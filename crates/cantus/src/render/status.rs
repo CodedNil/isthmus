@@ -108,7 +108,7 @@ mod host {
         pub(crate) fn new(background: &Background) -> Self {
             let audio_monitor = Arc::<AudioMonitor>::default();
             let (updates, inbox) = mpsc::channel();
-            Platform::start_status_monitor(background, updates, Arc::clone(&audio_monitor));
+            Platform::start_status_monitor(updates, Arc::clone(&audio_monitor));
             Self {
                 battery_level: None,
                 audio_spectrum: Default::default(),

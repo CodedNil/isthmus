@@ -1,3 +1,4 @@
+use crate::app::spawn_thread;
 use crate::interaction::InputEvent;
 use crate::{
     app::{AppUpdater, Background, CantusApp, send_update},
@@ -105,15 +106,11 @@ pub struct Linux;
 impl Linux {
     pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
-    pub(crate) fn start_status_monitor(
-        background: &Background,
-        updates: Sender<SystemSample>,
-        audio: Arc<AudioMonitor>,
-    ) {
+    pub(crate) fn start_status_monitor(updates: Sender<SystemSample>, audio: Arc<AudioMonitor>) {
         let volume = Arc::clone(&audio);
-        background.spawn_blocking(move || monitor_playback(&audio.spectrum));
-        background.spawn_blocking(move || monitor_volume(&volume.volume));
-        background.spawn_blocking(move || monitor_status(&updates));
+        spawn_thread("cantus-audio-playback", move || monitor_playback(&audio.spectrum));
+        spawn_thread("cantus-audio-volume", move || monitor_volume(&volume.volume));
+        spawn_thread("cantus-system-status", move || monitor_status(&updates));
     }
 
     pub(crate) fn set_volume(volume: f32) {
@@ -219,12 +216,12 @@ impl Linux {
         let path = launcher_socket_path();
         let _ = fs::remove_file(&path);
         let updater = updater.clone();
-        background.spawn_update(async move {
+        background.spawn(async move {
             let socket = match UnixDatagram::bind(&path) {
                 Ok(socket) => socket,
                 Err(error) => {
                     warn!(%error, ?path, "Failed to bind launcher toggle socket");
-                    return None;
+                    return;
                 }
             };
             let mut buffer = [0u8; 1];
@@ -234,7 +231,6 @@ impl Linux {
                     break;
                 }
             }
-            None
         });
     }
 
@@ -279,7 +275,7 @@ impl Linux {
             ..LayerShellApp::default()
         };
 
-        // Every output is bound so its name arrives; the configured monitor replaces the first one.
+        // Every output is bound so its name and description arrive; the configured monitor replaces the first one.
         let registry = globals.registry();
         for global in globals.contents().clone_list() {
             if global.interface == "wl_output" {
@@ -1020,28 +1016,39 @@ dispatch!(WlCallback, |state, proxy, event, qhandle| {
     }
 });
 
-dispatch!(WlOutput, |state, proxy, event, _qhandle| {
-    match event {
-        wl_output::Event::Mode {
-            flags: WEnum::Value(flags),
-            height,
-            ..
-        } if flags.contains(wl_output::Mode::Current) => {
-            state.output_height = Some(height as f32);
+impl Dispatch<WlOutput, ()> for LayerShellApp {
+    fn event(
+        state: &mut Self,
+        proxy: &WlOutput,
+        event: <WlOutput as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let monitor = state
+            .cantus
+            .config
+            .monitor
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match event {
+            wl_output::Event::Mode {
+                flags: WEnum::Value(flags),
+                height,
+                ..
+            } if flags.contains(wl_output::Mode::Current) => {
+                state.output_height = Some(height as f32);
+            }
+            wl_output::Event::Name { name } | wl_output::Event::Description { description: name }
+                if name.to_ascii_lowercase().contains(&monitor) =>
+            {
+                state.output = Some(proxy.clone());
+            }
+            _ => {}
         }
-        wl_output::Event::Name { name } | wl_output::Event::Description { description: name }
-            if state
-                .cantus
-                .config
-                .monitor
-                .as_ref()
-                .is_none_or(|target| name.contains(target)) =>
-        {
-            state.output = Some(proxy.clone());
-        }
-        _ => {}
     }
-});
+}
 
 dispatch!(WlSeat, |state, proxy, event, qhandle| {
     if let wl_seat::Event::Capabilities { capabilities } = event

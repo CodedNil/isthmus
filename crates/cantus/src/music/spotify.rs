@@ -6,7 +6,7 @@ use crate::app::{AppUpdater, Background, send_update};
 use crate::config::{self, Config};
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
-use futures_util::StreamExt;
+use futures_util::{StreamExt, future::try_join_all};
 use isthmus::FloatExt;
 use librespot_core::{
     FileId, Session, SessionConfig, SpotifyId, authentication::Credentials, cache::Cache,
@@ -37,13 +37,13 @@ use serde_json::json;
 use std::{
     collections::HashMap,
     error::Error,
-    fs,
     io::{self, Write},
     path::PathBuf,
     str,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tokio::task::spawn_blocking;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     time::sleep,
@@ -64,14 +64,14 @@ pub struct Spotify {
 
 enum WorkerEvent {
     Command(PlaybackCommand),
-    Metadata(HashMap<String, TrackDetails>),
+    Metadata {
+        generation: u64,
+        values: HashMap<String, TrackDetails>,
+    },
 }
 
 impl Spotify {
     pub(super) fn new(config: &Config, updater: &AppUpdater, background: &Background) -> Self {
-        if let Err(error) = fs::create_dir_all(config::directory()) {
-            warn!(%error, "Failed to create Cantus config directory");
-        }
         let (events, receiver) = mpsc::unbounded_channel();
         let session = Arc::new(Mutex::new(None));
         let connected_session = Arc::clone(&session);
@@ -79,9 +79,11 @@ impl Spotify {
         let updater = updater.clone();
         let playlist_targets = config.playlists.clone();
         let ratings_enabled = config.ratings_enabled;
-        background.spawn_update(async move {
+        background.spawn(async move {
             let mut receiver = receiver;
+            let mut generation = 0;
             loop {
+                generation += 1;
                 match connect().await {
                     Ok(spotify) => {
                         *connected_session.lock() = Some(spotify.clone());
@@ -92,6 +94,7 @@ impl Spotify {
                             updater.clone(),
                             playlist_targets.clone(),
                             ratings_enabled,
+                            generation,
                         )
                         .await
                         {
@@ -185,8 +188,13 @@ impl Spotify {
 }
 
 async fn connect() -> ClientResult<Session> {
-    let cache = Cache::new(Some(config::directory()), None::<PathBuf>, None::<PathBuf>, None)?;
-    let credentials = if let Some(credentials) = cache.credentials() {
+    let (cache, cached_credentials) = spawn_blocking(|| {
+        let cache = Cache::new(Some(config::directory()), None::<PathBuf>, None::<PathBuf>, None)?;
+        let credentials = cache.credentials();
+        Ok::<_, librespot_core::Error>((cache, credentials))
+    })
+    .await??;
+    let credentials = if let Some(credentials) = cached_credentials {
         credentials
     } else {
         let token = OAuthClientBuilder::new(CLIENT_ID, REDIRECT_URI, vec!["streaming", "app-remote-control"])
@@ -210,6 +218,7 @@ async fn run_spotify(
     updater: AppUpdater,
     playlist_targets: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
     ratings_enabled: bool,
+    generation: u64,
 ) -> ClientResult<()> {
     let dealer = session.dealer();
     let mut connections = dealer.listen_for("hm://pusher/v1/connections", Ok)?;
@@ -230,6 +239,7 @@ async fn run_spotify(
         track_metadata: HashMap::new(),
         queue: None,
         ratings_enabled,
+        generation,
     };
 
     loop {
@@ -274,6 +284,7 @@ struct SpotifyWorker {
     track_metadata: HashMap<String, Option<TrackDetails>>,
     queue: Option<QueueSnapshot>,
     ratings_enabled: bool,
+    generation: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -302,14 +313,15 @@ impl SpotifyWorker {
     async fn event(&mut self, event: WorkerEvent) {
         match event {
             WorkerEvent::Command(command) => self.command(command).await,
-            WorkerEvent::Metadata(metadata) => {
+            WorkerEvent::Metadata { generation, values } if generation == self.generation => {
                 self.track_metadata.retain(|_, metadata| metadata.is_some());
-                if !metadata.is_empty() {
+                if !values.is_empty() {
                     self.track_metadata
-                        .extend(metadata.into_iter().map(|(uri, metadata)| (uri, Some(metadata))));
+                        .extend(values.into_iter().map(|(uri, metadata)| (uri, Some(metadata))));
                     self.publish_snapshot(true);
                 }
             }
+            WorkerEvent::Metadata { .. } => {}
         }
     }
 
@@ -474,9 +486,13 @@ impl SpotifyWorker {
         }
         let session = self.session.clone();
         let sender = self.events.clone();
+        let generation = self.generation;
         tokio::spawn(async move {
             let metadata = fetch_track_metadata(&session, &requested).await;
-            let _ = sender.send(WorkerEvent::Metadata(metadata));
+            let _ = sender.send(WorkerEvent::Metadata {
+                generation,
+                values: metadata,
+            });
         });
     }
 
@@ -647,42 +663,53 @@ impl SpotifyWorker {
     async fn load_playlists(&mut self) -> ClientResult<()> {
         let root =
             SelectedListContent::parse_from_bytes(&self.session.spclient().get_rootlist(0, Some(10_000)).await?)?;
-        let mut updates = Vec::new();
-
-        for (item, metadata) in root
+        let requests = root
             .contents
             .get_or_default()
             .items
             .iter()
             .zip(&root.contents.get_or_default().meta_items)
-        {
-            let Some(id) = item
-                .uri()
-                .strip_prefix("spotify:playlist:")
-                .and_then(|id| id.parse::<PlaylistId>().ok())
-            else {
-                continue;
-            };
-            let attributes = metadata.attributes.get_or_default();
-            let name = attributes.name();
-            let rating_index = RATING_PLAYLISTS
-                .iter()
-                .position(|rating| *rating == name)
-                .filter(|_| self.ratings_enabled)
-                .map(|index| index as u8);
-            if !self.playlist_targets.iter().any(|target| target == name) && rating_index.is_none() {
-                continue;
-            }
+            .filter_map(|(item, metadata)| {
+                let id = item
+                    .uri()
+                    .strip_prefix("spotify:playlist:")
+                    .and_then(|id| id.parse::<PlaylistId>().ok())?;
+                let attributes = metadata.attributes.get_or_default();
+                let name = attributes.name();
+                let rating_index = RATING_PLAYLISTS
+                    .iter()
+                    .position(|rating| *rating == name)
+                    .filter(|_| self.ratings_enabled)
+                    .map(|index| index as u8);
+                if !self.playlist_targets.iter().any(|target| target == name) && rating_index.is_none() {
+                    return None;
+                }
+                Some(PlaylistRequest {
+                    id,
+                    revision: metadata.revision().to_vec(),
+                    name: name.to_owned(),
+                    image_url: playlist_image(attributes),
+                    rating_index,
+                })
+            })
+            .collect::<Vec<_>>();
 
-            let tracks = fetch_playlist_tracks(&self.session, id).await?;
-            self.playlist_revisions.insert(id, metadata.revision().to_vec());
+        let tracks = try_join_all(
+            requests
+                .iter()
+                .map(|request| fetch_playlist_tracks(&self.session, request.id)),
+        )
+        .await?;
+        let mut updates = Vec::with_capacity(requests.len());
+        for (request, tracks) in requests.into_iter().zip(tracks) {
+            self.playlist_revisions.insert(request.id, request.revision);
             updates.push(CondensedPlaylist {
-                id,
-                name: name.to_owned(),
-                image_url: playlist_image(attributes),
+                id: request.id,
+                name: request.name,
+                image_url: request.image_url,
                 art: ArtState::default(),
                 tracks,
-                rating_index,
+                rating_index: request.rating_index,
             });
         }
 
@@ -703,6 +730,14 @@ impl SpotifyWorker {
         });
         Ok(())
     }
+}
+
+struct PlaylistRequest {
+    id: PlaylistId,
+    revision: Vec<u8>,
+    name: String,
+    image_url: Option<String>,
+    rating_index: Option<u8>,
 }
 
 async fn fetch_playlist_tracks(session: &Session, id: PlaylistId) -> ClientResult<PlaylistTracks> {

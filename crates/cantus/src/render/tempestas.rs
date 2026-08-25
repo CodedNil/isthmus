@@ -309,7 +309,7 @@ mod host {
     mod monitor {
         use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, WeatherCondition, WeatherPanel};
         use crate::app::Background;
-        use futures_util::StreamExt;
+        use futures_util::{StreamExt, future::join_all};
         use jiff::{
             civil::DateTime,
             tz::{Offset, TimeZone},
@@ -542,18 +542,25 @@ mod host {
                 while let Ok(location) = locations_rx.try_recv() {
                     locations[0] = Some(location);
                 }
+                let unresolved = locations
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, location)| *index > 0 && location.is_none())
+                    .map(|(index, _)| (index, timezones[index - 1].clone()))
+                    .collect::<Vec<_>>();
+                let geocoded = join_all(unresolved.iter().map(|(_, timezone)| geocode(http, timezone))).await;
                 let mut retry = false;
+                for ((index, timezone), result) in unresolved.into_iter().zip(geocoded) {
+                    match result {
+                        Ok(location) => locations[index] = Some(location),
+                        Err(error) => {
+                            retry = true;
+                            warn!(%error, timezone, "Failed to locate timezone");
+                        }
+                    }
+                }
                 let mut ready = Vec::with_capacity(locations.len());
                 for (index, location) in locations.iter_mut().enumerate() {
-                    if index > 0 && location.is_none() {
-                        *location = geocode(http, &timezones[index - 1])
-                            .await
-                            .inspect_err(|error| {
-                                retry = true;
-                                warn!(%error, timezone = timezones[index - 1], "Failed to locate timezone");
-                            })
-                            .ok();
-                    }
                     let Some([latitude, longitude]) = *location else {
                         retry = true;
                         continue;
