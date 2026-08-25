@@ -1,10 +1,11 @@
 use crate::{
+    config::{self, Config},
     interaction::Interaction,
-    render::{RenderContext, TEXT_COLOR, Ui, program},
+    music::{Enrichment, Music},
+    platform::Platform,
+    render::{Bar, TEXT_COLOR, UiContext, launcher::LauncherState, program},
 };
 use isthmus::{Renderer, SurfaceHandle, glam::vec2};
-use music::{Enrichment, Music};
-use platform::{Linux as Platform, Platform as _};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
     future::Future,
@@ -16,18 +17,7 @@ use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{Layer as _, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-#[path = "config.rs"]
-pub(crate) mod config;
-#[path = "music/mod.rs"]
-pub(crate) mod music;
-#[path = "platform/linux.rs"]
-pub(crate) mod platform;
-
-pub fn trigger_launcher() -> ! {
-    Platform::trigger_launcher()
-}
-
-pub(crate) type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
+pub type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 pub type AppUpdater = Sender<Update<CantusApp>>;
 
 #[derive(Clone)]
@@ -66,9 +56,10 @@ pub struct CantusApp {
     pub(crate) gpu: Option<Renderer>,
     pub(crate) bar_surface: Option<SurfaceHandle>,
     pub(crate) music: Music,
-    pub(crate) ui: Ui,
+    pub(crate) launcher: LauncherState,
+    pub(crate) bar: Bar,
     pub(crate) app_updates: mpsc::Receiver<Update<Self>>,
-    pub(crate) config: config::Config,
+    pub(crate) config: Config,
     pub(crate) enrichment: Enrichment,
     pub(crate) interaction: Interaction,
     _runtime: Runtime,
@@ -82,7 +73,6 @@ impl Default for CantusApp {
             .max_blocking_threads(8)
             .thread_keep_alive(Duration::from_secs(10))
             .thread_name("cantus-async")
-            // Keep renderer worker stacks small; these jobs are shallow async state machines.
             .thread_stack_size(512 * 1024)
             .enable_all()
             .build()
@@ -90,16 +80,15 @@ impl Default for CantusApp {
         let background = Background::new(&runtime, &updater);
         let enrichment = Enrichment::new(background.clone());
         let config = config::load();
-        let music = Music::spotify(&config, &updater, &background);
         Platform::start_launcher_listener(&background, &updater);
-        let ui = Ui::new(&config, &background, &enrichment);
         Self {
             gpu: None,
             bar_surface: None,
-            ui,
+            launcher: LauncherState::new(&background, &enrichment.http, config.search_providers.clone()),
+            bar: Bar::new(&config, &background, &enrichment),
             app_updates,
             enrichment,
-            music,
+            music: Music::spotify(&config, &updater, &background),
             interaction: Interaction::default(),
             config,
             _runtime: runtime,
@@ -112,7 +101,7 @@ impl CantusApp {
     ///
     /// # Panics
     /// Panics if initialized twice or GPU setup fails.
-    pub fn initialize_renderer(&mut self, surface: &(impl HasDisplayHandle + HasWindowHandle), width: u32, height: u32) {
+    pub(crate) fn initialize_renderer(&mut self, surface: &(impl HasDisplayHandle + HasWindowHandle), width: u32, height: u32) {
         assert!(self.gpu.is_none(), "GPU initialized twice");
         let (gpu, bar_surface) =
             Renderer::new(program(), surface, [width, height], include_bytes!("../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR).expect("failed to initialize renderer");
@@ -121,13 +110,13 @@ impl CantusApp {
         self.bar_surface = Some(bar_surface);
     }
 
-    pub fn apply_pending_updates(&mut self) {
+    pub(crate) fn apply_pending_updates(&mut self) {
         while let Ok(update) = self.app_updates.try_recv() {
             update(self);
         }
     }
 
-    pub fn render(&mut self, screen_size: [f32; 2], launcher: Option<(SurfaceHandle, [f32; 2])>) {
+    pub(crate) fn render(&mut self, screen_size: [f32; 2], launcher: Option<(SurfaceHandle, [f32; 2])>) {
         let Some(gpu) = &mut self.gpu else {
             return;
         };
@@ -139,17 +128,18 @@ impl CantusApp {
         let screen_size = vec2(width, height);
         let config = &self.config;
         let interaction = &mut self.interaction;
-        let ui = &mut self.ui;
+        let launcher = &mut self.launcher;
+        let bar = &mut self.bar;
         let music = &mut self.music;
         let result = gpu.render(|render| {
             render.surface(surface, screen_size, |gpu| {
-                let mut frame = RenderContext::new(gpu, config, interaction);
+                let mut context = UiContext::new(gpu, config, interaction);
                 if launcher_open {
-                    ui.launcher.show(&mut frame);
+                    launcher.show(&mut context);
                 } else {
-                    ui.bar.show(&mut frame, music);
+                    bar.show(&mut context, music);
                 }
-                frame.finish();
+                context.finish();
             });
         });
         if let Err(error) = result {
@@ -158,11 +148,11 @@ impl CantusApp {
     }
 }
 
-pub(crate) fn update(work: impl FnOnce(&mut CantusApp) + Send + 'static) -> Update<CantusApp> {
+pub fn update(work: impl FnOnce(&mut CantusApp) + Send + 'static) -> Update<CantusApp> {
     Box::new(work)
 }
 
-pub(crate) fn send_update(sender: &AppUpdater, work: impl FnOnce(&mut CantusApp) + Send + 'static) -> bool {
+pub fn send_update(sender: &AppUpdater, work: impl FnOnce(&mut CantusApp) + Send + 'static) -> bool {
     sender.send(update(work)).is_ok()
 }
 
@@ -177,5 +167,5 @@ pub fn run() {
         .with_target("zbus::proxy", LevelFilter::ERROR);
     tracing_subscriber::registry().with(fmt::layer().with_writer(io::stderr).with_filter(filter)).init();
 
-    platform::run();
+    Platform::run();
 }

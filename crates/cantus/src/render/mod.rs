@@ -15,12 +15,10 @@ use isthmus::Frame;
 
 #[cfg(not(target_arch = "spirv"))]
 use crate::{
-    app::{
-        Background,
-        config::Config,
-        music::{Enrichment, Music},
-    },
+    app::Background,
+    config::Config,
     interaction::Interaction,
+    music::{Enrichment, Music},
 };
 
 pub const TEXT_COLOR: Vec3 = Vec3::splat(0.94);
@@ -55,8 +53,8 @@ pub struct RipplePulse {
 }
 
 #[cfg(not(target_arch = "spirv"))]
-pub struct RenderContext<'a> {
-    pub paint: Frame<'a>,
+pub struct UiContext<'a> {
+    pub frame: Frame<'a>,
     pub config: &'a Config,
     pub interaction: &'a mut Interaction,
 }
@@ -69,26 +67,21 @@ pub struct BarLayout {
 }
 
 #[cfg(not(target_arch = "spirv"))]
-impl<'a> RenderContext<'a> {
-    pub fn new(paint: Frame<'a>, config: &'a Config, interaction: &'a mut Interaction) -> Self {
-        interaction.begin_frame(paint.delta_time, paint.time);
-        Self { paint, config, interaction }
-    }
-
-    pub const fn globals(&self) -> Globals {
-        self.interaction.globals(self.config.height)
+impl<'a> UiContext<'a> {
+    pub fn new(frame: Frame<'a>, config: &'a Config, interaction: &'a mut Interaction) -> Self {
+        interaction.begin_frame(frame.delta_time, frame.time);
+        Self { frame, config, interaction }
     }
 
     pub fn finish(mut self) {
-        self.paint.set_globals(self.globals());
+        self.frame.set_globals(Globals {
+            pointer: self.interaction.mouse_pos(),
+            pressure: self.interaction.mouse_pressure(),
+            bar_height: self.config.height,
+            ripples: self.interaction.mouse_ripples(),
+        });
         self.interaction.end_frame();
     }
-}
-
-#[cfg(not(target_arch = "spirv"))]
-pub struct Ui {
-    pub(crate) launcher: launcher::LauncherState,
-    pub(crate) bar: Bar,
 }
 
 #[cfg(not(target_arch = "spirv"))]
@@ -100,18 +93,8 @@ pub struct Bar {
 }
 
 #[cfg(not(target_arch = "spirv"))]
-impl Ui {
-    pub fn new(config: &Config, background: &Background, enrichment: &Enrichment) -> Self {
-        Self {
-            launcher: launcher::LauncherState::new(background, &enrichment.http, config.search_providers.clone()),
-            bar: Bar::new(config, background, enrichment),
-        }
-    }
-}
-
-#[cfg(not(target_arch = "spirv"))]
 impl Bar {
-    fn new(config: &Config, background: &Background, enrichment: &Enrichment) -> Self {
+    pub fn new(config: &Config, background: &Background, enrichment: &Enrichment) -> Self {
         Self {
             lyrics: config.lyrics_enabled.then(|| lyrics::LyricsView::new(enrichment.clone())),
             weather: config
@@ -122,24 +105,24 @@ impl Bar {
         }
     }
 
-    pub fn show(&mut self, frame: &mut RenderContext, music: &mut Music) {
+    pub fn show(&mut self, context: &mut UiContext, music: &mut Music) {
         let status_width = self.status.as_ref().map_or(0.0, |status| status.width() + GAP);
-        let reserved = frame.config.history_width + GAP + f32::from(frame.config.tempestas_enabled) * (tempestas::WIDTH + GAP) + status_width;
-        let px_per_ms = (frame.paint.screen_size.x - reserved).max(84.0) / (frame.config.timeline_future_minutes * 60_000.0);
+        let reserved = context.config.history_width + GAP + f32::from(context.config.tempestas_enabled) * (tempestas::WIDTH + GAP) + status_width;
+        let px_per_ms = (context.frame.screen_size.x - reserved).max(84.0) / (context.config.timeline_future_minutes * 60_000.0);
         let layout = BarLayout {
-            playhead_x: frame.config.history_width + frame.config.timeline_past_minutes * 60_000.0 * px_per_ms,
+            playhead_x: context.config.history_width + context.config.timeline_past_minutes * 60_000.0 * px_per_ms,
             px_per_ms,
         };
         if let Some(lyrics) = self.lyrics.as_mut() {
-            lyrics.show(frame, music, layout);
+            lyrics.show(context, music, layout);
         }
         let sky = self
             .weather
             .as_mut()
-            .map_or_else(tempestas::StatusSky::default, |weather| weather.show(frame, status_width));
+            .map_or_else(tempestas::StatusSky::default, |weather| weather.show(context, status_width));
         if let Some(status) = self.status.as_mut() {
-            status.show(frame, sky);
+            status.show(context, sky);
         }
-        self.music_view.show(frame, music, layout);
+        self.music_view.show(context, music, layout);
     }
 }

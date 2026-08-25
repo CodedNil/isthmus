@@ -63,7 +63,10 @@ fn shader_workspace(crate_dir: &Path, target: &Path) -> Result<PathBuf, String> 
     )?;
     write_if_changed(
         &generated.join("lib.rs"),
-        &std::format!("#![no_std]\n#![allow(dead_code, unused_imports)]\n#[path = {:?}]\npub mod render;\n", source),
+        &std::format!(
+            "#![no_std]\n#![expect(dead_code, unused_imports, reason = \"shader compilation includes the complete render module\")]\n#[path = {:?}]\npub mod render;\n",
+            source
+        ),
     )?;
     Ok(generated)
 }

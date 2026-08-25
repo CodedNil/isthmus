@@ -1,6 +1,6 @@
 use crate::{
     Image,
-    backend::canvas::Canvas,
+    backend::Canvas,
     contract::{PushBlock, Quad, ShaderSpec, SurfaceHandle},
     data::ImageHandle,
     text::{Line, Text, TextScope},
@@ -41,7 +41,7 @@ impl<'a> Frame<'a> {
 
     #[doc(hidden)]
     pub fn __image(&mut self, image: &Image) -> ImageHandle {
-        self.canvas.image(image.size(), image.pixels())
+        self.canvas.image(image.size, &image.pixels)
     }
 
     pub const fn text(&mut self) -> TextScope<'_> {
@@ -91,11 +91,6 @@ impl<'canvas> PaintGroup<'_, 'canvas> {
             frame: self.frame,
             layer: u8::from(front),
         }
-    }
-
-    /// Finishes the group, returning subsequent paints to immediate order.
-    pub fn finish(self) {
-        drop(self);
     }
 }
 

@@ -1,8 +1,6 @@
 use super::{ClientResult, PLAYLIST_TRACKS_CACHE, PlaylistTracks, RATING_PLAYLISTS, SpotifyWorker, config_path, write_cache};
-use crate::app::{
-    music::{ArtState, CondensedPlaylist, PlaylistId, TrackId},
-    send_update,
-};
+use crate::app::send_update;
+use crate::music::{ArtState, CondensedPlaylist, PlaylistId, TrackId};
 use librespot_core::{FileId, Session, SpotifyId};
 use librespot_protocol::playlist4_external::{Add, Delta, Item, ListAttributes, ListChanges, Op, Rem, SelectedListContent, op};
 use protobuf::{Message as _, MessageField};

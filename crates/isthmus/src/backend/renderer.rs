@@ -1,6 +1,5 @@
 use super::{
-    canvas::Canvas,
-    context::{Context, SetupError},
+    Canvas, Context, SetupError,
     surface::{Present, SurfaceTarget},
 };
 use crate::{
@@ -62,16 +61,6 @@ impl Render<'_> {
         self.canvas.ensure_globals(surface);
     }
 }
-pub struct ShaderModule {
-    bytes: &'static [u8],
-    root: &'static str,
-}
-impl ShaderModule {
-    pub const fn new(bytes: &'static [u8], root: &'static str) -> Self {
-        Self { bytes, root }
-    }
-}
-
 impl Renderer {
     /// Creates a renderer and its primary presentation surface.
     ///
@@ -86,14 +75,13 @@ impl Renderer {
     ) -> Result<(Self, SurfaceHandle), SetupError> {
         let (context, raw_surface) = Context::new(surface)?;
         let target = SurfaceTarget::from_raw(&context, raw_surface, width, height)?;
-        let module = program.shader;
-        if !module.bytes.len().is_multiple_of(4) {
+        if !program.bytes.len().is_multiple_of(4) {
             return Err(SetupError::InvalidShader);
         }
-        let (words, _) = module.bytes.as_chunks::<4>();
+        let (words, _) = program.bytes.as_chunks::<4>();
         let shader = words.iter().map(|b| u32::from_le_bytes(*b)).collect();
-        let mut canvas = Canvas::new(&context, shader, target.format, module.root);
-        let text = Text::new(&mut canvas, font, text_color);
+        let mut canvas = Canvas::new(&context, shader, target.format, program.root);
+        let text = Text::new(&context, &mut canvas, font, text_color);
         Ok((
             Self {
                 context,
@@ -194,7 +182,7 @@ impl Renderer {
         slot.target.present(frame)
     }
     pub fn device_name(&self) -> &str {
-        self.context.device_name()
+        &self.context.0.device_name
     }
     pub fn resize(&mut self, surface: SurfaceHandle, [width, height]: [u32; 2]) {
         if let Some(slot) = surface_slot(&mut self.surfaces, surface) {

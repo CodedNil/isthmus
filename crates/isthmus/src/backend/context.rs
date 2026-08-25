@@ -60,22 +60,26 @@ pub(super) struct Inner {
 #[derive(Clone)]
 pub struct Context(pub(super) Rc<Inner>);
 
+pub(super) fn create_surface(instance: &wgpu::Instance, source: &(impl HasDisplayHandle + HasWindowHandle)) -> Result<wgpu::Surface<'static>, SetupError> {
+    // The caller owns the display/window handles for the lifetime of the
+    // returned surface; wgpu cannot express that relationship for generic
+    // raw handles, so this is the required API boundary.
+    unsafe {
+        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: Some(source.display_handle()?.as_raw()),
+            raw_window_handle: source.window_handle()?.as_raw(),
+        })
+    }
+    .map_err(|e| SetupError::Surface(e.to_string()))
+}
+
 impl Context {
     pub(super) fn new(source: &(impl HasDisplayHandle + HasWindowHandle)) -> Result<(Self, wgpu::Surface<'static>), SetupError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        // The caller owns the display/window handles for the lifetime of the
-        // returned surface; wgpu cannot express that relationship for generic
-        // raw handles, so this is the required API boundary.
-        let surface = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: Some(source.display_handle()?.as_raw()),
-                raw_window_handle: source.window_handle()?.as_raw(),
-            })
-        }
-        .map_err(|e| SetupError::Surface(e.to_string()))?;
+        let surface = create_surface(&instance, source)?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
@@ -124,9 +128,6 @@ impl Context {
         ))
     }
 
-    pub(super) fn device_name(&self) -> &str {
-        self.0.device_name.as_str()
-    }
     pub(crate) fn upload<T: ShaderData>(&self, values: &[T]) -> BufferRange {
         self.upload_bytes(bytemuck::cast_slice(values))
     }

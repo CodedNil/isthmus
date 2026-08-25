@@ -71,7 +71,7 @@ pub fn program(input: TokenStream) -> TokenStream {
     if !input.is_empty() {
         return syn::Error::new(proc_macro2::Span::call_site(), "program takes no arguments").to_compile_error().into();
     }
-    let module = match program_module() {
+    let (module, artifact) = match program_module() {
         Ok(module) => module,
         Err(error) => return error.to_compile_error().into(),
     };
@@ -81,7 +81,10 @@ pub fn program(input: TokenStream) -> TokenStream {
 
         #[cfg(not(target_arch = "spirv"))]
         pub const fn program() -> #isthmus::__private::Program {
-            #isthmus::__private::Program::new(__ISTHMUS_SHADER)
+            #isthmus::__private::Program::new(
+                include_bytes!(#artifact),
+                #isthmus::__private::shader_module_name(module_path!()),
+            )
         }
     }
     .into()
@@ -344,7 +347,7 @@ impl<'ast> Visit<'ast> for HostBindings {
     fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
 }
 
-fn program_module() -> syn::Result<TokenStream2> {
+fn program_module() -> syn::Result<(TokenStream2, String)> {
     let Ok(crate_dir) = env::var("CARGO_MANIFEST_DIR") else {
         return Err(syn::Error::new(proc_macro2::Span::call_site(), "missing package directory"));
     };
@@ -352,37 +355,34 @@ fn program_module() -> syn::Result<TokenStream2> {
         Ok(artifact) => artifact,
         Err(error) => return Err(syn::Error::new(proc_macro2::Span::call_site(), error)),
     };
-    let artifact = artifact.to_string_lossy();
+    let artifact = artifact.to_string_lossy().into_owned();
     let isthmus = isthmus_path();
-    Ok(quote! {
-        #[doc(hidden)]
-        pub mod __isthmus_quad {
-            use super::*;
-            use #isthmus::FloatExt as _;
+    Ok((
+        quote! {
+            #[doc(hidden)]
+            pub mod __isthmus_quad {
+                use super::*;
+                use #isthmus::FloatExt as _;
 
-            #[#isthmus::spirv_std::spirv(vertex)]
-            pub fn vertex(
-                #[spirv(vertex_index)] vertex: u32,
-                #[spirv(instance_index)] draw_index: u32,
-                #[spirv(push_constant)] frame: &#isthmus::__private::PushBlock,
-                #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] draws: &[#isthmus::__private::DrawRecord],
-                #[spirv(position)] out_position: &mut #isthmus::glam::Vec4,
-                #[spirv(location = 0)] out_pixel: &mut #isthmus::glam::Vec2,
-                #[spirv(location = 1, flat)] out_draw_index: &mut u32,
-            ) {
-                let draw = draws[draw_index as usize];
-                let sample = draw.quad.sample(vertex, frame.screen_size);
-                *out_position = sample.position;
-                *out_pixel = sample.pixel;
-                *out_draw_index = draw_index;
+                #[#isthmus::spirv_std::spirv(vertex)]
+                pub fn vertex(
+                    #[spirv(vertex_index)] vertex: u32,
+                    #[spirv(instance_index)] draw_index: u32,
+                    #[spirv(push_constant)] frame: &#isthmus::__private::PushBlock,
+                    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] draws: &[#isthmus::__private::DrawRecord],
+                    #[spirv(position)] out_position: &mut #isthmus::glam::Vec4,
+                    #[spirv(location = 0)] out_pixel: &mut #isthmus::glam::Vec2,
+                    #[spirv(location = 1, flat)] out_draw_index: &mut u32,
+                ) {
+                    let draw = draws[draw_index as usize];
+                    let sample = draw.quad.sample(vertex, frame.screen_size);
+                    *out_position = sample.position;
+                    *out_pixel = sample.pixel;
+                    *out_draw_index = draw_index;
+                }
             }
-        }
 
-        #[cfg(not(target_arch = "spirv"))]
-        const __ISTHMUS_SHADER: #isthmus::__private::ShaderModule =
-            #isthmus::__private::ShaderModule::new(
-                include_bytes!(#artifact),
-                #isthmus::__private::shader_module_name(module_path!()),
-            );
-    })
+        },
+        artifact,
+    ))
 }

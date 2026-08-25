@@ -8,10 +8,10 @@ pub const TEXT_GLYPHS: usize = 4_096;
 mod host {
     use super::*;
     use crate::{
-        app::music::{Enrichment, LyricSegment, Music, Track, TrackId},
-        render::{BarLayout, PANEL_START, RenderContext},
+        music::{Enrichment, LyricSegment, Music, Track, TrackId},
+        render::{BarLayout, PANEL_START, UiContext},
     };
-    use isthmus::{FloatExt, glam::vec2, text::TextStyle};
+    use isthmus::{FloatExt, glam::vec2};
     use std::time::Instant;
 
     pub struct LyricsView {
@@ -41,7 +41,6 @@ mod host {
     }
 
     impl Lyrics {
-        const STYLE: TextStyle = TextStyle::new(15.0, 700.0);
         const SILENCE_SPEED: f32 = 0.035;
         const SONG_GAP: f32 = 96.0;
         const MUSIC_GAP_MS: f32 = 5_000.0;
@@ -84,7 +83,7 @@ mod host {
                 }
                 let lane = segment.lane.min(1);
                 let text = segment.text.trim_start();
-                let width = shaper.width(text, Self::STYLE);
+                let width = shaper.width(text, 15.0, 700.0);
                 let position = cursors[lane];
                 positioned[lane].push((text, position));
                 cursors[lane] += width + if segment.line_end { Self::LINE_GAP } else { 0.0 };
@@ -93,7 +92,7 @@ mod host {
                     timeline.push((f32::midpoint(segment.start_ms, segment.end_ms), position + width * 0.5));
                 }
             }
-            let lines = [0, 1].map(|lane| shaper.shape_positioned(positioned[lane].iter().copied(), Self::STYLE, TEXT_GLYPHS));
+            let lines = [0, 1].map(|lane| shaper.shape_positioned(positioned[lane].iter().copied(), 15.0, 700.0, TEXT_GLYPHS));
             let position = cursors[0].max(cursors[1]) + (duration_ms - vocal_end).max(0.0) * Self::SILENCE_SPEED;
             timeline.push((duration_ms.max(vocal_end), position));
             timeline.sort_by(|left, right| left.0.total_cmp(&right.0));
@@ -279,7 +278,7 @@ mod host {
             Self { enrichment }
         }
 
-        pub fn show(&self, frame: &mut RenderContext, music: &mut Music, layout: BarLayout) {
+        pub fn show(&self, context: &mut UiContext, music: &mut Music, layout: BarLayout) {
             const PREFETCH_TRACKS: usize = 4;
             const LANE_OFFSET: f32 = 8.0;
 
@@ -288,7 +287,7 @@ mod host {
             let now = Instant::now();
             for track in music.queue.iter_mut().skip(start.saturating_sub(1)).take(PREFETCH_TRACKS) {
                 if track.runtime.lyrics.request(now) {
-                    self.enrichment.request_lyrics(track, music.backend.clone(), frame.paint.text().shaper());
+                    self.enrichment.request_lyrics(track, music.spotify.clone(), context.frame.text().shaper());
                 }
             }
 
@@ -296,7 +295,7 @@ mod host {
                 return;
             };
             let visible = index.saturating_sub(1)..(index + 2).min(music.queue.len());
-            let y = PANEL_START + frame.config.height + 10.0;
+            let y = PANEL_START + context.config.height + 10.0;
             let span = |track: &Track| {
                 track
                     .runtime
@@ -320,27 +319,29 @@ mod host {
                 let track = &music.queue[item];
                 if let Some(lyrics) = track.runtime.lyrics.ready() {
                     for (lane, line) in lyrics.lines.iter().enumerate().filter(|(_, line)| line.width > 0.0) {
-                        if x <= frame.paint.screen_size.x && x + line.width >= 0.0 {
+                        if x <= context.frame.screen_size.x && x + line.width >= 0.0 {
                             let color = if lane == 0 { TEXT_COLOR.extend(1.0) } else { Vec4::new(0.72, 0.86, 1.0, 1.0) };
-                            let screen_width = frame.paint.screen_size.x;
-                            let placed = frame
-                                .paint
+                            let screen_width = context.frame.screen_size.x;
+                            let placed = context
+                                .frame
                                 .text()
                                 .visible(line, vec2(x, y + lane as f32 * LANE_OFFSET), 0.0..screen_width)
                                 .with_color(color);
                             let padding = placed.size * 0.2 + 1.0;
                             // GPU: Scrolling lyrics line.
-                            frame.paint.paint_text(placed.expanded(padding), |text: TextFragment, playhead_x: f32, screen_width: f32| {
-                                let edge_fade = text.pixel.x.smoothstep(0.0, 32.0) * text.pixel.x.smoothstep(screen_width, screen_width - 32.0);
-                                let emphasis = (text.pixel.x - playhead_x).abs().smoothstep(110.0, 0.0);
-                                let weight = (text.line.weight + emphasis * 0.15).min(1.0);
-                                let distance = text.distance_scaled_with_weight(text.pixel, 1.0 + emphasis * 0.2, weight);
-                                let fill = text::coverage(distance);
-                                let outline = text::coverage(distance + 0.9) * 0.4;
-                                let progress = text.pixel.x.smoothstep(playhead_x + 4.0, playhead_x - 4.0);
-                                let fade = edge_fade * (1.0 - progress * 0.5);
-                                (text.line.color.to_vec3() * fill * fade).extend((fill + outline * (1.0 - fill)) * fade)
-                            });
+                            context
+                                .frame
+                                .paint_text(placed.expanded(padding), |text: TextFragment, playhead_x: f32, screen_width: f32| {
+                                    let edge_fade = text.pixel.x.smoothstep(0.0, 32.0) * text.pixel.x.smoothstep(screen_width, screen_width - 32.0);
+                                    let emphasis = (text.pixel.x - playhead_x).abs().smoothstep(110.0, 0.0);
+                                    let weight = (text.line.weight + emphasis * 0.15).min(1.0);
+                                    let distance = text.distance_scaled_with_weight(text.pixel, 1.0 + emphasis * 0.2, weight);
+                                    let fill = text::coverage(distance);
+                                    let outline = text::coverage(distance + 0.9) * 0.4;
+                                    let progress = text.pixel.x.smoothstep(playhead_x + 4.0, playhead_x - 4.0);
+                                    let fade = edge_fade * (1.0 - progress * 0.5);
+                                    (text.line.color.to_vec3() * fill * fade).extend((fill + outline * (1.0 - fill)) * fade)
+                                });
                         }
                     }
                 }

@@ -1,6 +1,7 @@
 use crate::{
-    app::{AppUpdater, Background, config::Config},
-    render::lyrics::Lyrics,
+    app::{AppUpdater, Background},
+    config::Config,
+    render::{lyrics::Lyrics, music::AudioFeatures},
 };
 use arrayvec::ArrayString;
 use std::{
@@ -26,9 +27,7 @@ pub type MusicResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 pub const TRACK_SPACING_MS: f32 = 4000.0;
 pub const MAX_PLAYLIST_TARGETS: usize = 8;
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
-pub(super) type PlaylistTracks = Arc<HashSet<TrackId>>;
-
-pub use crate::render::music::AudioFeatures;
+type PlaylistTracks = Arc<HashSet<TrackId>>;
 
 pub struct LyricSegment {
     pub start_ms: f32,
@@ -44,7 +43,7 @@ pub struct Music {
     pub playlists: Vec<CondensedPlaylist>,
     pub timeline: Timeline,
     pub last_toggle: Instant,
-    pub(crate) backend: Backend,
+    pub(crate) spotify: spotify::Spotify,
 }
 
 impl Music {
@@ -62,7 +61,7 @@ impl Music {
                 movement: 0.0,
             },
             last_toggle: Instant::now(),
-            backend: Backend(Arc::new(spotify::SpotifyBackend::new(config, updater, background))),
+            spotify: spotify::Spotify::new(config, updater, background),
         }
     }
 }
@@ -156,7 +155,47 @@ impl Music {
     pub fn toggle_playing(&self) {
         let playing = !self.playing;
         info!("{} current track", if playing { "Playing" } else { "Pausing" });
-        self.backend.command(PlaybackCommand::SetPlaying(playing));
+        self.spotify.command(PlaybackCommand::SetPlaying(playing));
+    }
+
+    pub(crate) fn rate_track(&mut self, track_id: TrackId, rating: u8) {
+        self.spotify.command(PlaybackCommand::UpdateLibrary {
+            track_id,
+            playlists: self
+                .playlists
+                .iter_mut()
+                .filter_map(|playlist| {
+                    let add = playlist.rating_index? == rating;
+                    playlist.set_membership(track_id, add).then_some((playlist.id, add))
+                })
+                .collect(),
+            liked: Some(rating >= 5),
+        });
+    }
+
+    pub(crate) fn toggle_playlist(&mut self, track_id: TrackId, playlist_id: PlaylistId) {
+        let Some(playlist) = self.playlists.iter_mut().find(|playlist| playlist.id == playlist_id) else {
+            warn!(%playlist_id, %track_id, "Playlist not found for track");
+            return;
+        };
+        let add = !playlist.tracks.contains(&track_id);
+        playlist.set_membership(track_id, add);
+        self.spotify.command(PlaybackCommand::UpdateLibrary {
+            track_id,
+            playlists: vec![(playlist_id, add)],
+            liked: None,
+        });
+    }
+
+    pub(crate) fn seek(&self, clicked_index: usize, clicked_duration_ms: u32, fraction: f32) {
+        let skip_count = clicked_index.abs_diff(self.timeline.index);
+        if skip_count == 0 {
+            let milliseconds = (clicked_duration_ms as f32 * fraction).round() as u32;
+            self.spotify.command(PlaybackCommand::Seek(milliseconds));
+        } else {
+            let direction = if self.timeline.index < clicked_index { 1 } else { -1 };
+            self.spotify.command(PlaybackCommand::Skip(direction * skip_count.min(10) as i8));
+        }
     }
 }
 
@@ -172,20 +211,13 @@ pub struct Track {
     pub runtime: TrackRuntime,
 }
 
-#[derive(Clone, Default)]
-pub struct LoudnessTimeline {
-    pub period_ms: u32,
-    pub samples: Vec<i32>,
-}
-
 #[derive(Default)]
 pub struct TrackRuntime {
     /// Album art, shared with other slots on the same URL and freed with the track.
     pub art: ArtState,
     pub audio_features: Fetch<AudioFeatures>,
-    pub loudness: Fetch<LoudnessTimeline>,
     pub(crate) lyrics: Fetch<Lyrics>,
-    pub(crate) playlist_expansion: f32,
+    pub(crate) track_expansion: f32,
 }
 
 impl Track {
@@ -223,69 +255,4 @@ enum PlaybackCommand {
         playlists: Vec<(PlaylistId, bool)>,
         liked: Option<bool>,
     },
-}
-
-#[derive(Clone)]
-pub struct Backend(Arc<spotify::SpotifyBackend>);
-
-impl Backend {
-    fn command(&self, command: PlaybackCommand) {
-        self.0.command(command);
-    }
-
-    pub fn rate_track(&self, playlists: &mut [CondensedPlaylist], track_id: TrackId, rating: u8) {
-        self.command(PlaybackCommand::UpdateLibrary {
-            track_id,
-            playlists: playlists
-                .iter_mut()
-                .filter_map(|playlist| {
-                    let add = playlist.rating_index? == rating;
-                    playlist.set_membership(track_id, add).then_some((playlist.id, add))
-                })
-                .collect(),
-            liked: Some(rating >= 5),
-        });
-    }
-
-    pub fn toggle_playlist(&self, playlists: &mut [CondensedPlaylist], track_id: TrackId, playlist_id: PlaylistId) {
-        let Some(playlist) = playlists.iter_mut().find(|playlist| playlist.id == playlist_id) else {
-            warn!(%playlist_id, %track_id, "Playlist not found for track");
-            return;
-        };
-        let add = !playlist.tracks.contains(&track_id);
-        playlist.set_membership(track_id, add);
-        self.command(PlaybackCommand::UpdateLibrary {
-            track_id,
-            playlists: vec![(playlist_id, add)],
-            liked: None,
-        });
-    }
-
-    pub fn seek(&self, timeline: &Timeline, clicked_index: usize, clicked_duration_ms: u32, fraction: f32) {
-        let skip_count = clicked_index.abs_diff(timeline.index);
-        if skip_count == 0 {
-            let milliseconds = (clicked_duration_ms as f32 * fraction).round() as u32;
-            self.command(PlaybackCommand::Seek(milliseconds));
-        } else {
-            let direction = if timeline.index < clicked_index { 1 } else { -1 };
-            self.command(PlaybackCommand::Skip(direction * skip_count.min(10) as i8));
-        }
-    }
-
-    /// Fetches timed lyrics from the active music service.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the provider request or response fails.
-    pub(crate) async fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
-        self.0.lyrics(track_id).await
-    }
-
-    pub(crate) async fn audio_features(&self, track_id: TrackId) -> MusicResult<AudioFeatures> {
-        self.0.audio_features(track_id).await
-    }
-
-    pub(crate) async fn loudness(&self, track_ids: &[TrackId]) -> MusicResult<HashMap<TrackId, LoudnessTimeline>> {
-        self.0.loudness(track_ids).await
-    }
 }
