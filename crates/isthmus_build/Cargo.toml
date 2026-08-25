@@ -3,17 +3,8 @@ name = "isthmus-build"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "isthmus"
-required-features = ["compiler"]
-
 [dependencies]
-spirv-builder = { workspace = true, optional = true }
-toml_edit = "0.25.13"
-
-[features]
-default = []
-compiler = ["dep:spirv-builder"]
+spirv-builder.workspace = true
 
 [lints]
 workspace = true

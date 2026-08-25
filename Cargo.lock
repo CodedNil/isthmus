@@ -299,6 +299,7 @@ dependencies = [
  "futures-util",
  "image",
  "isthmus",
+ "isthmus-build",
  "jiff",
  "librespot-core",
  "librespot-metadata",
@@ -1648,14 +1649,12 @@ name = "isthmus-build"
 version = "0.1.0"
 dependencies = [
  "spirv-builder",
- "toml_edit 0.25.13+spec-1.1.0",
 ]
 
 [[package]]
 name = "isthmus_macros"
 version = "0.1.0"
 dependencies = [
- "isthmus-build",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
@@ -4284,7 +4283,6 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
- "toml_writer",
  "winnow 1.0.4",
 ]
 
