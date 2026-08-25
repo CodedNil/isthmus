@@ -40,7 +40,12 @@ impl Unorm8x4 {
         }
         #[cfg(not(target_arch = "spirv"))]
         {
-            Vec4::new((self.0 & 255) as f32, ((self.0 >> 8) & 255) as f32, ((self.0 >> 16) & 255) as f32, (self.0 >> 24) as f32) / 255.0
+            Vec4::new(
+                (self.0 & 255) as f32,
+                ((self.0 >> 8) & 255) as f32,
+                ((self.0 >> 16) & 255) as f32,
+                (self.0 >> 24) as f32,
+            ) / 255.0
         }
     }
 

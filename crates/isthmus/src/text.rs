@@ -30,7 +30,8 @@ impl F16x2 {
     #[cfg(not(target_arch = "spirv"))]
     fn new(value: Vec2) -> Self {
         Self {
-            value: u32::from(half::f16::from_f32(value.x).to_bits()) | u32::from(half::f16::from_f32(value.y).to_bits()) << 16,
+            value: u32::from(half::f16::from_f32(value.x).to_bits())
+                | u32::from(half::f16::from_f32(value.y).to_bits()) << 16,
         }
     }
 
@@ -41,7 +42,10 @@ impl F16x2 {
         }
         #[cfg(not(target_arch = "spirv"))]
         {
-            vec2(half::f16::from_bits(self.value as u16).to_f32(), half::f16::from_bits((self.value >> 16) as u16).to_f32())
+            vec2(
+                half::f16::from_bits(self.value as u16).to_f32(),
+                half::f16::from_bits((self.value >> 16) as u16).to_f32(),
+            )
         }
     }
 }
@@ -106,7 +110,14 @@ impl Line {
         self.distance_scaled(placed_glyphs, glyphs, edges, point, 1.0)
     }
 
-    fn distance_scaled(self, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], point: Vec2, scale: f32) -> f32 {
+    fn distance_scaled(
+        self,
+        placed_glyphs: &[PlacedGlyph],
+        glyphs: &[Glyph],
+        edges: &[Edge],
+        point: Vec2,
+        scale: f32,
+    ) -> f32 {
         line_distance_scaled(self, placed_glyphs, glyphs, edges, point, scale)
     }
 }
@@ -126,7 +137,13 @@ pub struct TextFragment<'a, Globals = ()> {
 
 impl<'a, Globals: Copy> TextFragment<'a, Globals> {
     #[doc(hidden)]
-    pub const fn new(fragment: Fragment<Globals>, line: Line, placed_glyphs: &'a [PlacedGlyph], glyphs: &'a [Glyph], edges: &'a [Edge]) -> Self {
+    pub const fn new(
+        fragment: Fragment<Globals>,
+        line: Line,
+        placed_glyphs: &'a [PlacedGlyph],
+        glyphs: &'a [Glyph],
+        edges: &'a [Edge],
+    ) -> Self {
         Self {
             pixel: fragment.pixel,
             local: fragment.local,
@@ -145,7 +162,8 @@ impl<'a, Globals: Copy> TextFragment<'a, Globals> {
     }
 
     pub fn distance_scaled(&self, point: Vec2, scale: f32) -> f32 {
-        self.line.distance_scaled(self.placed_glyphs, self.glyphs, self.edges, point, scale)
+        self.line
+            .distance_scaled(self.placed_glyphs, self.glyphs, self.edges, point, scale)
     }
 
     pub fn distance_scaled_with_weight(&self, point: Vec2, scale: f32, weight: f32) -> f32 {
@@ -197,7 +215,11 @@ fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f
     let segment = b - a;
     let winding = if (a.y <= point.y && point.y < b.y) || (b.y <= point.y && point.y < a.y) {
         let crossing = a.x + (point.y - a.y) * segment.x / segment.y;
-        if crossing > point.x { if segment.y > 0.0 { 1 } else { -1 } } else { 0 }
+        if crossing > point.x {
+            if segment.y > 0.0 { 1 } else { -1 }
+        } else {
+            0
+        }
     } else {
         0
     };
@@ -242,7 +264,14 @@ fn glyph_after(placed_glyphs: &[PlacedGlyph], first: u32, count: u32, x: f32) ->
     low
 }
 
-fn line_distance_scaled(line: Line, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], local: Vec2, scale: f32) -> f32 {
+fn line_distance_scaled(
+    line: Line,
+    placed_glyphs: &[PlacedGlyph],
+    glyphs: &[Glyph],
+    edges: &[Edge],
+    local: Vec2,
+    scale: f32,
+) -> f32 {
     let inverse_size = 1.0 / line.size;
     let line_point = (local - line.origin) * inverse_size;
     let after = glyph_after(placed_glyphs, line.first, line.count, line_point.x);
@@ -258,8 +287,19 @@ fn line_distance_scaled(line: Line, placed_glyphs: &[PlacedGlyph], glyphs: &[Gly
         if glyph_point.x > glyph.max.x + padding {
             break;
         }
-        if glyph_point.x >= glyph.min.x - padding && glyph_point.y >= glyph.min.y - padding && glyph_point.x <= glyph.max.x + padding && glyph_point.y <= glyph.max.y + padding {
-            best = best.max(glyph_distance(edges, glyph.start, glyph.count, line.weight, glyph_point, line.size * scale));
+        if glyph_point.x >= glyph.min.x - padding
+            && glyph_point.y >= glyph.min.y - padding
+            && glyph_point.x <= glyph.max.x + padding
+            && glyph_point.y <= glyph.max.y + padding
+        {
+            best = best.max(glyph_distance(
+                edges,
+                glyph.start,
+                glyph.count,
+                line.weight,
+                glyph_point,
+                line.size * scale,
+            ));
         }
     }
     best
@@ -332,7 +372,10 @@ impl OutlineBuilder for Outline {
             let phase = step as f32 / 4.0;
             let inverse = 1.0 - phase;
             self.segment(
-                start * inverse * inverse * inverse + control_a * 3.0 * inverse * inverse * phase + control_b * 3.0 * inverse * phase * phase + end * phase * phase * phase,
+                start * inverse * inverse * inverse
+                    + control_a * 3.0 * inverse * inverse * phase
+                    + control_b * 3.0 * inverse * phase * phase
+                    + end * phase * phase * phase,
             );
         }
     }
@@ -432,7 +475,10 @@ impl<'a> TextLayout<'a> {
 
     pub fn right(self, position: Vec2) -> Line {
         let baseline = self.shaped.baseline;
-        self.text.place(&self.shaped, vec2(position.x - self.shaped.width, position.y + baseline))
+        self.text.place(
+            &self.shaped,
+            vec2(position.x - self.shaped.width, position.y + baseline),
+        )
     }
 
     pub fn fit(self, y: f32, bounds: Range<f32>) -> Line {
@@ -481,7 +527,11 @@ impl Text {
                                 vec2(f32::from(bounds.x_max), f32::from(bounds.y_max)) / span,
                             )
                         });
-                        (outline.edges, f32::from(face.glyph_hor_advance(GlyphId(id)).unwrap_or(0)) / span, (min, max))
+                        (
+                            outline.edges,
+                            f32::from(face.glyph_hor_advance(GlyphId(id)).unwrap_or(0)) / span,
+                            (min, max),
+                        )
                     })
                     .collect::<Vec<_>>(),
             );
@@ -533,7 +583,12 @@ impl Text {
         }
         let characters = characters
             .into_iter()
-            .filter_map(|(character, id)| metadata.binary_search_by_key(&id, |&(id, _)| id).ok().map(|index| (character, metadata[index].1)))
+            .filter_map(|(character, id)| {
+                metadata
+                    .binary_search_by_key(&id, |&(id, _)| id)
+                    .ok()
+                    .map(|index| (character, metadata[index].1))
+            })
             .collect::<Vec<_>>();
         let edges = context.upload(&curves);
         let glyphs = context.upload(&metadata.iter().map(|(_, meta)| meta.data).collect::<Vec<_>>());
@@ -560,8 +615,15 @@ impl Text {
     pub(crate) fn place_visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
         let origin = vec2(left.x, left.y + shaped.baseline);
         let local = |x| (x - origin.x) / shaped.size;
-        let start = shaped.glyphs.partition_point(|glyph| glyph.x < local(clip.start - EFFECT_PADDING)).saturating_sub(1);
-        let end = (shaped.glyphs.partition_point(|glyph| glyph.x <= local(clip.end + EFFECT_PADDING)) + 1).min(shaped.glyphs.len());
+        let start = shaped
+            .glyphs
+            .partition_point(|glyph| glyph.x < local(clip.start - EFFECT_PADDING))
+            .saturating_sub(1);
+        let end = (shaped
+            .glyphs
+            .partition_point(|glyph| glyph.x <= local(clip.end + EFFECT_PADDING))
+            + 1)
+        .min(shaped.glyphs.len());
         let mut line = self.place_range(shaped, origin, start..end);
         line.min.x = line.min.x.max(clip.start);
         line.max.x = line.max.x.min(clip.end);
@@ -587,7 +649,10 @@ impl Text {
         let (min, max) = if count == 0 {
             (Vec2::ZERO, Vec2::ZERO)
         } else {
-            (origin + shaped.min * shaped.size - EFFECT_PADDING, origin + shaped.max * shaped.size + EFFECT_PADDING)
+            (
+                origin + shaped.min * shaped.size - EFFECT_PADDING,
+                origin + shaped.max * shaped.size + EFFECT_PADDING,
+            )
         };
         self.placed.extend_from_slice(&shaped.glyphs[range]);
         Line {
@@ -606,7 +671,10 @@ impl Text {
 #[cfg(not(target_arch = "spirv"))]
 impl Shaper {
     fn glyph(&self, character: char) -> Option<Meta> {
-        self.characters.binary_search_by_key(&character, |glyph| glyph.0).ok().map(|index| self.characters[index].1)
+        self.characters
+            .binary_search_by_key(&character, |glyph| glyph.0)
+            .ok()
+            .map(|index| self.characters[index].1)
     }
 
     pub fn shape(&self, text: &str, size: f32, weight: f32) -> ShapedLine {
@@ -622,7 +690,13 @@ impl Shaper {
             * size
     }
 
-    pub fn shape_positioned<'a>(&self, parts: impl IntoIterator<Item = (&'a str, f32)>, size: f32, font_weight: f32, max_glyphs: usize) -> ShapedLine {
+    pub fn shape_positioned<'a>(
+        &self,
+        parts: impl IntoIterator<Item = (&'a str, f32)>,
+        size: f32,
+        font_weight: f32,
+        max_glyphs: usize,
+    ) -> ShapedLine {
         let mut min = Vec2::splat(f32::MAX);
         let mut max = Vec2::splat(f32::MIN);
         let weight = normalized_weight(font_weight);

@@ -21,7 +21,16 @@ pub fn sample_pill(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> Pill
         1.0
     };
     let (mouse_bulge, ripple_bulge, ripple, ripple_flash) = interaction(pixel, globals, time);
-    PillSample::new(local, size, distance, mouse_distance, mouse_bulge, ripple_bulge, ripple, ripple_flash)
+    PillSample::new(
+        local,
+        size,
+        distance,
+        mouse_distance,
+        mouse_bulge,
+        ripple_bulge,
+        ripple,
+        ripple_flash,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -43,7 +52,16 @@ pub struct PillSample {
 }
 
 impl PillSample {
-    fn new(local: Vec2, size: Vec2, shape_distance: f32, mouse_distance: f32, mouse_bulge: f32, ripple_bulge: f32, ripple: Vec2, ripple_flash: f32) -> Self {
+    fn new(
+        local: Vec2,
+        size: Vec2,
+        shape_distance: f32,
+        mouse_distance: f32,
+        mouse_bulge: f32,
+        ripple_bulge: f32,
+        ripple: Vec2,
+        ripple_flash: f32,
+    ) -> Self {
         let mut surface = Self {
             shape_distance,
             mouse_distance,
@@ -69,7 +87,9 @@ impl PillSample {
         let shadow = (-self.distance.max(0.0) * 0.3).exp() * 0.16;
         self.alpha = self.mask.max(shadow);
         let uv = self.local / self.size;
-        self.refracted = (uv - (uv - 0.5) * (1.0 + self.distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08 - self.ripple * 0.04) * self.size;
+        self.refracted =
+            (uv - (uv - 0.5) * (1.0 + self.distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08 - self.ripple * 0.04)
+                * self.size;
     }
 
     pub fn union(mut self, shape_distance: f32, mouse_distance: f32, smoothing: f32, amount: f32) -> Self {
@@ -98,7 +118,9 @@ impl PillSample {
 
 /// Core 2-lane avalanche mixer for hash functions
 pub fn avalanche(mut value: UVec2) -> UVec2 {
-    value = value.wrapping_mul(UVec2::splat(1_664_525)).wrapping_add(UVec2::splat(1_013_904_223));
+    value = value
+        .wrapping_mul(UVec2::splat(1_664_525))
+        .wrapping_add(UVec2::splat(1_013_904_223));
     value.x = value.x.wrapping_add(value.y.wrapping_mul(1_664_525));
     value.y = value.y.wrapping_add(value.x.wrapping_mul(1_664_525));
     value ^= value >> 16;
@@ -177,7 +199,16 @@ fn interaction(pixel: Vec2, globals: Globals, time: f32) -> (f32, f32, Vec2, f32
     } else {
         0.0
     };
-    (mouse_bulge, if ripple == Vec2::ZERO { 0.0 } else { ripple.length() * 22.0 }, ripple, ripple_flash)
+    (
+        mouse_bulge,
+        if ripple == Vec2::ZERO {
+            0.0
+        } else {
+            ripple.length() * 22.0
+        },
+        ripple,
+        ripple_flash,
+    )
 }
 
 pub fn ripple_flash(pixel: Vec2, globals: Globals, time: f32) -> f32 {
@@ -222,7 +253,12 @@ pub fn sd_rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> f32 {
     let mut point = vec2(point.x.abs(), point.y);
     let h = (point.x + k * point.y).max(0.0);
     point -= 0.5 * vec2(h, h * k);
-    point -= vec2(point.x.clamp(-0.5 * (side_len - radius) * k, 0.5 * (side_len - radius) * k), -0.5 * (side_len - radius));
+    point -= vec2(
+        point
+            .x
+            .clamp(-0.5 * (side_len - radius) * k, 0.5 * (side_len - radius) * k),
+        -0.5 * (side_len - radius),
+    );
     point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius
 }
 
@@ -235,7 +271,9 @@ pub fn segment_distance(point: Vec2, start: Vec2, end: Vec2) -> f32 {
 
 /// Antialiased coverage of the outline of a shape at the given signed `distance`, `width` pixels wide.
 pub fn stroke(distance: f32, width: f32) -> f32 {
-    distance.abs().smoothstep(width + ANTIALIAS_WIDTH, width - ANTIALIAS_WIDTH)
+    distance
+        .abs()
+        .smoothstep(width + ANTIALIAS_WIDTH, width - ANTIALIAS_WIDTH)
 }
 
 /// Antialiased coverage of the inside of a shape at the given signed `distance`.

@@ -56,7 +56,12 @@ impl Enrichment {
             let uri = request.uri.clone();
             let state = fetch_lyrics(&request, &http, &spotify, &shaper).await;
             Some(update(move |app| {
-                if let Some(track) = app.music.queue.iter_mut().find(|track| track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching)) {
+                if let Some(track) = app
+                    .music
+                    .queue
+                    .iter_mut()
+                    .find(|track| track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching))
+                {
                     track.runtime.lyrics = state;
                 }
             }))
@@ -106,11 +111,17 @@ pub struct AlbumArt {
 
 impl Fetch<AlbumArt> {
     pub fn palette(&self) -> [Unorm8x4; PALETTE_COLORS] {
-        self.ready().map_or_else(|| [Unorm8x4::default(); PALETTE_COLORS], |art| art.palette)
+        self.ready()
+            .map_or_else(|| [Unorm8x4::default(); PALETTE_COLORS], |art| art.palette)
     }
 }
 
-async fn fetch_lyrics(request: &LyricsRequest, http: &Client, spotify: &Spotify, shaper: &text::Shaper) -> Fetch<lyrics::Lyrics> {
+async fn fetch_lyrics(
+    request: &LyricsRequest,
+    http: &Client,
+    spotify: &Spotify,
+    shaper: &text::Shaper,
+) -> Fetch<lyrics::Lyrics> {
     let result = if let Some(lyrics) = request.fetch(http).await {
         Ok(lyrics)
     } else if let Some(id) = request.track_id {
@@ -119,7 +130,9 @@ async fn fetch_lyrics(request: &LyricsRequest, http: &Client, spotify: &Spotify,
         Ok(Vec::new())
     };
     match result {
-        Ok(segments) => Fetch::Ready(lyrics::Lyrics::shape(segments, request.duration_ms as f32, shaper).unwrap_or_default()),
+        Ok(segments) => {
+            Fetch::Ready(lyrics::Lyrics::shape(segments, request.duration_ms as f32, shaper).unwrap_or_default())
+        }
         Err(error) => {
             warn!(%error, track = request.name, "Failed to fetch lyrics");
             Fetch::retry()
@@ -236,7 +249,10 @@ fn complete_palette(colors: &mut ArrayVec<(Lch, f32), PALETTE_COLORS>) {
     let mut index = 1;
     while index < colors.len() {
         let (color, weight) = colors[index];
-        if let Some(duplicate) = colors[..index].iter().position(|(other, _)| (color.hue - other.hue).into_degrees().abs() < 20.0) {
+        if let Some(duplicate) = colors[..index]
+            .iter()
+            .position(|(other, _)| (color.hue - other.hue).into_degrees().abs() < 20.0)
+        {
             colors[duplicate].1 += weight;
             colors.remove(index);
         } else {
@@ -287,7 +303,10 @@ fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_
                         max[channel] = max[channel].max(component(color, channel));
                     }
                 }
-                let (channel, spread) = (0..3).map(|channel| (channel, max[channel] - min[channel])).max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+                let (channel, spread) = (0..3)
+                    .map(|channel| (channel, max[channel] - min[channel]))
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .unwrap();
                 (index, channel, spread * range.len() as f32)
             })
             .max_by(|a, b| a.2.total_cmp(&b.2))
@@ -313,13 +332,23 @@ fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_
                 sum[2] += color.b;
                 sum
             });
-            (palette::Lab::new(sum[0] / weight, sum[1] / weight, sum[2] / weight).into_color(), weight)
+            (
+                palette::Lab::new(sum[0] / weight, sum[1] / weight, sum[2] / weight).into_color(),
+                weight,
+            )
         })
         .collect()
 }
 
 fn image_palette(image: &RgbaImage) -> [Unorm8x4; PALETTE_COLORS] {
-    let srgb_to_lab = |pixel: &image::Rgba<u8>| palette::Srgb::new(f32::from(pixel[0]) / 255.0, f32::from(pixel[1]) / 255.0, f32::from(pixel[2]) / 255.0).into_color();
+    let srgb_to_lab = |pixel: &image::Rgba<u8>| {
+        palette::Srgb::new(
+            f32::from(pixel[0]) / 255.0,
+            f32::from(pixel[1]) / 255.0,
+            f32::from(pixel[2]) / 255.0,
+        )
+        .into_color()
+    };
     let mut pixels: Vec<palette::Lab> = image
         .pixels()
         .filter(|pixel| {

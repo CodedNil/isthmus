@@ -24,7 +24,8 @@ impl Capture {
         let source = input.ty.as_ref().clone();
         let kind = if matches!(&source, Type::Path(path) if path.path.is_ident("bool")) {
             CaptureKind::Bool
-        } else if matches!(&source, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "Image")) {
+        } else if matches!(&source, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "Image"))
+        {
             CaptureKind::Image
         } else {
             CaptureKind::Plain
@@ -72,12 +73,21 @@ pub struct Expansion {
     pub pipeline: Ident,
 }
 
-pub fn expand(name: &Ident, shader_input: &PatType, captures: &[Capture], body: &Block, text: bool) -> syn::Result<Expansion> {
+pub fn expand(
+    name: &Ident,
+    shader_input: &PatType,
+    captures: &[Capture],
+    body: &Block,
+    text: bool,
+) -> syn::Result<Expansion> {
     let isthmus = isthmus_path();
     let shader_name = format_ident!("__isthmus_paint_{name}");
     let instance_name = format_ident!("__IsthmusPaint{}", pascal(&name.to_string()));
     let Pat::Ident(shader_input_name) = shader_input.pat.as_ref() else {
-        return Err(syn::Error::new_spanned(&shader_input.pat, "shader fragment requires an identifier"));
+        return Err(syn::Error::new_spanned(
+            &shader_input.pat,
+            "shader fragment requires an identifier",
+        ));
     };
     let shader_input_name = &shader_input_name.ident;
     let shader_input_type = shader_input.ty.as_ref();

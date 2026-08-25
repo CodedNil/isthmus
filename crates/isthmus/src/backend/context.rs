@@ -60,7 +60,10 @@ pub(super) struct Inner {
 #[derive(Clone)]
 pub struct Context(pub(super) Rc<Inner>);
 
-pub(super) fn create_surface(instance: &wgpu::Instance, source: &(impl HasDisplayHandle + HasWindowHandle)) -> Result<wgpu::Surface<'static>, SetupError> {
+pub(super) fn create_surface(
+    instance: &wgpu::Instance,
+    source: &(impl HasDisplayHandle + HasWindowHandle),
+) -> Result<wgpu::Surface<'static>, SetupError> {
     // The caller owns the display/window handles for the lifetime of the
     // returned surface; wgpu cannot express that relationship for generic
     // raw handles, so this is the required API boundary.
@@ -74,7 +77,9 @@ pub(super) fn create_surface(instance: &wgpu::Instance, source: &(impl HasDispla
 }
 
 impl Context {
-    pub(super) fn new(source: &(impl HasDisplayHandle + HasWindowHandle)) -> Result<(Self, wgpu::Surface<'static>), SetupError> {
+    pub(super) fn new(
+        source: &(impl HasDisplayHandle + HasWindowHandle),
+    ) -> Result<(Self, wgpu::Surface<'static>), SetupError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -142,16 +147,29 @@ impl Context {
         if !bytes.is_empty() {
             self.0.queue.write_buffer(&buffer, 0, bytes);
         }
-        BufferRange { raw: Some(buffer), offset: 0 }
+        BufferRange {
+            raw: Some(buffer),
+            offset: 0,
+        }
     }
-    pub(super) fn configure_surface(&self, surface: &wgpu::Surface<'static>, width: u32, height: u32) -> Result<wgpu::SurfaceConfiguration, SetupError> {
+    pub(super) fn configure_surface(
+        &self,
+        surface: &wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::SurfaceConfiguration, SetupError> {
         let caps = surface.get_capabilities(&self.0.adapter);
         let format = caps
             .formats
             .iter()
             .copied()
             .find(|format| *format == wgpu::TextureFormat::Bgra8Unorm)
-            .or_else(|| caps.formats.iter().copied().find(|format| *format == wgpu::TextureFormat::Rgba8Unorm))
+            .or_else(|| {
+                caps.formats
+                    .iter()
+                    .copied()
+                    .find(|format| *format == wgpu::TextureFormat::Rgba8Unorm)
+            })
             .or_else(|| caps.formats.first().copied())
             .ok_or(SetupError::UnsupportedSurface)?;
         if !caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {

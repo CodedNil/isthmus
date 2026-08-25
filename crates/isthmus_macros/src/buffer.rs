@@ -3,11 +3,9 @@ use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_quote};
 
 pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
-    if !input
-        .attrs
-        .iter()
-        .any(|attribute| matches!(&attribute.meta, syn::Meta::List(list) if attribute.path().is_ident("repr") && list.tokens.to_string() == "C"))
-    {
+    if !input.attrs.iter().any(
+        |attribute| matches!(&attribute.meta, syn::Meta::List(list) if attribute.path().is_ident("repr") && list.tokens.to_string() == "C"),
+    ) {
         return syn::Error::new_spanned(input, "ShaderData requires #[repr(C)]").to_compile_error();
     }
     let name = &input.ident;
@@ -21,7 +19,10 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     let types = fields.named.iter().map(|field| &field.ty).collect::<Vec<_>>();
     let mut generics = input.generics.clone();
     for ty in &types {
-        generics.make_where_clause().predicates.push(parse_quote!(#ty: #isthmus::ShaderData));
+        generics
+            .make_where_clause()
+            .predicates
+            .push(parse_quote!(#ty: #isthmus::ShaderData));
     }
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     quote! {

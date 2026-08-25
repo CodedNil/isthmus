@@ -101,10 +101,21 @@ impl CantusApp {
     ///
     /// # Panics
     /// Panics if initialized twice or GPU setup fails.
-    pub(crate) fn initialize_renderer(&mut self, surface: &(impl HasDisplayHandle + HasWindowHandle), width: u32, height: u32) {
+    pub(crate) fn initialize_renderer(
+        &mut self,
+        surface: &(impl HasDisplayHandle + HasWindowHandle),
+        width: u32,
+        height: u32,
+    ) {
         assert!(self.gpu.is_none(), "GPU initialized twice");
-        let (gpu, bar_surface) =
-            Renderer::new(program(), surface, [width, height], include_bytes!("../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR).expect("failed to initialize renderer");
+        let (gpu, bar_surface) = Renderer::new(
+            program(),
+            surface,
+            [width, height],
+            include_bytes!("../../../assets/NotoSans-Variable.ttf"),
+            TEXT_COLOR,
+        )
+        .expect("failed to initialize renderer");
         tracing::info!("Using GPU device: {}", gpu.device_name());
         self.gpu = Some(gpu);
         self.bar_surface = Some(bar_surface);
@@ -165,7 +176,9 @@ pub fn run() {
         .with_target("cantus", Level::INFO)
         .with_target("simplecss", LevelFilter::ERROR)
         .with_target("zbus::proxy", LevelFilter::ERROR);
-    tracing_subscriber::registry().with(fmt::layer().with_writer(io::stderr).with_filter(filter)).init();
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_writer(io::stderr).with_filter(filter))
+        .init();
 
     Platform::run();
 }

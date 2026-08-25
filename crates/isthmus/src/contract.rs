@@ -178,7 +178,10 @@ pub struct SurfaceHandle {
 #[cfg(not(target_arch = "spirv"))]
 impl SurfaceHandle {
     pub(crate) const fn new(index: usize, generation: u32) -> Self {
-        Self { index: index as u32, generation }
+        Self {
+            index: index as u32,
+            generation,
+        }
     }
 
     pub(crate) const fn index(self) -> usize {

@@ -49,7 +49,12 @@ pub fn shader_is_fresh(artifact: &Path, source: &Path, dependency: Option<&Path>
     let crates = dependency.and_then(Path::parent);
     let macros = crates.and_then(|crates| newest_rust_source(&crates.join("isthmus_macros/src")));
     let compiler = crates.and_then(|crates| newest_rust_source(&crates.join("isthmus_build/src")));
-    shader.into_iter().chain(engine).chain(macros).chain(compiler).all(|modified| modified <= built)
+    shader
+        .into_iter()
+        .chain(engine)
+        .chain(macros)
+        .chain(compiler)
+        .all(|modified| modified <= built)
 }
 
 fn newest_rust_source(path: &Path) -> Option<SystemTime> {
@@ -82,7 +87,8 @@ fn manifest_path<'a>(manifest: &'a toml_edit::DocumentMut, path: &[&str]) -> Opt
 
 #[cfg(feature = "compiler")]
 pub(crate) fn workspace_root(crate_dir: &Path) -> Result<PathBuf, String> {
-    let crate_dir = fs::canonicalize(crate_dir).map_err(|error| std::format!("failed to locate shader crate: {error}"))?;
+    let crate_dir =
+        fs::canonicalize(crate_dir).map_err(|error| std::format!("failed to locate shader crate: {error}"))?;
     Ok(crate_dir
         .ancestors()
         .find(|path| {

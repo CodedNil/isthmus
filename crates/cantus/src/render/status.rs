@@ -1,6 +1,9 @@
 use crate::render::{
     Fragment, GAP, PADDING, PANEL_START, TextFragment,
-    sdf::{PILL_MARGIN, VISIBLE_ALPHA, fill, fill_rounded_box, hash, sample_pill, sd_capsule_box, sd_chevron, sd_rounded_box, segment_distance, smooth_union, stroke},
+    sdf::{
+        PILL_MARGIN, VISIBLE_ALPHA, fill, fill_rounded_box, hash, sample_pill, sd_capsule_box, sd_chevron,
+        sd_rounded_box, segment_distance, smooth_union, stroke,
+    },
     tempestas::{StatusSky, scene, sky_phase},
 };
 use core::f32::consts::TAU;
@@ -94,7 +97,12 @@ mod host {
     impl StatusPanel {
         /// Total on-screen width of the pill; grows to include the battery slot when shown.
         pub const fn width(&self) -> f32 {
-            BASE_WIDTH + if self.battery_level.is_some() { DATA_WIDTH + GAP } else { 0.0 }
+            BASE_WIDTH
+                + if self.battery_level.is_some() {
+                    DATA_WIDTH + GAP
+                } else {
+                    0.0
+                }
         }
 
         pub(crate) fn new(background: &Background) -> Self {
@@ -133,12 +141,17 @@ mod host {
             let pill = Rect::new(x, PANEL_START, x + width, PANEL_START + height);
             let pill_quad: Quad = pill.into();
             let mut cursor = PADDING;
-            let section = |center: f32, section_width: f32| Rect::from_center(vec2(x + center, PANEL_START + height * 0.5), vec2(f32::midpoint(section_width, GAP), height * 0.5));
+            let section = |center: f32, section_width: f32| {
+                Rect::from_center(
+                    vec2(x + center, PANEL_START + height * 0.5),
+                    vec2(f32::midpoint(section_width, GAP), height * 0.5),
+                )
+            };
 
             // GPU: Status background.
-            context
-                .frame
-                .paint_quad(pill_quad.expanded(PILL_MARGIN), |fragment: Fragment, pill_quad: Quad, sky: StatusSky| {
+            context.frame.paint_quad(
+                pill_quad.expanded(PILL_MARGIN),
+                |fragment: Fragment, pill_quad: Quad, sky: StatusSky| {
                     let sample = sample_pill(pill_quad, fragment.pixel, fragment.globals, fragment.time);
                     if sample.alpha <= VISIBLE_ALPHA {
                         kill();
@@ -156,13 +169,16 @@ mod host {
                     )
                     .lerp(Vec3::splat(0.95), sample.ripple_flash * 0.35);
                     sample.color(color)
-                });
+                },
+            );
 
             let temperature_blend = 1.0 - (-5.0 * context.frame.delta_time).exp();
             for (processor, target) in [&mut self.cpu, &mut self.gpu].into_iter().zip(self.target_temperature) {
                 processor.temperature += (target - processor.temperature) * temperature_blend;
             }
-            self.history_scroll = (self.history_scroll + context.frame.delta_time / Platform::STATUS_SAMPLE_INTERVAL.as_secs_f32()).saturate();
+            self.history_scroll = (self.history_scroll
+                + context.frame.delta_time / Platform::STATUS_SAMPLE_INTERVAL.as_secs_f32())
+            .saturate();
             for (processor, show_pins) in [(self.cpu, true), (self.gpu, false)] {
                 let center = cursor + GRAPH_WIDTH * 0.5;
                 let mut label = ArrayString::<16>::new();
@@ -175,7 +191,11 @@ mod host {
                 )
                 .unwrap();
                 let half_width = GRAPH_WIDTH * 0.5 - GAP * 0.5;
-                let line = context.frame.text().line(&label, 11.0, 700.0).fit(GAP + 5.0, center - half_width..center + half_width);
+                let line = context
+                    .frame
+                    .text()
+                    .line(&label, 11.0, 700.0)
+                    .fit(GAP + 5.0, center - half_width..center + half_width);
                 // GPU: Processor monitor.
                 context.frame.paint_quad(
                     section(center, GRAPH_WIDTH),
@@ -207,19 +227,22 @@ mod host {
                         // Scrolling usage and memory histories.
                         let chart = fill(capsule);
                         let history_step = half_width * 2.0 / HISTORY_END as f32;
-                        let sample = ((fragment.local.x + half_width) / history_step + history_scroll).clamp(0.0, HISTORY_END as f32);
+                        let sample = ((fragment.local.x + half_width) / history_step + history_scroll)
+                            .clamp(0.0, HISTORY_END as f32);
                         let index = sample.floor() as usize;
                         let graph_height = radius - 2.0;
                         let curve = |history: &[f32; STATUS_HISTORY_SAMPLES], color: Vec3, fill_strength: f32| {
                             let height = |i: usize| graph_height * (1.0 - history[i.min(HISTORY_END)] * 2.0);
-                            let at = |i: usize| vec2((i as f32 - history_scroll) * history_step - half_width, height(i));
+                            let at =
+                                |i: usize| vec2((i as f32 - history_scroll) * history_step - half_width, height(i));
                             let start = at(index);
                             let end = at(index + 1);
                             let line = stroke(segment_distance(fragment.local, start, end), CHART_LINE_WIDTH);
                             let graph_y = start.y.lerp(end.y, sample.fract().smoothstep(0.0, 1.0));
                             color * chart * (fill(graph_y - fragment.local.y) * fill_strength + line)
                         };
-                        let graphs = curve(&processor.usage, USAGE_COLOR, 0.156) + curve(&processor.memory, MEMORY_COLOR, 0.084);
+                        let graphs =
+                            curve(&processor.usage, USAGE_COLOR, 0.156) + curve(&processor.memory, MEMORY_COLOR, 0.084);
 
                         // Grid and smoothly temperature-tinted package context.
                         let cell = (((fragment.local + vec2(half_width, radius)) / vec2(7.0, 6.1)).fract() - 0.5).abs();
@@ -233,50 +256,59 @@ mod host {
                         let pin_visibility = if show_pins { 1.0 } else { 0.0 };
                         let coverage = fill(smooth_union(capsule, pins, 1.6, pin_visibility));
                         let hardware = stroke(capsule, 1.55).max(fill(pins) * pin_visibility);
-                        let color = vec3(0.004, 0.012, 0.026).lerp(frame_color, hardware) * coverage + Vec3::splat(grid) + graphs;
+                        let color = vec3(0.004, 0.012, 0.026).lerp(frame_color, hardware) * coverage
+                            + Vec3::splat(grid)
+                            + graphs;
                         color.extend(coverage.max(graphs.max_element().saturate()))
                     },
                 );
                 // GPU: Processor label.
                 context
                     .frame
-                    .paint_text(line.translated(vec2(x, PANEL_START)), |text: TextFragment| text.color(text.alpha()));
+                    .paint_text(line.translated(vec2(x, PANEL_START)), |text: TextFragment| {
+                        text.color(text.alpha())
+                    });
                 cursor += GRAPH_WIDTH + GAP;
             }
 
             if let Some(battery_level) = self.battery_level {
                 let center = cursor + DATA_WIDTH * 0.5;
                 // GPU: Battery indicator.
-                context.frame.paint_quad(section(center, DATA_WIDTH), |fragment: Fragment, battery_level: f32| {
-                    let time = fragment.time;
-                    let point = fragment.local / 0.8;
+                context
+                    .frame
+                    .paint_quad(section(center, DATA_WIDTH), |fragment: Fragment, battery_level: f32| {
+                        let time = fragment.time;
+                        let point = fragment.local / 0.8;
 
-                    // Battery shell and fill boundary.
-                    let charging = if battery_level < 0.0 { 1.0 } else { 0.0 };
-                    let level = battery_level.abs();
-                    let shell = stroke(sd_rounded_box(point - vec2(0.0, 1.0), vec2(11.5, 15.0), 3.2), 1.875);
-                    let terminal = fill_rounded_box(point - vec2(0.0, -15.6), vec2(4.0, 1.8), 0.8);
-                    let inside = fill_rounded_box(point - vec2(0.0, 1.0), vec2(8.5, 12.0), 1.7);
-                    let surface = 12.0 - level.saturate() * 24.0;
-                    let wave = (point.x * 0.62 + time * (1.4 + charging * 1.2)).sin() * 1.15 + (point.x * 0.27 - time * 0.8).sin() * 0.45;
-                    let liquid = inside * (point.y - 1.0).smoothstep(surface + wave - 0.7, surface + wave + 0.7);
+                        // Battery shell and fill boundary.
+                        let charging = if battery_level < 0.0 { 1.0 } else { 0.0 };
+                        let level = battery_level.abs();
+                        let shell = stroke(sd_rounded_box(point - vec2(0.0, 1.0), vec2(11.5, 15.0), 3.2), 1.875);
+                        let terminal = fill_rounded_box(point - vec2(0.0, -15.6), vec2(4.0, 1.8), 0.8);
+                        let inside = fill_rounded_box(point - vec2(0.0, 1.0), vec2(8.5, 12.0), 1.7);
+                        let surface = 12.0 - level.saturate() * 24.0;
+                        let wave = (point.x * 0.62 + time * (1.4 + charging * 1.2)).sin() * 1.15
+                            + (point.x * 0.27 - time * 0.8).sin() * 0.45;
+                        let liquid = inside * (point.y - 1.0).smoothstep(surface + wave - 0.7, surface + wave + 0.7);
 
-                    // Charge-dependent liquid color.
-                    let liquid_color = vec3(1.0, 0.18, 0.10)
-                        .lerp(vec3(1.0, 0.72, 0.12), level.smoothstep(0.08, 0.28))
-                        .lerp(vec3(0.22, 0.95, 0.55), level.smoothstep(0.18, 0.72));
+                        // Charge-dependent liquid color.
+                        let liquid_color = vec3(1.0, 0.18, 0.10)
+                            .lerp(vec3(1.0, 0.72, 0.12), level.smoothstep(0.08, 0.28))
+                            .lerp(vec3(0.22, 0.95, 0.55), level.smoothstep(0.18, 0.72));
 
-                    // Rising bubbles only while charging.
-                    let column = (point.x / 3.0).floor();
-                    let seed = hash(vec2(column, 0.0));
-                    let cycle = (time * (0.35 + seed.y * 0.5) + seed.x * 7.0).fract();
-                    let center = vec2((column + 0.2 + seed.x * 0.6) * 3.0, 13.0 - cycle * 24.0);
-                    let distance = (point - center).length() - (0.4 + seed.y * 0.5);
-                    let fade = cycle.smoothstep(0.0, 0.25) * cycle.smoothstep(1.0, 0.7);
-                    let bubble = stroke(distance, 0.45) * fade * inside * charging;
-                    let color = Vec3::splat(shell * 0.43 + terminal * 0.38) + liquid_color * liquid * 0.78 + liquid_color.lerp(Vec3::ONE, 0.72) * bubble * 0.9;
-                    color.extend(shell.max(terminal).max(liquid).max(bubble))
-                });
+                        // Rising bubbles only while charging.
+                        let column = (point.x / 3.0).floor();
+                        let seed = hash(vec2(column, 0.0));
+                        let cycle = (time * (0.35 + seed.y * 0.5) + seed.x * 7.0).fract();
+                        let center = vec2((column + 0.2 + seed.x * 0.6) * 3.0, 13.0 - cycle * 24.0);
+                        let distance = (point - center).length() - (0.4 + seed.y * 0.5);
+                        let fade = cycle.smoothstep(0.0, 0.25) * cycle.smoothstep(1.0, 0.7);
+                        let bubble = stroke(distance, 0.45) * fade * inside * charging;
+                        let color = Vec3::splat(shell * 0.43 + terminal * 0.38)
+                            + liquid_color * liquid * 0.78
+                            + liquid_color.lerp(Vec3::ONE, 0.72) * bubble * 0.9;
+                        color.extend(shell.max(terminal).max(liquid).max(bubble))
+                    });
                 cursor += DATA_WIDTH + GAP;
             }
 
@@ -322,7 +354,8 @@ mod host {
             for action in [1usize, 0] {
                 let center = cursor + ACTION_WIDTH * 0.5;
                 let response = context.interaction.interact(section(center, ACTION_WIDTH));
-                self.action_hover[action] = self.action_hover[action].move_towards(f32::from(response.hovered()), context.frame.delta_time / 0.12);
+                self.action_hover[action] = self.action_hover[action]
+                    .move_towards(f32::from(response.hovered()), context.frame.delta_time / 0.12);
                 if response.hovered() && response.held_for(1.5) {
                     Platform::run_power_action(&self.background, action);
                 }
@@ -346,7 +379,9 @@ mod host {
                             let progress = 1.0 - selected + charge;
                             let phase = ((point.y.atan2(point.x) - START) / TAU + 1.0).fract();
                             let arc_end = (progress * 0.82 - 0.045).max(0.0);
-                            let arc = stroke(point.length() - 7.1, 1.05) * phase.smoothstep(arc_end + 0.008, arc_end - 0.008) * progress.smoothstep(0.0, 0.02);
+                            let arc = stroke(point.length() - 7.1, 1.05)
+                                * phase.smoothstep(arc_end + 0.008, arc_end - 0.008)
+                                * progress.smoothstep(0.0, 0.02);
                             let angle = START + SWEEP * progress;
                             let direction = vec2(angle.cos(), angle.sin());
                             let tangent = vec2(-direction.y, direction.x);
@@ -358,10 +393,15 @@ mod host {
                             let radius = 7.5 - charge * 4.6 + (time * 8.0).sin() * charge * (1.0 - charge) * 0.16;
                             let ring = stroke(point.length() - radius, 1.05 + ease * 0.7);
                             let gap = fill_rounded_box(point - vec2(0.0, -7.0), vec2(3.0 * (1.0 - charge), 3.0), 0.5);
-                            let stem = fill_rounded_box(point - vec2(0.0, -5.0 + charge * 3.5), vec2(1.05 + ease * 0.45, 4.6 - charge * 3.0), 0.7);
+                            let stem = fill_rounded_box(
+                                point - vec2(0.0, -5.0 + charge * 3.5),
+                                vec2(1.05 + ease * 0.45, 4.6 - charge * 3.0),
+                                0.7,
+                            );
                             (ring * (1.0 - gap)).max(stem)
                         };
-                        let color = Vec3::splat(0.76).lerp(vec3(0.95, 0.42, 0.4), hover.max(selected * (0.5 + charge * 0.5)));
+                        let color =
+                            Vec3::splat(0.76).lerp(vec3(0.95, 0.42, 0.4), hover.max(selected * (0.5 + charge * 0.5)));
                         (color * (1.0 + charge * 0.45)).extend(icon)
                     },
                 );

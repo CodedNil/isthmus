@@ -26,14 +26,17 @@ pub fn build_shader(crate_dir: &Path) -> Result<(PathBuf, bool), String> {
     let target = workspace_root(crate_dir)?.join("target/isthmus");
     let source = shader_workspace(crate_dir, &target)?;
     let shader = compile_shader(&source, &target.join("build"))?;
-    let parent = output.parent().ok_or_else(|| String::from("shader artifact has no parent"))?;
+    let parent = output
+        .parent()
+        .ok_or_else(|| String::from("shader artifact has no parent"))?;
     fs::create_dir_all(parent).map_err(|error| std::format!("failed to create shader artifact directory: {error}"))?;
     fs::write(&output, shader).map_err(|error| std::format!("failed to write shader artifact: {error}"))?;
     Ok((output, true))
 }
 
 fn shader_workspace(crate_dir: &Path, target: &Path) -> Result<PathBuf, String> {
-    let manifest_text = fs::read_to_string(crate_dir.join("Cargo.toml")).map_err(|error| std::format!("failed to read shader manifest: {error}"))?;
+    let manifest_text = fs::read_to_string(crate_dir.join("Cargo.toml"))
+        .map_err(|error| std::format!("failed to read shader manifest: {error}"))?;
     let manifest = manifest_text
         .parse::<toml_edit::DocumentMut>()
         .map_err(|error| std::format!("invalid shader manifest: {error}"))?;
@@ -41,16 +44,25 @@ fn shader_workspace(crate_dir: &Path, target: &Path) -> Result<PathBuf, String> 
     if source == crate_dir.join("src/lib.rs") {
         return Ok(crate_dir.to_path_buf());
     }
-    let source = fs::canonicalize(&source).map_err(|error| std::format!("failed to locate shader source {}: {error}", source.display()))?;
+    let source = fs::canonicalize(&source)
+        .map_err(|error| std::format!("failed to locate shader source {}: {error}", source.display()))?;
     let artifact = shader_artifact(crate_dir)?;
-    let artifact_name = artifact.file_name().ok_or_else(|| String::from("shader artifact has no file name"))?.to_owned();
-    let artifact = fs::canonicalize(artifact.parent().ok_or_else(|| String::from("shader artifact has no parent"))?)
-        .map_err(|error| std::format!("failed to locate shader artifact directory: {error}"))?
-        .join(artifact_name);
+    let artifact_name = artifact
+        .file_name()
+        .ok_or_else(|| String::from("shader artifact has no file name"))?
+        .to_owned();
+    let artifact = fs::canonicalize(
+        artifact
+            .parent()
+            .ok_or_else(|| String::from("shader artifact has no parent"))?,
+    )
+    .map_err(|error| std::format!("failed to locate shader artifact directory: {error}"))?
+    .join(artifact_name);
     let dependency = manifest["dependencies"]["isthmus"]["path"]
         .as_str()
         .ok_or_else(|| String::from("shader source requires a path dependency on isthmus"))?;
-    let dependency = fs::canonicalize(crate_dir.join(dependency)).map_err(|error| std::format!("failed to locate isthmus dependency: {error}"))?;
+    let dependency = fs::canonicalize(crate_dir.join(dependency))
+        .map_err(|error| std::format!("failed to locate isthmus dependency: {error}"))?;
     let generated = target.join("source");
     fs::create_dir_all(&generated).map_err(|error| std::format!("failed to create shader workspace: {error}"))?;
     write_if_changed(

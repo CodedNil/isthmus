@@ -107,7 +107,10 @@ impl Canvas {
         if let Some(index) = images.iter().position(|candidate| Rc::ptr_eq(candidate, &image)) {
             return ImageHandle::new(index as u32);
         }
-        assert!(images.len() < IMAGE_CAPACITY as usize, "one paint shader uses more than {IMAGE_CAPACITY} images");
+        assert!(
+            images.len() < IMAGE_CAPACITY as usize,
+            "one paint shader uses more than {IMAGE_CAPACITY} images"
+        );
         let index = images.len() as u32;
         images.push(image);
         ImageHandle::new(index)
@@ -153,7 +156,10 @@ impl Canvas {
         const {
             assert!(size_of::<S::Instance>() % 4 == 0);
         }
-        assert_eq!(self.payload_pipeline.take().map(|pipeline| pipeline.entry), Some(S::PIPELINE.entry));
+        assert_eq!(
+            self.payload_pipeline.take().map(|pipeline| pipeline.entry),
+            Some(S::PIPELINE.entry)
+        );
         let images = self.payload_images.take();
         let paint = self.record(S::PIPELINE, quad, bytemuck::bytes_of(&value), images);
         self.surface(surface).push(paint);
@@ -162,7 +168,10 @@ impl Canvas {
         const {
             assert!(size_of::<S::Instance>() % 4 == 0);
         }
-        assert_eq!(self.payload_pipeline.take().map(|pipeline| pipeline.entry), Some(S::PIPELINE.entry));
+        assert_eq!(
+            self.payload_pipeline.take().map(|pipeline| pipeline.entry),
+            Some(S::PIPELINE.entry)
+        );
         let images = self.payload_images.take();
         let paint = self.record(S::PIPELINE, quad, bytemuck::bytes_of(&value), images);
         self.group.as_mut().expect("paint layer outside a group").1[layer as usize].push(paint);
@@ -175,50 +184,57 @@ impl Canvas {
             // entry-point names below; passthrough is required because naga
             // cannot represent Rust-GPU's non-uniform descriptor operations.
             let module = unsafe {
-                self.context.0.device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
-                    label: Some("isthmus shader"),
-                    entry_points: Cow::Owned(vec![
-                        wgpu::PassthroughShaderEntryPoint {
-                            name: Cow::Owned(vertex_entry),
-                            workgroup_size: (0, 0, 0),
-                        },
-                        wgpu::PassthroughShaderEntryPoint {
-                            name: Cow::Owned(fragment_entry),
-                            workgroup_size: (0, 0, 0),
-                        },
-                    ]),
-                    spirv: Some(Cow::Borrowed(&self.shader)),
-                    ..Default::default()
-                })
+                self.context
+                    .0
+                    .device
+                    .create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+                        label: Some("isthmus shader"),
+                        entry_points: Cow::Owned(vec![
+                            wgpu::PassthroughShaderEntryPoint {
+                                name: Cow::Owned(vertex_entry),
+                                workgroup_size: (0, 0, 0),
+                            },
+                            wgpu::PassthroughShaderEntryPoint {
+                                name: Cow::Owned(fragment_entry),
+                                workgroup_size: (0, 0, 0),
+                            },
+                        ]),
+                        spirv: Some(Cow::Borrowed(&self.shader)),
+                        ..Default::default()
+                    })
             };
-            let pipeline = self.context.0.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(spec.entry),
-                layout: Some(&self.layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some(&format!("{}::__isthmus_quad::vertex", self.root)),
-                    buffers: &[],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some(&format!("{}::fragment", spec.entry)),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
+            let pipeline = self
+                .context
+                .0
+                .device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(spec.entry),
+                    layout: Some(&self.layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some(&format!("{}::__isthmus_quad::vertex", self.root)),
+                        buffers: &[],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(&format!("{}::fragment", spec.entry)),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: self.format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                });
             self.pipelines.insert(spec.entry, pipeline);
         }
         let payload = self.payload.len() as u32;
@@ -254,7 +270,9 @@ impl Canvas {
         self.paints.get(surface.index()).is_some_and(|p| !p.is_empty())
     }
     pub(super) fn draw_surface(&self, pass: &mut wgpu::RenderPass<'_>, surface: SurfaceHandle, shared: &[u8]) {
-        let Some(paints) = self.paints.get(surface.index()) else { return };
+        let Some(paints) = self.paints.get(surface.index()) else {
+            return;
+        };
         if paints.is_empty() {
             return;
         }
@@ -286,7 +304,12 @@ impl Canvas {
             }
             let mut views: Vec<_> = paint
                 .images
-                .map(|table| self.image_tables[table].iter().map(|image| &image.view).collect::<Vec<_>>())
+                .map(|table| {
+                    self.image_tables[table]
+                        .iter()
+                        .map(|image| &image.view)
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default();
             views.resize(IMAGE_CAPACITY as usize, &self.images.fallback().view);
             entries.push(wgpu::BindGroupEntry {
@@ -311,7 +334,11 @@ impl Canvas {
         while start < paints.len() {
             let first = paints[start];
             let mut end = start + 1;
-            while end < paints.len() && paints[end].pipeline == first.pipeline && paints[end].images == first.images && paints[end].draw == paints[end - 1].draw + 1 {
+            while end < paints.len()
+                && paints[end].pipeline == first.pipeline
+                && paints[end].images == first.images
+                && paints[end].draw == paints[end - 1].draw + 1
+            {
                 end += 1;
             }
             pass.set_pipeline(&self.pipelines[first.pipeline]);
