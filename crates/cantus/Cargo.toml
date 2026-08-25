@@ -1,0 +1,81 @@
+[package]
+name = "cantus"
+version = "0.8.0"
+edition = "2024"
+default-run = "cantus"
+
+[package.metadata.isthmus]
+artifact = "../../assets/cantus.spv"
+source = "src/render/mod.rs"
+
+[[bin]]
+name = "cantus"
+path = "src/main.rs"
+
+[features]
+generate-nix = ["dep:schemars"]
+
+[dependencies]
+isthmus = { path = "../isthmus" }
+
+[target.'cfg(not(target_arch = "spirv"))'.dependencies]
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
+bytemuck.workspace = true
+arrayvec = { version = "0.7.8", features = ["serde"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+    "fmt",
+    "smallvec",
+    "tracing-log",
+] }
+librespot-protocol = "0.8.0"
+librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-metadata = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-oauth = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+protobuf = "3.7.2"
+quick-xml = "0.42.0"
+wayland-client = { version = "0.31.15", default-features = false, features = ["system"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+xkbcommon = { version = "0.9.0", default-features = false, features = ["wayland"] }
+fend-core = "1.5.8"
+resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
+image = { version = "0.25.10", default-features = false, features = [
+    "ico",
+    "jpeg",
+    "png",
+] }
+palette = { version = "0.7.7", default-features = false, features = ["std"] }
+parking_lot = "0.12.5"
+raw-window-handle.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json = "1.0.151"
+toml = "1.1.4"
+schemars = { version = "1.2.2", features = ["arrayvec07", "preserve_order"], optional = true }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "sync", "time"] }
+form_urlencoded = "1.2.2"
+flate2 = "1.1.9"
+futures-util = "0.3.34"
+freedesktop-desktop-entry = { version = "0.8.1", default-features = false }
+freedesktop-icons = "0.4.0"
+fastrand = "2.5.0"
+microfft = { version = "0.6.0", default-features = false, features = ["size-1024", "std"] }
+sysinfo = { git = "https://github.com/CodedNil/sysinfo", branch = "gpu_temp", default-features = false, features = [
+    "component",
+    "system",
+    "gpu",
+] }
+jiff = { version = "0.2.35", default-features = false, features = [
+    "serde",
+    "std",
+    "tz-system",
+    "tzdb-zoneinfo",
+] }
+
+[build-dependencies]
+# librespot-core 0.8's vergen-gitcl build dependency is incompatible with vergen 9.1.
+vergen = { version = "=9.0.6", default-features = false }
+
+[lints]
+workspace = true
