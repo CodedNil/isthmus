@@ -17,7 +17,14 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    pub(crate) const fn new(push: &'a PushBlock, time: f32, delta_time: f32, text: &'a mut Text, canvas: &'a mut Canvas, surface: SurfaceHandle) -> Self {
+    pub(crate) const fn new(
+        push: &'a PushBlock,
+        time: f32,
+        delta_time: f32,
+        text: &'a mut Text,
+        canvas: &'a mut Canvas,
+        surface: SurfaceHandle,
+    ) -> Self {
         Self {
             time,
             screen_size: push.screen_size,

@@ -29,7 +29,11 @@ struct SurfaceSlot {
     push: PushBlock,
 }
 fn surface_slot(entries: &mut [SurfaceEntry], handle: SurfaceHandle) -> Option<&mut SurfaceSlot> {
-    entries.get_mut(handle.index()).filter(|e| e.generation == handle.generation())?.slot.as_mut()
+    entries
+        .get_mut(handle.index())
+        .filter(|e| e.generation == handle.generation())?
+        .slot
+        .as_mut()
 }
 pub struct Render<'a> {
     surfaces: &'a mut [SurfaceEntry],
@@ -54,10 +58,19 @@ impl fmt::Display for RenderError {
 impl Error for RenderError {}
 impl Render<'_> {
     pub fn surface(&mut self, surface: SurfaceHandle, screen_size: Vec2, draw: impl FnOnce(Frame<'_>)) {
-        let Some(slot) = surface_slot(self.surfaces, surface) else { return };
+        let Some(slot) = surface_slot(self.surfaces, surface) else {
+            return;
+        };
         slot.push.screen_size = screen_size;
         slot.push.time = self.time;
-        draw(Frame::new(&slot.push, self.time, self.delta_time, self.text, self.canvas, surface));
+        draw(Frame::new(
+            &slot.push,
+            self.time,
+            self.delta_time,
+            self.text,
+            self.canvas,
+            surface,
+        ));
         self.canvas.ensure_globals(surface);
     }
 }
@@ -127,7 +140,11 @@ impl Renderer {
         let placed = self.text.finish_frame();
         self.canvas.prepare(placed);
         for index in 0..self.surfaces.len() {
-            let Some(generation) = self.surfaces[index].slot.as_ref().map(|_| self.surfaces[index].generation) else {
+            let Some(generation) = self.surfaces[index]
+                .slot
+                .as_ref()
+                .map(|_| self.surfaces[index].generation)
+            else {
                 continue;
             };
             let handle = SurfaceHandle::new(index, generation);
@@ -154,7 +171,9 @@ impl Renderer {
             .context
             .0
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("isthmus frame") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("isthmus frame"),
+            });
         let extent = slot.target.extent;
         let shared = bytemuck::bytes_of(&slot.push);
         {
@@ -193,7 +212,11 @@ impl Renderer {
     ///
     /// # Errors
     /// Returns an error if the surface cannot be initialized or uses a different format.
-    pub fn add_surface(&mut self, target: &(impl HasDisplayHandle + HasWindowHandle), [width, height]: [u32; 2]) -> Result<SurfaceHandle, SetupError> {
+    pub fn add_surface(
+        &mut self,
+        target: &(impl HasDisplayHandle + HasWindowHandle),
+        [width, height]: [u32; 2],
+    ) -> Result<SurfaceHandle, SetupError> {
         let target = SurfaceTarget::new(&self.context, target, width, height)?;
         if target.format != self.canvas.format() {
             return Err(SetupError::IncompatibleSurface);
@@ -207,7 +230,10 @@ impl Renderer {
             Ok(SurfaceHandle::new(index, entry.generation))
         } else {
             let index = self.surfaces.len();
-            self.surfaces.push(SurfaceEntry { generation: 0, slot: Some(slot) });
+            self.surfaces.push(SurfaceEntry {
+                generation: 0,
+                slot: Some(slot),
+            });
             Ok(SurfaceHandle::new(index, 0))
         }
     }

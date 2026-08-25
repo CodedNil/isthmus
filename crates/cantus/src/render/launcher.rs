@@ -1,6 +1,9 @@
 use crate::render::{
     Fragment, GAP, PADDING, TEXT_COLOR, TextFragment,
-    sdf::{PILL_MARGIN, VISIBLE_ALPHA, fill, fill_rounded_box, presence, ripple_flash, ripple_light, sample_pill, sd_rounded_box, segment_distance, stroke},
+    sdf::{
+        PILL_MARGIN, VISIBLE_ALPHA, fill, fill_rounded_box, presence, ripple_flash, ripple_light, sample_pill,
+        sd_rounded_box, segment_distance, stroke,
+    },
 };
 use isthmus::{
     FloatExt, Image, Quad,
@@ -42,7 +45,9 @@ fn calculator_icon(point: Vec2) -> Vec4 {
     let badge = fill_rounded_box(point, Vec2::splat(13.0), 9.0);
     let bar = |offset: f32| fill_rounded_box(point - vec2(0.0, offset), vec2(5.4, 1.1), 1.1);
     let equals = bar(-3.1).max(bar(3.1));
-    ACCENT_COLOR.lerp(Vec3::splat(0.96), equals).extend(badge.max(equals * badge))
+    ACCENT_COLOR
+        .lerp(Vec3::splat(0.96), equals)
+        .extend(badge.max(equals * badge))
 }
 
 /// "↵" or "⇧" glyph coverage, drawn around the origin.
@@ -294,7 +299,11 @@ mod host {
     }
 
     impl LauncherState {
-        pub(crate) fn new(background: &Background, http: &Client, providers: impl IntoIterator<Item = SearchProvider>) -> Self {
+        pub(crate) fn new(
+            background: &Background,
+            http: &Client,
+            providers: impl IntoIterator<Item = SearchProvider>,
+        ) -> Self {
             let mut calc = Context::new();
             fetch_exchange_rates(background, http.clone());
             calc.set_exchange_rate_handler_v2(ExchangeRates);
@@ -383,7 +392,8 @@ mod host {
                 .filter(|_| !explicit_search)
                 .filter_map(|(index, app)| {
                     let name = app.name.to_lowercase();
-                    name.contains(&lower_query).then(|| (index, name.starts_with(&lower_query)))
+                    name.contains(&lower_query)
+                        .then(|| (index, name.starts_with(&lower_query)))
                 })
                 .collect::<Vec<_>>();
             scored.sort_by_key(|&(_, prefix_match)| !prefix_match);
@@ -407,18 +417,30 @@ mod host {
                 .get(row)
                 .and_then(|&app| self.apps.get(app))
                 .map(LauncherEntry::App)
-                .or_else(|| self.search_provider().filter(|_| row == self.matches.len()).map(LauncherEntry::Search))
+                .or_else(|| {
+                    self.search_provider()
+                        .filter(|_| row == self.matches.len())
+                        .map(LauncherEntry::Search)
+                })
         }
 
         /// Moves the highlight by `delta` rows, stopping at either end.
         pub fn move_selection(&mut self, delta: i32) {
-            self.selected = self.selected.saturating_add_signed(delta as isize).min(self.entry_count().saturating_sub(1));
+            self.selected = self
+                .selected
+                .saturating_add_signed(delta as isize)
+                .min(self.entry_count().saturating_sub(1));
         }
 
         /// Runs row `index`'s action — its alternative one when `alternate` is set — then dismisses.
         pub fn activate(&mut self, index: usize, alternate: bool) {
             match self.entry(index) {
-                Some(LauncherEntry::App(app)) => Platform::spawn(app.action.as_ref().filter(|_| alternate).map_or(&app.exec, |(_, exec)| exec)),
+                Some(LauncherEntry::App(app)) => Platform::spawn(
+                    app.action
+                        .as_ref()
+                        .filter(|_| alternate)
+                        .map_or(&app.exec, |(_, exec)| exec),
+                ),
                 Some(LauncherEntry::Answer(answer)) => self.pending_copy = Some(answer.to_owned()),
                 Some(LauncherEntry::Search(engine)) => {
                     let terms = self.search_query().1;
@@ -436,13 +458,22 @@ mod host {
             let query = self.field.text.trim();
             self.providers
                 .iter()
-                .position(|provider| query == provider.config.alias || query.strip_prefix(&provider.config.alias).is_some_and(|rest| rest.starts_with(char::is_whitespace)))
-                .map_or((None, query), |index| (Some(index), query[self.providers[index].config.alias.len()..].trim()))
+                .position(|provider| {
+                    query == provider.config.alias
+                        || query
+                            .strip_prefix(&provider.config.alias)
+                            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+                })
+                .map_or((None, query), |index| {
+                    (Some(index), query[self.providers[index].config.alias.len()..].trim())
+                })
         }
 
         fn search_provider(&self) -> Option<&SearchEngine> {
             let (provider, query) = self.search_query();
-            self.providers.get(provider.unwrap_or_default()).filter(|_| provider.is_some() || !query.is_empty())
+            self.providers
+                .get(provider.unwrap_or_default())
+                .filter(|_| provider.is_some() || !query.is_empty())
         }
 
         pub(crate) fn bounds(&self, screen_size: Vec2) -> (Vec2, Vec2) {
@@ -459,7 +490,11 @@ mod host {
     struct ExchangeRates;
 
     impl fend_core::ExchangeRateFnV2 for ExchangeRates {
-        fn relative_to_base_currency(&self, currency: &str, _options: &fend_core::ExchangeRateFnV2Options) -> Result<f64, Box<dyn Error + Send + Sync>> {
+        fn relative_to_base_currency(
+            &self,
+            currency: &str,
+            _options: &fend_core::ExchangeRateFnV2Options,
+        ) -> Result<f64, Box<dyn Error + Send + Sync>> {
             EXCHANGE_RATES
                 .get()
                 .and_then(|rates| rates.get(currency))
@@ -470,7 +505,11 @@ mod host {
 
     fn fetch_exchange_rates(background: &Background, http: Client) {
         background.spawn_update(async move {
-            if let Ok(response) = http.get("https://open.er-api.com/v6/latest/USD").send().await.and_then(reqwest::Response::error_for_status)
+            if let Ok(response) = http
+                .get("https://open.er-api.com/v6/latest/USD")
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
                 && let Ok(body) = response.json::<CurrencyRates>().await
             {
                 let _ = EXCHANGE_RATES.set(body.rates);
@@ -485,7 +524,12 @@ mod host {
     }
 
     /// Scans installed apps and decodes their icons on a background thread, then applies the result.
-    fn start_scan(background: &Background, http: &Client, providers: &[SearchEngine], updates: &Sender<LauncherUpdate>) {
+    fn start_scan(
+        background: &Background,
+        http: &Client,
+        providers: &[SearchEngine],
+        updates: &Sender<LauncherUpdate>,
+    ) {
         let app_updates = updates.clone();
         background.spawn(async move {
             let apps = spawn_blocking(move || {
@@ -521,7 +565,16 @@ mod host {
     }
 
     async fn fetch_icon(http: &Client, url: &str) -> Option<Vec<u8>> {
-        let bytes = http.get(url).send().await.ok()?.error_for_status().ok()?.bytes().await.ok()?;
+        let bytes = http
+            .get(url)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .bytes()
+            .await
+            .ok()?;
         spawn_blocking(move || load_raster(&bytes)).await.ok().flatten()
     }
 
@@ -534,7 +587,10 @@ mod host {
     }
 
     fn load_raster(bytes: &[u8]) -> Option<Vec<u8>> {
-        image::load_from_memory(bytes).map(|image| resize_icon(&image)).ok().or_else(|| rasterize_svg(bytes))
+        image::load_from_memory(bytes)
+            .map(|image| resize_icon(&image))
+            .ok()
+            .or_else(|| rasterize_svg(bytes))
     }
 
     fn rasterize_svg(bytes: &[u8]) -> Option<Vec<u8>> {
@@ -573,9 +629,12 @@ mod host {
                 return;
             }
             let (origin, size) = self.bounds(context.frame.screen_size);
-            context
-                .interaction
-                .input_region(Rect::new(0.0, 0.0, context.frame.screen_size.x, context.frame.screen_size.y));
+            context.interaction.input_region(Rect::new(
+                0.0,
+                0.0,
+                context.frame.screen_size.x,
+                context.frame.screen_size.y,
+            ));
             let (left, right) = (PADDING + 34.0, size.x - PADDING);
             if self.field.touched {
                 self.field.touched = false;
@@ -611,40 +670,50 @@ mod host {
             };
             let quad = Quad::from_min_max(origin, origin + size);
             // GPU: Launcher panel and search selection.
-            context.frame.paint_quad(quad, |fragment: Fragment, size: Vec2, caret: Vec2, selection: Vec2| {
-                let mask = fill_rounded_box(fragment.local, size * 0.5, BACKGROUND_RADIUS as f32);
-                if mask <= 0.0 {
-                    kill();
-                }
-                let panel = fragment.local + size * 0.5;
-                let mut color = Vec3::splat(0.09).lerp(
-                    Vec3::splat(0.17),
-                    fill_rounded_box(panel - vec2(size.x * 0.5, HEADER_HEIGHT - 0.5), vec2(size.x * 0.5, 0.5), 0.0),
-                );
-                color = ripple_light(color, ripple_flash(fragment.pixel, fragment.globals, fragment.time));
-                color = color.lerp(ICON_COLOR, magnifier_icon(panel - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
-
-                let selection_width = selection.y - selection.x;
-                let highlight = fill_rounded_box(
-                    panel - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5),
-                    vec2(selection_width * 0.5, 13.0),
-                    3.0,
-                );
-                color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
-                let caret_mask = fill_rounded_box(panel - vec2(caret.x, HEADER_HEIGHT * 0.5), vec2(0.9, 12.0), 0.9);
-                color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
-
-                let opacity = mask * 0.82;
-                color.extend(opacity)
-            });
-            let padding = line.size * 0.5 + 2.0;
-            // GPU: Launcher query text.
             context
                 .frame
-                .paint_text(line.expanded(padding).translated(origin), |text: TextFragment, origin: Vec2, size: Vec2| {
+                .paint_quad(quad, |fragment: Fragment, size: Vec2, caret: Vec2, selection: Vec2| {
+                    let mask = fill_rounded_box(fragment.local, size * 0.5, BACKGROUND_RADIUS as f32);
+                    if mask <= 0.0 {
+                        kill();
+                    }
+                    let panel = fragment.local + size * 0.5;
+                    let mut color = Vec3::splat(0.09).lerp(
+                        Vec3::splat(0.17),
+                        fill_rounded_box(
+                            panel - vec2(size.x * 0.5, HEADER_HEIGHT - 0.5),
+                            vec2(size.x * 0.5, 0.5),
+                            0.0,
+                        ),
+                    );
+                    color = ripple_light(color, ripple_flash(fragment.pixel, fragment.globals, fragment.time));
+                    color = color.lerp(
+                        ICON_COLOR,
+                        magnifier_icon(panel - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)),
+                    );
+
+                    let selection_width = selection.y - selection.x;
+                    let highlight = fill_rounded_box(
+                        panel - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5),
+                        vec2(selection_width * 0.5, 13.0),
+                        3.0,
+                    );
+                    color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
+                    let caret_mask = fill_rounded_box(panel - vec2(caret.x, HEADER_HEIGHT * 0.5), vec2(0.9, 12.0), 0.9);
+                    color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
+
+                    let opacity = mask * 0.82;
+                    color.extend(opacity)
+                });
+            let padding = line.size * 0.5 + 2.0;
+            // GPU: Launcher query text.
+            context.frame.paint_text(
+                line.expanded(padding).translated(origin),
+                |text: TextFragment, origin: Vec2, size: Vec2| {
                     let clip = fill_rounded_box(text.pixel - origin - size * 0.5, size * 0.5, BACKGROUND_RADIUS as f32);
                     text.color(text.alpha() * clip)
-                });
+                },
+            );
 
             self.show_entries(context, origin);
         }
@@ -676,7 +745,12 @@ mod host {
                     };
                     let badge = vec2(edge - width * 0.5, width * 0.5);
                     edge -= width + GAP;
-                    let line = context.frame.text().line(label, 13.0, 600.0).right(vec2(edge, ROW_HEIGHT * 0.5)).with_color(MUTED_COLOR);
+                    let line = context
+                        .frame
+                        .text()
+                        .line(label, 13.0, 600.0)
+                        .right(vec2(edge, ROW_HEIGHT * 0.5))
+                        .with_color(MUTED_COLOR);
                     edge -= context.frame.text().width(label, 13.0, 600.0) + GAP * 2.0;
                     (badge, line)
                 };
@@ -689,7 +763,11 @@ mod host {
                 } else {
                     (ROW_HEIGHT * 0.34, ROW_HEIGHT * 0.68)
                 };
-                let name_line = context.frame.text().line(entry.name, 16.0, 700.0).visible(vec2(text_left, name_y), clip.clone());
+                let name_line = context
+                    .frame
+                    .text()
+                    .line(entry.name, 16.0, 700.0)
+                    .visible(vec2(text_left, name_y), clip.clone());
                 let detail_line = if entry.detail.is_empty() {
                     text::Line::default()
                 } else {
@@ -708,9 +786,9 @@ mod host {
                 };
                 let quad = pill.expanded(PILL_MARGIN);
                 // GPU: Launcher result row.
-                context
-                    .frame
-                    .paint_quad(quad, |fragment: Fragment, pill: Quad, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
+                context.frame.paint_quad(
+                    quad,
+                    |fragment: Fragment, pill: Quad, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
                         let surface = sample_pill(pill, fragment.pixel, fragment.globals, fragment.time);
                         if surface.alpha <= VISIBLE_ALPHA {
                             kill();
@@ -728,15 +806,28 @@ mod host {
                             color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
                         }
 
-                        let enter = action_badge(surface.refracted - vec2(enter_badge.x, surface.size.y * 0.5), enter_badge.y, false);
+                        let enter = action_badge(
+                            surface.refracted - vec2(enter_badge.x, surface.size.y * 0.5),
+                            enter_badge.y,
+                            false,
+                        );
                         color = color.lerp(enter.truncate(), enter.w);
-                        let alternate = action_badge(surface.refracted - vec2(alternate_badge.x, surface.size.y * 0.5), alternate_badge.y, true);
+                        let alternate = action_badge(
+                            surface.refracted - vec2(alternate_badge.x, surface.size.y * 0.5),
+                            alternate_badge.y,
+                            true,
+                        );
                         color = color.lerp(alternate.truncate(), alternate.w);
 
                         surface.color(color)
-                    });
+                    },
+                );
                 if let Some(image) = image {
-                    let icon = Quad::new(pill.center - vec2((pill.size.x - pill.size.y) * 0.5, 0.0), Vec2::splat(ICON_SIZE), Vec2::X);
+                    let icon = Quad::new(
+                        pill.center - vec2((pill.size.x - pill.size.y) * 0.5, 0.0),
+                        Vec2::splat(ICON_SIZE),
+                        Vec2::X,
+                    );
                     // GPU: Launcher result image.
                     context.frame.paint_quad(icon, |fragment: Fragment, image: Image| {
                         let texture = image.sample(fragment.uv);
@@ -748,12 +839,13 @@ mod host {
                 for line in [name_line, detail_line, action_line, alternate_line] {
                     if !line.is_empty() {
                         // GPU: Launcher result text.
-                        context
-                            .frame
-                            .paint_text(line.expanded(line.size * 0.5 + 2.0).translated(origin), |text: TextFragment, pill: Quad| {
+                        context.frame.paint_text(
+                            line.expanded(line.size * 0.5 + 2.0).translated(origin),
+                            |text: TextFragment, pill: Quad| {
                                 let surface = sample_pill(pill, text.pixel, text.globals, text.time);
                                 text.color(text.alpha() * surface.mask)
-                            });
+                            },
+                        );
                     }
                 }
                 y += ROW_HEIGHT + GAP;

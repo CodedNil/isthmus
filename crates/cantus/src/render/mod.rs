@@ -70,7 +70,11 @@ pub struct BarLayout {
 impl<'a> UiContext<'a> {
     pub fn new(frame: Frame<'a>, config: &'a Config, interaction: &'a mut Interaction) -> Self {
         interaction.begin_frame(frame.delta_time, frame.time);
-        Self { frame, config, interaction }
+        Self {
+            frame,
+            config,
+            interaction,
+        }
     }
 
     pub fn finish(mut self) {
@@ -96,7 +100,9 @@ pub struct Bar {
 impl Bar {
     pub fn new(config: &Config, background: &Background, enrichment: &Enrichment) -> Self {
         Self {
-            lyrics: config.lyrics_enabled.then(|| lyrics::LyricsView::new(enrichment.clone())),
+            lyrics: config
+                .lyrics_enabled
+                .then(|| lyrics::LyricsView::new(enrichment.clone())),
             weather: config
                 .tempestas_enabled
                 .then(|| tempestas::WeatherPanel::new(&config.timezones, background, enrichment.http.clone())),
@@ -107,8 +113,12 @@ impl Bar {
 
     pub fn show(&mut self, context: &mut UiContext, music: &mut Music) {
         let status_width = self.status.as_ref().map_or(0.0, |status| status.width() + GAP);
-        let reserved = context.config.history_width + GAP + f32::from(context.config.tempestas_enabled) * (tempestas::WIDTH + GAP) + status_width;
-        let px_per_ms = (context.frame.screen_size.x - reserved).max(84.0) / (context.config.timeline_future_minutes * 60_000.0);
+        let reserved = context.config.history_width
+            + GAP
+            + f32::from(context.config.tempestas_enabled) * (tempestas::WIDTH + GAP)
+            + status_width;
+        let px_per_ms =
+            (context.frame.screen_size.x - reserved).max(84.0) / (context.config.timeline_future_minutes * 60_000.0);
         let layout = BarLayout {
             playhead_x: context.config.history_width + context.config.timeline_past_minutes * 60_000.0 * px_per_ms,
             px_per_ms,
@@ -119,7 +129,9 @@ impl Bar {
         let sky = self
             .weather
             .as_mut()
-            .map_or_else(tempestas::StatusSky::default, |weather| weather.show(context, status_width));
+            .map_or_else(tempestas::StatusSky::default, |weather| {
+                weather.show(context, status_width)
+            });
         if let Some(status) = self.status.as_mut() {
             status.show(context, sky);
         }

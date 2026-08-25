@@ -100,10 +100,18 @@ impl Music {
     }
 
     /// Replaces an authoritative queue snapshot without moving its rendered contents.
-    fn replace_queue(&mut self, mut queue: Vec<Track>, index: usize, position_ms: f32, rate: f32, observed_at: Instant) {
+    fn replace_queue(
+        &mut self,
+        mut queue: Vec<Track>,
+        index: usize,
+        position_ms: f32,
+        rate: f32,
+        observed_at: Instant,
+    ) {
         let old_index = self.timeline.index.min(self.queue.len().saturating_sub(1));
         let origin = self.queue.get(old_index).map(|track| {
-            let progress = -self.timeline.queue_start_ms - self.queue[..old_index].iter().map(Track::queue_span_ms).sum::<f32>();
+            let progress =
+                -self.timeline.queue_start_ms - self.queue[..old_index].iter().map(Track::queue_span_ms).sum::<f32>();
             (track.uri.clone(), progress)
         });
 
@@ -140,7 +148,8 @@ impl Music {
             return;
         }
         let index = self.timeline.index.min(self.queue.len() - 1);
-        let target = -self.timeline.position_now() - self.queue[..index].iter().map(Track::queue_span_ms).sum::<f32>() + drag_offset_ms;
+        let target = -self.timeline.position_now() - self.queue[..index].iter().map(Track::queue_span_ms).sum::<f32>()
+            + drag_offset_ms;
         let difference = target - self.timeline.queue_start_ms;
         let next = if !dragging && difference.abs() > 200.0 {
             self.timeline.queue_start_ms + difference * 3.5 * delta_time
@@ -158,28 +167,27 @@ impl Music {
         self.spotify.command(PlaybackCommand::SetPlaying(playing));
     }
 
-    pub(crate) fn rate_track(&mut self, track_id: TrackId, rating: u8) {
+    pub(crate) fn rate_track(&self, track_id: TrackId, rating: u8) {
         self.spotify.command(PlaybackCommand::UpdateLibrary {
             track_id,
             playlists: self
                 .playlists
-                .iter_mut()
+                .iter()
                 .filter_map(|playlist| {
                     let add = playlist.rating_index? == rating;
-                    playlist.set_membership(track_id, add).then_some((playlist.id, add))
+                    (playlist.tracks.contains(&track_id) != add).then_some((playlist.id, add))
                 })
                 .collect(),
             liked: Some(rating >= 5),
         });
     }
 
-    pub(crate) fn toggle_playlist(&mut self, track_id: TrackId, playlist_id: PlaylistId) {
-        let Some(playlist) = self.playlists.iter_mut().find(|playlist| playlist.id == playlist_id) else {
+    pub(crate) fn toggle_playlist(&self, track_id: TrackId, playlist_id: PlaylistId) {
+        let Some(playlist) = self.playlists.iter().find(|playlist| playlist.id == playlist_id) else {
             warn!(%playlist_id, %track_id, "Playlist not found for track");
             return;
         };
         let add = !playlist.tracks.contains(&track_id);
-        playlist.set_membership(track_id, add);
         self.spotify.command(PlaybackCommand::UpdateLibrary {
             track_id,
             playlists: vec![(playlist_id, add)],
@@ -194,7 +202,8 @@ impl Music {
             self.spotify.command(PlaybackCommand::Seek(milliseconds));
         } else {
             let direction = if self.timeline.index < clicked_index { 1 } else { -1 };
-            self.spotify.command(PlaybackCommand::Skip(direction * skip_count.min(10) as i8));
+            self.spotify
+                .command(PlaybackCommand::Skip(direction * skip_count.min(10) as i8));
         }
     }
 }
@@ -237,13 +246,6 @@ pub struct CondensedPlaylist {
     pub art: ArtState,
     pub tracks: PlaylistTracks,
     pub rating_index: Option<u8>,
-}
-
-impl CondensedPlaylist {
-    fn set_membership(&mut self, track_id: TrackId, add: bool) -> bool {
-        let tracks = Arc::make_mut(&mut self.tracks);
-        if add { tracks.insert(track_id) } else { tracks.remove(&track_id) }
-    }
 }
 
 enum PlaybackCommand {

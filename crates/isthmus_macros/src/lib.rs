@@ -10,7 +10,14 @@ use syn::visit_mut::{VisitMut, visit_expr_mut};
 mod buffer;
 mod paint;
 
-fn fragment_entry(text: bool, payload: bool, images: bool, shader_input: &syn::Type, shader_name: &syn::Ident, body: &TokenStream2) -> TokenStream2 {
+fn fragment_entry(
+    text: bool,
+    payload: bool,
+    images: bool,
+    shader_input: &syn::Type,
+    shader_name: &syn::Ident,
+    body: &TokenStream2,
+) -> TokenStream2 {
     let isthmus = isthmus_path();
     let fragment = if text {
         quote!(let fragment = #isthmus::Fragment::new(pixel, local, draw.quad.size, frame.time, #isthmus::__private::load(globals, 0));)
@@ -24,8 +31,10 @@ fn fragment_entry(text: bool, payload: bool, images: bool, shader_input: &syn::T
             #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] edges: &[#isthmus::text::Edge],
         }
     });
-    let payload_resource = payload.then(|| quote!(#[spirv(storage_buffer, descriptor_set = 0, binding = 1)] payload: &[u32],));
-    let image_resource = images.then(|| quote!(#[spirv(descriptor_set = 0, binding = 5)] images: &#isthmus::__private::ImageHeap,));
+    let payload_resource =
+        payload.then(|| quote!(#[spirv(storage_buffer, descriptor_set = 0, binding = 1)] payload: &[u32],));
+    let image_resource =
+        images.then(|| quote!(#[spirv(descriptor_set = 0, binding = 5)] images: &#isthmus::__private::ImageHeap,));
     quote! {
         #[#isthmus::spirv_std::spirv(fragment)]
         pub fn fragment(
@@ -69,7 +78,9 @@ pub fn derive_shader_data(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn program(input: TokenStream) -> TokenStream {
     if !input.is_empty() {
-        return syn::Error::new(proc_macro2::Span::call_site(), "program takes no arguments").to_compile_error().into();
+        return syn::Error::new(proc_macro2::Span::call_site(), "program takes no arguments")
+            .to_compile_error()
+            .into();
     }
     let (module, artifact) = match program_module() {
         Ok(module) => module,
@@ -97,7 +108,9 @@ pub fn program(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn paint(args: TokenStream, input: TokenStream) -> TokenStream {
     if !args.is_empty() {
-        return syn::Error::new(proc_macro2::Span::call_site(), "paint takes no arguments").to_compile_error().into();
+        return syn::Error::new(proc_macro2::Span::call_site(), "paint takes no arguments")
+            .to_compile_error()
+            .into();
     }
     extract_paints(input)
 }
@@ -181,10 +194,16 @@ impl InlinePaints {
             return Ok(None);
         };
         if !closure.inputs.iter().all(|input| matches!(input, syn::Pat::Type(_))) {
-            return Err(syn::Error::new_spanned(&closure.inputs, "inline paint closure parameters require explicit types"));
+            return Err(syn::Error::new_spanned(
+                &closure.inputs,
+                "inline paint closure parameters require explicit types",
+            ));
         }
         if closure.inputs.is_empty() {
-            return Err(syn::Error::new_spanned(&closure.inputs, "inline paint closures require the fragment input"));
+            return Err(syn::Error::new_spanned(
+                &closure.inputs,
+                "inline paint closures require the fragment input",
+            ));
         }
         let input_start = 1;
         let input_values = self.input_values(&closure, input_start)?;
@@ -195,9 +214,14 @@ impl InlinePaints {
         let name = format_ident!("__isthmus_inline_{}_{}", self.method, self.next);
         self.next += 1;
         let mut inputs = closure.inputs.iter();
-        let syn::Pat::Type(shader_input) = inputs.next().unwrap() else { unreachable!() };
+        let syn::Pat::Type(shader_input) = inputs.next().unwrap() else {
+            unreachable!()
+        };
         let syn::Pat::Ident(shader_name) = shader_input.pat.as_ref() else {
-            return Err(syn::Error::new_spanned(&shader_input.pat, "shader fragment requires an identifier"));
+            return Err(syn::Error::new_spanned(
+                &shader_input.pat,
+                "shader fragment requires an identifier",
+            ));
         };
         if text {
             let shader_type = match shader_input.ty.as_ref() {
@@ -205,7 +229,10 @@ impl InlinePaints {
                 _ => None,
             };
             if shader_type.as_deref() != Some("TextFragment") {
-                return Err(syn::Error::new_spanned(&shader_input.ty, "paint_text closure's first parameter must be TextFragment"));
+                return Err(syn::Error::new_spanned(
+                    &shader_input.ty,
+                    "paint_text closure's first parameter must be TextFragment",
+                ));
             }
         } else if shader_name.ident != "fragment" {
             return Err(syn::Error::new_spanned(
@@ -219,9 +246,16 @@ impl InlinePaints {
                 input.clone()
             })
             .collect::<Vec<_>>();
-        let captures = shader_inputs.iter().map(paint::Capture::new).collect::<syn::Result<Vec<_>>>()?;
+        let captures = shader_inputs
+            .iter()
+            .map(paint::Capture::new)
+            .collect::<syn::Result<Vec<_>>>()?;
         let expansion = paint::expand(&name, shader_input, &captures, &block, text)?;
-        let paint::Expansion { items, instance, pipeline } = expansion;
+        let paint::Expansion {
+            items,
+            instance,
+            pipeline,
+        } = expansion;
         self.shaders.push(items);
         let geometry = call.args.first().unwrap().clone();
         Ok(Some(rewrite_call(
@@ -246,7 +280,10 @@ impl InlinePaints {
             .map(|input| {
                 let syn::Pat::Type(input) = input else { unreachable!() };
                 let syn::Pat::Ident(name) = input.pat.as_ref() else {
-                    return Err(syn::Error::new_spanned(&input.pat, "inferred shader inputs require identifier parameters"));
+                    return Err(syn::Error::new_spanned(
+                        &input.pat,
+                        "inferred shader inputs require identifier parameters",
+                    ));
                 };
                 let name = &name.ident;
                 Ok(if self.bindings.contains(&name.to_string()) || !self.method_receiver {
@@ -284,7 +321,10 @@ fn rewrite_call(call: &syn::ExprMethodCall, rewrite: &Rewrite<'_>) -> syn::Expr 
         .enumerate()
         .map(|(index, _)| format_ident!("__isthmus_capture_{index}"))
         .collect::<Vec<_>>();
-    let capture_bindings = capture_names.iter().zip(input_values.iter()).map(|(name, value)| quote!(let #name = #value;));
+    let capture_bindings = capture_names
+        .iter()
+        .zip(input_values.iter())
+        .map(|(name, value)| quote!(let #name = #value;));
     let values = captures
         .iter()
         .zip(capture_names.iter())
@@ -349,7 +389,10 @@ impl<'ast> Visit<'ast> for HostBindings {
 
 fn program_module() -> syn::Result<(TokenStream2, String)> {
     let Ok(crate_dir) = env::var("CARGO_MANIFEST_DIR") else {
-        return Err(syn::Error::new(proc_macro2::Span::call_site(), "missing package directory"));
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "missing package directory",
+        ));
     };
     let artifact = match shader_artifact(Path::new(&crate_dir)) {
         Ok(artifact) => artifact,

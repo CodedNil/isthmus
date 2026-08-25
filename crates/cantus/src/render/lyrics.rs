@@ -92,7 +92,8 @@ mod host {
                     timeline.push((f32::midpoint(segment.start_ms, segment.end_ms), position + width * 0.5));
                 }
             }
-            let lines = [0, 1].map(|lane| shaper.shape_positioned(positioned[lane].iter().copied(), 15.0, 700.0, TEXT_GLYPHS));
+            let lines =
+                [0, 1].map(|lane| shaper.shape_positioned(positioned[lane].iter().copied(), 15.0, 700.0, TEXT_GLYPHS));
             let position = cursors[0].max(cursors[1]) + (duration_ms - vocal_end).max(0.0) * Self::SILENCE_SPEED;
             timeline.push((duration_ms.max(vocal_end), position));
             timeline.sort_by(|left, right| left.0.total_cmp(&right.0));
@@ -162,7 +163,16 @@ mod host {
                 .results
                 .into_iter()
                 .find(|result| result.timing_type == "word")?;
-            let source = http.get(result.url).send().await.ok()?.error_for_status().ok()?.text().await.ok()?;
+            let source = http
+                .get(result.url)
+                .send()
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()?
+                .text()
+                .await
+                .ok()?;
             let segments = parse(&source);
             (!segments.is_empty()).then_some(segments)
         }
@@ -198,7 +208,10 @@ mod host {
                     Ok(Event::Start(tag)) if tag.local_name().as_ref() == "p" => {
                         span_roles.clear();
                         line_text.clear();
-                        line_time = attribute(&tag, "begin").as_deref().and_then(time).zip(attribute(&tag, "end").as_deref().and_then(time));
+                        line_time = attribute(&tag, "begin")
+                            .as_deref()
+                            .and_then(time)
+                            .zip(attribute(&tag, "end").as_deref().and_then(time));
                         let agent = attribute(&tag, "agent").unwrap_or_default();
                         let lane = usize::from(primary_agent.as_ref().is_some_and(|primary| primary != &agent));
                         primary_agent.get_or_insert(agent);
@@ -220,12 +233,15 @@ mod host {
                                 start_ms,
                                 end_ms: end.unwrap_or(start_ms + 1_000.0),
                                 text: String::new(),
-                                lane: line_lane.unwrap() ^ usize::from(span_roles.iter().any(|&(background, _)| background)),
+                                lane: line_lane.unwrap()
+                                    ^ usize::from(span_roles.iter().any(|&(background, _)| background)),
                                 line_end: false,
                             });
                         }
                     }
-                    Ok(Event::Text(value)) if line_lane.is_some() && !span_roles.iter().any(|&(_, ignored)| ignored) => {
+                    Ok(Event::Text(value))
+                        if line_lane.is_some() && !span_roles.iter().any(|&(_, ignored)| ignored) =>
+                    {
                         let value = value.xml_content(XmlVersion::Implicit1_0);
                         let Ok(value) = unescape(&value) else {
                             return Vec::new();
@@ -283,11 +299,19 @@ mod host {
             const LANE_OFFSET: f32 = 8.0;
 
             let playhead_track = music.timeline.track_at_playhead(&music.queue);
-            let start = playhead_track.map_or(music.timeline.index, |(index, _)| index).min(music.queue.len());
+            let start = playhead_track
+                .map_or(music.timeline.index, |(index, _)| index)
+                .min(music.queue.len());
             let now = Instant::now();
-            for track in music.queue.iter_mut().skip(start.saturating_sub(1)).take(PREFETCH_TRACKS) {
+            for track in music
+                .queue
+                .iter_mut()
+                .skip(start.saturating_sub(1))
+                .take(PREFETCH_TRACKS)
+            {
                 if track.runtime.lyrics.request(now) {
-                    self.enrichment.request_lyrics(track, music.spotify.clone(), context.frame.text().shaper());
+                    self.enrichment
+                        .request_lyrics(track, music.spotify.clone(), context.frame.text().shaper());
                 }
             }
 
@@ -309,7 +333,9 @@ mod host {
                 .runtime
                 .lyrics
                 .ready()
-                .map_or(progress_ms * Lyrics::SILENCE_SPEED, |lyrics| lyrics.position(progress_ms));
+                .map_or(progress_ms * Lyrics::SILENCE_SPEED, |lyrics| {
+                    lyrics.position(progress_ms)
+                });
             let mut x = layout.playhead_x - progress;
             let playhead_x = layout.playhead_x;
             for track in &music.queue[visible.start..index] {
@@ -320,7 +346,11 @@ mod host {
                 if let Some(lyrics) = track.runtime.lyrics.ready() {
                     for (lane, line) in lyrics.lines.iter().enumerate().filter(|(_, line)| line.width > 0.0) {
                         if x <= context.frame.screen_size.x && x + line.width >= 0.0 {
-                            let color = if lane == 0 { TEXT_COLOR.extend(1.0) } else { Vec4::new(0.72, 0.86, 1.0, 1.0) };
+                            let color = if lane == 0 {
+                                TEXT_COLOR.extend(1.0)
+                            } else {
+                                Vec4::new(0.72, 0.86, 1.0, 1.0)
+                            };
                             let screen_width = context.frame.screen_size.x;
                             let placed = context
                                 .frame
@@ -329,19 +359,23 @@ mod host {
                                 .with_color(color);
                             let padding = placed.size * 0.2 + 1.0;
                             // GPU: Scrolling lyrics line.
-                            context
-                                .frame
-                                .paint_text(placed.expanded(padding), |text: TextFragment, playhead_x: f32, screen_width: f32| {
-                                    let edge_fade = text.pixel.x.smoothstep(0.0, 32.0) * text.pixel.x.smoothstep(screen_width, screen_width - 32.0);
+                            context.frame.paint_text(
+                                placed.expanded(padding),
+                                |text: TextFragment, playhead_x: f32, screen_width: f32| {
+                                    let edge_fade = text.pixel.x.smoothstep(0.0, 32.0)
+                                        * text.pixel.x.smoothstep(screen_width, screen_width - 32.0);
                                     let emphasis = (text.pixel.x - playhead_x).abs().smoothstep(110.0, 0.0);
                                     let weight = (text.line.weight + emphasis * 0.15).min(1.0);
-                                    let distance = text.distance_scaled_with_weight(text.pixel, 1.0 + emphasis * 0.2, weight);
+                                    let distance =
+                                        text.distance_scaled_with_weight(text.pixel, 1.0 + emphasis * 0.2, weight);
                                     let fill = text::coverage(distance);
                                     let outline = text::coverage(distance + 0.9) * 0.4;
                                     let progress = text.pixel.x.smoothstep(playhead_x + 4.0, playhead_x - 4.0);
                                     let fade = edge_fade * (1.0 - progress * 0.5);
-                                    (text.line.color.to_vec3() * fill * fade).extend((fill + outline * (1.0 - fill)) * fade)
-                                });
+                                    (text.line.color.to_vec3() * fill * fade)
+                                        .extend((fill + outline * (1.0 - fill)) * fade)
+                                },
+                            );
                         }
                     }
                 }
