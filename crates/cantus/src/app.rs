@@ -11,6 +11,7 @@ use std::{
     future::Future,
     io,
     sync::mpsc::{self, Sender},
+    thread::Builder,
     time::Duration,
 };
 use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
@@ -26,16 +27,19 @@ pub struct Background {
     updater: AppUpdater,
 }
 
+pub fn spawn_thread(name: &'static str, job: impl FnOnce() + Send + 'static) {
+    Builder::new()
+        .name(name.into())
+        .spawn(job)
+        .expect("failed to spawn background thread");
+}
+
 impl Background {
     fn new(runtime: &Runtime, updater: &AppUpdater) -> Self {
         Self {
             runtime: runtime.handle().clone(),
             updater: updater.clone(),
         }
-    }
-
-    pub(crate) fn spawn_blocking(&self, job: impl FnOnce() + Send + 'static) {
-        self.runtime.spawn_blocking(job);
     }
 
     pub(crate) fn spawn_update(&self, task: impl Future<Output = Option<Update<CantusApp>>> + Send + 'static) {
@@ -173,9 +177,7 @@ pub fn run() {
 
     let filter = Targets::new()
         .with_default(LevelFilter::WARN)
-        .with_target("cantus", Level::INFO)
-        .with_target("simplecss", LevelFilter::ERROR)
-        .with_target("zbus::proxy", LevelFilter::ERROR);
+        .with_target("cantus", Level::INFO);
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(io::stderr).with_filter(filter))
         .init();

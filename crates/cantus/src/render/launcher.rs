@@ -504,7 +504,7 @@ mod host {
     }
 
     fn fetch_exchange_rates(background: &Background, http: Client) {
-        background.spawn_update(async move {
+        background.spawn(async move {
             if let Ok(response) = http
                 .get("https://open.er-api.com/v6/latest/USD")
                 .send()
@@ -514,7 +514,6 @@ mod host {
             {
                 let _ = EXCHANGE_RATES.set(body.rates);
             }
-            None
         });
     }
 
