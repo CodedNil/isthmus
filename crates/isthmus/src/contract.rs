@@ -1,13 +1,19 @@
 #[cfg(not(target_arch = "spirv"))]
 use crate::backend::renderer::ShaderModule;
 use crate::{ShaderData, data::ImageHandle};
-use spirv_std::image::{Image2dArray, SampledImage};
+use spirv_std::image::{Image2d, SampledImage};
 
-pub type ImageHeap = spirv_std::RuntimeArray<SampledImage<Image2dArray>>;
+pub const IMAGE_CAPACITY: usize = 16;
+pub type ImageHeap = [SampledImage<Image2d>; IMAGE_CAPACITY];
 
-/// Produces a premultiplied RGBA fragment output for the default source-over blend.
-pub fn rgba(color: glam::Vec3, alpha: f32) -> glam::Vec4 {
-    (color * alpha).extend(alpha)
+/// Loads one generated shader value from a byte-addressed storage buffer.
+///
+/// The shader generator only calls this for values and offsets it recorded
+/// while constructing the frame, so alignment and bounds are part of the
+/// generated host/shader contract.
+#[doc(hidden)]
+pub fn load<T>(buffer: &[u32], byte_index: u32) -> T {
+    unsafe { spirv_std::ByteAddressableBuffer::from_slice(buffer).load(byte_index) }
 }
 
 #[doc(hidden)]
@@ -22,8 +28,7 @@ impl<'a> ShaderImage<'a> {
     }
 
     pub fn sample(&self, uv: glam::Vec2) -> glam::Vec4 {
-        let (image, layer) = self.handle.parts();
-        unsafe { self.heap.index(image as usize) }.sample(uv.extend(layer as f32))
+        self.heap[self.handle.index() as usize].sample(uv)
     }
 }
 
@@ -157,11 +162,10 @@ const fn quad_coord(vertex: u32) -> glam::Vec2 {
 
 /// Converts a top-left-origin pixel position to clip space.
 ///
-/// Vulkan's positive-height viewport maps -1 NDC Y to the top edge, preserving
-/// the renderer's logical top-left coordinate system.
+/// Converts the renderer's top-left coordinates to wgpu's clip-space convention.
 fn pixel_to_ndc(pixel: glam::Vec2, screen_size: glam::Vec2) -> glam::Vec4 {
     let ndc = pixel / screen_size * 2.0 - 1.0;
-    glam::vec4(ndc.x, ndc.y, 0.0, 1.0)
+    glam::vec4(ndc.x, -ndc.y, 0.0, 1.0)
 }
 
 #[cfg(not(target_arch = "spirv"))]

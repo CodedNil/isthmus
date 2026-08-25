@@ -8,7 +8,7 @@ name = "isthmus"
 required-features = ["compiler"]
 
 [dependencies]
-spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666", optional = true }
+spirv-builder = { workspace = true, optional = true }
 toml_edit = "0.25.13"
 
 [features]

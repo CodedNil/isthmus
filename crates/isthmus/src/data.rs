@@ -6,21 +6,20 @@ use glam::{UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
 #[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct Unorm8x4(u32);
 
-/// Compact descriptor/layer pair into the shader-visible image heap.
+/// Index into the shader-visible image heap.
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 #[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct ImageHandle(i32);
+pub struct ImageHandle(u32);
 
 impl ImageHandle {
     #[cfg(not(target_arch = "spirv"))]
-    pub(crate) const fn new(image: u32, layer: u32) -> Self {
-        Self(((image & 0xff) << 23 | (layer & 0x7f_ffff)) as i32)
+    pub(crate) const fn new(image: u32) -> Self {
+        Self(image)
     }
 
-    pub(crate) const fn parts(self) -> (u32, u32) {
-        let value = self.0 as u32;
-        (value >> 23, value & 0x7f_ffff)
+    pub(crate) const fn index(self) -> u32 {
+        self.0
     }
 }
 

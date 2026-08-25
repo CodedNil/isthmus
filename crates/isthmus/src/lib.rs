@@ -28,7 +28,7 @@ pub use backend::{
 };
 #[cfg(not(target_arch = "spirv"))]
 pub use contract::SurfaceHandle;
-pub use contract::{Fragment, Quad, rgba};
+pub use contract::{Fragment, Quad};
 pub use data::{ShaderData, Unorm8x4};
 pub use float::FloatExt;
 #[cfg(not(target_arch = "spirv"))]
@@ -38,7 +38,7 @@ pub use text::TextFragment;
 
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::contract::{DrawRecord, ImageHeap, PushBlock, ShaderImage};
+    pub use crate::contract::{DrawRecord, ImageHeap, PushBlock, ShaderImage, load};
     pub use crate::data::ImageHandle;
     #[cfg(not(target_arch = "spirv"))]
     pub use crate::{

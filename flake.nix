@@ -1,5 +1,5 @@
 rec {
-  description = "A beautiful interactive music widget for wayland";
+  description = "Ergonomic bridge between the CPU and GPU, write inline shaders";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.rust-overlay = {
@@ -16,18 +16,12 @@ rec {
     }:
     let
       inherit (nixpkgs) lib;
+      system = "x86_64-linux";
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [ rust-overlay.overlays.default ];
+      };
       pname = "cantus";
-      forAllSystems =
-        f:
-        lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] (
-          system:
-          f (
-            import nixpkgs {
-              inherit system;
-              overlays = [ rust-overlay.overlays.default ];
-            }
-          )
-        );
       runtimeLibraries =
         pkgs: with pkgs; [
           wayland
@@ -39,30 +33,28 @@ rec {
           pipewire
           wireplumber
         ];
-      stableRust =
-        pkgs:
-        pkgs.rust-bin.stable.latest.default.override {
-          extensions = [
-            "clippy"
-            "rustfmt"
-          ];
-        };
-      shaderRust =
+      nightlyRust =
         pkgs:
         pkgs.rust-bin.nightly."2026-05-22".default.override {
           extensions = [
+            "clippy"
+            "rustfmt"
             "rust-src"
             "rustc-dev"
             "llvm-tools"
           ];
         };
+      nightlyRustPlatform =
+        pkgs:
+        pkgs.makeRustPlatform {
+          rustc = nightlyRust pkgs;
+          cargo = nightlyRust pkgs;
+        };
     in
     {
-      packages = forAllSystems (pkgs: rec {
+      packages.${system} = rec {
         default = cantus;
-        rust-stable = stableRust pkgs;
-        rust-nightly = shaderRust pkgs;
-        cantus = pkgs.rustPlatform.buildRustPackage {
+        cantus = (nightlyRustPlatform pkgs).buildRustPackage {
           inherit pname;
           version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
 
@@ -98,26 +90,24 @@ rec {
             mainProgram = pname;
           };
         };
-      });
+      };
 
-      devShells = forAllSystems (pkgs: {
-        default = pkgs.mkShell {
-          name = pname;
-          packages = with pkgs; [
-            (stableRust pkgs)
-            mold
-            pkg-config
-            just
-            nixfmt
-            pipewire
-            wireplumber
-          ];
-          buildInputs = runtimeLibraries pkgs;
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries pkgs);
-        };
-      });
+      devShells.${system}.default = pkgs.mkShell {
+        name = pname;
+        packages = with pkgs; [
+          (nightlyRust pkgs)
+          mold
+          pkg-config
+          just
+          nixfmt
+          pipewire
+          wireplumber
+        ];
+        buildInputs = runtimeLibraries pkgs;
+        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries pkgs);
+      };
 
-      formatter = forAllSystems (pkgs: pkgs.nixfmt);
+      formatter.${system} = pkgs.nixfmt;
 
       homeManagerModules = {
         default = self.homeManagerModules.cantus;
@@ -150,8 +140,8 @@ rec {
 
               package = mkOption {
                 type = types.package;
-                default = self.packages.${pkgs.stdenv.hostPlatform.system}.cantus;
-                defaultText = literalExpression "inputs.${pname}.packages.\${pkgs.stdenv.hostPlatform.system}.${pname}";
+                default = self.packages.${system}.cantus;
+                defaultText = literalExpression "inputs.${pname}.packages.${system}.${pname}";
                 description = "Cantus package to install.";
               };
 

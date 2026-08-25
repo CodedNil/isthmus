@@ -1,21 +1,22 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/cantus",
     "crates/isthmus",
     "crates/isthmus_build",
     "crates/isthmus_macros",
+    "crates/cantus",
 ]
-default-members = ["crates/cantus"]
 
 [workspace.dependencies]
-ash = "0.38.0"
-ash-window = "0.13.0"
 bytemuck = { version = "1.25.2", features = ["derive", "min_const_generics"] }
 glam = { version = "0.33.5", default-features = false, features = ["bytemuck", "u32"] }
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
 serde = { version = "1.0.229", features = ["derive"] }
 smallvec = "1.15.2"
 raw-window-handle = "0.6.2"
+pollster = "1.0.1"
+wgpu = { version = "30.0.1", default-features = false }
 ttf-parser = "0.25.1"
 
 [workspace.lints.rust]
@@ -49,7 +50,6 @@ codegen-units = 1
 lto = "fat"
 strip = true
 panic = "abort"
-
 
 [profile.release.build-override]
 opt-level = 0

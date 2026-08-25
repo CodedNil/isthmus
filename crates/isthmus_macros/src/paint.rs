@@ -102,9 +102,7 @@ pub fn expand(name: &Ident, shader_input: &PatType, captures: &[Capture], body: 
     let payload_unpack = captures.iter().map(|capture| capture.unpack(&isthmus));
     let instance_load = (!payload.is_empty()).then(|| {
         quote! {
-            let instance = unsafe {
-                #isthmus::spirv_std::ByteAddressableBuffer::from_slice(payload).load::<#instance_name>(draw.payload)
-            };
+            let instance = #isthmus::__private::load::<#instance_name>(payload, draw.payload);
         }
     });
     let shade_body = if text {
