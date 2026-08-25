@@ -1,10 +1,7 @@
 use crate::interaction::InputEvent;
 use crate::{
-    app::{
-        AppUpdater, Background, CantusApp,
-        config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
-        send_update,
-    },
+    app::{AppUpdater, Background, CantusApp, send_update},
+    config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
     render::{
         PANEL_START,
         launcher::{BACKGROUND_RADIUS, LauncherKey},
@@ -99,34 +96,20 @@ pub struct DesktopApp {
     pub icon: Option<Image>,
 }
 
-/// Host integration used by app and render code.
-pub trait Platform {
-    const STATUS_SAMPLE_INTERVAL: Duration;
-
-    fn start_status_monitor(background: &Background, updates: Sender<SystemSample>, audio: Arc<AudioMonitor>);
-    fn set_volume(volume: f32);
-    fn run_power_action(background: &Background, action: usize);
-    fn desktop_apps() -> Vec<DesktopApp>;
-    fn spawn(exec: &str);
-    fn open_url(url: &str);
-    fn start_launcher_listener(background: &Background, updater: &AppUpdater);
-    fn trigger_launcher() -> !;
-}
-
-/// The Linux desktop [`Platform`].
+/// The Linux desktop implementation exposed as [`super::Platform`].
 pub struct Linux;
 
-impl Platform for Linux {
-    const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+impl Linux {
+    pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
-    fn start_status_monitor(background: &Background, updates: Sender<SystemSample>, audio: Arc<AudioMonitor>) {
+    pub(crate) fn start_status_monitor(background: &Background, updates: Sender<SystemSample>, audio: Arc<AudioMonitor>) {
         let volume = Arc::clone(&audio);
         background.spawn_blocking(move || monitor_playback(&audio.spectrum));
         background.spawn_blocking(move || monitor_volume(&volume.volume));
         background.spawn_blocking(move || monitor_status(&updates));
     }
 
-    fn set_volume(volume: f32) {
+    pub(crate) fn set_volume(volume: f32) {
         let volume = format!("{volume:.3}");
         if let Err(error) = Command::new("wpctl").args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume]).spawn() {
             warn!(%error, "Failed to set PipeWire volume");
@@ -134,7 +117,7 @@ impl Platform for Linux {
     }
 
     /// Calls logind directly, which is what `systemctl poweroff` does under the hood.
-    fn run_power_action(background: &Background, action: usize) {
+    pub(crate) fn run_power_action(background: &Background, action: usize) {
         let method = ["PowerOff", "Reboot"][action];
         background.spawn_update(async move {
             let result = async {
@@ -158,7 +141,7 @@ impl Platform for Linux {
         });
     }
 
-    fn desktop_apps() -> Vec<DesktopApp> {
+    pub(crate) fn desktop_apps() -> Vec<DesktopApp> {
         let mut seen = HashSet::new();
         let locales = get_languages_from_env();
         desktop_entries(&locales)
@@ -184,7 +167,7 @@ impl Platform for Linux {
     }
 
     /// Strips desktop-entry field codes (`%f %F %u %U %i %c %k`) and launches the command, detached.
-    fn spawn(exec: &str) {
+    pub(crate) fn spawn(exec: &str) {
         let mut fields = exec.split_whitespace().filter(|token| !token.starts_with('%'));
         let Some(program) = fields.next() else { return };
         let args = fields.collect::<Vec<_>>();
@@ -212,13 +195,13 @@ impl Platform for Linux {
         }
     }
 
-    fn open_url(url: &str) {
+    pub(crate) fn open_url(url: &str) {
         if let Err(error) = Command::new("xdg-open").arg(url).spawn() {
             warn!(%error, %url, "Failed to open URL");
         }
     }
 
-    fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
+    pub(crate) fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
         let path = launcher_socket_path();
         let _ = fs::remove_file(&path);
         let updater = updater.clone();
@@ -232,7 +215,7 @@ impl Platform for Linux {
             };
             let mut buffer = [0u8; 1];
             while socket.recv(&mut buffer).await.is_ok() {
-                if !send_update(&updater, |app| app.ui.launcher.toggle()) {
+                if !send_update(&updater, |app| app.launcher.toggle()) {
                     warn!("Launcher toggle update was discarded");
                     break;
                 }
@@ -241,13 +224,105 @@ impl Platform for Linux {
         });
     }
 
-    fn trigger_launcher() -> ! {
+    pub fn trigger_launcher() -> ! {
         let path = launcher_socket_path();
         if let Err(error) = BlockingUnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)) {
             eprintln!("Failed to reach a running Cantus instance at {}: {error}", path.display());
             process::exit(1);
         }
         process::exit(0);
+    }
+
+    /// Runs the Wayland application event loop.
+    ///
+    /// # Panics
+    ///
+    /// Panics when required Wayland globals or rendering resources cannot be initialized.
+    pub(crate) fn run() {
+        let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
+        let (globals, mut event_queue) = registry_queue_init::<LayerShellApp>(&connection).expect("Failed to read Wayland registry");
+        let qhandle = event_queue.handle();
+        let compositor: WlCompositor = globals.bind(&qhandle, 1..=7, ()).expect("Missing wl_compositor");
+        let layer_shell: ZwlrLayerShellV1 = globals.bind(&qhandle, 4..=4, ()).expect("Missing zwlr_layer_shell_v1");
+        let seat: WlSeat = globals.bind(&qhandle, 1..=7, ()).expect("Missing wl_seat");
+
+        let mut app = LayerShellApp {
+            compositor: Some(compositor.clone()),
+            layer_shell: Some(layer_shell.clone()),
+            repeat_delay: Duration::from_millis(600),
+            repeat_interval: Duration::from_millis(40),
+            clipboard: globals.bind::<WlDataDeviceManager, _, _>(&qhandle, 1..=3, ()).ok().map(|manager| {
+                let device = manager.get_data_device(&seat, &qhandle, ());
+                (manager, device)
+            }),
+            ..LayerShellApp::default()
+        };
+
+        // Every output is bound so its name arrives; the configured monitor replaces the first one.
+        let registry = globals.registry();
+        for global in globals.contents().clone_list() {
+            if global.interface == "wl_output" {
+                let version = global.version.min(4);
+                let output = registry.bind::<WlOutput, (), LayerShellApp>(global.name, version, &qhandle, ());
+                app.output.get_or_insert(output);
+            }
+        }
+        event_queue.roundtrip(&mut app).expect("Failed to fetch output details");
+
+        let wl_surface = compositor.create_surface(&qhandle, ());
+        let handle = |pointer: Option<NonNull<c_void>>| pointer.expect("Failed to get Wayland pointer");
+        app.display_handle = Some(handle(NonNull::new(connection.backend().display_ptr().cast())));
+        let output = app.output.take().expect("No Wayland outputs found");
+        // wl_pointer exposes a surface, not its output. Keep the configured output as the
+        // best protocol-level target for the launcher rather than letting the compositor choose.
+        app.output = Some(output.clone());
+
+        app.wl_surface = Some(wl_surface);
+        let surface = app.wl_surface.as_ref().unwrap();
+        // Fractional scaling needs both halves: the viewport scales the buffer the scale factor sizes.
+        if let (Ok(viewporter), Ok(fractional)) = (
+            globals.bind::<WpViewporter, _, _>(&qhandle, 1..=1, ()),
+            globals.bind::<WpFractionalScaleManagerV1, _, _>(&qhandle, 1..=1, ()),
+        ) {
+            app.viewport = Some(viewporter.get_viewport(surface, &qhandle, ()));
+            app.fractional = Some(fractional.get_fractional_scale(surface, &qhandle, ()));
+            app.viewporter = Some(viewporter);
+            app.fractional_manager = Some(fractional);
+        }
+        if let Ok(manager) = globals.bind::<ExtBackgroundEffectManagerV1, _, _>(&qhandle, 1..=1, ()) {
+            app.background_manager = Some(manager.clone());
+            app.background_effect = Some(manager.get_background_effect(surface, &qhandle, ()));
+        }
+
+        let config = &app.cantus.config;
+        let layer_surface = layer_shell.get_layer_surface(
+            surface,
+            Some(&output),
+            match config.layer {
+                ConfigLayer::Background => LayerStyle::Background,
+                ConfigLayer::Bottom => LayerStyle::Bottom,
+                ConfigLayer::Top => LayerStyle::Top,
+                ConfigLayer::Overlay => LayerStyle::Overlay,
+            },
+            "cantus".into(),
+            &qhandle,
+            (),
+        );
+        layer_surface.set_anchor(match config.layer_anchor {
+            ConfigLayerAnchor::Top => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
+            ConfigLayerAnchor::Bottom => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
+        });
+        layer_surface.set_exclusive_zone((PANEL_START + config.height + f32::from(config.lyrics_enabled) * LYRICS_EXTENSION) as i32);
+        resize_layer_surface(&layer_surface, &app);
+        app.layer_surface = Some(layer_surface);
+
+        app.pending_bar_surface = Some(app.create_render_surface(surface));
+        surface.commit();
+        connection.flush().expect("Failed to flush initial commit");
+
+        while !app.should_exit {
+            event_queue.blocking_dispatch(&mut app).expect("Wayland dispatch error");
+        }
     }
 }
 
@@ -431,98 +506,6 @@ fn capture_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) -> io::Result<()
     Ok(())
 }
 
-/// Runs the Wayland application event loop.
-///
-/// # Panics
-///
-/// Panics when required Wayland globals or rendering resources cannot be initialized.
-pub fn run() {
-    let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
-    let (globals, mut event_queue) = registry_queue_init::<LayerShellApp>(&connection).expect("Failed to read Wayland registry");
-    let qhandle = event_queue.handle();
-    let compositor: WlCompositor = globals.bind(&qhandle, 1..=7, ()).expect("Missing wl_compositor");
-    let layer_shell: ZwlrLayerShellV1 = globals.bind(&qhandle, 4..=4, ()).expect("Missing zwlr_layer_shell_v1");
-    let seat: WlSeat = globals.bind(&qhandle, 1..=7, ()).expect("Missing wl_seat");
-
-    let mut app = LayerShellApp {
-        compositor: Some(compositor.clone()),
-        layer_shell: Some(layer_shell.clone()),
-        repeat_delay: Duration::from_millis(600),
-        repeat_interval: Duration::from_millis(40),
-        clipboard: globals.bind::<WlDataDeviceManager, _, _>(&qhandle, 1..=3, ()).ok().map(|manager| {
-            let device = manager.get_data_device(&seat, &qhandle, ());
-            (manager, device)
-        }),
-        ..LayerShellApp::default()
-    };
-
-    // Every output is bound so its name arrives; the configured monitor replaces the first one.
-    let registry = globals.registry();
-    for global in globals.contents().clone_list() {
-        if global.interface == "wl_output" {
-            let version = global.version.min(4);
-            let output = registry.bind::<WlOutput, (), LayerShellApp>(global.name, version, &qhandle, ());
-            app.output.get_or_insert(output);
-        }
-    }
-    event_queue.roundtrip(&mut app).expect("Failed to fetch output details");
-
-    let wl_surface = compositor.create_surface(&qhandle, ());
-    let handle = |pointer: Option<NonNull<c_void>>| pointer.expect("Failed to get Wayland pointer");
-    app.display_handle = Some(handle(NonNull::new(connection.backend().display_ptr().cast())));
-    let output = app.output.take().expect("No Wayland outputs found");
-    // wl_pointer exposes a surface, not its output. Keep the configured output as the
-    // best protocol-level target for the launcher rather than letting the compositor choose.
-    app.output = Some(output.clone());
-
-    app.wl_surface = Some(wl_surface);
-    let surface = app.wl_surface.as_ref().unwrap();
-    // Fractional scaling needs both halves: the viewport scales the buffer the scale factor sizes.
-    if let (Ok(viewporter), Ok(fractional)) = (
-        globals.bind::<WpViewporter, _, _>(&qhandle, 1..=1, ()),
-        globals.bind::<WpFractionalScaleManagerV1, _, _>(&qhandle, 1..=1, ()),
-    ) {
-        app.viewport = Some(viewporter.get_viewport(surface, &qhandle, ()));
-        app.fractional = Some(fractional.get_fractional_scale(surface, &qhandle, ()));
-        app.viewporter = Some(viewporter);
-        app.fractional_manager = Some(fractional);
-    }
-    if let Ok(manager) = globals.bind::<ExtBackgroundEffectManagerV1, _, _>(&qhandle, 1..=1, ()) {
-        app.background_manager = Some(manager.clone());
-        app.background_effect = Some(manager.get_background_effect(surface, &qhandle, ()));
-    }
-
-    let config = &app.cantus.config;
-    let layer_surface = layer_shell.get_layer_surface(
-        surface,
-        Some(&output),
-        match config.layer {
-            ConfigLayer::Background => LayerStyle::Background,
-            ConfigLayer::Bottom => LayerStyle::Bottom,
-            ConfigLayer::Top => LayerStyle::Top,
-            ConfigLayer::Overlay => LayerStyle::Overlay,
-        },
-        "cantus".into(),
-        &qhandle,
-        (),
-    );
-    layer_surface.set_anchor(match config.layer_anchor {
-        ConfigLayerAnchor::Top => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
-        ConfigLayerAnchor::Bottom => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
-    });
-    layer_surface.set_exclusive_zone((PANEL_START + config.height + f32::from(config.lyrics_enabled) * LYRICS_EXTENSION) as i32);
-    resize_layer_surface(&layer_surface, &app);
-    app.layer_surface = Some(layer_surface);
-
-    app.pending_bar_surface = Some(app.create_render_surface(surface));
-    surface.commit();
-    connection.flush().expect("Failed to flush initial commit");
-
-    while !app.should_exit {
-        event_queue.blocking_dispatch(&mut app).expect("Wayland dispatch error");
-    }
-}
-
 #[derive(Clone, Copy)]
 struct NativeSurface {
     display: NonNull<c_void>,
@@ -621,7 +604,7 @@ macro_rules! dispatch {
 /// Resizes the bar surface and sets keyboard focus for the launcher.
 fn resize_layer_surface(layer_surface: &ZwlrLayerSurfaceV1, app: &LayerShellApp) {
     layer_surface.set_size(0, app.bar_surface_size().1 as u32);
-    layer_surface.set_keyboard_interactivity(if app.cantus.ui.launcher.open {
+    layer_surface.set_keyboard_interactivity(if app.cantus.launcher.open {
         KeyboardInteractivity::Exclusive
     } else {
         KeyboardInteractivity::None
@@ -661,7 +644,7 @@ impl LayerShellApp {
         let now = Instant::now();
         while let Some((keycode, next)) = self.repeat
             && next <= now
-            && self.cantus.ui.launcher.open
+            && self.cantus.launcher.open
         {
             self.repeat = Some((keycode, next + self.repeat_interval));
             handle_launcher_key(self, keycode);
@@ -714,7 +697,7 @@ impl LayerShellApp {
     }
 
     fn sync_launcher_surface(&mut self, qhandle: &QueueHandle<Self>) {
-        let open = self.cantus.ui.launcher.open;
+        let open = self.cantus.launcher.open;
         self.cantus.interaction.set_launcher_active(open);
         if open == self.launcher_layer_surface.is_some() {
             return;
@@ -816,7 +799,7 @@ impl LayerShellApp {
 
         self.cantus
             .render(bar_size.into(), self.launcher_surface.map(|surface| (surface, launcher_logical_size.into())));
-        if let Some(text) = self.cantus.ui.launcher.pending_copy.take() {
+        if let Some(text) = self.cantus.launcher.pending_copy.take() {
             self.set_clipboard(&text, qhandle);
         }
         self.update_input_region(qhandle);
@@ -872,7 +855,7 @@ impl LayerShellApp {
         let Some(effect) = self.active_background_effect() else {
             return;
         };
-        if !self.cantus.ui.launcher.open {
+        if !self.cantus.launcher.open {
             effect.set_blur_region(None);
             return;
         }
@@ -880,7 +863,7 @@ impl LayerShellApp {
         let compositor = self.compositor.as_ref().unwrap();
         let region = compositor.create_region(qhandle, ());
         let (width, height) = self.launcher_surface_size();
-        let (origin, size) = self.cantus.ui.launcher.bounds(vec2(width, height));
+        let (origin, size) = self.cantus.launcher.bounds(vec2(width, height));
         // Keep the integer input region one pixel inside the shader's antialiased edge.
         let x = origin.x.ceil() as i32 + 1;
         let y = origin.y.ceil() as i32 + 1;
@@ -924,7 +907,7 @@ dispatch!(ZwlrLayerSurfaceV1, |state, proxy, event, qhandle| {
         }
         zwlr_layer_surface_v1::Event::Closed => {
             if state.launcher_layer_surface.as_ref().is_some_and(|launcher| launcher.id() == proxy.id()) {
-                state.cantus.ui.launcher.open = false;
+                state.cantus.launcher.open = false;
                 state.sync_launcher_surface(qhandle);
             } else {
                 state.should_exit = true;
@@ -1098,7 +1081,7 @@ dispatch!(WlKeyboard, |state, _proxy, event, _qhandle| {
 
 /// Applies one key press to the launcher's search field and selection while it is open.
 fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
-    if !state.cantus.ui.launcher.open {
+    if !state.cantus.launcher.open {
         return;
     }
     let Some(xkb_state) = &state.xkb_state else {
@@ -1117,7 +1100,7 @@ fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
     if control && letter == Some('v') {
         if let Some(pasted) = state.paste() {
             let pasted = pasted.replace(['\n', '\r'], " ");
-            state.cantus.ui.launcher.edit(|field| field.insert(&pasted));
+            state.cantus.launcher.edit(|field| field.insert(&pasted));
         }
         return;
     }
@@ -1138,9 +1121,9 @@ fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
         _ => None,
     };
     if let Some(key) = key {
-        state.cantus.ui.launcher.key(key, shift);
+        state.cantus.launcher.key(key, shift);
     } else if let Some(typed) = character.filter(|typed| !typed.is_control() && !control) {
-        state.cantus.ui.launcher.edit(|field| field.insert(typed.encode_utf8(&mut [0u8; 4])));
+        state.cantus.launcher.edit(|field| field.insert(typed.encode_utf8(&mut [0u8; 4])));
     }
 }
 

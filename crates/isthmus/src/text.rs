@@ -10,10 +10,7 @@ use crate::FloatExt;
 
 #[cfg(not(target_arch = "spirv"))]
 use {
-    crate::backend::{
-        canvas::Canvas,
-        context::{BufferRange, Context},
-    },
+    crate::backend::{BufferRange, Canvas, Context},
     smallvec::SmallVec,
     std::{ops::Range, sync::Arc, vec::Vec},
     ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
@@ -189,33 +186,9 @@ pub struct PlacedGlyph {
     pub glyph: u32,
 }
 
-#[derive(Clone, Copy)]
-pub struct TextStyle {
-    size: f32,
-    weight: f32,
-}
-
-impl TextStyle {
-    pub const fn new(size: f32, weight: f32) -> Self {
-        Self { size, weight }
-    }
-
-    #[must_use]
-    pub fn with_weight_mix(mut self, mix: f32) -> Self {
-        self.weight = 600.0 + mix.clamp(0.0, 1.0) * 300.0;
-        self
-    }
-
-    #[must_use]
-    pub fn scaled(mut self, scale: f32) -> Self {
-        self.size *= scale;
-        self
-    }
-
-    #[cfg(not(target_arch = "spirv"))]
-    fn normalized_weight(self) -> f32 {
-        ((self.weight - 600.0) / 300.0).clamp(0.0, 1.0)
-    }
+#[cfg(not(target_arch = "spirv"))]
+fn normalized_weight(weight: f32) -> f32 {
+    ((weight - 600.0) / 300.0).clamp(0.0, 1.0)
 }
 
 fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f32, i32) {
@@ -415,12 +388,12 @@ impl<'a> TextScope<'a> {
         Self { text }
     }
 
-    pub fn line(&mut self, content: &str, style: TextStyle) -> TextLayout<'_> {
-        TextLayout::new(self.text, content, style)
+    pub fn line(&mut self, content: &str, size: f32, weight: f32) -> TextLayout<'_> {
+        TextLayout::new(self.text, content, size, weight)
     }
 
-    pub fn width(&self, content: &str, style: TextStyle) -> f32 {
-        self.text.width(content, style)
+    pub fn width(&self, content: &str, size: f32, weight: f32) -> f32 {
+        self.text.shaper.width(content, size, weight)
     }
 
     pub fn fit(&mut self, shaped: &ShapedLine, y: f32, bounds: Range<f32>) -> Line {
@@ -432,14 +405,14 @@ impl<'a> TextScope<'a> {
     }
 
     pub fn shaper(&self) -> Shaper {
-        self.text.shaper()
+        self.text.shaper.clone()
     }
 }
 
 #[cfg(not(target_arch = "spirv"))]
 impl<'a> TextLayout<'a> {
-    pub(crate) fn new(text: &'a mut Text, content: &str, style: TextStyle) -> Self {
-        let shaped = text.shaper.shape(content, style);
+    pub(crate) fn new(text: &'a mut Text, content: &str, size: f32, weight: f32) -> Self {
+        let shaped = text.shaper.shape(content, size, weight);
         Self { text, shaped }
     }
 
@@ -478,7 +451,7 @@ impl Text {
     /// # Panics
     ///
     /// Panics if the supplied variable font cannot be parsed or its outlines cannot be read.
-    pub(crate) fn new(canvas: &mut Canvas, font: &[u8], color: Vec3) -> Self {
+    pub(crate) fn new(context: &Context, canvas: &mut Canvas, font: &[u8], color: Vec3) -> Self {
         let mut face = Face::parse(font, 0).expect("parse variable font");
         let characters = RANGES
             .iter()
@@ -562,7 +535,6 @@ impl Text {
             .into_iter()
             .filter_map(|(character, id)| metadata.binary_search_by_key(&id, |&(id, _)| id).ok().map(|index| (character, metadata[index].1)))
             .collect::<Vec<_>>();
-        let context = canvas.context();
         let edges = context.upload(&curves);
         let glyphs = context.upload(&metadata.iter().map(|(_, meta)| meta.data).collect::<Vec<_>>());
         canvas.register_text(glyphs, edges);
@@ -571,18 +543,10 @@ impl Text {
                 characters: characters.into(),
                 baseline,
             },
-            context,
+            context: context.clone(),
             placed: Vec::with_capacity(GLYPH_CAPACITY),
             color: Unorm8x4::from_vec3(color),
         }
-    }
-
-    pub(crate) fn shaper(&self) -> Shaper {
-        self.shaper.clone()
-    }
-
-    pub(crate) fn width(&self, content: &str, style: TextStyle) -> f32 {
-        self.shaper.width(content, style)
     }
 
     pub(crate) fn begin_frame(&mut self) {
@@ -645,27 +609,27 @@ impl Shaper {
         self.characters.binary_search_by_key(&character, |glyph| glyph.0).ok().map(|index| self.characters[index].1)
     }
 
-    pub fn shape(&self, text: &str, style: TextStyle) -> ShapedLine {
-        self.shape_positioned([(text, 0.0)], style, usize::MAX)
+    pub fn shape(&self, text: &str, size: f32, weight: f32) -> ShapedLine {
+        self.shape_positioned([(text, 0.0)], size, weight, usize::MAX)
     }
 
-    pub fn width(&self, text: &str, style: TextStyle) -> f32 {
-        let weight = style.normalized_weight();
+    pub fn width(&self, text: &str, size: f32, weight: f32) -> f32 {
+        let weight = normalized_weight(weight);
         text.chars()
             .filter_map(|character| self.glyph(character))
             .map(|meta| meta.advance[0] + (meta.advance[1] - meta.advance[0]) * weight)
             .sum::<f32>()
-            * style.size
+            * size
     }
 
-    pub fn shape_positioned<'a>(&self, parts: impl IntoIterator<Item = (&'a str, f32)>, style: TextStyle, max_glyphs: usize) -> ShapedLine {
+    pub fn shape_positioned<'a>(&self, parts: impl IntoIterator<Item = (&'a str, f32)>, size: f32, font_weight: f32, max_glyphs: usize) -> ShapedLine {
         let mut min = Vec2::splat(f32::MAX);
         let mut max = Vec2::splat(f32::MIN);
-        let weight = style.normalized_weight();
+        let weight = normalized_weight(font_weight);
         let mut width: f32 = 0.0;
         let mut glyphs = SmallVec::new();
         for (text, position) in parts {
-            let mut x = position / style.size;
+            let mut x = position / size;
             for meta in text.chars().filter_map(|character| self.glyph(character)) {
                 if glyphs.len() == max_glyphs {
                     break;
@@ -677,15 +641,15 @@ impl Shaper {
                 }
                 x += meta.advance[0] + (meta.advance[1] - meta.advance[0]) * weight;
             }
-            width = width.max(x * style.size);
+            width = width.max(x * size);
         }
         ShapedLine {
             glyphs,
             min,
             max,
             width,
-            baseline: self.baseline * style.size,
-            size: style.size,
+            baseline: self.baseline * size,
+            size,
             weight,
         }
     }

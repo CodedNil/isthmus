@@ -1,6 +1,5 @@
-use super::context::{Context, SetupError};
+use super::context::{Context, SetupError, create_surface};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::string::ToString;
 
 pub(super) enum Present {
     Rendered,
@@ -23,16 +22,7 @@ pub(super) struct SurfaceTarget {
 
 impl SurfaceTarget {
     pub(crate) fn new(context: &Context, source: &(impl HasDisplayHandle + HasWindowHandle), width: u32, height: u32) -> Result<Self, SetupError> {
-        // The caller owns the display/window handles for the lifetime of the
-        // returned surface; wgpu cannot express that relationship for generic
-        // raw handles, so this is the required API boundary.
-        let surface = unsafe {
-            context.0.instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: Some(source.display_handle()?.as_raw()),
-                raw_window_handle: source.window_handle()?.as_raw(),
-            })
-        }
-        .map_err(|e| SetupError::Surface(e.to_string()))?;
+        let surface = create_surface(&context.0.instance, source)?;
         Self::from_raw(context, surface, width, height)
     }
     pub(super) fn from_raw(context: &Context, surface: wgpu::Surface<'static>, width: u32, height: u32) -> Result<Self, SetupError> {

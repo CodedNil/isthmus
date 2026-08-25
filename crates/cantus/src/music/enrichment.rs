@@ -1,4 +1,4 @@
-use super::{AudioFeatures, Backend, Music, MusicResult, Track, TrackId};
+use super::{AudioFeatures, Music, MusicResult, Track, TrackId, spotify::Spotify};
 use crate::{
     app::{Background, CantusApp, update},
     render::{
@@ -42,7 +42,7 @@ impl Enrichment {
         }
     }
 
-    pub(crate) fn request_lyrics(&self, track: &Track, backend: Backend, shaper: text::Shaper) {
+    pub(crate) fn request_lyrics(&self, track: &Track, spotify: Spotify, shaper: text::Shaper) {
         let request = LyricsRequest {
             uri: track.uri.clone(),
             track_id: track.id,
@@ -54,7 +54,7 @@ impl Enrichment {
         let http = self.http.clone();
         self.background.spawn_update(async move {
             let uri = request.uri.clone();
-            let state = fetch_lyrics(&request, &http, &backend, &shaper).await;
+            let state = fetch_lyrics(&request, &http, &spotify, &shaper).await;
             Some(update(move |app| {
                 if let Some(track) = app.music.queue.iter_mut().find(|track| track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching)) {
                     track.runtime.lyrics = state;
@@ -110,11 +110,11 @@ impl Fetch<AlbumArt> {
     }
 }
 
-async fn fetch_lyrics(request: &LyricsRequest, http: &Client, backend: &Backend, shaper: &text::Shaper) -> Fetch<lyrics::Lyrics> {
+async fn fetch_lyrics(request: &LyricsRequest, http: &Client, spotify: &Spotify, shaper: &text::Shaper) -> Fetch<lyrics::Lyrics> {
     let result = if let Some(lyrics) = request.fetch(http).await {
         Ok(lyrics)
     } else if let Some(id) = request.track_id {
-        backend.lyrics(id).await
+        spotify.lyrics(id).await
     } else {
         Ok(Vec::new())
     };
@@ -180,19 +180,15 @@ impl CantusApp {
         audio.dedup();
 
         if !audio.is_empty() {
-            let backend = self.music.backend.clone();
+            let spotify = self.music.spotify.clone();
             self.enrichment.background.spawn_update(async move {
-                let features = resolve_audio_features(&backend, &audio).await;
-                let loudness = backend.loudness(&audio).await.unwrap_or_default();
+                let features = resolve_audio_features(&spotify, &audio).await;
                 Some(update(move |app| {
                     for track in &mut app.music.queue {
                         let Some(features) = track.id.and_then(|id| features.get(&id)) else {
                             continue;
                         };
                         track.runtime.audio_features = features.map_or_else(Fetch::default, Fetch::Ready);
-                        if let Some(timeline) = track.id.and_then(|id| loudness.get(&id)) {
-                            track.runtime.loudness = Fetch::Ready(timeline.clone());
-                        }
                     }
                 }))
             });
@@ -221,9 +217,9 @@ impl CantusApp {
     }
 }
 
-async fn resolve_audio_features(backend: &Backend, track_ids: &[TrackId]) -> HashMap<TrackId, Option<AudioFeatures>> {
+async fn resolve_audio_features(spotify: &Spotify, track_ids: &[TrackId]) -> HashMap<TrackId, Option<AudioFeatures>> {
     join_all(track_ids.iter().map(|&id| async move {
-        let features = backend
+        let features = spotify
             .audio_features(id)
             .await
             .inspect_err(|error| warn!(%error, %id, "Failed to fetch Spotify audio features"))

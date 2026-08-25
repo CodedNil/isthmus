@@ -1,5 +1,3 @@
-#[cfg(not(target_arch = "spirv"))]
-use crate::backend::renderer::ShaderModule;
 use crate::{ShaderData, data::ImageHandle};
 use spirv_std::image::{Image2d, SampledImage};
 
@@ -47,14 +45,16 @@ unsafe impl bytemuck::Zeroable for PushBlock {}
 unsafe impl bytemuck::Pod for PushBlock {}
 
 #[cfg(not(target_arch = "spirv"))]
+#[derive(Clone, Copy)]
 pub struct Program {
-    pub(crate) shader: ShaderModule,
+    pub(crate) bytes: &'static [u8],
+    pub(crate) root: &'static str,
 }
 
 #[cfg(not(target_arch = "spirv"))]
 impl Program {
-    pub const fn new(shader: ShaderModule) -> Self {
-        Self { shader }
+    pub const fn new(bytes: &'static [u8], root: &'static str) -> Self {
+        Self { bytes, root }
     }
 }
 

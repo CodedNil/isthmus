@@ -1,4 +1,4 @@
-use crate::{app::music::MAX_PLAYLIST_TARGETS, render::tempestas};
+use crate::{music::MAX_PLAYLIST_TARGETS, render::tempestas};
 use arrayvec::ArrayVec;
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};

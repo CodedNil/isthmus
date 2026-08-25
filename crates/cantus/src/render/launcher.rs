@@ -1,12 +1,12 @@
 use crate::render::{
     Fragment, GAP, PADDING, TEXT_COLOR, TextFragment,
-    sdf::{VISIBLE_ALPHA, fill, fill_rounded_box, pill_margin, presence, ripple_flash, ripple_light, sample_pill, sd_rounded_box, segment_distance, stroke},
+    sdf::{PILL_MARGIN, VISIBLE_ALPHA, fill, fill_rounded_box, presence, ripple_flash, ripple_light, sample_pill, sd_rounded_box, segment_distance, stroke},
 };
 use isthmus::{
     FloatExt, Image, Quad,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
-    text::{self, TextStyle},
+    text,
 };
 
 const PANEL_WIDTH: f32 = 520.0;
@@ -25,9 +25,6 @@ const ACCENT_COLOR: Vec3 = vec3(0.44, 0.40, 0.80);
 const ENTER_BADGE_WIDTH: f32 = 27.0;
 const ALTERNATE_BADGE_WIDTH: f32 = 42.0;
 const ICON_PX: u32 = 48;
-const SEARCH_STYLE: TextStyle = TextStyle::new(18.0, 600.0);
-const NAME_STYLE: TextStyle = TextStyle::new(16.0, 700.0);
-const DETAIL_STYLE: TextStyle = TextStyle::new(13.0, 600.0);
 const DETAIL_COLOR: Vec4 = Vec4::new(0.56, 0.63, 0.86, 1.0);
 const MUTED_COLOR: Vec4 = Vec4::new(0.52, 0.55, 0.64, 1.0);
 const CALCULATOR_ICON: u32 = 1;
@@ -82,15 +79,12 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
 #[isthmus::paint]
 mod host {
     use super::*;
-
-    use crate::interaction::Rect;
     use crate::{
-        app::{
-            Background,
-            config::SearchProvider,
-            platform::{DesktopApp, Linux as Platform, Platform as _},
-        },
-        render::RenderContext,
+        app::Background,
+        config::SearchProvider,
+        interaction::Rect,
+        platform::{DesktopApp, Platform},
+        render::UiContext,
     };
     use fend_core::Context;
     use image::imageops::FilterType;
@@ -122,7 +116,7 @@ mod host {
         anchor: usize,
         /// Frame time the caret blink last restarted at, so typing keeps it solid.
         blink_start: f32,
-        /// Set by an edit, consumed by the next frame to restart the blink.
+        /// Set by an edit, consumed by the next context to restart the blink.
         touched: bool,
     }
 
@@ -559,7 +553,7 @@ mod host {
     /// The search query with a caret and selection, edited like an ordinary text box.
     impl LauncherState {
         /// Draws the panel and its search field, then the rows beneath it.
-        pub fn show(&mut self, frame: &mut RenderContext) {
+        pub fn show(&mut self, context: &mut UiContext) {
             let mut refreshed = false;
             while let Ok(update) = self.updates.try_recv() {
                 match update {
@@ -578,33 +572,35 @@ mod host {
             if !self.open {
                 return;
             }
-            let (origin, size) = self.bounds(frame.paint.screen_size);
-            frame.interaction.input_region(Rect::new(0.0, 0.0, frame.paint.screen_size.x, frame.paint.screen_size.y));
+            let (origin, size) = self.bounds(context.frame.screen_size);
+            context
+                .interaction
+                .input_region(Rect::new(0.0, 0.0, context.frame.screen_size.x, context.frame.screen_size.y));
             let (left, right) = (PADDING + 34.0, size.x - PADDING);
             if self.field.touched {
                 self.field.touched = false;
-                self.field.blink_start = frame.paint.time;
+                self.field.blink_start = context.frame.time;
             }
             let line = if self.field.text.is_empty() {
-                frame
-                    .paint
+                context
+                    .frame
                     .text()
-                    .line("Search anything…", SEARCH_STYLE)
+                    .line("Search anything…", 18.0, 600.0)
                     .left(vec2(left, HEADER_HEIGHT * 0.5))
                     .with_color(MUTED_COLOR)
             } else {
-                frame
-                    .paint
+                context
+                    .frame
                     .text()
-                    .line(&self.field.text, SEARCH_STYLE)
+                    .line(&self.field.text, 18.0, 600.0)
                     .visible(vec2(left, HEADER_HEIGHT * 0.5), left..right)
             };
             let selection_range = self.field.selection();
-            let blink = ((frame.paint.time - self.field.blink_start) * 1.4).fract();
+            let blink = ((context.frame.time - self.field.blink_start) * 1.4).fract();
             let (caret, selection) = {
-                let text = frame.paint.text();
+                let text = context.frame.text();
                 // Long queries are clipped rather than scrolled, so every offset maps straight to an x.
-                let at = |offset: usize| (left + text.width(&self.field.text[..offset], SEARCH_STYLE)).min(right);
+                let at = |offset: usize| (left + text.width(&self.field.text[..offset], 18.0, 600.0)).min(right);
                 let caret = vec2(at(self.field.cursor), blink.smoothstep(0.62, 0.5));
                 let selection = if selection_range.is_empty() {
                     Vec2::ZERO
@@ -615,7 +611,7 @@ mod host {
             };
             let quad = Quad::from_min_max(origin, origin + size);
             // GPU: Launcher panel and search selection.
-            frame.paint.paint_quad(quad, |fragment: Fragment, size: Vec2, caret: Vec2, selection: Vec2| {
+            context.frame.paint_quad(quad, |fragment: Fragment, size: Vec2, caret: Vec2, selection: Vec2| {
                 let mask = fill_rounded_box(fragment.local, size * 0.5, BACKGROUND_RADIUS as f32);
                 if mask <= 0.0 {
                     kill();
@@ -643,18 +639,18 @@ mod host {
             });
             let padding = line.size * 0.5 + 2.0;
             // GPU: Launcher query text.
-            frame
-                .paint
+            context
+                .frame
                 .paint_text(line.expanded(padding).translated(origin), |text: TextFragment, origin: Vec2, size: Vec2| {
                     let clip = fill_rounded_box(text.pixel - origin - size * 0.5, size * 0.5, BACKGROUND_RADIUS as f32);
                     text.color(text.alpha() * clip)
                 });
 
-            self.show_entries(frame, origin);
+            self.show_entries(context, origin);
         }
 
         /// Draws and interacts with calculator, application and search rows in visual order.
-        fn show_entries(&mut self, frame: &mut RenderContext, origin: Vec2) {
+        fn show_entries(&mut self, context: &mut UiContext, origin: Vec2) {
             let (x, width) = (origin.x + PADDING, PANEL_WIDTH - PADDING * 2.0);
             let mut y = origin.y + HEADER_HEIGHT + PADDING;
             let text_left = ROW_HEIGHT * 0.5 + ICON_SIZE * 0.5 + GAP * 2.0;
@@ -662,7 +658,7 @@ mod host {
             let mut activated = None;
             for index in 0..self.entry_count() {
                 let pill = Rect::new(x, y, x + width, y + ROW_HEIGHT);
-                let response = frame.interaction.interact(pill);
+                let response = context.interaction.interact(pill);
                 if response.hovered() {
                     self.selected = index;
                 }
@@ -680,8 +676,8 @@ mod host {
                     };
                     let badge = vec2(edge - width * 0.5, width * 0.5);
                     edge -= width + GAP;
-                    let line = frame.paint.text().line(label, DETAIL_STYLE).right(vec2(edge, ROW_HEIGHT * 0.5)).with_color(MUTED_COLOR);
-                    edge -= frame.paint.text().width(label, DETAIL_STYLE) + GAP * 2.0;
+                    let line = context.frame.text().line(label, 13.0, 600.0).right(vec2(edge, ROW_HEIGHT * 0.5)).with_color(MUTED_COLOR);
+                    edge -= context.frame.text().width(label, 13.0, 600.0) + GAP * 2.0;
                     (badge, line)
                 };
                 let (enter_badge, action_line) = badge(Some(entry.action), ENTER_BADGE_WIDTH);
@@ -693,14 +689,14 @@ mod host {
                 } else {
                     (ROW_HEIGHT * 0.34, ROW_HEIGHT * 0.68)
                 };
-                let name_line = frame.paint.text().line(entry.name, NAME_STYLE).visible(vec2(text_left, name_y), clip.clone());
+                let name_line = context.frame.text().line(entry.name, 16.0, 700.0).visible(vec2(text_left, name_y), clip.clone());
                 let detail_line = if entry.detail.is_empty() {
                     text::Line::default()
                 } else {
-                    frame
-                        .paint
+                    context
+                        .frame
                         .text()
-                        .line(entry.detail, DETAIL_STYLE)
+                        .line(entry.detail, 13.0, 600.0)
                         .visible(vec2(text_left, detail_y), clip)
                         .with_color(DETAIL_COLOR)
                 };
@@ -710,10 +706,10 @@ mod host {
                     EntryIcon::Calculator => (None, CALCULATOR_ICON),
                     EntryIcon::Search => (None, SEARCH_ICON),
                 };
-                let quad = pill.expanded(pill_margin(frame.globals(), frame.paint.time));
+                let quad = pill.expanded(PILL_MARGIN);
                 // GPU: Launcher result row.
-                frame
-                    .paint
+                context
+                    .frame
                     .paint_quad(quad, |fragment: Fragment, pill: Quad, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
                         let surface = sample_pill(pill, fragment.pixel, fragment.globals, fragment.time);
                         if surface.alpha <= VISIBLE_ALPHA {
@@ -742,7 +738,7 @@ mod host {
                 if let Some(image) = image {
                     let icon = Quad::new(pill.center - vec2((pill.size.x - pill.size.y) * 0.5, 0.0), Vec2::splat(ICON_SIZE), Vec2::X);
                     // GPU: Launcher result image.
-                    frame.paint.paint_quad(icon, |fragment: Fragment, image: Image| {
+                    context.frame.paint_quad(icon, |fragment: Fragment, image: Image| {
                         let texture = image.sample(fragment.uv);
                         texture.truncate().extend(texture.w)
                     });
@@ -752,8 +748,8 @@ mod host {
                 for line in [name_line, detail_line, action_line, alternate_line] {
                     if !line.is_empty() {
                         // GPU: Launcher result text.
-                        frame
-                            .paint
+                        context
+                            .frame
                             .paint_text(line.expanded(line.size * 0.5 + 2.0).translated(origin), |text: TextFragment, pill: Quad| {
                                 let surface = sample_pill(pill, text.pixel, text.globals, text.time);
                                 text.color(text.alpha() * surface.mask)

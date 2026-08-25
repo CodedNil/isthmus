@@ -4,8 +4,8 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "spirv"))]
 #[derive(Clone)]
 pub struct Image {
-    size: [u32; 2],
-    pixels: Arc<[u8]>,
+    pub(crate) size: [u32; 2],
+    pub(crate) pixels: Arc<[u8]>,
 }
 
 #[cfg(target_arch = "spirv")]
@@ -36,13 +36,5 @@ impl Image {
         pixel(lower)
             .lerp(pixel(glam::uvec2(upper.x, lower.y)), fraction.x)
             .lerp(pixel(glam::uvec2(lower.x, upper.y)).lerp(pixel(upper), fraction.x), fraction.y)
-    }
-
-    pub(crate) const fn size(&self) -> [u32; 2] {
-        self.size
-    }
-
-    pub(crate) const fn pixels(&self) -> &Arc<[u8]> {
-        &self.pixels
     }
 }

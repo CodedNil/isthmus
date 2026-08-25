@@ -24,7 +24,8 @@ pub struct Canvas {
     paints: Vec<Vec<Paint>>,
     group: Option<(SurfaceHandle, [Vec<Paint>; 2])>,
     images: ImageCache,
-    pipeline_images: HashMap<&'static str, Vec<Rc<super::image::Image>>>,
+    image_tables: Vec<Vec<Rc<super::image::Image>>>,
+    payload_images: Option<usize>,
     payload_pipeline: Option<PaintPipeline>,
     text: [BufferRange; 3],
     globals: Vec<BufferRange>,
@@ -84,29 +85,35 @@ impl Canvas {
             paints: Vec::new(),
             group: None,
             images: ImageCache::new(context),
-            pipeline_images: HashMap::new(),
+            image_tables: Vec::new(),
+            payload_images: None,
             payload_pipeline: None,
             text: from_fn(|_| BufferRange::default()),
             globals: Vec::new(),
         }
     }
     pub(crate) fn image(&mut self, size: [u32; 2], pixels: &Arc<[u8]>) -> ImageHandle {
+        self.payload_pipeline.expect("image captured outside a paint payload");
         let image = self.images.image(&self.context, size, pixels);
-        let pipeline = self.payload_pipeline.expect("image captured outside a paint payload");
-        let images = self.pipeline_images.entry(pipeline.entry).or_default();
+        let table = if let Some(table) = self.payload_images {
+            table
+        } else {
+            let table = self.image_tables.len();
+            self.image_tables.push(Vec::new());
+            self.payload_images = Some(table);
+            table
+        };
+        let images = &mut self.image_tables[table];
         if let Some(index) = images.iter().position(|candidate| Rc::ptr_eq(candidate, &image)) {
             return ImageHandle::new(index as u32);
         }
-        assert!(images.len() < IMAGE_CAPACITY as usize, "paint shader uses more than {IMAGE_CAPACITY} images in one frame");
+        assert!(images.len() < IMAGE_CAPACITY as usize, "one paint shader uses more than {IMAGE_CAPACITY} images");
         let index = images.len() as u32;
         images.push(image);
         ImageHandle::new(index)
     }
     pub(crate) const fn begin_payload(&mut self, pipeline: PaintPipeline) {
         self.payload_pipeline = Some(pipeline);
-    }
-    pub(crate) fn context(&self) -> Context {
-        self.context.clone()
     }
     pub(crate) const fn format(&self) -> wgpu::TextureFormat {
         self.format
@@ -138,15 +145,17 @@ impl Canvas {
         }
         self.group = None;
         self.images.begin_frame();
-        self.pipeline_images.clear();
+        self.image_tables.clear();
         self.payload_pipeline = None;
+        self.payload_images = None;
     }
     pub(crate) fn emit<S: ShaderSpec>(&mut self, surface: SurfaceHandle, quad: Quad, value: S::Instance) {
         const {
             assert!(size_of::<S::Instance>() % 4 == 0);
         }
         assert_eq!(self.payload_pipeline.take().map(|pipeline| pipeline.entry), Some(S::PIPELINE.entry));
-        let paint = self.record(S::PIPELINE, quad, bytemuck::bytes_of(&value));
+        let images = self.payload_images.take();
+        let paint = self.record(S::PIPELINE, quad, bytemuck::bytes_of(&value), images);
         self.surface(surface).push(paint);
     }
     pub(crate) fn emit_layer<S: ShaderSpec>(&mut self, layer: u8, quad: Quad, value: S::Instance) {
@@ -154,10 +163,11 @@ impl Canvas {
             assert!(size_of::<S::Instance>() % 4 == 0);
         }
         assert_eq!(self.payload_pipeline.take().map(|pipeline| pipeline.entry), Some(S::PIPELINE.entry));
-        let paint = self.record(S::PIPELINE, quad, bytemuck::bytes_of(&value));
+        let images = self.payload_images.take();
+        let paint = self.record(S::PIPELINE, quad, bytemuck::bytes_of(&value), images);
         self.group.as_mut().expect("paint layer outside a group").1[layer as usize].push(paint);
     }
-    fn record(&mut self, spec: PaintPipeline, quad: Quad, value: &[u8]) -> Paint {
+    fn record(&mut self, spec: PaintPipeline, quad: Quad, value: &[u8], images: Option<usize>) -> Paint {
         if !self.pipelines.contains_key(spec.entry) {
             let vertex_entry = format!("{}::__isthmus_quad::vertex", self.root);
             let fragment_entry = format!("{}::fragment", spec.entry);
@@ -215,7 +225,11 @@ impl Canvas {
         self.payload.extend_from_slice(value);
         let draw = self.draws.len() as u32;
         self.draws.push(DrawRecord { quad, payload });
-        Paint { pipeline: spec.entry, draw }
+        Paint {
+            pipeline: spec.entry,
+            draw,
+            images,
+        }
     }
     fn surface(&mut self, surface: SurfaceHandle) -> &mut Vec<Paint> {
         if self.paints.len() <= surface.index() {
@@ -254,7 +268,7 @@ impl Canvas {
         ];
         let mut binds = HashMap::new();
         for paint in paints {
-            if binds.contains_key(paint.pipeline) {
+            if binds.contains_key(&(paint.pipeline, paint.images)) {
                 continue;
             }
             let mut entries = Vec::new();
@@ -270,7 +284,10 @@ impl Canvas {
                     });
                 }
             }
-            let mut views: Vec<_> = self.pipeline_images.get(paint.pipeline).into_iter().flatten().map(|image| &image.view).collect();
+            let mut views: Vec<_> = paint
+                .images
+                .map(|table| self.image_tables[table].iter().map(|image| &image.view).collect::<Vec<_>>())
+                .unwrap_or_default();
             views.resize(IMAGE_CAPACITY as usize, &self.images.fallback().view);
             entries.push(wgpu::BindGroupEntry {
                 binding: 5,
@@ -281,7 +298,7 @@ impl Canvas {
                 resource: wgpu::BindingResource::Sampler(&self.context.0.sampler),
             });
             binds.insert(
-                paint.pipeline,
+                (paint.pipeline, paint.images),
                 self.context.0.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(paint.pipeline),
                     layout: &self.bind_layout,
@@ -294,11 +311,11 @@ impl Canvas {
         while start < paints.len() {
             let first = paints[start];
             let mut end = start + 1;
-            while end < paints.len() && paints[end].pipeline == first.pipeline && paints[end].draw == paints[end - 1].draw + 1 {
+            while end < paints.len() && paints[end].pipeline == first.pipeline && paints[end].images == first.images && paints[end].draw == paints[end - 1].draw + 1 {
                 end += 1;
             }
             pass.set_pipeline(&self.pipelines[first.pipeline]);
-            pass.set_bind_group(0, &binds[first.pipeline], &[]);
+            pass.set_bind_group(0, &binds[&(first.pipeline, first.images)], &[]);
             if !immediates_set {
                 pass.set_immediates(0, shared);
                 immediates_set = true;
@@ -312,4 +329,5 @@ impl Canvas {
 struct Paint {
     pipeline: &'static str,
     draw: u32,
+    images: Option<usize>,
 }

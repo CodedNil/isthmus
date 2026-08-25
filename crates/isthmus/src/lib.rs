@@ -22,10 +22,7 @@ pub use spirv_std;
 pub use isthmus_macros::{ShaderData, paint, program};
 
 #[cfg(not(target_arch = "spirv"))]
-pub use backend::{
-    context::SetupError,
-    renderer::{Render, RenderError, Renderer},
-};
+pub use backend::{Render, RenderError, Renderer, SetupError};
 #[cfg(not(target_arch = "spirv"))]
 pub use contract::SurfaceHandle;
 pub use contract::{Fragment, Quad};
@@ -39,12 +36,9 @@ pub use text::TextFragment;
 #[doc(hidden)]
 pub mod __private {
     pub use crate::contract::{DrawRecord, ImageHeap, PushBlock, ShaderImage, load};
-    pub use crate::data::ImageHandle;
     #[cfg(not(target_arch = "spirv"))]
-    pub use crate::{
-        backend::renderer::ShaderModule,
-        contract::{PaintPipeline, Program, ShaderSpec, shader_module_name},
-    };
+    pub use crate::contract::{PaintPipeline, Program, ShaderSpec, shader_module_name};
+    pub use crate::data::ImageHandle;
     #[cfg(not(target_arch = "spirv"))]
     pub use bytemuck;
 }

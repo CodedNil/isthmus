@@ -1,9 +1,9 @@
-use cantus::app::{run, trigger_launcher};
+use cantus::{Platform, run};
 use std::env;
 
 fn main() {
     if env::args().any(|arg| arg == "--launcher") {
-        trigger_launcher();
+        Platform::trigger_launcher();
     }
     run();
 }

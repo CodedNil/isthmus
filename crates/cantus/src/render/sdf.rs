@@ -146,15 +146,8 @@ pub fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
     fbm(p / scale * 0.14 + vec2(time * 0.012, 6.1))
 }
 
-/// Pixels the pill can cover beyond its bounds: shadow always, bulges only while active.
-pub fn pill_margin(globals: Globals, time: f32) -> f32 {
-    let mut bulge = globals.pressure * 8.0;
-    for pulse in &globals.ripples {
-        let fade = 1.0 - ((time - pulse.start_time) * 1.2).saturate();
-        bulge += presence(pulse.start_time) * fade * fade * 11.0;
-    }
-    SHADOW_REACH + bulge * 0.5
-}
+/// Maximum pixels a pill can cover beyond its bounds: shadow plus held-pointer and four ripples.
+pub const PILL_MARGIN: f32 = SHADOW_REACH + (2.0 * 8.0 + 4.0 * 11.0) * 0.5;
 
 /// 1.0 when positive, else 0.0; core lowers `f32::from(bool)` through `u8`, which costs an extra conversion.
 pub fn presence(value: f32) -> f32 {

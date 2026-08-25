@@ -1,9 +1,6 @@
-use super::{AudioFeatures, LoudnessTimeline, LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult, PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime};
-use crate::app::{
-    AppUpdater, Background,
-    config::{self, Config},
-    send_update,
-};
+use super::{AudioFeatures, LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult, PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime};
+use crate::app::{AppUpdater, Background, send_update};
+use crate::config::{self, Config};
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
 use futures_util::StreamExt;
@@ -69,7 +66,8 @@ fn read_cache<T: DeserializeOwned>(path: &Path) -> Option<T> {
         .ok()
 }
 
-pub struct SpotifyBackend {
+#[derive(Clone)]
+pub struct Spotify {
     events: UnboundedSender<WorkerEvent>,
     session: Arc<Mutex<Option<Session>>>,
 }
@@ -79,8 +77,8 @@ enum WorkerEvent {
     Metadata(HashMap<String, TrackDetails>),
 }
 
-impl SpotifyBackend {
-    pub fn new(config: &Config, updater: &AppUpdater, background: &Background) -> Self {
+impl Spotify {
+    pub(super) fn new(config: &Config, updater: &AppUpdater, background: &Background) -> Self {
         if let Err(error) = fs::create_dir_all(config::directory()) {
             warn!(%error, "Failed to create Cantus config directory");
         }
@@ -112,7 +110,7 @@ impl SpotifyBackend {
         Self { events, session }
     }
 
-    pub fn command(&self, command: PlaybackCommand) {
+    pub(super) fn command(&self, command: PlaybackCommand) {
         if self.events.send(WorkerEvent::Command(command)).is_err() {
             warn!("Discarded music command after Spotify worker stopped");
         }
@@ -172,74 +170,6 @@ impl SpotifyBackend {
             instrumentalness: features.instrumentalness.saturate(),
         })
     }
-
-    pub(super) async fn loudness(&self, track_ids: &[TrackId]) -> MusicResult<HashMap<TrackId, LoudnessTimeline>> {
-        let session = self.session.lock().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
-        let response = session
-            .spclient()
-            .get_extended_metadata(BatchedEntityRequest {
-                entity_request: track_ids
-                    .iter()
-                    .map(|id| EntityRequest {
-                        entity_uri: format!("spotify:track:{id}"),
-                        query: vec![ExtensionQuery {
-                            extension_kind: EnumOrUnknown::new(ExtensionKind::LIST_TUNER_AUDIO_ANALYSIS),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    })
-                    .collect(),
-                ..Default::default()
-            })
-            .await?;
-        Ok(response
-            .extended_metadata
-            .into_iter()
-            .flat_map(|array| array.extension_data)
-            .filter_map(|data| {
-                let id = data.entity_uri.rsplit(':').next()?.parse().ok()?;
-                let bytes = data.extension_data.into_option()?.value;
-                Some((id, decode_loudness(&bytes)?))
-            })
-            .collect())
-    }
-}
-
-fn decode_loudness(bytes: &[u8]) -> Option<LoudnessTimeline> {
-    let mut cursor = 0;
-    let mut period_ms = 0;
-    let mut samples = Vec::new();
-    while cursor < bytes.len() {
-        let tag = read_varint(bytes, &mut cursor)?;
-        match (tag >> 3, tag & 7) {
-            (2, 0) => period_ms = read_varint(bytes, &mut cursor)? as u32,
-            (3, 2) => {
-                let end = cursor.checked_add(read_varint(bytes, &mut cursor)? as usize)?;
-                while cursor < end {
-                    samples.push(read_varint(bytes, &mut cursor)? as u32 as i32);
-                }
-            }
-            (_, 0) => _ = read_varint(bytes, &mut cursor)?,
-            (_, 1) => cursor = cursor.checked_add(8)?,
-            (_, 2) => cursor = cursor.checked_add(read_varint(bytes, &mut cursor)? as usize)?,
-            (_, 5) => cursor = cursor.checked_add(4)?,
-            _ => return None,
-        }
-    }
-    (!samples.is_empty()).then_some(LoudnessTimeline { period_ms, samples })
-}
-
-fn read_varint(bytes: &[u8], cursor: &mut usize) -> Option<u64> {
-    let mut value = 0;
-    for shift in (0..64).step_by(7) {
-        let byte = *bytes.get(*cursor)?;
-        *cursor += 1;
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Some(value);
-        }
-    }
-    None
 }
 
 async fn connect() -> ClientResult<Session> {

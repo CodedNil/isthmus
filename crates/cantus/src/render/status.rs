@@ -1,6 +1,6 @@
 use crate::render::{
     Fragment, GAP, PADDING, PANEL_START, TextFragment,
-    sdf::{VISIBLE_ALPHA, fill, fill_rounded_box, hash, pill_margin, sample_pill, sd_capsule_box, sd_chevron, sd_rounded_box, segment_distance, smooth_union, stroke},
+    sdf::{PILL_MARGIN, VISIBLE_ALPHA, fill, fill_rounded_box, hash, sample_pill, sd_capsule_box, sd_chevron, sd_rounded_box, segment_distance, smooth_union, stroke},
     tempestas::{StatusSky, scene, sky_phase},
 };
 use core::f32::consts::TAU;
@@ -8,7 +8,6 @@ use isthmus::{
     FloatExt, Quad, ShaderData,
     glam::{Vec2, Vec3, vec2, vec3},
     spirv_std::arch::kill,
-    text::TextStyle,
 };
 
 const STATUS_HISTORY_SAMPLES: usize = 32;
@@ -21,7 +20,6 @@ const CHART_LINE_WIDTH: f32 = 0.85;
 const USAGE_COLOR: Vec3 = Vec3::new(0.32, 0.68, 1.0);
 const MEMORY_COLOR: Vec3 = Vec3::new(0.78, 0.3, 1.0);
 const MUTED_COLOR: Vec3 = Vec3::new(1.0, 0.24, 0.3);
-const LABEL_STYLE: TextStyle = TextStyle::new(11.0, 700.0);
 const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
 const BASE_WIDTH: f32 = PADDING * 2.0 + GRAPH_WIDTH * 2.0 + DATA_WIDTH + ACTION_WIDTH * 2.0 + GAP * 4.0;
 
@@ -36,14 +34,7 @@ pub struct ProcessorStatus {
 #[isthmus::paint]
 mod host {
     use super::*;
-    use crate::{
-        app::{
-            Background,
-            platform::{Linux as Platform, Platform as _},
-        },
-        interaction::Rect,
-        render::RenderContext,
-    };
+    use crate::{app::Background, interaction::Rect, platform::Platform, render::UiContext};
     use arrayvec::ArrayString;
     use std::{
         fmt::Write,
@@ -124,7 +115,7 @@ mod host {
             }
         }
 
-        pub fn show(&mut self, frame: &mut RenderContext, sky: StatusSky) {
+        pub fn show(&mut self, context: &mut UiContext, sky: StatusSky) {
             while let Ok(update) = self.updates.try_recv() {
                 self.target_temperature[0] = update.cpu.temperature;
                 self.cpu.record(update.cpu);
@@ -136,41 +127,42 @@ mod host {
                 self.history_scroll = 0.0;
             }
             let mut volume = f32::from_bits(self.audio_monitor.volume.load(Ordering::Relaxed));
-            let height = frame.config.height;
+            let height = context.config.height;
             let width = self.width();
-            let x = frame.paint.screen_size.x - width - GAP;
+            let x = context.frame.screen_size.x - width - GAP;
             let pill = Rect::new(x, PANEL_START, x + width, PANEL_START + height);
             let pill_quad: Quad = pill.into();
             let mut cursor = PADDING;
             let section = |center: f32, section_width: f32| Rect::from_center(vec2(x + center, PANEL_START + height * 0.5), vec2(f32::midpoint(section_width, GAP), height * 0.5));
 
             // GPU: Status background.
-            let margin = pill_margin(frame.globals(), frame.paint.time);
-            frame.paint.paint_quad(pill_quad.expanded(margin), |fragment: Fragment, pill_quad: Quad, sky: StatusSky| {
-                let sample = sample_pill(pill_quad, fragment.pixel, fragment.globals, fragment.time);
-                if sample.alpha <= VISIBLE_ALPHA {
-                    kill();
-                }
+            context
+                .frame
+                .paint_quad(pill_quad.expanded(PILL_MARGIN), |fragment: Fragment, pill_quad: Quad, sky: StatusSky| {
+                    let sample = sample_pill(pill_quad, fragment.pixel, fragment.globals, fragment.time);
+                    if sample.alpha <= VISIBLE_ALPHA {
+                        kill();
+                    }
 
-                // Weather-reactive glass body and interaction flash.
-                let color = scene(
-                    fragment.time,
-                    fragment.globals.bar_height,
-                    sample.refracted,
-                    sample.size.x,
-                    sample.distance,
-                    sky_phase(sky.sun_height),
-                    sky.conditions,
-                )
-                .lerp(Vec3::splat(0.95), sample.ripple_flash * 0.35);
-                sample.color(color)
-            });
+                    // Weather-reactive glass body and interaction flash.
+                    let color = scene(
+                        fragment.time,
+                        fragment.globals.bar_height,
+                        sample.refracted,
+                        sample.size.x,
+                        sample.distance,
+                        sky_phase(sky.sun_height),
+                        sky.conditions,
+                    )
+                    .lerp(Vec3::splat(0.95), sample.ripple_flash * 0.35);
+                    sample.color(color)
+                });
 
-            let temperature_blend = 1.0 - (-5.0 * frame.paint.delta_time).exp();
+            let temperature_blend = 1.0 - (-5.0 * context.frame.delta_time).exp();
             for (processor, target) in [&mut self.cpu, &mut self.gpu].into_iter().zip(self.target_temperature) {
                 processor.temperature += (target - processor.temperature) * temperature_blend;
             }
-            self.history_scroll = (self.history_scroll + frame.paint.delta_time / Platform::STATUS_SAMPLE_INTERVAL.as_secs_f32()).saturate();
+            self.history_scroll = (self.history_scroll + context.frame.delta_time / Platform::STATUS_SAMPLE_INTERVAL.as_secs_f32()).saturate();
             for (processor, show_pins) in [(self.cpu, true), (self.gpu, false)] {
                 let center = cursor + GRAPH_WIDTH * 0.5;
                 let mut label = ArrayString::<16>::new();
@@ -183,9 +175,9 @@ mod host {
                 )
                 .unwrap();
                 let half_width = GRAPH_WIDTH * 0.5 - GAP * 0.5;
-                let line = frame.paint.text().line(&label, LABEL_STYLE).fit(GAP + 5.0, center - half_width..center + half_width);
+                let line = context.frame.text().line(&label, 11.0, 700.0).fit(GAP + 5.0, center - half_width..center + half_width);
                 // GPU: Processor monitor.
-                frame.paint.paint_quad(
+                context.frame.paint_quad(
                     section(center, GRAPH_WIDTH),
                     |fragment: Fragment, processor: ProcessorStatus, history_scroll: f32, show_pins: bool| {
                         let half_width = GRAPH_WIDTH * 0.5 - GAP * 0.5;
@@ -229,7 +221,7 @@ mod host {
                         };
                         let graphs = curve(&processor.usage, USAGE_COLOR, 0.156) + curve(&processor.memory, MEMORY_COLOR, 0.084);
 
-                        // Grid and smoothly temperature-tinted package frame.
+                        // Grid and smoothly temperature-tinted package context.
                         let cell = (((fragment.local + vec2(half_width, radius)) / vec2(7.0, 6.1)).fract() - 0.5).abs();
                         let grid = chart * cell.x.smoothstep(0.49, 0.46).max(cell.y.smoothstep(0.49, 0.45)) * 0.045;
                         let heat = vec3(0.22, 0.62, 1.0)
@@ -246,14 +238,16 @@ mod host {
                     },
                 );
                 // GPU: Processor label.
-                frame.paint.paint_text(line.translated(vec2(x, PANEL_START)), |text: TextFragment| text.color(text.alpha()));
+                context
+                    .frame
+                    .paint_text(line.translated(vec2(x, PANEL_START)), |text: TextFragment| text.color(text.alpha()));
                 cursor += GRAPH_WIDTH + GAP;
             }
 
             if let Some(battery_level) = self.battery_level {
                 let center = cursor + DATA_WIDTH * 0.5;
                 // GPU: Battery indicator.
-                frame.paint.paint_quad(section(center, DATA_WIDTH), |fragment: Fragment, battery_level: f32| {
+                context.frame.paint_quad(section(center, DATA_WIDTH), |fragment: Fragment, battery_level: f32| {
                     let time = fragment.time;
                     let point = fragment.local / 0.8;
 
@@ -289,10 +283,10 @@ mod host {
             for (damped, level) in self.audio_spectrum.iter_mut().zip(&self.audio_monitor.spectrum) {
                 let target = f32::from_bits(level.load(Ordering::Relaxed));
                 let response = if target > *damped { 18.0 } else { 6.0 };
-                *damped += (target - *damped) * (1.0 - (-response * frame.paint.delta_time).exp());
+                *damped += (target - *damped) * (1.0 - (-response * context.frame.delta_time).exp());
             }
             let center = cursor + DATA_WIDTH * 0.5;
-            let scroll = frame.interaction.interact(section(center, DATA_WIDTH)).scroll;
+            let scroll = context.interaction.interact(section(center, DATA_WIDTH)).scroll;
             if scroll != 0 {
                 let sign = volume.signum();
                 volume = (volume.abs() - scroll as f32 * 0.05).saturate() * sign;
@@ -300,7 +294,7 @@ mod host {
                 Platform::set_volume(volume.abs());
             }
             // GPU: Audio spectrum and volume.
-            frame.paint.paint_quad(
+            context.frame.paint_quad(
                 section(center, DATA_WIDTH),
                 |fragment: Fragment, audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS], volume: f32| {
                     // Seven-band spectrum.
@@ -327,8 +321,8 @@ mod host {
 
             for action in [1usize, 0] {
                 let center = cursor + ACTION_WIDTH * 0.5;
-                let response = frame.interaction.interact(section(center, ACTION_WIDTH));
-                self.action_hover[action] = self.action_hover[action].move_towards(f32::from(response.hovered()), frame.paint.delta_time / 0.12);
+                let response = context.interaction.interact(section(center, ACTION_WIDTH));
+                self.action_hover[action] = self.action_hover[action].move_towards(f32::from(response.hovered()), context.frame.delta_time / 0.12);
                 if response.hovered() && response.held_for(1.5) {
                     Platform::run_power_action(&self.background, action);
                 }
@@ -337,7 +331,7 @@ mod host {
                 let power_progress = (response.held_seconds / 1.5).saturate();
                 let reboot = action == 1;
                 // GPU: Power action icon.
-                frame.paint.paint_quad(
+                context.frame.paint_quad(
                     section(center, ACTION_WIDTH),
                     |fragment: Fragment, reboot: bool, hover: f32, selected: f32, power_progress: f32| {
                         let time = fragment.time;
@@ -373,7 +367,7 @@ mod host {
                 );
                 cursor += ACTION_WIDTH + GAP;
             }
-            frame.interaction.input_region(pill);
+            context.interaction.input_region(pill);
         }
     }
 }
