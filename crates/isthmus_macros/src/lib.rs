@@ -1,9 +1,8 @@
-use isthmus_build::artifact::shader_artifact;
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use std::{collections::HashSet, env, path::Path};
+use std::collections::HashSet;
 use syn::visit::{self, Visit};
 use syn::visit_mut::{VisitMut, visit_expr_mut};
 
@@ -82,10 +81,7 @@ pub fn program(input: TokenStream) -> TokenStream {
             .to_compile_error()
             .into();
     }
-    let (module, artifact) = match program_module() {
-        Ok(module) => module,
-        Err(error) => return error.to_compile_error().into(),
-    };
+    let module = program_module();
     let isthmus = isthmus_path();
     quote! {
         #module
@@ -93,7 +89,7 @@ pub fn program(input: TokenStream) -> TokenStream {
         #[cfg(not(target_arch = "spirv"))]
         pub const fn program() -> #isthmus::__private::Program {
             #isthmus::__private::Program::new(
-                include_bytes!(#artifact),
+                include_bytes!(concat!(env!("OUT_DIR"), "/isthmus.spv")),
                 #isthmus::__private::shader_module_name(module_path!()),
             )
         }
@@ -387,45 +383,31 @@ impl<'ast> Visit<'ast> for HostBindings {
     fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
 }
 
-fn program_module() -> syn::Result<(TokenStream2, String)> {
-    let Ok(crate_dir) = env::var("CARGO_MANIFEST_DIR") else {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "missing package directory",
-        ));
-    };
-    let artifact = match shader_artifact(Path::new(&crate_dir)) {
-        Ok(artifact) => artifact,
-        Err(error) => return Err(syn::Error::new(proc_macro2::Span::call_site(), error)),
-    };
-    let artifact = artifact.to_string_lossy().into_owned();
+fn program_module() -> TokenStream2 {
     let isthmus = isthmus_path();
-    Ok((
-        quote! {
-            #[doc(hidden)]
-            pub mod __isthmus_quad {
-                use super::*;
-                use #isthmus::FloatExt as _;
+    quote! {
+        #[doc(hidden)]
+        pub mod __isthmus_quad {
+            use super::*;
+            use #isthmus::FloatExt as _;
 
-                #[#isthmus::spirv_std::spirv(vertex)]
-                pub fn vertex(
-                    #[spirv(vertex_index)] vertex: u32,
-                    #[spirv(instance_index)] draw_index: u32,
-                    #[spirv(push_constant)] frame: &#isthmus::__private::PushBlock,
-                    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] draws: &[#isthmus::__private::DrawRecord],
-                    #[spirv(position)] out_position: &mut #isthmus::glam::Vec4,
-                    #[spirv(location = 0)] out_pixel: &mut #isthmus::glam::Vec2,
-                    #[spirv(location = 1, flat)] out_draw_index: &mut u32,
-                ) {
-                    let draw = draws[draw_index as usize];
-                    let sample = draw.quad.sample(vertex, frame.screen_size);
-                    *out_position = sample.position;
-                    *out_pixel = sample.pixel;
-                    *out_draw_index = draw_index;
-                }
+            #[#isthmus::spirv_std::spirv(vertex)]
+            pub fn vertex(
+                #[spirv(vertex_index)] vertex: u32,
+                #[spirv(instance_index)] draw_index: u32,
+                #[spirv(push_constant)] frame: &#isthmus::__private::PushBlock,
+                #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] draws: &[#isthmus::__private::DrawRecord],
+                #[spirv(position)] out_position: &mut #isthmus::glam::Vec4,
+                #[spirv(location = 0)] out_pixel: &mut #isthmus::glam::Vec2,
+                #[spirv(location = 1, flat)] out_draw_index: &mut u32,
+            ) {
+                let draw = draws[draw_index as usize];
+                let sample = draw.quad.sample(vertex, frame.screen_size);
+                *out_position = sample.position;
+                *out_pixel = sample.pixel;
+                *out_draw_index = draw_index;
             }
+        }
 
-        },
-        artifact,
-    ))
+    }
 }

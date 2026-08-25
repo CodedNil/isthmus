@@ -4,10 +4,6 @@ version = "0.8.0"
 edition = "2024"
 default-run = "cantus"
 
-[package.metadata.isthmus]
-artifact = "../../assets/cantus.spv"
-source = "src/render/mod.rs"
-
 [[bin]]
 name = "cantus"
 path = "src/main.rs"
@@ -76,6 +72,7 @@ jiff = { version = "0.2.35", default-features = false, features = [
 [build-dependencies]
 # librespot-core 0.8's vergen-gitcl build dependency is incompatible with vergen 9.1.
 vergen = { version = "=9.0.6", default-features = false }
+isthmus-build = { path = "../isthmus_build" }
 
 [lints]
 workspace = true

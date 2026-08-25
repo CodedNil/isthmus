@@ -7,7 +7,6 @@ edition = "2024"
 proc-macro = true
 
 [dependencies]
-isthmus-build = { path = "../isthmus_build" }
 proc-macro2 = "1"
 proc-macro-crate = "3"
 quote = "1"

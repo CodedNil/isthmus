@@ -20,7 +20,7 @@ https://github.com/user-attachments/assets/86c0bc3c-8e50-49bc-a955-86975910b7ae
 
 ## Usage
 
-`cantus` can be run in two different modes: Wayland native (using `layer-shell` protocol) or as a standard window using `winit`.
+`cantus` currently runs as a native Wayland layer-shell application.
 
 Spotify authentication opens in the browser on first launch; no developer API key is required.
 
