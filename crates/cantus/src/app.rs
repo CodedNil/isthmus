@@ -111,12 +111,12 @@ impl CantusApp {
     /// Initializes the renderer for the first configured surface.
     ///
     /// # Panics
-    /// Panics if initialized twice or Vulkan setup fails.
+    /// Panics if initialized twice or GPU setup fails.
     pub fn initialize_renderer(&mut self, surface: &(impl HasDisplayHandle + HasWindowHandle), width: u32, height: u32) {
         assert!(self.gpu.is_none(), "GPU initialized twice");
         let (gpu, bar_surface) =
             Renderer::new(program(), surface, [width, height], include_bytes!("../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR).expect("failed to initialize renderer");
-        tracing::info!("Using Vulkan device: {}", gpu.device_name());
+        tracing::info!("Using GPU device: {}", gpu.device_name());
         self.gpu = Some(gpu);
         self.bar_surface = Some(bar_surface);
     }

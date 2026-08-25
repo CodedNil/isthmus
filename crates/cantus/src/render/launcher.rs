@@ -5,7 +5,6 @@ use crate::render::{
 use isthmus::{
     FloatExt, Image, Quad,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
-    rgba,
     spirv_std::arch::kill,
     text::{self, TextStyle},
 };
@@ -640,7 +639,7 @@ mod host {
                 color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
 
                 let opacity = mask * 0.82;
-                rgba(color, opacity)
+                color.extend(opacity)
             });
             let padding = line.size * 0.5 + 2.0;
             // GPU: Launcher query text.
@@ -745,7 +744,7 @@ mod host {
                     // GPU: Launcher result image.
                     frame.paint.paint_quad(icon, |fragment: Fragment, image: Image| {
                         let texture = image.sample(fragment.uv);
-                        rgba(texture.truncate(), texture.w)
+                        texture.truncate().extend(texture.w)
                     });
                 }
 

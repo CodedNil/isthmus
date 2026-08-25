@@ -59,6 +59,7 @@ impl<'a> Frame<'a> {
         Geometry: Copy + Into<Quad>,
         Payload: FnOnce(&mut Self, Geometry) -> S::Instance,
     {
+        self.canvas.begin_payload(S::PIPELINE);
         let value = payload(self, geometry);
         self.canvas.emit::<S>(self.surface, geometry.into(), value);
     }
@@ -72,6 +73,7 @@ impl<'a> Frame<'a> {
         S: ShaderSpec,
         Payload: FnOnce(&mut Self, Line) -> S::Instance,
     {
+        self.canvas.begin_payload(S::PIPELINE);
         let value = payload(self, line);
         self.canvas.emit::<S>(self.surface, line.quad(), value);
     }
@@ -130,6 +132,7 @@ impl<'canvas> PaintLayer<'_, 'canvas> {
         Geometry: Copy + Into<Quad>,
         Payload: FnOnce(&mut Frame<'canvas>, Geometry) -> S::Instance,
     {
+        self.frame.canvas.begin_payload(S::PIPELINE);
         let value = payload(self.frame, geometry);
         self.frame.canvas.emit_layer::<S>(self.layer, geometry.into(), value);
     }
@@ -139,6 +142,7 @@ impl<'canvas> PaintLayer<'_, 'canvas> {
         S: ShaderSpec,
         Payload: FnOnce(&mut Frame<'canvas>, Line) -> S::Instance,
     {
+        self.frame.canvas.begin_payload(S::PIPELINE);
         let value = payload(self.frame, line);
         self.frame.canvas.emit_layer::<S>(self.layer, line.quad(), value);
     }

@@ -13,9 +13,9 @@ mod paint;
 fn fragment_entry(text: bool, payload: bool, images: bool, shader_input: &syn::Type, shader_name: &syn::Ident, body: &TokenStream2) -> TokenStream2 {
     let isthmus = isthmus_path();
     let fragment = if text {
-        quote!(let fragment = #isthmus::Fragment::new(pixel, local, draw.quad.size, frame.time, unsafe { #isthmus::spirv_std::ByteAddressableBuffer::from_slice(globals).load(0) });)
+        quote!(let fragment = #isthmus::Fragment::new(pixel, local, draw.quad.size, frame.time, #isthmus::__private::load(globals, 0));)
     } else {
-        quote!(let #shader_name: #shader_input = #isthmus::Fragment::new(pixel, local, draw.quad.size, frame.time, unsafe { #isthmus::spirv_std::ByteAddressableBuffer::from_slice(globals).load(0) });)
+        quote!(let #shader_name: #shader_input = #isthmus::Fragment::new(pixel, local, draw.quad.size, frame.time, #isthmus::__private::load(globals, 0));)
     };
     let text_resources = text.then(|| {
         quote! {
@@ -114,7 +114,6 @@ fn extract_paints(input: TokenStream) -> TokenStream {
     let exports = host_module.map(|module| {
         quote! {
             #[cfg(not(target_arch = "spirv"))]
-            #[allow(unused_imports)]
             pub use #module::*;
         }
     });

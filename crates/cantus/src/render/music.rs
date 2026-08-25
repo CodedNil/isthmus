@@ -6,7 +6,6 @@ use core::f32::consts::{FRAC_PI_2, TAU};
 use isthmus::{
     FloatExt, Image, Quad, ShaderData, Unorm8x4,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
-    rgba,
     spirv_std::arch::{Derivative, kill},
     text::TextStyle,
 };
@@ -340,7 +339,7 @@ impl MusicView {
                     let radius = surface.size.y * 0.5 + surface.bulge() * 0.5;
                     let texture = image.sample(offset / (radius * 2.0) + 0.5);
                     let alpha = texture.w * (1.0 - (offset.length() - radius).smoothstep(-4.0, 0.0)) * (1.0 - surface.distance.smoothstep(-0.5, 0.5)) * alpha;
-                    rgba(texture.truncate(), alpha)
+                    texture.truncate().extend(alpha)
                 });
             }
             // Text render
@@ -516,7 +515,7 @@ impl MusicView {
                 |fragment: Fragment, color: Vec3, opacity: f32| {
                     let centered = fragment.uv * 2.0 - 1.0;
                     let shape = (centered * vec2(0.8, 1.0)).length().smoothstep(1.0, 0.2);
-                    rgba(color, opacity * shape)
+                    color.extend(opacity * shape)
                 },
             );
         }
@@ -561,7 +560,7 @@ impl MusicView {
                     kill();
                 }
                 let color = vec3(1.0, 0.878, 0.824).lerp(Vec3::splat(0.15), bar_distance.min(icon_distance).smoothstep(-2.5, -1.0));
-                rgba(color, alpha)
+                color.extend(alpha)
             },
         );
     }

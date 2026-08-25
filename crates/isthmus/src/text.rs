@@ -3,7 +3,6 @@ use crate::glam::Vec3;
 use crate::{
     Fragment, Quad, Unorm8x4,
     glam::{Vec2, Vec4, vec2},
-    rgba,
 };
 
 #[cfg(target_arch = "spirv")]
@@ -11,7 +10,10 @@ use crate::FloatExt;
 
 #[cfg(not(target_arch = "spirv"))]
 use {
-    crate::backend::{buffer::BufferRange, canvas::Canvas, context::Context},
+    crate::backend::{
+        canvas::Canvas,
+        context::{BufferRange, Context},
+    },
     smallvec::SmallVec,
     std::{ops::Range, sync::Arc, vec::Vec},
     ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
@@ -165,7 +167,7 @@ impl<'a, Globals: Copy> TextFragment<'a, Globals> {
 
     pub fn color(&self, coverage: f32) -> Vec4 {
         let alpha = coverage * self.line.color.to_vec4().w;
-        rgba(self.line.color.to_vec3(), alpha)
+        self.line.color.to_vec3().extend(alpha)
     }
 }
 
@@ -561,8 +563,8 @@ impl Text {
             .filter_map(|(character, id)| metadata.binary_search_by_key(&id, |&(id, _)| id).ok().map(|index| (character, metadata[index].1)))
             .collect::<Vec<_>>();
         let context = canvas.context();
-        let edges = context.upload_static(&curves);
-        let glyphs = context.upload_static(&metadata.iter().map(|(_, meta)| meta.data).collect::<Vec<_>>());
+        let edges = context.upload(&curves);
+        let glyphs = context.upload(&metadata.iter().map(|(_, meta)| meta.data).collect::<Vec<_>>());
         canvas.register_text(glyphs, edges);
         Self {
             shaper: Shaper {

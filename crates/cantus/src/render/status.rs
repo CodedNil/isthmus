@@ -7,7 +7,6 @@ use core::f32::consts::TAU;
 use isthmus::{
     FloatExt, Quad, ShaderData,
     glam::{Vec2, Vec3, vec2, vec3},
-    rgba,
     spirv_std::arch::kill,
     text::TextStyle,
 };
@@ -369,7 +368,7 @@ mod host {
                             (ring * (1.0 - gap)).max(stem)
                         };
                         let color = Vec3::splat(0.76).lerp(vec3(0.95, 0.42, 0.4), hover.max(selected * (0.5 + charge * 0.5)));
-                        rgba(color * (1.0 + charge * 0.45), icon)
+                        (color * (1.0 + charge * 0.45)).extend(icon)
                     },
                 );
                 cursor += ACTION_WIDTH + GAP;

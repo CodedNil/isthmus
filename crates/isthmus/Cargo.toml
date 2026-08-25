@@ -5,14 +5,14 @@ edition = "2024"
 
 [dependencies]
 isthmus_macros = { path = "../isthmus_macros" }
-spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
+spirv-std.workspace = true
 
 [target.'cfg(target_arch = "spirv")'.dependencies]
 glam = { workspace = true, features = ["libm"] }
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
-ash.workspace = true
-ash-window.workspace = true
+pollster.workspace = true
+wgpu = { workspace = true, features = ["std", "vulkan", "spirv"] }
 bytemuck.workspace = true
 glam = { workspace = true, features = ["std"] }
 half = { version = "2.7.1", default-features = false }
