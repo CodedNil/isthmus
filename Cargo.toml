@@ -5,11 +5,16 @@ members = [
     "crates/isthmus_build",
     "crates/isthmus_macros",
     "crates/cantus",
+    "crates/lares",
+    "crates/paries",
 ]
 
 [workspace.dependencies]
 bytemuck = { version = "1.25.2", features = ["derive", "min_const_generics"] }
-glam = { version = "0.33.5", default-features = false, features = ["bytemuck", "u32"] }
+glam = { version = "0.33.5", default-features = false, features = [
+    "bytemuck",
+    "u32",
+] }
 spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
 spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
 serde = { version = "1.0.229", features = ["derive"] }

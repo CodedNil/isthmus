@@ -1756,6 +1756,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lares"
+version = "0.1.0"
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2406,6 +2410,10 @@ name = "palette_math"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e6eb142958d64335fb0e345c5b9ead2ecd6fc438c307e9d7d3c4fd428dbaf12"
+
+[[package]]
+name = "paries"
+version = "0.1.0"
 
 [[package]]
 name = "parking"
