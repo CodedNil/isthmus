@@ -279,7 +279,7 @@ impl MusicView {
                         PILL_MARGIN + (icon_supports[1].y + 1.0).max(icon_supports[0].y - 6.0).max(0.0),
                     ),
             );
-            track_layer.paint_quad(
+            track_layer.paint(
                 render_quad,
                 |fragment: Fragment,
                  pill: Quad,
@@ -376,7 +376,7 @@ impl MusicView {
                 let image = &art.image;
                 let center = pill.center + vec2((pill.size.x - pill.size.y) * 0.5, 0.0);
                 let quad = Quad::new(center, Vec2::splat(pill.size.y), Vec2::X).expanded(PILL_MARGIN);
-                track_layer.paint_quad(quad, |fragment: Fragment, pill: Quad, image: Image, alpha: f32| {
+                track_layer.paint(quad, |fragment: Fragment, pill: Quad, image: Image, alpha: f32| {
                     let surface = sample_pill(pill, fragment.pixel, fragment.globals, fragment.time);
                     let image_center = vec2(surface.size.x - surface.size.y, 0.0) + Vec2::splat(surface.size.y * 0.5);
                     let offset = surface.local - image_center;
@@ -470,7 +470,7 @@ impl MusicView {
                             let image = &art.image;
                             let desaturation = 0.2
                                 * f32::from(secondary && (mouse_pressure <= 0.0 || mouse_distance > ICON_WIDTH * 0.5));
-                            track_layer.paint_quad(
+                            track_layer.paint(
                                 quad,
                                 |fragment: Fragment, image: Image, alpha: f32, desaturation: f32| {
                                     let texture = image.sample(fragment.uv);
@@ -492,7 +492,7 @@ impl MusicView {
                             burst = true;
                         }
                         let fill = ((*rating as f32 - slot as f32 * 2.0) * 0.5).saturate();
-                        track_layer.paint_quad(quad, |fragment: Fragment, fill: f32, alpha: f32| {
+                        track_layer.paint(quad, |fragment: Fragment, fill: f32, alpha: f32| {
                             let split = fragment.uv.x - fill;
                             let unselected = (split / split.fwidth() + 0.5).saturate();
                             let star = sd_star((fragment.uv * 2.0 - 1.0) * 18.0, 5.6, 3.58) - 1.12;
@@ -590,7 +590,7 @@ impl MusicView {
             let age = elapsed / (particle.expires_at - particle.spawned_at);
             let opacity = (1.0 - age) * elapsed.smoothstep(0.0, 0.15);
             let color = particle.color;
-            context.frame.paint_quad(
+            context.frame.paint(
                 Quad::oriented(
                     particle.origin + particle.velocity * elapsed,
                     vec2(10.0, 5.0) * (age + 0.5),
@@ -627,7 +627,7 @@ impl MusicView {
         if response.clicked() {
             music.toggle_playing();
         }
-        context.frame.paint_quad(
+        context.frame.paint(
             Quad::from_min_max(
                 vec2(bar.playhead_x - half_width, PANEL_START - 5.0),
                 vec2(bar.playhead_x + half_width, PANEL_START + panel_height + 5.0),

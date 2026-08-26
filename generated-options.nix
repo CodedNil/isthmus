@@ -60,7 +60,7 @@
     default = builtins.fromJSON "true";
     description = "Whether to show synchronized lyrics.";
   };
-  tempestas_enabled = lib.mkOption {
+  weathertime_enabled = lib.mkOption {
     type = lib.types.bool;
     default = builtins.fromJSON "true";
     description = "Whether to show the weather and calendar module.";

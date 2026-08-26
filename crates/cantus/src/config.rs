@@ -1,4 +1,4 @@
-use crate::{music::MAX_PLAYLIST_TARGETS, render::tempestas};
+use crate::{music::MAX_PLAYLIST_TARGETS, render::weathertime};
 use arrayvec::ArrayVec;
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};
@@ -32,9 +32,9 @@ pub struct Config {
     pub lyrics_enabled: bool,
 
     /// Whether to show the weather and calendar module.
-    pub tempestas_enabled: bool,
+    pub weathertime_enabled: bool,
     /// Up to three IANA timezones shown with approximate city weather.
-    pub timezones: ArrayVec<String, { tempestas::MAX_WORLD_CLOCKS }>,
+    pub timezones: ArrayVec<String, { weathertime::MAX_WORLD_CLOCKS }>,
 
     /// Whether to show the system status module.
     pub status_enabled: bool,
@@ -80,7 +80,7 @@ impl Default for Config {
             monitor: None,
             height: 50.0,
             timezones: ArrayVec::new(),
-            tempestas_enabled: true,
+            weathertime_enabled: true,
             status_enabled: true,
             layer: Layer::Top,
             layer_anchor: LayerAnchor::Top,

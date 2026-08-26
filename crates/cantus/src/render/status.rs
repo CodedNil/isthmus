@@ -4,7 +4,7 @@ use crate::render::{
         PILL_MARGIN, VISIBLE_ALPHA, fill, fill_rounded_box, hash, sample_pill, sd_capsule_box, sd_chevron,
         sd_rounded_box, segment_distance, smooth_union, stroke,
     },
-    tempestas::{StatusSky, scene, sky_phase},
+    weathertime::{StatusSky, scene, sky_phase},
 };
 use core::f32::consts::TAU;
 use isthmus::{
@@ -149,7 +149,7 @@ mod host {
             };
 
             // GPU: Status background.
-            context.frame.paint_quad(
+            context.frame.paint(
                 pill_quad.expanded(PILL_MARGIN),
                 |fragment: Fragment, pill_quad: Quad, sky: StatusSky| {
                     let sample = sample_pill(pill_quad, fragment.pixel, fragment.globals, fragment.time);
@@ -197,7 +197,7 @@ mod host {
                     .line(&label, 11.0, 700.0)
                     .fit(GAP + 5.0, center - half_width..center + half_width);
                 // GPU: Processor monitor.
-                context.frame.paint_quad(
+                context.frame.paint(
                     section(center, GRAPH_WIDTH),
                     |fragment: Fragment, processor: ProcessorStatus, history_scroll: f32, show_pins: bool| {
                         let half_width = GRAPH_WIDTH * 0.5 - GAP * 0.5;
@@ -276,7 +276,7 @@ mod host {
                 // GPU: Battery indicator.
                 context
                     .frame
-                    .paint_quad(section(center, DATA_WIDTH), |fragment: Fragment, battery_level: f32| {
+                    .paint(section(center, DATA_WIDTH), |fragment: Fragment, battery_level: f32| {
                         let time = fragment.time;
                         let point = fragment.local / 0.8;
 
@@ -326,7 +326,7 @@ mod host {
                 Platform::set_volume(volume.abs());
             }
             // GPU: Audio spectrum and volume.
-            context.frame.paint_quad(
+            context.frame.paint(
                 section(center, DATA_WIDTH),
                 |fragment: Fragment, audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS], volume: f32| {
                     // Seven-band spectrum.
@@ -364,7 +364,7 @@ mod host {
                 let power_progress = (response.held_seconds / 1.5).saturate();
                 let reboot = action == 1;
                 // GPU: Power action icon.
-                context.frame.paint_quad(
+                context.frame.paint(
                     section(center, ACTION_WIDTH),
                     |fragment: Fragment, reboot: bool, hover: f32, selected: f32, power_progress: f32| {
                         let time = fragment.time;

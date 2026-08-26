@@ -160,7 +160,7 @@ impl VisitMut for InlinePaints {
     fn visit_expr_mut(&mut self, i: &mut syn::Expr) {
         if let syn::Expr::MethodCall(call) = i {
             let text = call.method == "paint_text";
-            if (call.method == "paint_quad" || text) && !call.args.is_empty() {
+            if (call.method == "paint" || text) && !call.args.is_empty() {
                 match self.expand_call(call, text) {
                     Ok(Some(replacement)) => {
                         *i = replacement;
@@ -183,7 +183,7 @@ impl InlinePaints {
         if call.args.len() != 2 {
             return Err(syn::Error::new_spanned(
                 &call.args,
-                "paint_quad and paint_text take geometry followed by a typed shader closure; shader inputs are inferred",
+                "paint and paint_text take geometry followed by a typed shader closure; shader inputs are inferred",
             ));
         }
         let Some(syn::Expr::Closure(closure)) = call.args.last().cloned() else {
@@ -233,7 +233,7 @@ impl InlinePaints {
         } else if shader_name.ident != "fragment" {
             return Err(syn::Error::new_spanned(
                 &shader_input.pat,
-                "paint_quad shader input must be the first parameter and named `fragment`",
+                "paint shader input must be the first parameter and named `fragment`",
             ));
         }
         let shader_inputs = inputs
