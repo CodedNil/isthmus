@@ -389,6 +389,7 @@ impl MusicView {
                     texture.truncate().extend(alpha)
                 });
             }
+
             // Text render
             let (left, right) = (18.0, width - panel_height - 8.0);
             if right > left

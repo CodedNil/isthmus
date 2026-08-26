@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
 use tracing::{Level, level_filters::LevelFilter};
-use tracing_subscriber::{Layer as _, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{Layer, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 pub type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 pub type AppUpdater = Sender<Update<CantusApp>>;
@@ -25,6 +25,20 @@ pub type AppUpdater = Sender<Update<CantusApp>>;
 pub struct Background {
     runtime: Handle,
     updater: AppUpdater,
+}
+
+pub fn run() {
+    #[cfg(all(debug_assertions, feature = "generate-nix"))]
+    config::nix_options::generate();
+
+    let filter = Targets::new()
+        .with_default(LevelFilter::WARN)
+        .with_target("cantus", Level::INFO);
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_writer(io::stderr).with_filter(filter))
+        .init();
+
+    Platform::run();
 }
 
 pub fn spawn_thread(name: &'static str, job: impl FnOnce() + Send + 'static) {
@@ -141,18 +155,13 @@ impl CantusApp {
         let launcher_open = launcher.is_some();
         let (surface, [width, height]) = launcher.unwrap_or((bar_surface, screen_size));
         let screen_size = vec2(width, height);
-        let config = &self.config;
-        let interaction = &mut self.interaction;
-        let launcher = &mut self.launcher;
-        let bar = &mut self.bar;
-        let music = &mut self.music;
         let result = gpu.render(|render| {
             render.surface(surface, screen_size, |gpu| {
-                let mut context = UiContext::new(gpu, config, interaction);
+                let mut context = UiContext::new(gpu, &self.config, &mut self.interaction);
                 if launcher_open {
-                    launcher.show(&mut context);
+                    self.launcher.show(&mut context);
                 } else {
-                    bar.show(&mut context, music);
+                    self.bar.show(&mut context, &mut self.music);
                 }
                 context.finish();
             });
@@ -169,18 +178,4 @@ pub fn update(work: impl FnOnce(&mut CantusApp) + Send + 'static) -> Update<Cant
 
 pub fn send_update(sender: &AppUpdater, work: impl FnOnce(&mut CantusApp) + Send + 'static) -> bool {
     sender.send(update(work)).is_ok()
-}
-
-pub fn run() {
-    #[cfg(all(debug_assertions, feature = "generate-nix"))]
-    config::nix_options::generate();
-
-    let filter = Targets::new()
-        .with_default(LevelFilter::WARN)
-        .with_target("cantus", Level::INFO);
-    tracing_subscriber::registry()
-        .with(fmt::layer().with_writer(io::stderr).with_filter(filter))
-        .init();
-
-    Platform::run();
 }
