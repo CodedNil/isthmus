@@ -60,7 +60,7 @@ impl Default for Pointer {
 #[derive(Clone, Copy)]
 enum ButtonEvent {
     Press,
-    Release,
+    Release { drag_origin: Vec2, was_dragging: bool },
 }
 
 #[derive(Clone, Copy)]
@@ -287,8 +287,9 @@ impl Interaction {
             } else {
                 self.hot == Some(slot)
             };
-        let release = matches!(self.event, Some(ButtonEvent::Release));
-        let gesture = if drag.is_some() && active && self.dragging() && release {
+        let release = matches!(self.event, Some(ButtonEvent::Release { .. }));
+        let was_dragging = matches!(self.event, Some(ButtonEvent::Release { was_dragging: true, .. }));
+        let gesture = if drag.is_some() && active && was_dragging {
             Gesture::DragReleased
         } else if active && hovered && release {
             Gesture::Clicked
@@ -305,8 +306,14 @@ impl Interaction {
             scroll: if hovered { mem::take(&mut self.scroll) } else { 0 },
             held_seconds: self.held_seconds,
             previous_held_seconds: self.previous_held_seconds,
-            drag_origin: match self.pointer {
-                Pointer::Held { origin, .. } => origin,
+            drag_origin: match (self.pointer, self.event) {
+                (Pointer::Held { origin, .. }, _)
+                | (
+                    _,
+                    Some(ButtonEvent::Release {
+                        drag_origin: origin, ..
+                    }),
+                ) => origin,
                 _ => self.mouse_pos(),
             },
         }
@@ -345,7 +352,13 @@ impl Interaction {
     }
 
     fn release(&mut self) {
-        self.event = self.down().then_some(ButtonEvent::Release);
+        self.event = match self.pointer {
+            Pointer::Held { origin, dragging, .. } => Some(ButtonEvent::Release {
+                drag_origin: origin,
+                was_dragging: dragging,
+            }),
+            _ => None,
+        };
         let position = self.mouse_pos();
         self.pointer = Pointer::Hovering(position);
         self.hot = self.hit_test(position);

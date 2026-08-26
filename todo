@@ -19,6 +19,4 @@ outline still doesnt work perfectly for example for M
 do a pass through everything, cantus and isthmus, identify cruft and legacy stuff to remove, identify places where we arent using immediate mode to its fullest potential, identify some radical suggestions to improve both the backend and frontend of isthmus/cantus
 
 
-have the paint output give you the options for blending? and then it auto handles premultiply etc? custom Rgba struct instead of vec4?
-
 replace isthmus build with cargo gpu
