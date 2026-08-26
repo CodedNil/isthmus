@@ -55,12 +55,12 @@ impl<'a> Frame<'a> {
         TextScope::new(self.text)
     }
 
-    /// Paints a quad with an inline Rust-GPU fragment shader.
+    /// Paints geometry with an inline Rust-GPU fragment shader.
     ///
     /// The inline closure receives [`crate::Fragment`], followed by explicitly typed
     /// values inferred from its surrounding host function.
     ///
-    pub fn paint_quad<S, Geometry, Payload>(&mut self, geometry: Geometry, payload: Payload)
+    pub fn paint<S, Geometry, Payload>(&mut self, geometry: Geometry, payload: Payload)
     where
         S: ShaderSpec,
         Geometry: Copy + Into<Quad>,
@@ -73,7 +73,7 @@ impl<'a> Frame<'a> {
 
     /// Paints shaped text with an inline Rust-GPU fragment shader.
     ///
-    /// The closure inputs match [`Self::paint_quad`], starting with [`crate::TextFragment`].
+    /// The closure inputs match [`Self::paint`], starting with [`crate::TextFragment`].
     ///
     pub fn paint_text<S, Payload>(&mut self, line: Line, payload: Payload)
     where
@@ -128,7 +128,7 @@ pub struct PaintLayer<'frame, 'canvas> {
 }
 
 impl<'canvas> PaintLayer<'_, 'canvas> {
-    pub fn paint_quad<S, Geometry, Payload>(&mut self, geometry: Geometry, payload: Payload)
+    pub fn paint<S, Geometry, Payload>(&mut self, geometry: Geometry, payload: Payload)
     where
         S: ShaderSpec,
         Geometry: Copy + Into<Quad>,

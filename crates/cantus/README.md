@@ -35,33 +35,6 @@ imports = [ inputs.cantus.homeManagerModules.default ];
 programs.cantus = {
   enable = true;
   package = pkgs.cantus;
-  settings = {
-    monitor = "eDP-1";
-    tempestas_enabled = true;
-    timezones = [ "America/Los_Angeles" "Australia/Sydney" ];
-    status_enabled = true;
-    lyrics_enabled = true;
-    height = 40.0;
-    timeline_future_minutes = 12.0;
-    timeline_past_minutes = 1.5;
-    history_width = 100.0;
-    playlists = [ "Rock & Roll" "Instrumental" "Pop" ];
-    ratings_enabled = true;
-    search_providers = [
-      {
-        name = "DuckDuckGo";
-        url = "https://duckduckgo.com/?q={searchTerms}";
-        alias = "!ddg";
-        icon = "https://duckduckgo.com/favicon.ico";
-      }
-      {
-        name = "GitHub";
-        url = "https://github.com/search?q={searchTerms}";
-        alias = "!gh";
-        icon = "https://github.com/favicon.ico";
-      }
-    ];
-  };
 };
 ```
 

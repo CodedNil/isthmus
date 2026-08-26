@@ -777,7 +777,7 @@ mod host {
                 PANEL_START + height + EXTENSION * expansion + PILL_MARGIN,
             );
             // GPU: Current weather pill unified with its expanded panel.
-            context.frame.paint_quad(
+            context.frame.paint(
                 Quad::from_min_max(render_min, render_max),
                 |fragment: Fragment,
                  pill: Quad,
@@ -978,7 +978,7 @@ mod host {
                 let alpha = reveal_progress(expansion, row_origin.y + size.y * 0.5);
                 let forecast_pill = Quad::from_min_max(origin + row_origin, origin + row_origin + size);
                 // GPU: Hourly or daily forecast row.
-                context.frame.paint_quad(
+                context.frame.paint(
                     forecast_pill.expanded(PILL_MARGIN),
                     |fragment: Fragment,
                      forecast_pill: Quad,

@@ -671,7 +671,7 @@ mod host {
             // GPU: Launcher panel and search selection.
             context
                 .frame
-                .paint_quad(quad, |fragment: Fragment, size: Vec2, caret: Vec2, selection: Vec2| {
+                .paint(quad, |fragment: Fragment, size: Vec2, caret: Vec2, selection: Vec2| {
                     let mask = fill_rounded_box(fragment.local, size * 0.5, BACKGROUND_RADIUS as f32);
                     if mask <= 0.0 {
                         kill();
@@ -785,7 +785,7 @@ mod host {
                 };
                 let quad = pill.expanded(PILL_MARGIN);
                 // GPU: Launcher result row.
-                context.frame.paint_quad(
+                context.frame.paint(
                     quad,
                     |fragment: Fragment, pill: Quad, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
                         let surface = sample_pill(pill, fragment.pixel, fragment.globals, fragment.time);
@@ -828,7 +828,7 @@ mod host {
                         Vec2::X,
                     );
                     // GPU: Launcher result image.
-                    context.frame.paint_quad(icon, |fragment: Fragment, image: Image| {
+                    context.frame.paint(icon, |fragment: Fragment, image: Image| {
                         let texture = image.sample(fragment.uv);
                         texture.truncate().extend(texture.w)
                     });

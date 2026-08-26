@@ -3,7 +3,7 @@ pub mod lyrics;
 pub mod music;
 pub mod sdf;
 pub mod status;
-pub mod tempestas;
+pub mod weathertime;
 
 use isthmus::{
     ShaderData,
@@ -91,7 +91,7 @@ impl<'a> UiContext<'a> {
 #[cfg(not(target_arch = "spirv"))]
 pub struct Bar {
     pub(crate) lyrics: Option<lyrics::LyricsView>,
-    pub(crate) weather: Option<tempestas::WeatherPanel>,
+    pub(crate) weather: Option<weathertime::WeatherPanel>,
     pub(crate) status: Option<status::StatusPanel>,
     music_view: music::MusicView,
 }
@@ -104,8 +104,8 @@ impl Bar {
                 .lyrics_enabled
                 .then(|| lyrics::LyricsView::new(enrichment.clone())),
             weather: config
-                .tempestas_enabled
-                .then(|| tempestas::WeatherPanel::new(&config.timezones, background, enrichment.http.clone())),
+                .weathertime_enabled
+                .then(|| weathertime::WeatherPanel::new(&config.timezones, background, enrichment.http.clone())),
             status: config.status_enabled.then(|| status::StatusPanel::new(background)),
             music_view: music::MusicView::default(),
         }
@@ -115,7 +115,7 @@ impl Bar {
         let status_width = self.status.as_ref().map_or(0.0, |status| status.width() + GAP);
         let reserved = context.config.history_width
             + GAP
-            + f32::from(context.config.tempestas_enabled) * (tempestas::WIDTH + GAP)
+            + f32::from(context.config.weathertime_enabled) * (weathertime::WIDTH + GAP)
             + status_width;
         let px_per_ms =
             (context.frame.screen_size.x - reserved).max(84.0) / (context.config.timeline_future_minutes * 60_000.0);
@@ -129,7 +129,7 @@ impl Bar {
         let sky = self
             .weather
             .as_mut()
-            .map_or_else(tempestas::StatusSky::default, |weather| {
+            .map_or_else(weathertime::StatusSky::default, |weather| {
                 weather.show(context, status_width)
             });
         if let Some(status) = self.status.as_mut() {

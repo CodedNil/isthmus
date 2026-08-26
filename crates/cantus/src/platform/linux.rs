@@ -8,7 +8,7 @@ use crate::{
         launcher::{BACKGROUND_RADIUS, LauncherKey},
         lyrics::EXTENSION as LYRICS_EXTENSION,
         status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
-        tempestas::EXTENSION as WEATHER_EXTENSION,
+        weathertime::EXTENSION as WEATHER_EXTENSION,
     },
 };
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
@@ -654,7 +654,7 @@ impl LayerShellApp {
     }
 
     fn bar_surface_size(&self) -> (f32, f32) {
-        let extension = if self.cantus.config.tempestas_enabled {
+        let extension = if self.cantus.config.weathertime_enabled {
             WEATHER_EXTENSION
         } else if self.cantus.config.lyrics_enabled {
             LYRICS_EXTENSION
