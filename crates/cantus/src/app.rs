@@ -80,6 +80,7 @@ pub struct CantusApp {
     pub(crate) config: Config,
     pub(crate) enrichment: Enrichment,
     pub(crate) interaction: Interaction,
+    occluded_interaction: Interaction,
     _runtime: Runtime,
 }
 
@@ -108,6 +109,7 @@ impl Default for CantusApp {
             enrichment,
             music: Music::spotify(&config, &updater, &background),
             interaction: Interaction::default(),
+            occluded_interaction: Interaction::default(),
             config,
             _runtime: runtime,
         }
@@ -152,19 +154,25 @@ impl CantusApp {
         let Some(bar_surface) = self.bar_surface else {
             return;
         };
-        let launcher_open = launcher.is_some();
-        let (surface, [width, height]) = launcher.unwrap_or((bar_surface, screen_size));
-        let screen_size = vec2(width, height);
         let result = gpu.render(|render| {
-            render.surface(surface, screen_size, |gpu| {
-                let mut context = UiContext::new(gpu, &self.config, &mut self.interaction);
-                if launcher_open {
-                    self.launcher.show(&mut context);
-                } else {
-                    self.bar.show(&mut context, &mut self.music);
-                }
+            let bar_interaction = if launcher.is_some() {
+                &mut self.occluded_interaction
+            } else {
+                &mut self.interaction
+            };
+            render.surface(bar_surface, vec2(screen_size[0], screen_size[1]), |gpu| {
+                let mut context = UiContext::new(gpu, &self.config, bar_interaction);
+                self.bar.show(&mut context, &mut self.music);
                 context.finish();
             });
+
+            if let Some((launcher_surface, [width, height])) = launcher {
+                render.surface(launcher_surface, vec2(width, height), |gpu| {
+                    let mut context = UiContext::new(gpu, &self.config, &mut self.interaction);
+                    self.launcher.show(&mut context);
+                    context.finish();
+                });
+            }
         });
         if let Err(error) = result {
             tracing::error!(%error, "Could not render frame");

@@ -632,12 +632,16 @@ mod host {
                 return;
             }
             let (origin, size) = self.bounds(context.frame.screen_size);
-            context.interaction.input_region(Rect::new(
-                0.0,
-                0.0,
-                context.frame.screen_size.x,
-                context.frame.screen_size.y,
-            ));
+            let screen = Rect::new(0.0, 0.0, context.frame.screen_size.x, context.frame.screen_size.y);
+            let backdrop = context.interaction.interact(screen);
+            context.interaction.input_region(screen);
+            if backdrop.clicked()
+                && !Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y)
+                    .contains(context.interaction.mouse_pos())
+            {
+                self.close();
+                return;
+            }
             let (left, right) = (PADDING + 34.0, size.x - PADDING);
             if self.field.touched {
                 self.field.touched = false;
