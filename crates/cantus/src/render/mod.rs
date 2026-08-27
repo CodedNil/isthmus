@@ -90,7 +90,6 @@ impl<'a> UiContext<'a> {
 
 #[cfg(not(target_arch = "spirv"))]
 pub struct Bar {
-    pub(crate) lyrics: Option<lyrics::LyricsView>,
     pub(crate) weather: Option<weathertime::WeatherPanel>,
     pub(crate) status: Option<status::StatusPanel>,
     music_view: music::MusicView,
@@ -100,9 +99,6 @@ pub struct Bar {
 impl Bar {
     pub fn new(config: &Config, background: &Background, enrichment: &Enrichment) -> Self {
         Self {
-            lyrics: config
-                .lyrics_enabled
-                .then(|| lyrics::LyricsView::new(enrichment.clone())),
             weather: config
                 .weathertime_enabled
                 .then(|| weathertime::WeatherPanel::new(&config.timezones, background, enrichment.http.clone())),
@@ -123,8 +119,8 @@ impl Bar {
             playhead_x: context.config.history_width + context.config.timeline_past_minutes * 60_000.0 * px_per_ms,
             px_per_ms,
         };
-        if let Some(lyrics) = self.lyrics.as_mut() {
-            lyrics.show(context, music, layout);
+        if context.config.lyrics_enabled {
+            lyrics::show(context, music, layout);
         }
         let sky = self
             .weather

@@ -442,9 +442,6 @@ impl MusicView {
                             + (icon as f32 - (count.saturating_sub(1)) as f32 * 0.5) * ICON_SPACING * expansion,
                         PANEL_START + panel_height * 0.975 - 1.0 + f32::from(secondary) * ICON_SPACING * expansion,
                     );
-                    context
-                        .interaction
-                        .input_region(Rect::from_center(center, Vec2::splat(ICON_REACTION_RADIUS)));
                     let response = context
                         .interaction
                         .interact(Rect::from_center(center, Vec2::splat(ICON_WIDTH * 0.5)));

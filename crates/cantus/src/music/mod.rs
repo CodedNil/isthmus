@@ -1,7 +1,7 @@
 use crate::{
     app::{AppUpdater, Background},
     config::Config,
-    render::{lyrics::Lyrics, music::AudioFeatures},
+    render::music::AudioFeatures,
 };
 use arrayvec::ArrayString;
 use std::{
@@ -17,9 +17,11 @@ use std::{
 use tracing::{info, warn};
 
 mod enrichment;
+mod lyrics;
 mod spotify;
 
 pub use enrichment::{ArtState, Enrichment, Fetch};
+pub use lyrics::Lyrics;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
@@ -29,13 +31,7 @@ pub const MAX_PLAYLIST_TARGETS: usize = 8;
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
 type PlaylistTracks = Arc<HashSet<TrackId>>;
 
-pub struct LyricSegment {
-    pub start_ms: f32,
-    pub end_ms: f32,
-    pub text: String,
-    pub lane: usize,
-    pub line_end: bool,
-}
+pub use lyrics::LyricSegment;
 
 pub struct Music {
     pub playing: bool,
@@ -82,9 +78,16 @@ impl Timeline {
     }
 
     pub fn track_at_playhead(&self, queue: &[Track]) -> Option<(usize, f32)> {
+        self.span_at_playhead(queue)
+            .filter(|(index, elapsed)| *elapsed <= queue[*index].duration_ms as f32)
+    }
+
+    /// Returns the queue item covering the playhead, including its trailing spacing.
+    pub fn span_at_playhead(&self, queue: &[Track]) -> Option<(usize, f32)> {
         let mut start_ms = self.queue_start_ms;
         queue.iter().enumerate().find_map(|(index, track)| {
-            let current = (start_ms <= 0.0 && start_ms + track.duration_ms as f32 >= 0.0).then_some((index, -start_ms));
+            let elapsed = -start_ms;
+            let current = (elapsed >= 0.0 && elapsed <= track.queue_span_ms()).then_some((index, elapsed));
             start_ms += track.queue_span_ms();
             current
         })
@@ -150,11 +153,12 @@ impl Music {
         let index = self.timeline.index.min(self.queue.len() - 1);
         let target = -self.timeline.position_now() - self.queue[..index].iter().map(Track::queue_span_ms).sum::<f32>()
             + drag_offset_ms;
-        let difference = target - self.timeline.queue_start_ms;
-        let next = if !dragging && difference.abs() > 200.0 {
-            self.timeline.queue_start_ms + difference * 3.5 * delta_time
-        } else {
+        let predicted = self.timeline.queue_start_ms - self.timeline.rate * delta_time * 1_000.0;
+        let correction = target - predicted;
+        let next = if dragging || correction.abs() > 500.0 {
             target
+        } else {
+            predicted + correction * (1.0 - (-delta_time / 0.3).exp())
         };
         let target_movement = (next - self.timeline.queue_start_ms) * delta_time;
         self.timeline.movement += (target_movement - self.timeline.movement) * (delta_time * 10.0).min(1.0);
