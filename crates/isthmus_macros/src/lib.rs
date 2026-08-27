@@ -27,7 +27,7 @@ fn fragment_entry(
         quote! {
             #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] placed_glyphs: &[#isthmus::text::PlacedGlyph],
             #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] glyphs: &[#isthmus::text::Glyph],
-            #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] edges: &[#isthmus::text::Edge],
+            #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] curves: &[#isthmus::text::Curve],
         }
     });
     let payload_resource =

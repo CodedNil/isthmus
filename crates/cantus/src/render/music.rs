@@ -1,13 +1,13 @@
 use crate::render::{
     Fragment, PANEL_START, TextFragment,
     sdf::{
-        PILL_MARGIN, VISIBLE_ALPHA, hash, pill_sheen, ripple_light, sample_pill, sd_capsule_box, sd_rounded_box,
+        PILL_MARGIN, VISIBLE_ALPHA, cantus_surface, hash, sample_pill, sd_capsule_box, sd_rounded_box,
         sd_rounded_triangle, sd_star, simplex_noise,
     },
 };
 use core::f32::consts::{FRAC_PI_2, TAU};
 use isthmus::{
-    FloatExt, Image, Quad, Unorm8x4,
+    FloatExt, Image, Quad, Sdf, Unorm8x4,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::{Derivative, kill},
 };
@@ -69,11 +69,12 @@ fn particle_color(color: Vec3) -> Vec3 {
         * 2.0
 }
 
-fn icon_color(color: Vec3, shape: f32, alpha: f32) -> Vec4 {
-    let mask = (0.5 - shape).saturate();
-    let shadow = (-shape.max(0.0) * 0.5).exp();
-    let bevel = 1.0 - shape.smoothstep(0.0, -5.0);
-    ((color + bevel * bevel * 0.045) * mask * alpha).extend(mask.max(shadow * shadow * 0.2) * alpha)
+fn icon_color(color: Vec3, shape: Sdf, alpha: f32) -> Vec4 {
+    let mask = shape.fill();
+    let shadow = (-shape.distance.max(0.0) * 0.5).exp();
+    let bevel = 1.0 - shape.distance.smoothstep(0.0, -5.0);
+    let coverage = mask.max(shadow * shadow * 0.2) * alpha;
+    ((color + bevel * bevel * 0.045) * mask * alpha / coverage.max(0.0001)).extend(coverage)
 }
 
 /// Twinkling points for acoustic tracks.
@@ -160,16 +161,15 @@ impl MusicView {
             let expansion = track.runtime.track_expansion.smoothstep(0.0, 1.0);
             // Track content
             let track_text = (width > panel_height + 26.0 || expansion > 0.0).then(|| {
-                let without_suffix = track
+                let title = track
                     .name
                     .split_once(" -")
-                    .map_or(track.name.as_str(), |(name, _)| name);
-                let title = without_suffix
+                    .map_or(track.name.as_str(), |(name, _)| name)
                     .split('(')
                     .next()
-                    .filter(|title| !title.trim().is_empty())
-                    .unwrap_or(&track.name)
+                    .unwrap_or_default()
                     .trim();
+                let title = if title.is_empty() { &track.name } else { title };
                 let seconds = (track_start_ms / 1000.0).abs();
                 let details = if seconds >= 60.0 {
                     let whole_seconds = seconds as u32;
@@ -243,7 +243,6 @@ impl MusicView {
                 ),
             ];
             let pill_rect = Rect::new(x, PANEL_START, x + width.max(panel_height), PANEL_START + panel_height);
-            let hover_rect = pill_rect;
             let colors = track.runtime.art.palette();
             let art = track.runtime.art.ready();
             let alpha = width
@@ -255,7 +254,7 @@ impl MusicView {
                 * 2.328_306_4e-10;
             let audio = track.runtime.audio_features.ready().copied().unwrap_or_default();
             // Pill interaction
-            let body = context.interaction.drag(track.interaction_id, hover_rect);
+            let body = context.interaction.drag(track.interaction_id, pill_rect);
             let mut hovered = body.hovered();
             let mut track_layer = paints.front(hovered);
             if body.clicked() && track.id.is_some() {
@@ -289,27 +288,26 @@ impl MusicView {
                  colors: [Unorm8x4; PALETTE_COLORS],
                  audio: AudioFeatures| {
                     let bottom = pill.center.y + pill.size.y * 0.5;
-                    let mut surface = sample_pill(pill, fragment.pixel, fragment.globals, fragment.time);
-                    let mut index = 0;
-                    while index < 2 {
-                        let support = icon_supports[index];
-                        let half_size = support * 0.5;
-                        let center = vec2(pill.center.x, bottom - 6.0 + index as f32 * 7.0 + half_size.y);
-                        surface = surface.union(
-                            sd_rounded_box(fragment.pixel - center, half_size, half_size.y),
-                            sd_rounded_box(
-                                fragment.globals.pointer - center + vec2(0.0, 10.0),
-                                half_size,
-                                half_size.y,
-                            ),
-                            9.0,
-                            (support.y
-                                / (PRIMARY_SUPPORT_DEPTH
-                                    + index as f32 * (SECONDARY_SUPPORT_DEPTH - PRIMARY_SUPPORT_DEPTH)))
-                                .saturate(),
-                        );
-                        index += 1;
-                    }
+                    let surface = cantus_surface(pill, fragment.pixel, fragment.globals, fragment.time, |point| {
+                        let mut shape =
+                            sd_capsule_box(pill.local(point), (pill.size.x - pill.size.y) * 0.5, pill.size.y * 0.5);
+                        let mut index = 0;
+                        while index < 2 {
+                            let support = icon_supports[index];
+                            let half_size = support * 0.5;
+                            let center = vec2(pill.center.x, bottom - 6.0 + index as f32 * 7.0 + half_size.y);
+                            shape = shape.smooth_union(
+                                sd_rounded_box(point - center, half_size, half_size.y),
+                                9.0,
+                                (support.y
+                                    / (PRIMARY_SUPPORT_DEPTH
+                                        + index as f32 * (SECONDARY_SUPPORT_DEPTH - PRIMARY_SUPPORT_DEPTH)))
+                                    .saturate(),
+                            );
+                            index += 1;
+                        }
+                        shape
+                    });
 
                     if surface.alpha * alpha <= VISIBLE_ALPHA {
                         kill();
@@ -358,16 +356,15 @@ impl MusicView {
                         .clamp(Vec3::splat(0.035), Vec3::splat(0.92))
                         * (0.52 / luma.max(0.001)).min(1.0)
                         * (0.96 + audio.valence * 0.06 + beat * 0.5)
-                        * (0.84 + surface.refracted_uv().y.smoothstep(0.45, 1.0) * 0.1);
+                        * (0.84 + (surface.refracted / surface.size).y.smoothstep(0.45, 1.0) * 0.1);
 
                     // Material details sit above the plasma but below refraction/ripple response.
                     color +=
                         colors[3].to_vec3().lerp(Vec3::ONE, 0.25) * speckle(surface.local, fragment.time, seed, audio);
                     color *= 1.0 + caustics(surface.local / surface.size.y, fragment.time, seed, audio);
-                    color += color.lerp(Vec3::ONE, 0.32) * pill_sheen(surface.distance);
-                    color = ripple_light(color, surface.ripple_flash);
-
-                    surface.color(color) * alpha
+                    let mut output = surface.color(color);
+                    output.w *= alpha;
+                    output
                 },
             );
 
@@ -406,8 +403,9 @@ impl MusicView {
                             let surface = sample_pill(pill, text.pixel, text.globals, text.time);
                             let image_center =
                                 vec2(surface.size.x - surface.size.y, 0.0) + Vec2::splat(surface.size.y * 0.5);
-                            let alpha = text.alpha_at(pill.center - pill.size * 0.5 + surface.refracted)
+                            let alpha = text.alpha_at(surface.content_point(text.pixel))
                                 * sd_capsule_box(surface.refracted - image_center, 0.0, surface.size.y * 0.5)
+                                    .distance
                                     .smoothstep(2.0, 18.0)
                                 * surface.mask
                                 * alpha;
@@ -645,16 +643,16 @@ impl MusicView {
                     - 3.5;
                 let play_scale = fragment.globals.bar_height * 0.18 * (1.0 + icon_morph * (1.0 - icon_presence));
                 let play_distance = sd_rounded_triangle(fragment.local.perp(), play_scale, play_scale * 0.5);
-                let icon_distance = pause_distance.lerp(play_distance, icon_morph);
-                let bar_mask = 1.0 - bar_distance.smoothstep(-0.8, 0.2);
-                let icon_mask = (1.0 - icon_distance.smoothstep(-0.8, 0.2)) * icon_presence;
+                let icon_distance = Sdf::new(pause_distance).lerp(play_distance, icon_morph);
+                let bar_mask = bar_distance.fill();
+                let icon_mask = icon_distance.fill() * icon_presence;
                 let alpha = icon_mask.max(bar_mask);
                 if alpha <= 0.0 {
                     kill();
                 }
                 let color = vec3(1.0, 0.878, 0.824).lerp(
                     Vec3::splat(0.15),
-                    bar_distance.min(icon_distance).smoothstep(-2.5, -1.0),
+                    bar_distance.union(icon_distance).distance.smoothstep(-2.5, -1.0),
                 );
                 color.extend(alpha)
             },

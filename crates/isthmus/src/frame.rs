@@ -82,7 +82,8 @@ impl<'a> Frame<'a> {
     {
         self.canvas.begin_payload(S::PIPELINE);
         let value = payload(self, line);
-        self.canvas.emit::<S>(self.surface, line.quad(), value);
+        let quads = self.text.quads(line);
+        self.canvas.emit_text::<S>(self.surface, quads, value);
     }
 }
 
@@ -146,7 +147,8 @@ impl<'canvas> PaintLayer<'_, 'canvas> {
     {
         self.frame.canvas.begin_payload(S::PIPELINE);
         let value = payload(self.frame, line);
-        self.frame.canvas.emit_layer::<S>(self.layer, line.quad(), value);
+        let quads = self.frame.text.quads(line);
+        self.frame.canvas.emit_text_layer::<S>(self.layer, quads, value);
     }
 }
 

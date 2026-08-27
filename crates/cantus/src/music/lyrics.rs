@@ -1,6 +1,6 @@
 use super::{Enrichment, Fetch, TRACK_SPACING_MS, Track, TrackId, spotify::Spotify};
 use crate::app::update;
-use isthmus::{FloatExt, text};
+use isthmus::{FloatExt, glam::vec2, text};
 use quick_xml::{
     Reader, XmlVersion,
     escape::unescape,
@@ -67,9 +67,12 @@ pub struct Lyrics {
 
 struct PositionedLyric {
     text: String,
+    start_ms: f32,
+    end_ms: f32,
     position: f32,
     width: f32,
     lane: usize,
+    offset: f32,
 }
 
 impl Lyrics {
@@ -109,9 +112,12 @@ impl Lyrics {
             let position = cursors[lane];
             words.push(PositionedLyric {
                 text: value.into(),
+                start_ms: segment.start_ms,
+                end_ms: segment.end_ms,
                 position,
                 width,
                 lane,
+                offset: 0.0,
             });
             cursors[lane] += width + space * f32::from(segment.break_after);
             let end_ms = segment.end_ms.max(segment.start_ms);
@@ -120,6 +126,25 @@ impl Lyrics {
                 timeline.push((segment.start_ms, position));
                 timeline.push((end_ms, position + width));
             }
+        }
+
+        let offsets = words
+            .iter()
+            .map(|word| {
+                let gap = words
+                    .iter()
+                    .filter(|other| other.lane != word.lane)
+                    .map(|other| {
+                        (other.start_ms - word.end_ms)
+                            .max(word.start_ms - other.end_ms)
+                            .max(0.0)
+                    })
+                    .fold(f32::MAX, f32::min);
+                (1.0 - gap / 400.0).clamp(0.0, 1.0).smoothstep(0.0, 1.0)
+            })
+            .collect::<Vec<_>>();
+        for (word, offset) in words.iter_mut().zip(offsets) {
+            word.offset = offset;
         }
 
         let vocal_end = vocal_end[0].max(vocal_end[1]);
@@ -162,7 +187,10 @@ impl Lyrics {
                     .filter(move |word| {
                         word.lane == lane && word.position <= range.end && word.position + word.width >= range.start
                     })
-                    .map(|word| (word.text.as_str(), word.position)),
+                    .map(|word| {
+                        let direction = word.lane as f32 * 2.0 - 1.0;
+                        (word.text.as_str(), vec2(word.position, direction * 8.0 * word.offset))
+                    }),
                 15.0,
                 700.0,
                 usize::MAX,

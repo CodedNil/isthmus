@@ -1,12 +1,12 @@
 use crate::render::{
-    Fragment, GAP, PADDING, TEXT_COLOR, TextFragment,
+    Fragment, GAP, Globals, PADDING, TEXT_COLOR, TextFragment,
     sdf::{
-        PILL_MARGIN, VISIBLE_ALPHA, fill, fill_rounded_box, presence, ripple_flash, ripple_light, sample_pill,
-        sd_rounded_box, segment_distance, stroke,
+        PILL_MARGIN, SurfaceSample, VISIBLE_ALPHA, cantus_surface, presence, sample_pill, sd_rounded_box,
+        segment_distance,
     },
 };
 use isthmus::{
-    FloatExt, Image, Quad,
+    FloatExt, Image, Quad, Sdf,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
     text,
@@ -35,34 +35,32 @@ const SEARCH_ICON: u32 = 2;
 
 /// Coverage of a magnifying glass centered on the origin.
 fn magnifier_icon(point: Vec2) -> f32 {
-    let ring = stroke(point.length() - 6.2, 1.05);
-    let handle = stroke(segment_distance(point, vec2(4.6, 4.6), vec2(8.8, 8.8)), 1.05);
+    let ring = Sdf::new(point.length() - 6.2).stroke(1.05);
+    let handle = segment_distance(point, vec2(4.6, 4.6), vec2(8.8, 8.8)).stroke(1.05);
     ring.max(handle)
 }
 
 /// Straight color and coverage of the calculator badge shown beside a fend answer.
 fn calculator_icon(point: Vec2) -> Vec4 {
-    let badge = fill_rounded_box(point, Vec2::splat(13.0), 9.0);
-    let bar = |offset: f32| fill_rounded_box(point - vec2(0.0, offset), vec2(5.4, 1.1), 1.1);
+    let badge = sd_rounded_box(point, Vec2::splat(13.0), 9.0).fill();
+    let bar = |offset: f32| sd_rounded_box(point - vec2(0.0, offset), vec2(5.4, 1.1), 1.1).fill();
     let equals = bar(-3.1).max(bar(3.1));
-    ACCENT_COLOR
-        .lerp(Vec3::splat(0.96), equals)
-        .extend(badge.max(equals * badge))
+    ACCENT_COLOR.lerp(Vec3::splat(0.96), equals).extend(badge)
 }
 
 /// "↵" or "⇧" glyph coverage, drawn around the origin.
 fn key_glyph(point: Vec2, shift: bool) -> f32 {
     let distance = if shift {
         segment_distance(point, vec2(0.0, -4.0), vec2(-3.4, 0.2))
-            .min(segment_distance(point, vec2(0.0, -4.0), vec2(3.4, 0.2)))
-            .min(segment_distance(point, vec2(0.0, -0.6), vec2(0.0, 4.0)))
+            .union(segment_distance(point, vec2(0.0, -4.0), vec2(3.4, 0.2)))
+            .union(segment_distance(point, vec2(0.0, -0.6), vec2(0.0, 4.0)))
     } else {
         segment_distance(point, vec2(3.4, -3.6), vec2(3.4, 1.8))
-            .min(segment_distance(point, vec2(3.4, 1.8), vec2(-2.6, 1.8)))
-            .min(segment_distance(point, vec2(-2.6, 1.8), vec2(0.2, -0.8)))
-            .min(segment_distance(point, vec2(-2.6, 1.8), vec2(0.2, 4.4)))
+            .union(segment_distance(point, vec2(3.4, 1.8), vec2(-2.6, 1.8)))
+            .union(segment_distance(point, vec2(-2.6, 1.8), vec2(0.2, -0.8)))
+            .union(segment_distance(point, vec2(-2.6, 1.8), vec2(0.2, 4.4)))
     };
-    stroke(distance, 0.8)
+    distance.stroke(0.8)
 }
 
 /// Straight color and coverage of one key badge; `half_width` of 0 leaves the slot empty.
@@ -71,7 +69,7 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
         return Vec4::ZERO;
     }
     let outline = sd_rounded_box(point, vec2(half_width, BADGE_HEIGHT * 0.5), 6.0);
-    let (body, edge) = (fill(outline), stroke(outline, 0.65));
+    let (body, edge) = (outline.fill(), outline.stroke(0.65));
     let glyph = if shift {
         key_glyph(point + vec2(8.5, 0.0), true).max(key_glyph(point - vec2(7.5, 0.0), false))
     } else {
@@ -79,6 +77,12 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
     };
     let color = Vec3::splat(0.27).lerp(ICON_COLOR, edge).lerp(TEXT_COLOR, glyph);
     color.extend(body.max(edge).max(glyph))
+}
+
+fn sample_launcher(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
+    cantus_surface(quad, pixel, globals, time, |point| {
+        sd_rounded_box(quad.local(point), quad.size * 0.5, BACKGROUND_RADIUS as f32)
+    })
 }
 
 #[isthmus::paint]
@@ -669,48 +673,55 @@ mod host {
             };
             let quad = Quad::from_min_max(origin, origin + size);
             // GPU: Launcher panel and search selection.
-            context
-                .frame
-                .paint(quad, |fragment: Fragment, size: Vec2, caret: Vec2, selection: Vec2| {
-                    let mask = fill_rounded_box(fragment.local, size * 0.5, BACKGROUND_RADIUS as f32);
-                    if mask <= 0.0 {
+            context.frame.paint(
+                quad.expanded(PILL_MARGIN),
+                |fragment: Fragment, quad: Quad, size: Vec2, caret: Vec2, selection: Vec2| {
+                    let surface = sample_launcher(quad, fragment.pixel, fragment.globals, fragment.time);
+                    if surface.mask <= 0.0 {
                         kill();
                     }
-                    let panel = fragment.local + size * 0.5;
                     let mut color = Vec3::splat(0.09).lerp(
                         Vec3::splat(0.17),
-                        fill_rounded_box(
-                            panel - vec2(size.x * 0.5, HEADER_HEIGHT - 0.5),
+                        sd_rounded_box(
+                            surface.refracted - vec2(size.x * 0.5, HEADER_HEIGHT - 0.5),
                             vec2(size.x * 0.5, 0.5),
                             0.0,
-                        ),
+                        )
+                        .fill(),
                     );
-                    color = ripple_light(color, ripple_flash(fragment.pixel, fragment.globals, fragment.time));
                     color = color.lerp(
                         ICON_COLOR,
-                        magnifier_icon(panel - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)),
+                        magnifier_icon(surface.refracted - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)),
                     );
 
                     let selection_width = selection.y - selection.x;
-                    let highlight = fill_rounded_box(
-                        panel - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5),
+                    let highlight = sd_rounded_box(
+                        surface.refracted - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5),
                         vec2(selection_width * 0.5, 13.0),
                         3.0,
-                    );
+                    )
+                    .fill();
                     color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
-                    let caret_mask = fill_rounded_box(panel - vec2(caret.x, HEADER_HEIGHT * 0.5), vec2(0.9, 12.0), 0.9);
+                    let caret_mask = sd_rounded_box(
+                        surface.refracted - vec2(caret.x, HEADER_HEIGHT * 0.5),
+                        vec2(0.9, 12.0),
+                        0.9,
+                    )
+                    .fill();
                     color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
 
-                    let opacity = mask * 0.82;
-                    color.extend(opacity)
-                });
+                    let mut output = surface.color(color);
+                    output.w *= 0.82;
+                    output
+                },
+            );
             let padding = line.size * 0.5 + 2.0;
             // GPU: Launcher query text.
             context.frame.paint_text(
                 line.expanded(padding).translated(origin),
-                |text: TextFragment, origin: Vec2, size: Vec2| {
-                    let clip = fill_rounded_box(text.pixel - origin - size * 0.5, size * 0.5, BACKGROUND_RADIUS as f32);
-                    text.color(text.alpha() * clip)
+                |text: TextFragment, quad: Quad| {
+                    let surface = sample_launcher(quad, text.pixel, text.globals, text.time);
+                    text.color(text.alpha_at(surface.content_point(text.pixel)) * surface.mask)
                 },
             );
 
@@ -783,10 +794,9 @@ mod host {
                     EntryIcon::Calculator => (None, CALCULATOR_ICON),
                     EntryIcon::Search => (None, SEARCH_ICON),
                 };
-                let quad = pill.expanded(PILL_MARGIN);
                 // GPU: Launcher result row.
                 context.frame.paint(
-                    quad,
+                    pill.expanded(PILL_MARGIN),
                     |fragment: Fragment, pill: Quad, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
                         let surface = sample_pill(pill, fragment.pixel, fragment.globals, fragment.time);
                         if surface.alpha <= VISIBLE_ALPHA {
@@ -828,10 +838,9 @@ mod host {
                         Vec2::X,
                     );
                     // GPU: Launcher result image.
-                    context.frame.paint(icon, |fragment: Fragment, image: Image| {
-                        let texture = image.sample(fragment.uv);
-                        texture.truncate().extend(texture.w)
-                    });
+                    context
+                        .frame
+                        .paint(icon, |fragment: Fragment, image: Image| image.sample(fragment.uv));
                 }
 
                 let origin = vec2(x, y);
@@ -839,10 +848,10 @@ mod host {
                     if !line.is_empty() {
                         // GPU: Launcher result text.
                         context.frame.paint_text(
-                            line.expanded(line.size * 0.5 + 2.0).translated(origin),
+                            line.expanded(20.0).translated(origin),
                             |text: TextFragment, pill: Quad| {
                                 let surface = sample_pill(pill, text.pixel, text.globals, text.time);
-                                text.color(text.alpha() * surface.mask)
+                                text.color(text.alpha_at(surface.content_point(text.pixel)) * surface.mask)
                             },
                         );
                     }

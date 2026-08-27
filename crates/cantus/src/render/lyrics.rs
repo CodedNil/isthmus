@@ -1,8 +1,5 @@
 use crate::render::{TEXT_COLOR, TextFragment};
-use isthmus::{
-    glam::{Vec2, Vec4, vec2},
-    text,
-};
+use isthmus::glam::{Vec4, vec2};
 
 pub const EXTENSION: f32 = 10.0;
 
@@ -14,14 +11,8 @@ use crate::{
 #[cfg(not(target_arch = "spirv"))]
 use isthmus::FloatExt;
 
-fn cover(text: &TextFragment, point: Vec2, weight: f32) -> Vec2 {
-    let distance = text.distance_scaled_with_weight(point, 1.0, weight);
-    vec2(text::coverage(distance), text::coverage(distance + 1.0))
-}
-
 #[isthmus::paint]
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
-    const LANE_OFFSET: f32 = 8.0;
     const CLIP_PADDING: f32 = 4.0;
 
     let Some((index, progress_ms)) = music.timeline.span_at_playhead(&music.queue) else {
@@ -96,7 +87,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
             let placed = context
                 .frame
                 .text()
-                .visible(line, vec2(x, y + lane as f32 * LANE_OFFSET), 0.0..screen_width)
+                .visible(line, vec2(x, y), 0.0..screen_width)
                 .with_color(color);
             let padding = placed.size * 0.2 + 1.0;
             context.frame.paint_text(
@@ -106,16 +97,12 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                         text.pixel.x.smoothstep(0.0, 32.0) * text.pixel.x.smoothstep(screen_width, screen_width - 32.0);
                     let emphasis = (text.pixel.x - playhead_x).abs().smoothstep(110.0, 0.0);
                     let weight = (text.line.weight + emphasis * 0.15).min(1.0);
-                    let coverage = (cover(&text, text.pixel + vec2(-0.25, -0.25), weight)
-                        + cover(&text, text.pixel + vec2(0.25, -0.25), weight)
-                        + cover(&text, text.pixel + vec2(-0.25, 0.25), weight)
-                        + cover(&text, text.pixel + vec2(0.25, 0.25), weight))
-                        * 0.25;
-                    let fill = coverage.x;
-                    let outline = coverage.y - fill;
+                    let sample = text.sample_with_weight(text.pixel, weight);
                     let sung = text.pixel.x.smoothstep(playhead_x + 4.0, playhead_x - 4.0);
                     let fade = edge_fade * (1.0 - sung * 0.5);
-                    (text.line.color.to_vec3() * fill * fade).extend((fill + outline * 0.4) * fade)
+                    let mut color = sample.color(text.line.color.to_vec4(), Vec4::new(0.0, 0.0, 0.0, 0.4), 1.5);
+                    color.w *= fade;
+                    color
                 },
             );
         }
