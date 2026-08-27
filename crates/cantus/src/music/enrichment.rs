@@ -1,20 +1,17 @@
-use super::{AudioFeatures, Music, MusicResult, Track, TrackId, spotify::Spotify};
+use super::{AudioFeatures, Music, MusicResult, TrackId, spotify::Spotify};
 use crate::{
     app::{Background, CantusApp, update},
-    render::{
-        lyrics::{self, LyricsRequest},
-        music::PALETTE_COLORS,
-    },
+    render::music::PALETTE_COLORS,
 };
 use arrayvec::ArrayVec;
 use futures_util::future::join_all;
 use image::{RgbaImage, imageops};
-use isthmus::{Image, Unorm8x4, glam::Vec3, text};
+use isthmus::{Image, Unorm8x4, glam::Vec3};
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use reqwest::Client;
 use std::{
     array,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::Range,
     time::{Duration, Instant},
 };
@@ -40,32 +37,6 @@ impl Enrichment {
                 .build()
                 .expect("failed to construct HTTP client"),
         }
-    }
-
-    pub(crate) fn request_lyrics(&self, track: &Track, spotify: Spotify, shaper: text::Shaper) {
-        let request = LyricsRequest {
-            uri: track.uri.clone(),
-            track_id: track.id,
-            name: track.name.clone(),
-            artist: track.artist.clone(),
-            album: track.album.clone(),
-            duration_ms: track.duration_ms,
-        };
-        let http = self.http.clone();
-        self.background.spawn_update(async move {
-            let uri = request.uri.clone();
-            let state = fetch_lyrics(&request, &http, &spotify, &shaper).await;
-            Some(update(move |app| {
-                if let Some(track) = app
-                    .music
-                    .queue
-                    .iter_mut()
-                    .find(|track| track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching))
-                {
-                    track.runtime.lyrics = state;
-                }
-            }))
-        });
     }
 }
 
@@ -101,6 +72,13 @@ impl<T> Fetch<T> {
             _ => None,
         }
     }
+
+    pub const fn ready_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Self::Ready(value) => Some(value),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -113,30 +91,6 @@ impl Fetch<AlbumArt> {
     pub fn palette(&self) -> [Unorm8x4; PALETTE_COLORS] {
         self.ready()
             .map_or_else(|| [Unorm8x4::default(); PALETTE_COLORS], |art| art.palette)
-    }
-}
-
-async fn fetch_lyrics(
-    request: &LyricsRequest,
-    http: &Client,
-    spotify: &Spotify,
-    shaper: &text::Shaper,
-) -> Fetch<lyrics::Lyrics> {
-    let result = if let Some(lyrics) = request.fetch(http).await {
-        Ok(lyrics)
-    } else if let Some(id) = request.track_id {
-        spotify.lyrics(id).await
-    } else {
-        Ok(Vec::new())
-    };
-    match result {
-        Ok(segments) => {
-            Fetch::Ready(lyrics::Lyrics::shape(segments, request.duration_ms as f32, shaper).unwrap_or_default())
-        }
-        Err(error) => {
-            warn!(%error, track = request.name, "Failed to fetch lyrics");
-            Fetch::retry()
-        }
     }
 }
 
@@ -180,6 +134,25 @@ fn art_slots(music: &mut Music) -> impl Iterator<Item = (&str, &mut ArtState)> {
 impl CantusApp {
     pub(crate) fn refresh_enrichment(&mut self, include_audio: bool) {
         let now = Instant::now();
+        let mut lyric_uris = HashSet::new();
+        let lyrics = self
+            .music
+            .queue
+            .iter_mut()
+            .filter_map(|track| {
+                if track.name.trim().is_empty()
+                    || !track.runtime.lyrics.request(now)
+                    || !lyric_uris.insert(track.uri.clone())
+                {
+                    return None;
+                }
+                Some((&*track).into())
+            })
+            .collect::<Vec<_>>();
+        for request in lyrics {
+            self.enrichment.request_lyrics(request, self.music.spotify.clone());
+        }
+
         let mut audio = if include_audio {
             self.music
                 .queue

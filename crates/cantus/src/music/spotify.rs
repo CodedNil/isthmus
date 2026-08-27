@@ -136,19 +136,8 @@ impl Spotify {
             .enumerate()
             .filter_map(|(index, line)| {
                 let start_ms = line.start_time_ms.parse().ok()?;
-                Some(LyricSegment {
-                    start_ms,
-                    end_ms: line
-                        .end_time_ms
-                        .parse()
-                        .ok()
-                        .filter(|end| *end > start_ms)
-                        .or_else(|| lines.get(index + 1)?.start_time_ms.parse().ok())
-                        .unwrap_or(start_ms + 1_000.0),
-                    text: line.words.clone(),
-                    lane: 0,
-                    line_end: true,
-                })
+                let next_start_ms = lines.get(index + 1).and_then(|next| next.start_time_ms.parse().ok());
+                Some(LyricSegment::line(start_ms, next_start_ms, line.words.clone()))
             })
             .collect())
     }
