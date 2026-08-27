@@ -1,12 +1,11 @@
+#[cfg(target_arch = "spirv")]
+use crate::FloatExt;
 #[cfg(not(target_arch = "spirv"))]
 use crate::glam::Vec3;
 use crate::{
-    Fragment, Quad, Unorm8x4,
+    Fragment, Quad, Sdf, SdfSample, Unorm8x4,
     glam::{Vec2, Vec4, vec2},
 };
-
-#[cfg(target_arch = "spirv")]
-use crate::FloatExt;
 
 #[cfg(not(target_arch = "spirv"))]
 use {
@@ -53,11 +52,15 @@ impl F16x2 {
 #[repr(C)]
 #[derive(Clone, Copy, crate::ShaderData)]
 #[doc(hidden)]
-pub struct Edge {
+pub struct Curve {
     start: F16x2,
+    control: F16x2,
     end: F16x2,
     start_delta: F16x2,
+    control_delta: F16x2,
     end_delta: F16x2,
+    min: Vec2,
+    max: Vec2,
 }
 
 #[repr(C)]
@@ -71,6 +74,7 @@ pub struct Line {
     pub count: u32,
     pub first: u32,
     pub color: Unorm8x4,
+    padding: f32,
 }
 
 impl Line {
@@ -89,6 +93,7 @@ impl Line {
     pub fn expanded(mut self, padding: f32) -> Self {
         self.min -= padding;
         self.max += padding;
+        self.padding += padding;
         self
     }
 
@@ -106,19 +111,19 @@ impl Line {
         self
     }
 
-    fn distance(self, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], point: Vec2) -> f32 {
-        self.distance_scaled(placed_glyphs, glyphs, edges, point, 1.0)
+    fn distance(self, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], curves: &[Curve], point: Vec2) -> f32 {
+        self.distance_scaled(placed_glyphs, glyphs, curves, point, 1.0)
     }
 
     fn distance_scaled(
         self,
         placed_glyphs: &[PlacedGlyph],
         glyphs: &[Glyph],
-        edges: &[Edge],
+        curves: &[Curve],
         point: Vec2,
         scale: f32,
     ) -> f32 {
-        line_distance_scaled(self, placed_glyphs, glyphs, edges, point, scale)
+        line_distance_scaled(self, placed_glyphs, glyphs, curves, point, scale)
     }
 }
 
@@ -132,8 +137,10 @@ pub struct TextFragment<'a, Globals = ()> {
     pub line: Line,
     placed_glyphs: &'a [PlacedGlyph],
     glyphs: &'a [Glyph],
-    edges: &'a [Edge],
+    curves: &'a [Curve],
 }
+
+pub type TextSample = SdfSample;
 
 impl<'a, Globals: Copy> TextFragment<'a, Globals> {
     #[doc(hidden)]
@@ -142,7 +149,7 @@ impl<'a, Globals: Copy> TextFragment<'a, Globals> {
         line: Line,
         placed_glyphs: &'a [PlacedGlyph],
         glyphs: &'a [Glyph],
-        edges: &'a [Edge],
+        curves: &'a [Curve],
     ) -> Self {
         Self {
             pixel: fragment.pixel,
@@ -153,23 +160,27 @@ impl<'a, Globals: Copy> TextFragment<'a, Globals> {
             line,
             placed_glyphs,
             glyphs,
-            edges,
+            curves,
         }
     }
 
     pub fn distance(&self, point: Vec2) -> f32 {
-        self.line.distance(self.placed_glyphs, self.glyphs, self.edges, point)
+        self.line.distance(self.placed_glyphs, self.glyphs, self.curves, point)
     }
 
     pub fn distance_scaled(&self, point: Vec2, scale: f32) -> f32 {
         self.line
-            .distance_scaled(self.placed_glyphs, self.glyphs, self.edges, point, scale)
+            .distance_scaled(self.placed_glyphs, self.glyphs, self.curves, point, scale)
     }
 
     pub fn distance_scaled_with_weight(&self, point: Vec2, scale: f32, weight: f32) -> f32 {
         let mut line = self.line;
         line.weight = weight;
-        line.distance_scaled(self.placed_glyphs, self.glyphs, self.edges, point, scale)
+        line.distance_scaled(self.placed_glyphs, self.glyphs, self.curves, point, scale)
+    }
+
+    pub fn sample_with_weight(&self, point: Vec2, weight: f32) -> TextSample {
+        Sdf::new(self.distance_scaled_with_weight(point, 1.0, weight)).sample()
     }
 
     pub fn alpha(&self) -> f32 {
@@ -177,7 +188,7 @@ impl<'a, Globals: Copy> TextFragment<'a, Globals> {
     }
 
     pub fn alpha_at(&self, point: Vec2) -> f32 {
-        coverage(self.distance(point))
+        Sdf::new(self.distance(point)).fill()
     }
 
     pub fn color(&self, coverage: f32) -> Vec4 {
@@ -201,6 +212,7 @@ pub struct Glyph {
 #[doc(hidden)]
 pub struct PlacedGlyph {
     pub x: f32,
+    pub y: f32,
     pub glyph: u32,
 }
 
@@ -209,35 +221,83 @@ fn normalized_weight(weight: f32) -> f32 {
     ((weight - 600.0) / 300.0).clamp(0.0, 1.0)
 }
 
-fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f32, i32) {
-    let a = edge.start.get() + edge.start_delta.get() * weight;
-    let b = edge.end.get() + edge.end_delta.get() * weight;
-    let segment = b - a;
-    let winding = if (a.y <= point.y && point.y < b.y) || (b.y <= point.y && point.y < a.y) {
-        let crossing = a.x + (point.y - a.y) * segment.x / segment.y;
-        if crossing > point.x {
-            if segment.y > 0.0 { 1 } else { -1 }
-        } else {
-            0
+fn quadratic(start: Vec2, control: Vec2, end: Vec2, t: f32) -> Vec2 {
+    let inverse = 1.0 - t;
+    start * inverse * inverse + control * 2.0 * inverse * t + end * t * t
+}
+
+#[allow(clippy::manual_range_contains)] // Range::contains does not lower cleanly through Rust-GPU.
+fn curve_winding(start: Vec2, control: Vec2, end: Vec2, point: Vec2) -> i32 {
+    let a = start.y - 2.0 * control.y + end.y;
+    let b = 2.0 * (control.y - start.y);
+    let c = start.y - point.y;
+    let discriminant = b * b - 4.0 * a * c;
+    let mut winding = 0;
+    let mut test = |t: f32| {
+        if t >= 0.0 && t < 1.0 {
+            let position = quadratic(start, control, end, t);
+            let direction = 2.0 * a * t + b;
+            if position.x > point.x {
+                winding += if direction > 0.0 {
+                    1
+                } else if direction < 0.0 {
+                    -1
+                } else {
+                    0
+                };
+            }
         }
+    };
+    if a.abs() < 1e-6 {
+        if b.abs() >= 1e-6 {
+            test(-c / b);
+        }
+    } else if discriminant >= 0.0 {
+        let root = discriminant.sqrt();
+        test((-b - root) / (2.0 * a));
+        test((-b + root) / (2.0 * a));
+    }
+    winding
+}
+
+fn curve_distance(curve: Curve, weight: f32, point: Vec2, best: f32) -> (f32, i32) {
+    let start = curve.start.get() + curve.start_delta.get() * weight;
+    let control = curve.control.get() + curve.control_delta.get() * weight;
+    let end = curve.end.get() + curve.end_delta.get() * weight;
+    let winding = if point.y >= curve.min.y && point.y <= curve.max.y {
+        curve_winding(start, control, end, point)
     } else {
         0
     };
-    let bounds_min = a.min(b);
-    let bounds_max = a.max(b);
-    if (point - point.clamp(bounds_min, bounds_max)).length_squared() >= best_distance {
-        return (best_distance, winding);
+    if (point - point.clamp(curve.min, curve.max)).length_squared() >= best {
+        return (best, winding);
     }
-    let t = ((point - a).dot(segment) / segment.length_squared().max(1e-8)).clamp(0.0, 1.0);
-    ((point - (a + segment * t)).length_squared(), winding)
+
+    let acceleration = start - control * 2.0 + end;
+    let velocity = (control - start) * 2.0;
+    let mut distance = best;
+    for seed in 0..3 {
+        let mut t = seed as f32 * 0.5;
+        for _ in 0..3 {
+            let position = quadratic(start, control, end, t);
+            let tangent = acceleration * (2.0 * t) + velocity;
+            let derivative = tangent.length_squared() + (position - point).dot(acceleration * 2.0);
+            if derivative.abs() > 1e-8 {
+                t = (t - (position - point).dot(tangent) / derivative).clamp(0.0, 1.0);
+            }
+        }
+        distance = distance.min((quadratic(start, control, end, t) - point).length_squared());
+    }
+    (distance, winding)
 }
 
-fn glyph_distance(edges: &[Edge], start: u32, count: u32, weight: f32, point: Vec2, size: f32) -> f32 {
+fn glyph_distance(curves: &[Curve], start: u32, count: u32, weight: f32, point: Vec2, size: f32) -> f32 {
     let mut distance_squared = f32::MAX;
     let mut winding = 0;
     // Rust-GPU cannot lower this runtime slice iterator without a pointer-to-integer conversion.
     for index in 0..count {
-        let (distance, edge_winding) = edge_distance(edges[(start + index) as usize], weight, point, distance_squared);
+        let (distance, edge_winding) =
+            curve_distance(curves[(start + index) as usize], weight, point, distance_squared);
         distance_squared = distance;
         winding += edge_winding;
     }
@@ -247,7 +307,7 @@ fn glyph_distance(edges: &[Edge], start: u32, count: u32, weight: f32, point: Ve
     } else {
         scaled_squared.sqrt()
     };
-    distance * if winding == 0 { -1.0 } else { 1.0 }
+    distance * if winding == 0 { 1.0 } else { -1.0 }
 }
 
 fn glyph_after(placed_glyphs: &[PlacedGlyph], first: u32, count: u32, x: f32) -> u32 {
@@ -268,14 +328,14 @@ fn line_distance_scaled(
     line: Line,
     placed_glyphs: &[PlacedGlyph],
     glyphs: &[Glyph],
-    edges: &[Edge],
+    curves: &[Curve],
     local: Vec2,
     scale: f32,
 ) -> f32 {
     let inverse_size = 1.0 / line.size;
     let line_point = (local - line.origin) * inverse_size;
     let after = glyph_after(placed_glyphs, line.first, line.count, line_point.x);
-    let mut best: f32 = -1e6;
+    let mut best: f32 = 1e6;
     let padding = EFFECT_PADDING * inverse_size / scale;
     // Include the next origin too: italic/curved glyphs and the effect padding can overhang left.
     let mut glyph_index = (after + 1).min(line.count);
@@ -283,7 +343,7 @@ fn line_distance_scaled(
         glyph_index -= 1;
         let placed = placed_glyphs[(line.first + glyph_index) as usize];
         let glyph = glyphs[placed.glyph as usize];
-        let glyph_point = vec2(line_point.x - placed.x, -line_point.y) / scale;
+        let glyph_point = vec2(line_point.x - placed.x, placed.y - line_point.y) / scale;
         if glyph_point.x > glyph.max.x + padding {
             break;
         }
@@ -292,8 +352,8 @@ fn line_distance_scaled(
             && glyph_point.x <= glyph.max.x + padding
             && glyph_point.y <= glyph.max.y + padding
         {
-            best = best.max(glyph_distance(
-                edges,
+            best = best.min(glyph_distance(
+                curves,
                 glyph.start,
                 glyph.count,
                 line.weight,
@@ -303,11 +363,6 @@ fn line_distance_scaled(
         }
     }
     best
-}
-
-pub fn coverage(distance: f32) -> f32 {
-    let coverage = (distance * 1.25 + 0.5).clamp(0.0, 1.0);
-    coverage * coverage * (3.0 - 2.0 * coverage)
 }
 
 #[cfg(not(target_arch = "spirv"))]
@@ -368,16 +423,28 @@ impl OutlineBuilder for Outline {
 
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
         let (start, control_a, control_b, end) = (self.current, vec2(x1, y1), vec2(x2, y2), vec2(x, y));
-        for step in 1..=4 {
-            let phase = step as f32 / 4.0;
-            let inverse = 1.0 - phase;
-            self.segment(
-                start * inverse * inverse * inverse
-                    + control_a * 3.0 * inverse * inverse * phase
-                    + control_b * 3.0 * inverse * phase * phase
-                    + end * phase * phase * phase,
-            );
+        let point = |t: f32| {
+            let inverse = 1.0 - t;
+            start * inverse * inverse * inverse
+                + control_a * 3.0 * inverse * inverse * t
+                + control_b * 3.0 * inverse * t * t
+                + end * t * t * t
+        };
+        let tangent = |t: f32| {
+            let inverse = 1.0 - t;
+            (control_a - start) * 3.0 * inverse * inverse
+                + (control_b - control_a) * 6.0 * inverse * t
+                + (end - control_b) * 3.0 * t * t
+        };
+        for step in 0..4 {
+            let t0 = step as f32 * 0.25;
+            let t1 = (step + 1) as f32 * 0.25;
+            let a = point(t0);
+            let c = point(t1);
+            let control = (a + tangent(t0) * 0.125 + c - tangent(t1) * 0.125) * 0.5;
+            self.edges.push([a, control, c]);
         }
+        self.current = end;
     }
 
     fn close(&mut self) {
@@ -409,6 +476,7 @@ pub struct Shaper {
 #[cfg(not(target_arch = "spirv"))]
 pub(crate) struct Text {
     shaper: Shaper,
+    glyphs: Arc<[Glyph]>,
     context: Context,
     placed: Vec<PlacedGlyph>,
     color: Unorm8x4,
@@ -543,28 +611,16 @@ impl Text {
             assert_eq!(low.len(), high.len(), "variable outline topology changed");
             let start = curves.len() as u32;
             for (&[a, b, c], &[d, e, f]) in low.iter().zip(high) {
-                // Flatten once on the CPU. The tolerance is in ems and keeps the
-                // largest text comfortably below a quarter pixel of curve error.
-                let curvature = (a - b * 2.0 + c).length().max((d - e * 2.0 + f).length());
-                let segments = (curvature / 0.02).sqrt().ceil().max(1.0) as u32;
-                let point = |start: Vec2, control: Vec2, end: Vec2, t: f32| {
-                    let one_minus_t = 1.0 - t;
-                    start * one_minus_t * one_minus_t + control * 2.0 * one_minus_t * t + end * t * t
-                };
-                for segment in 0..segments {
-                    let t0 = segment as f32 / segments as f32;
-                    let t1 = (segment + 1) as f32 / segments as f32;
-                    let low_start = point(a, b, c, t0);
-                    let low_end = point(a, b, c, t1);
-                    let high_start = point(d, e, f, t0);
-                    let high_end = point(d, e, f, t1);
-                    curves.push(Edge {
-                        start: F16x2::new(low_start),
-                        end: F16x2::new(low_end),
-                        start_delta: F16x2::new(high_start - low_start),
-                        end_delta: F16x2::new(high_end - low_end),
-                    });
-                }
+                curves.push(Curve {
+                    start: F16x2::new(a),
+                    control: F16x2::new(b),
+                    end: F16x2::new(c),
+                    start_delta: F16x2::new(d - a),
+                    control_delta: F16x2::new(e - b),
+                    end_delta: F16x2::new(f - c),
+                    min: a.min(b).min(c).min(d).min(e).min(f),
+                    max: a.max(b).max(c).max(d).max(e).max(f),
+                });
             }
             let count = curves.len() - start as usize;
             metadata.push((
@@ -590,14 +646,15 @@ impl Text {
                     .map(|index| (character, metadata[index].1))
             })
             .collect::<Vec<_>>();
-        let edges = context.upload(&curves);
-        let glyphs = context.upload(&metadata.iter().map(|(_, meta)| meta.data).collect::<Vec<_>>());
-        canvas.register_text(glyphs, edges);
+        let curves = context.upload(&curves);
+        let glyphs = metadata.iter().map(|(_, meta)| meta.data).collect::<Arc<[_]>>();
+        canvas.register_text(context.upload(&glyphs), curves);
         Self {
             shaper: Shaper {
                 characters: characters.into(),
                 baseline,
             },
+            glyphs,
             context: context.clone(),
             placed: Vec::with_capacity(GLYPH_CAPACITY),
             color: Unorm8x4::from_vec3(color),
@@ -610,6 +667,40 @@ impl Text {
 
     pub(crate) fn finish_frame(&self) -> BufferRange {
         self.context.upload(&self.placed)
+    }
+
+    pub(crate) fn quads(&self, line: Line) -> SmallVec<[Quad; 32]> {
+        let placed = &self.placed[line.first as usize..(line.first + line.count) as usize];
+        let bounds = |placed: PlacedGlyph| {
+            let glyph = self.glyphs[placed.glyph as usize];
+            vec2(
+                line.origin.x + (placed.x + glyph.min.x) * line.size - line.padding,
+                line.origin.x + (placed.x + glyph.max.x) * line.size + line.padding,
+            )
+        };
+        placed
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(index, glyph)| {
+                let own = bounds(glyph);
+                let left = index.checked_sub(1).map_or(own.x, |previous| {
+                    let previous = bounds(placed[previous]);
+                    if previous.y < own.x {
+                        own.x
+                    } else {
+                        (previous.y + own.x) * 0.5
+                    }
+                });
+                let right = placed.get(index + 1).map_or(own.y, |&next| {
+                    let next = bounds(next);
+                    if own.y < next.x { own.y } else { (own.y + next.x) * 0.5 }
+                });
+                let min = vec2(left.max(line.min.x), line.min.y);
+                let max = vec2(right.min(line.max.x), line.max.y);
+                (min.x < max.x).then(|| Quad::from_min_max(min, max))
+            })
+            .collect()
     }
 
     pub(crate) fn place_visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
@@ -664,6 +755,7 @@ impl Text {
             count: count as u32,
             first: first as u32,
             color: self.color,
+            padding: EFFECT_PADDING,
         }
     }
 }
@@ -678,7 +770,7 @@ impl Shaper {
     }
 
     pub fn shape(&self, text: &str, size: f32, weight: f32) -> ShapedLine {
-        self.shape_positioned([(text, 0.0)], size, weight, usize::MAX)
+        self.shape_positioned([(text, Vec2::ZERO)], size, weight, usize::MAX)
     }
 
     pub fn width(&self, text: &str, size: f32, weight: f32) -> f32 {
@@ -692,7 +784,7 @@ impl Shaper {
 
     pub fn shape_positioned<'a>(
         &self,
-        parts: impl IntoIterator<Item = (&'a str, f32)>,
+        parts: impl IntoIterator<Item = (&'a str, Vec2)>,
         size: f32,
         font_weight: f32,
         max_glyphs: usize,
@@ -703,15 +795,20 @@ impl Shaper {
         let mut width: f32 = 0.0;
         let mut glyphs = SmallVec::new();
         for (text, position) in parts {
-            let mut x = position / size;
+            let mut x = position.x / size;
+            let y = position.y / size;
             for meta in text.chars().filter_map(|character| self.glyph(character)) {
                 if glyphs.len() == max_glyphs {
                     break;
                 }
                 if meta.data.count > 0 {
-                    min = min.min(vec2(x + meta.data.min.x, -meta.data.max.y));
-                    max = max.max(vec2(x + meta.data.max.x, -meta.data.min.y));
-                    glyphs.push(PlacedGlyph { x, glyph: meta.glyph });
+                    min = min.min(vec2(x + meta.data.min.x, y - meta.data.max.y));
+                    max = max.max(vec2(x + meta.data.max.x, y - meta.data.min.y));
+                    glyphs.push(PlacedGlyph {
+                        x,
+                        y,
+                        glyph: meta.glyph,
+                    });
                 }
                 x += meta.advance[0] + (meta.advance[1] - meta.advance[0]) * weight;
             }

@@ -11,6 +11,7 @@ mod float;
 #[cfg(not(target_arch = "spirv"))]
 mod frame;
 mod image;
+mod sdf;
 pub mod text;
 
 #[cfg(not(target_arch = "spirv"))]
@@ -31,6 +32,7 @@ pub use float::FloatExt;
 #[cfg(not(target_arch = "spirv"))]
 pub use frame::Frame;
 pub use image::Image;
+pub use sdf::{Sdf, SdfSample};
 pub use text::TextFragment;
 
 #[doc(hidden)]

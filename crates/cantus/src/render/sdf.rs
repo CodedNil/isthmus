@@ -1,44 +1,49 @@
 use crate::render::Globals;
 use isthmus::{
-    FloatExt, Quad,
+    FloatExt, Quad, Sdf,
     glam::{UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
-    spirv_std::arch::Derivative,
 };
 
 /// Where the drop shadow fades below the fragment kill threshold, plus an AA pixel.
 const SHADOW_REACH: f32 = 18.0;
-const ANTIALIAS_WIDTH: f32 = 0.55;
 /// Smallest coverage worth shading; analytic shadows never reach exact zero.
 pub const VISIBLE_ALPHA: f32 = 1.0 / 1024.0;
 
-pub fn sample_pill(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> PillSample {
+pub fn sample_pill(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
     let size = quad.size;
-    let local = quad.local(pixel) + size * 0.5;
-    let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
+    cantus_surface(quad, pixel, globals, time, |point| {
+        sd_capsule_box(quad.local(point), (size.x - size.y) * 0.5, size.y * 0.5)
+    })
+}
+
+/// Samples arbitrary Cantus SDF geometry with interaction, refraction and shadowing.
+pub fn cantus_surface(
+    quad: Quad,
+    pixel: Vec2,
+    globals: Globals,
+    time: f32,
+    shape: impl Fn(Vec2) -> Sdf,
+) -> SurfaceSample {
+    let distance = shape(pixel).distance;
     let mouse_distance = if globals.pressure > 0.0 {
-        sd_capsule_box(quad.local(globals.pointer), (size.x - size.y) * 0.5, size.y * 0.5)
+        shape(globals.pointer).distance
     } else {
         1.0
     };
-    let (mouse_bulge, ripple_bulge, ripple, ripple_flash) = interaction(pixel, globals, time);
-    PillSample::new(
-        local,
-        size,
-        distance,
-        mouse_distance,
-        mouse_bulge,
-        ripple_bulge,
-        ripple,
-        ripple_flash,
+    let mouse_mask = mouse_distance.smoothstep(0.5, -0.5);
+    let interaction = interaction(pixel, globals, time, mouse_mask);
+    SurfaceSample::new(
+        quad.local(pixel) + quad.size * 0.5,
+        quad.size,
+        Sdf::new(distance),
+        interaction,
     )
 }
 
 #[derive(Clone, Copy)]
-pub struct PillSample {
-    shape_distance: f32,
-    mouse_distance: f32,
-    mouse_bulge: f32,
-    ripple_bulge: f32,
+pub struct SurfaceSample {
+    bulge: f32,
+    refraction: Vec2,
     /// Unmodified top-left-relative surface coordinates.
     pub local: Vec2,
     /// Ripple- and edge-refracted top-left-relative coordinates.
@@ -48,54 +53,41 @@ pub struct PillSample {
     pub mask: f32,
     pub alpha: f32,
     pub ripple: Vec2,
-    pub ripple_flash: f32,
+    flash: f32,
 }
 
-impl PillSample {
-    fn new(
-        local: Vec2,
-        size: Vec2,
-        shape_distance: f32,
-        mouse_distance: f32,
-        mouse_bulge: f32,
-        ripple_bulge: f32,
-        ripple: Vec2,
-        ripple_flash: f32,
-    ) -> Self {
+impl SurfaceSample {
+    fn new(local: Vec2, size: Vec2, shape: Sdf, interaction: Interaction) -> Self {
         let mut surface = Self {
-            shape_distance,
-            mouse_distance,
-            mouse_bulge,
-            ripple_bulge,
+            bulge: interaction.bulge,
+            refraction: interaction.refraction,
             local,
             refracted: local,
             size,
-            distance: shape_distance,
+            distance: shape.distance,
             mask: 0.0,
             alpha: 0.0,
-            ripple,
-            ripple_flash,
+            ripple: interaction.ripple,
+            flash: interaction.flash,
         };
-        surface.resolve();
+        surface.resolve(shape);
         surface
     }
 
-    fn resolve(&mut self) {
-        self.distance = self.shape_distance - self.bulge() * 0.5;
-        let width = self.distance.fwidth().max(ANTIALIAS_WIDTH);
-        self.mask = self.distance.smoothstep(width, -width);
+    fn resolve(&mut self, shape: Sdf) {
+        self.distance = shape.distance - self.bulge * 0.5;
+        self.mask = Sdf::new(self.distance).fill();
         let shadow = (-self.distance.max(0.0) * 0.3).exp() * 0.16;
         self.alpha = self.mask.max(shadow);
         let uv = self.local / self.size;
-        self.refracted =
-            (uv - (uv - 0.5) * (1.0 + self.distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08 - self.ripple * 0.04)
-                * self.size;
+        let edge_lens =
+            (uv.clamp(Vec2::ZERO, Vec2::ONE) - 0.5) * (1.0 + self.distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08;
+        self.refracted = (uv - edge_lens) * self.size - self.refraction;
     }
 
-    pub fn union(mut self, shape_distance: f32, mouse_distance: f32, smoothing: f32, amount: f32) -> Self {
-        self.shape_distance = smooth_union(self.shape_distance, shape_distance, smoothing, amount);
-        self.mouse_distance = smooth_union(self.mouse_distance, mouse_distance, smoothing, amount);
-        self.resolve();
+    /// Resolves child geometry with this surface's existing interaction and optics.
+    pub fn layer(mut self, shape: Sdf) -> Self {
+        self.resolve(shape);
         self
     }
 
@@ -103,16 +95,40 @@ impl PillSample {
         self.local / self.size
     }
 
-    pub fn refracted_uv(self) -> Vec2 {
-        self.refracted / self.size
+    /// Maps a fragment coordinate through this surface's optical displacement.
+    pub fn refract(self, pixel: Vec2) -> Vec2 {
+        pixel + self.displacement()
     }
 
-    pub fn bulge(self) -> f32 {
-        self.mouse_bulge * self.mouse_distance.smoothstep(0.5, -0.5) + self.ripple_bulge
+    /// Moves content with pointer and ripple interaction without applying the
+    /// static edge lens, which would bend text baselines near a surface edge.
+    pub fn content_point(self, pixel: Vec2) -> Vec2 {
+        pixel - self.refraction
     }
 
+    pub fn displacement(self) -> Vec2 {
+        self.refracted - self.local
+    }
+
+    pub const fn bulge(self) -> f32 {
+        self.bulge
+    }
+
+    fn shade(self, mut color: Vec3) -> Vec3 {
+        color += color.lerp(Vec3::ONE, 0.32) * self.distance.smoothstep(5.0, -3.0) * 0.14;
+        color.lerp(color * 1.5 + 0.1, self.flash)
+    }
+
+    /// Straight-alpha surface color including its outer shadow.
     pub fn color(self, color: Vec3) -> Vec4 {
-        (color * self.mask).extend(self.alpha)
+        // The render pipeline uses straight-alpha blending. `mask / alpha`
+        // retains the black outer shadow without applying edge coverage twice.
+        (self.shade(color) * self.mask / self.alpha.max(0.0001)).extend(self.alpha)
+    }
+
+    /// Straight-alpha surface color clipped to the shape without a shadow.
+    pub fn fill_color(self, color: Vec3) -> Vec4 {
+        self.shade(color).extend(self.mask)
     }
 }
 
@@ -176,7 +192,15 @@ pub fn presence(value: f32) -> f32 {
     if value > 0.0 { 1.0 } else { 0.0 }
 }
 
-fn interaction(pixel: Vec2, globals: Globals, time: f32) -> (f32, f32, Vec2, f32) {
+#[derive(Clone, Copy)]
+struct Interaction {
+    bulge: f32,
+    refraction: Vec2,
+    ripple: Vec2,
+    flash: f32,
+}
+
+fn interaction(pixel: Vec2, globals: Globals, time: f32, mouse_mask: f32) -> Interaction {
     let mut ripple = Vec2::ZERO;
     let mut ripple_flash = 0.0;
     // Rust-GPU cannot lower this slice iterator without a pointer-to-integer conversion.
@@ -194,47 +218,31 @@ fn interaction(pixel: Vec2, globals: Globals, time: f32) -> (f32, f32, Vec2, f32
         }
     }
 
-    let mouse_bulge = if globals.pressure > 0.0 {
-        pixel.distance(globals.pointer).smoothstep(150.0, 0.0) * globals.pressure * 8.0
+    let pointer_offset = pixel - globals.pointer;
+    let mouse_lift = if globals.pressure > 0.0 {
+        pointer_offset.length().smoothstep(150.0, 0.0) * globals.pressure
     } else {
         0.0
     };
-    (
-        mouse_bulge,
-        if ripple == Vec2::ZERO {
-            0.0
-        } else {
-            ripple.length() * 22.0
-        },
+    Interaction {
+        bulge: mouse_lift * mouse_mask * 8.0 + ripple.length() * 22.0,
+        refraction: pointer_offset * mouse_lift * mouse_mask * 0.035 + ripple * 3.0,
         ripple,
-        ripple_flash,
-    )
+        flash: ripple_flash,
+    }
 }
 
-pub fn ripple_flash(pixel: Vec2, globals: Globals, time: f32) -> f32 {
-    interaction(pixel, globals, time).3
-}
-
-pub fn ripple_light(color: Vec3, flash: f32) -> Vec3 {
-    color.lerp(color * 1.5 + 0.1, flash)
-}
-
-/// Edge light derived from the final SDF, so it follows every deformation.
-pub fn pill_sheen(distance: f32) -> f32 {
-    distance.smoothstep(5.0, -3.0) * 0.14
-}
-
-pub fn sd_rounded_box(point: Vec2, half_size: Vec2, radius: f32) -> f32 {
+pub fn sd_rounded_box(point: Vec2, half_size: Vec2, radius: f32) -> Sdf {
     let corner = point.abs() - half_size + radius;
-    corner.max(Vec2::ZERO).length() + corner.x.max(corner.y).min(0.0) - radius
+    Sdf::new(corner.max(Vec2::ZERO).length() + corner.x.max(corner.y).min(0.0) - radius)
 }
 
-pub fn sd_capsule_box(point: Vec2, half_span: f32, radius: f32) -> f32 {
+pub fn sd_capsule_box(point: Vec2, half_span: f32, radius: f32) -> Sdf {
     let offset = point.abs() - vec2(half_span, 0.0);
-    offset.max(Vec2::ZERO).length() + offset.x.max(offset.y).min(0.0) - radius
+    Sdf::new(offset.max(Vec2::ZERO).length() + offset.x.max(offset.y).min(0.0) - radius)
 }
 
-pub fn sd_star(point: Vec2, radius: f32, indent: f32) -> f32 {
+pub fn sd_star(point: Vec2, radius: f32, indent: f32) -> Sdf {
     let k1 = vec2(0.809_017, -0.587_785_25);
     let k2 = vec2(-k1.x, k1.y);
     let mut point = vec2(point.x.abs(), -point.y);
@@ -245,10 +253,10 @@ pub fn sd_star(point: Vec2, radius: f32, indent: f32) -> f32 {
     let edge = indent * vec2(-k1.y, k1.x) - vec2(0.0, radius);
     let edge_t = (point.dot(edge) / edge.length_squared()).saturate();
     let cross = point.y * edge.x - point.x * edge.y;
-    (point - edge * edge_t).length() * if cross < 0.0 { -1.0 } else { 1.0 }
+    Sdf::new((point - edge * edge_t).length() * if cross < 0.0 { -1.0 } else { 1.0 })
 }
 
-pub fn sd_rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> f32 {
+pub fn sd_rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> Sdf {
     let k = 1.732_050_8;
     let mut point = vec2(point.x.abs(), point.y);
     let h = (point.x + k * point.y).max(0.0);
@@ -259,39 +267,17 @@ pub fn sd_rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> f32 {
             .clamp(-0.5 * (side_len - radius) * k, 0.5 * (side_len - radius) * k),
         -0.5 * (side_len - radius),
     );
-    point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius
+    Sdf::new(point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius)
 }
 
 /// Shortest distance from `point` to the line segment between `start` and `end`.
-pub fn segment_distance(point: Vec2, start: Vec2, end: Vec2) -> f32 {
+pub fn segment_distance(point: Vec2, start: Vec2, end: Vec2) -> Sdf {
     let segment = end - start;
     let along = ((point - start).dot(segment) / segment.length_squared().max(0.001)).saturate();
-    (point - start - segment * along).length()
-}
-
-/// Antialiased coverage of the outline of a shape at the given signed `distance`, `width` pixels wide.
-pub fn stroke(distance: f32, width: f32) -> f32 {
-    distance
-        .abs()
-        .smoothstep(width + ANTIALIAS_WIDTH, width - ANTIALIAS_WIDTH)
-}
-
-/// Antialiased coverage of the inside of a shape at the given signed `distance`.
-pub fn fill(distance: f32) -> f32 {
-    distance.smoothstep(ANTIALIAS_WIDTH, -ANTIALIAS_WIDTH)
-}
-
-pub fn fill_rounded_box(point: Vec2, half_size: Vec2, radius: f32) -> f32 {
-    fill(sd_rounded_box(point, half_size, radius))
+    Sdf::new((point - start - segment * along).length())
 }
 
 /// "‹" chevron with its tip at the origin, spanning to `extent` and its mirror; negate `extent.x` for a "›".
-pub fn sd_chevron(point: Vec2, extent: Vec2) -> f32 {
-    segment_distance(point, Vec2::ZERO, extent).min(segment_distance(point, Vec2::ZERO, vec2(extent.x, -extent.y)))
-}
-
-pub fn smooth_union(base: f32, shape: f32, smoothing: f32, amount: f32) -> f32 {
-    let blend = (0.5 + 0.5 * (shape - base) / smoothing).saturate();
-    let union = shape.lerp(base, blend) - smoothing * blend * (1.0 - blend);
-    base.lerp(union, amount)
+pub fn sd_chevron(point: Vec2, extent: Vec2) -> Sdf {
+    segment_distance(point, Vec2::ZERO, extent).union(segment_distance(point, Vec2::ZERO, vec2(extent.x, -extent.y)))
 }

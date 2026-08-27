@@ -153,28 +153,42 @@ impl Canvas {
         self.payload_images = None;
     }
     pub(crate) fn emit<S: ShaderSpec>(&mut self, surface: SurfaceHandle, quad: Quad, value: S::Instance) {
-        const {
-            assert!(size_of::<S::Instance>() % 4 == 0);
-        }
-        assert_eq!(
-            self.payload_pipeline.take().map(|pipeline| pipeline.entry),
-            Some(S::PIPELINE.entry)
-        );
-        let images = self.payload_images.take();
+        let images = self.finish_payload::<S>();
         let paint = self.record(S::PIPELINE, quad, bytemuck::bytes_of(&value), images);
         self.surface(surface).push(paint);
     }
+    pub(crate) fn emit_text<S: ShaderSpec>(
+        &mut self,
+        surface: SurfaceHandle,
+        quads: impl IntoIterator<Item = Quad>,
+        value: S::Instance,
+    ) {
+        let images = self.finish_payload::<S>();
+        let paints = self.record_text(S::PIPELINE, quads, bytemuck::bytes_of(&value), images);
+        self.surface(surface).extend(paints);
+    }
     pub(crate) fn emit_layer<S: ShaderSpec>(&mut self, layer: u8, quad: Quad, value: S::Instance) {
-        const {
-            assert!(size_of::<S::Instance>() % 4 == 0);
-        }
+        let images = self.finish_payload::<S>();
+        let paint = self.record(S::PIPELINE, quad, bytemuck::bytes_of(&value), images);
+        self.group.as_mut().expect("paint layer outside a group").1[layer as usize].push(paint);
+    }
+    pub(crate) fn emit_text_layer<S: ShaderSpec>(
+        &mut self,
+        layer: u8,
+        quads: impl IntoIterator<Item = Quad>,
+        value: S::Instance,
+    ) {
+        let images = self.finish_payload::<S>();
+        let paints = self.record_text(S::PIPELINE, quads, bytemuck::bytes_of(&value), images);
+        self.group.as_mut().expect("paint layer outside a group").1[layer as usize].extend(paints);
+    }
+    fn finish_payload<S: ShaderSpec>(&mut self) -> Option<usize> {
+        const { assert!(size_of::<S::Instance>() % 4 == 0) };
         assert_eq!(
             self.payload_pipeline.take().map(|pipeline| pipeline.entry),
             Some(S::PIPELINE.entry)
         );
-        let images = self.payload_images.take();
-        let paint = self.record(S::PIPELINE, quad, bytemuck::bytes_of(&value), images);
-        self.group.as_mut().expect("paint layer outside a group").1[layer as usize].push(paint);
+        self.payload_images.take()
     }
     fn record(&mut self, spec: PaintPipeline, quad: Quad, value: &[u8], images: Option<usize>) -> Paint {
         if !self.pipelines.contains_key(spec.entry) {
@@ -221,7 +235,9 @@ impl Canvas {
                         entry_point: Some(&format!("{}::fragment", spec.entry)),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: self.format,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            // Paint shaders expose straight RGBA. Their generated
+                            // fragment entry premultiplies once at this boundary.
+                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -246,6 +262,31 @@ impl Canvas {
             draw,
             images,
         }
+    }
+    fn record_text(
+        &mut self,
+        spec: PaintPipeline,
+        quads: impl IntoIterator<Item = Quad>,
+        value: &[u8],
+        images: Option<usize>,
+    ) -> Vec<Paint> {
+        let mut quads = quads.into_iter();
+        let Some(first_quad) = quads.next() else {
+            return Vec::new();
+        };
+        let first = self.record(spec, first_quad, value, images);
+        let payload = self.draws[first.draw as usize].payload;
+        let mut paints = vec![first];
+        for quad in quads {
+            let draw = self.draws.len() as u32;
+            self.draws.push(DrawRecord { quad, payload });
+            paints.push(Paint {
+                pipeline: spec.entry,
+                draw,
+                images,
+            });
+        }
+        paints
     }
     fn surface(&mut self, surface: SurfaceHandle) -> &mut Vec<Paint> {
         if self.paints.len() <= surface.index() {

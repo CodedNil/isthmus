@@ -1,7 +1,7 @@
 use crate::render::{
     Fragment, GAP, Globals, PANEL_START, TEXT_COLOR, TextFragment, UNIT,
     sdf::{
-        PILL_MARGIN, PillSample, VISIBLE_ALPHA, cloud_mass, fbm, hash, pill_sheen, ripple_light, sample_pill,
+        PILL_MARGIN, SurfaceSample, VISIBLE_ALPHA, cantus_surface, cloud_mass, fbm, hash, sample_pill, sd_capsule_box,
         sd_rounded_box,
     },
 };
@@ -74,8 +74,7 @@ fn expanded_x(x: f32, expansion: f32) -> f32 {
     x - FORECAST_X * expansion * 0.5
 }
 
-fn sample_weather_panel(pill: Quad, expansion: f32, pixel: Vec2, globals: Globals, time: f32) -> PillSample {
-    let body = sample_pill(pill, pixel, globals, time);
+fn sample_weather_panel(pill: Quad, expansion: f32, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
     let pill_min = pill.center - pill.size * 0.5;
     let popup_size = vec2(
         WIDTH + FORECAST_X * expansion,
@@ -86,22 +85,18 @@ fn sample_weather_panel(pill: Quad, expansion: f32, pixel: Vec2, globals: Global
         pill_min.y + pill.size.y + GAP * expansion,
     ) + popup_size * 0.5;
     let radius = (popup_size.y * 0.5).min(18.0);
-    body.union(
-        sd_rounded_box(pixel - popup_center, popup_size * 0.5, radius),
-        sd_rounded_box(globals.pointer - popup_center, popup_size * 0.5, radius),
-        56.0,
-        expansion,
-    )
+    cantus_surface(pill, pixel, globals, time, |point| {
+        let body = sd_capsule_box(pill.local(point), (pill.size.x - pill.size.y) * 0.5, pill.size.y * 0.5);
+        body.smooth_union(
+            sd_rounded_box(point - popup_center, popup_size * 0.5, radius),
+            56.0,
+            expansion,
+        )
+    })
 }
 
 fn forecast_center(height: f32, row: f32) -> f32 {
     UNIT * 14.0 + height * 0.5 + row * (height + GAP)
-}
-
-fn forecast_row(height: f32, row: f32) -> (Vec2, Vec2) {
-    let size = Vec2::new(WIDTH - GAP * 2.0, height);
-    let center = Vec2::new(FORECAST_X + WIDTH * 0.5, forecast_center(height, row));
-    (center - size * 0.5, size)
 }
 
 fn reveal_progress(expansion: f32, y: f32) -> f32 {
@@ -169,15 +164,7 @@ pub fn sky_phase(sun_y: f32) -> Vec3 {
     )
 }
 
-pub fn scene(
-    time: f32,
-    cloud_scale: f32,
-    p: Vec2,
-    width: f32,
-    dist: f32,
-    phase: Vec3,
-    weather: WeatherCondition,
-) -> Vec3 {
+pub fn scene(time: f32, cloud_scale: f32, p: Vec2, width: f32, phase: Vec3, weather: WeatherCondition) -> Vec3 {
     let sky_y = p.y / cloud_scale;
     let vertical = sky_y.smoothstep(1.0, 0.0);
     let mut color = vec3(0.006, 0.012, 0.035)
@@ -237,7 +224,7 @@ pub fn scene(
             weather.fog * (0.58 + fog.smoothstep(0.35, 0.7) * 0.18),
         );
     }
-    color + pill_sheen(dist)
+    color
 }
 
 fn sun_layer(color: Vec3, point: Vec2, size: Vec2, [sun_x, sun_y]: [f32; 2], cloud: f32, time: f32) -> Vec3 {
@@ -754,7 +741,7 @@ mod host {
                 monitor::apply(self, update);
             }
             let height = context.config.height;
-            let x = Self::pill_x(context.frame.screen_size.x, status_width);
+            let x = context.frame.screen_size.x - WIDTH - GAP - status_width;
             let hovered = Self::visible_rects(x, height, self.expansion)
                 .into_iter()
                 .any(|rect| context.interaction.pointer_in(rect));
@@ -801,7 +788,6 @@ mod host {
                         fragment.globals.bar_height,
                         surface.refracted,
                         pill.size.x,
-                        surface.distance,
                         sky_phase(sun.y),
                         conditions,
                     );
@@ -815,7 +801,6 @@ mod host {
                             fragment.time,
                         );
                     }
-                    color = ripple_light(color, surface.ripple_flash);
                     surface.color(color)
                 },
             );
@@ -853,9 +838,12 @@ mod host {
                 .with_color(color.extend(alpha));
             // GPU: Weather text.
             ui.frame
-                .paint_text(line, |text: TextFragment, pill: Quad, expansion: f32| {
+                .paint_text(line.expanded(20.0), |text: TextFragment, pill: Quad, expansion: f32| {
                     let panel = sample_weather_panel(pill, expansion, text.pixel, text.globals, text.time);
-                    text.color(text.alpha() * panel.mask)
+                    let sample = text.sample_with_weight(panel.content_point(text.pixel), text.line.weight);
+                    let mut color = sample.color(text.line.color.to_vec4(), Vec4::new(0.0, 0.0, 0.0, 0.18), 0.8);
+                    color.w *= panel.mask;
+                    color
                 });
         }
 
@@ -973,7 +961,8 @@ mod host {
                 let conditions = from_fn(|index| items[index.min(items.len() - 1)].conditions);
                 let start_hour = items[0].hour;
                 let count = items.len() as u32;
-                let (row_origin, size) = forecast_row(height, row as f32);
+                let size = Vec2::new(WIDTH - GAP * 2.0, height);
+                let row_origin = Vec2::new(FORECAST_X + WIDTH * 0.5, forecast_center(height, row as f32)) - size * 0.5;
                 let step = size.x / items.len() as f32;
                 let alpha = reveal_progress(expansion, row_origin.y + size.y * 0.5);
                 let forecast_pill = Quad::from_min_max(origin + row_origin, origin + row_origin + size);
@@ -1012,12 +1001,12 @@ mod host {
                             fragment.globals.bar_height,
                             surface.refracted,
                             surface.size.x,
-                            surface.distance,
                             sky_phase(sun_position(hour, sun_hours)[1]),
                             conditions,
-                        )
-                        .lerp(vec3(0.18, 0.22, 0.34), surface.ripple_flash);
-                        surface.color(color) * (alpha * panel.mask)
+                        );
+                        let mut output = surface.color(color);
+                        output.w *= alpha * panel.mask;
+                        output
                     },
                 );
                 for (column, forecast) in items.iter().enumerate() {
@@ -1116,10 +1105,6 @@ mod host {
 
         fn hour_of_day(time: DateTime) -> f32 {
             time.time().duration_since(Time::midnight()).as_secs_f32() / 3600.0
-        }
-
-        fn pill_x(screen_width: f32, status_width: f32) -> f32 {
-            screen_width - WIDTH - GAP - status_width
         }
 
         const fn pill_rect(x: f32, height: f32) -> Rect {

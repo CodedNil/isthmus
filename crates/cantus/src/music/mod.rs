@@ -155,7 +155,7 @@ impl Music {
             + drag_offset_ms;
         let predicted = self.timeline.queue_start_ms - self.timeline.rate * delta_time * 1_000.0;
         let correction = target - predicted;
-        let next = if dragging || correction.abs() > 500.0 {
+        let next = if dragging {
             target
         } else {
             predicted + correction * (1.0 - (-delta_time / 0.3).exp())

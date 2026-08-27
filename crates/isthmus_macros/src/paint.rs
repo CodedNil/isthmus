@@ -117,7 +117,7 @@ pub fn expand(
     });
     let shade_body = if text {
         quote!({
-            let #shader_input_name: #shader_input_type = #isthmus::TextFragment::new(fragment, line, placed_glyphs, glyphs, edges);
+            let #shader_input_name: #shader_input_type = #isthmus::TextFragment::new(fragment, line, placed_glyphs, glyphs, curves);
             #body
         })
     } else {
@@ -133,7 +133,8 @@ pub fn expand(
             #instance_load
             #line_unpack
             #(#payload_unpack)*
-            *out_color = #shade_body;
+            let color = #shade_body;
+            *out_color = color.truncate().extend(1.0) * color.w;
         },
     );
     let module_name = quote!(#isthmus::__private::shader_module_name(module_path!()));
