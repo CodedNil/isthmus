@@ -77,6 +77,7 @@ pub(super) fn create_surface(
 }
 
 impl Context {
+    #[cfg(target_os = "linux")]
     pub(super) fn new(
         source: &(impl HasDisplayHandle + HasWindowHandle),
     ) -> Result<(Self, wgpu::Surface<'static>), SetupError> {
@@ -131,6 +132,13 @@ impl Context {
             })),
             surface,
         ))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn new(
+        _source: &(impl HasDisplayHandle + HasWindowHandle),
+    ) -> Result<(Self, wgpu::Surface<'static>), SetupError> {
+        Err(SetupError::UnsupportedSurface)
     }
 
     pub(crate) fn upload<T: ShaderData>(&self, values: &[T]) -> BufferRange {

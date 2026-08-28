@@ -297,25 +297,17 @@ mod host {
 
     mod monitor {
         use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, WeatherCondition, WeatherPanel};
-        use crate::app::Background;
-        use futures_util::{StreamExt, future::join_all};
+        use crate::{app::Background, platform::Platform};
+        use futures_util::future::join_all;
         use jiff::{
             civil::DateTime,
             tz::{Offset, TimeZone},
         };
         use reqwest::Client;
         use serde::{Deserialize, de::DeserializeOwned};
-        use std::{array::from_fn, collections::HashMap, error::Error, time::Duration};
-        use tokio::{
-            sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
-            time::{sleep, timeout},
-        };
+        use std::{array::from_fn, time::Duration};
+        use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
         use tracing::warn;
-        use zbus::{
-            Connection, Proxy,
-            proxy::{Builder as ProxyBuilder, CacheProperties},
-            zvariant::{OwnedObjectPath, OwnedValue, Value},
-        };
 
         const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
         const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
@@ -420,96 +412,10 @@ mod host {
             http: Client,
         ) {
             let (location_tx, locations) = mpsc::unbounded_channel();
-            background.spawn(async move {
-                if let Err(error) = stream_location(&location_tx).await {
-                    warn!(%error, "Location portal unavailable");
-                }
-            });
+            Platform::start_location_monitor(background, location_tx);
             background.spawn(async move {
                 refresh_loop(&http, &timezones, updates, locations).await;
             });
-        }
-
-        async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), Box<dyn Error + Send + Sync>> {
-            const DESTINATION: &str = "org.freedesktop.portal.Desktop";
-            let connection = Connection::session().await?;
-            let location = ProxyBuilder::<Proxy>::new(&connection)
-                .destination(DESTINATION)?
-                .path("/org/freedesktop/portal/desktop")?
-                .interface("org.freedesktop.portal.Location")?
-                .cache_properties(CacheProperties::No)
-                .build()
-                .await?;
-            let session_token = format!("cantus_{:x}", fastrand::u64(..));
-            let session: OwnedObjectPath = location
-                .call(
-                    "CreateSession",
-                    &HashMap::from([
-                        ("session_handle_token", Value::from(session_token)),
-                        ("accuracy", Value::from(2u32)),
-                    ]),
-                )
-                .await?;
-            let mut updates = location.receive_signal("LocationUpdated").await?;
-
-            let request_token = format!("cantus_{:x}", fastrand::u64(..));
-            let sender_name = connection
-                .unique_name()
-                .unwrap()
-                .trim_start_matches(':')
-                .replace('.', "_");
-            let request = ProxyBuilder::<Proxy>::new(&connection)
-                .destination(DESTINATION)?
-                .path(format!(
-                    "/org/freedesktop/portal/desktop/request/{sender_name}/{request_token}"
-                ))?
-                .interface("org.freedesktop.portal.Request")?
-                .cache_properties(CacheProperties::No)
-                .build()
-                .await?;
-            let mut response = request.receive_signal("Response").await?;
-            let _: OwnedObjectPath = location
-                .call(
-                    "Start",
-                    &(
-                        &session,
-                        "",
-                        HashMap::from([("handle_token", Value::from(request_token))]),
-                    ),
-                )
-                .await?;
-            let (status, _): (u32, HashMap<String, OwnedValue>) = response
-                .next()
-                .await
-                .ok_or("Location portal returned no response")?
-                .body()
-                .deserialize()?;
-            if status != 0 {
-                return Err(format!("Location request failed with status {status}").into());
-            }
-
-            while let Some(update) = updates.next().await {
-                let (_, location): (OwnedObjectPath, HashMap<String, OwnedValue>) = update.body().deserialize()?;
-                if sender
-                    .send([
-                        f64::try_from(&location["Latitude"])? as f32,
-                        f64::try_from(&location["Longitude"])? as f32,
-                    ])
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            ProxyBuilder::<Proxy>::new(&connection)
-                .destination(DESTINATION)?
-                .path(session)?
-                .interface("org.freedesktop.portal.Session")?
-                .cache_properties(CacheProperties::No)
-                .build()
-                .await?
-                .call::<_, _, ()>("Close", &())
-                .await?;
-            Ok(())
         }
 
         async fn refresh_loop(
@@ -572,11 +478,7 @@ mod host {
                     break;
                 }
                 let interval = if retry { RETRY_INTERVAL } else { REFRESH_INTERVAL };
-                match timeout(interval, locations_rx.recv()).await {
-                    Ok(Some(location)) => locations[0] = Some(location),
-                    Ok(None) => sleep(interval).await,
-                    Err(_) => {}
-                }
+                Platform::sleep(interval).await;
             }
         }
 

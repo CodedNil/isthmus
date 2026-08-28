@@ -11,14 +11,19 @@ spirv-std.workspace = true
 glam = { workspace = true, features = ["libm"] }
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
-pollster.workspace = true
-wgpu = { workspace = true, features = ["std", "vulkan", "spirv"] }
 bytemuck.workspace = true
 glam = { workspace = true, features = ["std"] }
 half = { version = "2.7.1", default-features = false }
 raw-window-handle.workspace = true
 smallvec.workspace = true
 ttf-parser.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pollster.workspace = true
+wgpu = { workspace = true, features = ["std", "vulkan", "spirv"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { workspace = true, features = ["std", "webgpu", "wgsl"] }
 
 [lints]
 workspace = true

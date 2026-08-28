@@ -2,6 +2,7 @@ use crate::{
     app::{AppUpdater, Background},
     config::Config,
     render::music::AudioFeatures,
+    time::Instant,
 };
 use arrayvec::ArrayString;
 use std::{
@@ -12,13 +13,18 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
 };
 use tracing::{info, warn};
 
 mod enrichment;
 mod lyrics;
+#[cfg(not(target_arch = "wasm32"))]
 mod spotify;
+#[cfg(target_arch = "wasm32")]
+mod web;
+
+#[cfg(target_arch = "wasm32")]
+use web as spotify;
 
 pub use enrichment::{ArtState, Enrichment, Fetch};
 pub use lyrics::Lyrics;

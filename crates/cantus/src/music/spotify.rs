@@ -2,8 +2,11 @@ use super::{
     ART_SIZE, ArtState, AudioFeatures, CondensedPlaylist, LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult,
     PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime,
 };
-use crate::app::{AppUpdater, Background, send_update};
 use crate::config::{self, Config};
+use crate::{
+    app::{AppUpdater, Background, send_update},
+    time::Instant,
+};
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
 use futures_util::{StreamExt, future::try_join_all};
@@ -41,7 +44,7 @@ use std::{
     path::PathBuf,
     str,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::task::spawn_blocking;
 use tokio::{
