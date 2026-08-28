@@ -2,6 +2,7 @@ use super::{ART_SIZE, AudioFeatures, Music, MusicResult, TrackId, spotify::Spoti
 use crate::{
     app::{Background, CantusApp, update},
     render::music::PALETTE_COLORS,
+    time::Instant,
 };
 use arrayvec::ArrayVec;
 use futures_util::future::join_all;
@@ -13,8 +14,9 @@ use std::{
     array,
     collections::{HashMap, HashSet},
     ops::Range,
-    time::{Duration, Instant},
+    time::Duration,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::task::spawn_blocking;
 use tracing::warn;
 
@@ -28,13 +30,12 @@ pub struct Enrichment {
 
 impl Enrichment {
     pub(crate) fn new(background: Background) -> Self {
+        let client = Client::builder().user_agent(concat!("Cantus/", env!("CARGO_PKG_VERSION")));
+        #[cfg(not(target_arch = "wasm32"))]
+        let client = client.timeout(Duration::from_secs(15));
         Self {
             background,
-            http: Client::builder()
-                .user_agent(concat!("Cantus/", env!("CARGO_PKG_VERSION")))
-                .timeout(Duration::from_secs(15))
-                .build()
-                .expect("failed to construct HTTP client"),
+            http: client.build().expect("failed to construct HTTP client"),
         }
     }
 }
@@ -96,21 +97,11 @@ impl Fetch<AlbumArt> {
 async fn fetch_art(http: &Client, url: &str) -> ArtState {
     let result: MusicResult<_> = async {
         let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
-        Ok(spawn_blocking(move || {
-            let image = image::load_from_memory(&bytes)?;
-            let image = if image.width() > ART_SIZE || image.height() > ART_SIZE {
-                image.resize_to_fill(ART_SIZE, ART_SIZE, imageops::FilterType::Triangle)
-            } else {
-                image
-            }
-            .into_rgba8();
-            let (width, height) = image.dimensions();
-            Ok::<_, image::ImageError>(AlbumArt {
-                palette: image_palette(&image),
-                image: Image::rgba8((width, height).into(), image.into_raw()),
-            })
-        })
-        .await??)
+        #[cfg(not(target_arch = "wasm32"))]
+        let art = spawn_blocking(move || decode_art(&bytes)).await??;
+        #[cfg(target_arch = "wasm32")]
+        let art = decode_art(&bytes)?;
+        Ok(art)
     }
     .await;
     match result {
@@ -120,6 +111,21 @@ async fn fetch_art(http: &Client, url: &str) -> ArtState {
             Fetch::retry()
         }
     }
+}
+
+fn decode_art(bytes: &[u8]) -> Result<AlbumArt, image::ImageError> {
+    let image = image::load_from_memory(bytes)?;
+    let image = if image.width() > ART_SIZE || image.height() > ART_SIZE {
+        image.resize_to_fill(ART_SIZE, ART_SIZE, imageops::FilterType::Triangle)
+    } else {
+        image
+    }
+    .into_rgba8();
+    let (width, height) = image.dimensions();
+    Ok(AlbumArt {
+        palette: image_palette(&image),
+        image: Image::rgba8((width, height).into(), image.into_raw()),
+    })
 }
 
 fn art_slots(music: &mut Music) -> impl Iterator<Item = (&str, &mut ArtState)> {

@@ -1,2 +1,6 @@
 /target
+/assets/web/cantus.js
+/assets/web/cantus_bg.wasm
+/assets/web/cantus.d.ts
+/assets/web/cantus_bg.wasm.d.ts
 /.direnv

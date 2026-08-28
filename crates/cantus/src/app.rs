@@ -7,13 +7,17 @@ use crate::{
 };
 use isthmus::{Renderer, SurfaceHandle, glam::vec2};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+#[cfg(target_arch = "wasm32")]
+use std::marker::PhantomData;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 use std::{
     future::Future,
     io,
     sync::mpsc::{self, Sender},
     thread::Builder,
-    time::Duration,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{Layer, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -23,7 +27,10 @@ pub type AppUpdater = Sender<Update<CantusApp>>;
 
 #[derive(Clone)]
 pub struct Background {
+    #[cfg(not(target_arch = "wasm32"))]
     runtime: Handle,
+    #[cfg(target_arch = "wasm32")]
+    _runtime: PhantomData<()>,
     updater: AppUpdater,
 }
 
@@ -49,6 +56,7 @@ pub fn spawn_thread(name: &'static str, job: impl FnOnce() + Send + 'static) {
 }
 
 impl Background {
+    #[cfg(not(target_arch = "wasm32"))]
     fn new(runtime: &Runtime, updater: &AppUpdater) -> Self {
         Self {
             runtime: runtime.handle().clone(),
@@ -56,6 +64,15 @@ impl Background {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn new(updater: &AppUpdater) -> Self {
+        Self {
+            _runtime: PhantomData,
+            updater: updater.clone(),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn spawn_update(&self, task: impl Future<Output = Option<Update<CantusApp>>> + Send + 'static) {
         let updater = self.updater.clone();
         self.runtime.spawn(async move {
@@ -65,8 +82,24 @@ impl Background {
         });
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn spawn_update(&self, task: impl Future<Output = Option<Update<CantusApp>>> + 'static) {
+        let updater = self.updater.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Some(event) = task.await {
+                let _ = updater.send(event);
+            }
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
         self.runtime.spawn(task);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn spawn(&self, task: impl Future<Output = ()> + 'static) {
+        wasm_bindgen_futures::spawn_local(task);
     }
 }
 
@@ -81,12 +114,14 @@ pub struct CantusApp {
     pub(crate) enrichment: Enrichment,
     pub(crate) interaction: Interaction,
     occluded_interaction: Interaction,
+    #[cfg(not(target_arch = "wasm32"))]
     _runtime: Runtime,
 }
 
 impl Default for CantusApp {
     fn default() -> Self {
         let (updater, app_updates) = mpsc::channel();
+        #[cfg(not(target_arch = "wasm32"))]
         let runtime = RuntimeBuilder::new_multi_thread()
             .worker_threads(2)
             .max_blocking_threads(8)
@@ -96,7 +131,10 @@ impl Default for CantusApp {
             .enable_all()
             .build()
             .expect("failed to start Cantus async runtime");
+        #[cfg(not(target_arch = "wasm32"))]
         let background = Background::new(&runtime, &updater);
+        #[cfg(target_arch = "wasm32")]
+        let background = Background::new(&updater);
         let enrichment = Enrichment::new(background.clone());
         let config = config::load();
         Platform::start_launcher_listener(&background, &updater);
@@ -111,6 +149,7 @@ impl Default for CantusApp {
             interaction: Interaction::default(),
             occluded_interaction: Interaction::default(),
             config,
+            #[cfg(not(target_arch = "wasm32"))]
             _runtime: runtime,
         }
     }

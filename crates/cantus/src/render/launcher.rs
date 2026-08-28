@@ -98,26 +98,16 @@ mod host {
         render::UiContext,
     };
     use fend_core::Context;
-    use image::imageops::FilterType;
     use reqwest::Client;
-    use resvg::{
-        render,
-        tiny_skia::{Pixmap, Transform},
-        usvg::{self, Tree},
-    };
     use std::{
         collections::HashMap,
         error::Error,
-        fs,
         ops::Range,
-        path::Path,
         sync::{
             OnceLock,
             mpsc::{self, Receiver, Sender},
         },
     };
-    use tokio::task::spawn_blocking;
-    use tracing::warn;
 
     #[derive(Default)]
     pub struct TextField {
@@ -311,7 +301,7 @@ mod host {
             providers: impl IntoIterator<Item = SearchProvider>,
         ) -> Self {
             let mut calc = Context::new();
-            fetch_exchange_rates(background, http.clone());
+            Platform::start_exchange_rates(background, http.clone(), set_exchange_rates);
             calc.set_exchange_rate_handler_v2(ExchangeRates);
             let providers = providers
                 .into_iter()
@@ -509,26 +499,11 @@ mod host {
         }
     }
 
-    fn fetch_exchange_rates(background: &Background, http: Client) {
-        background.spawn(async move {
-            if let Ok(response) = http
-                .get("https://open.er-api.com/v6/latest/USD")
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-                && let Ok(body) = response.json::<CurrencyRates>().await
-            {
-                let _ = EXCHANGE_RATES.set(body.rates);
-            }
-        });
+    fn set_exchange_rates(rates: HashMap<String, f64>) {
+        let _ = EXCHANGE_RATES.set(rates);
     }
 
-    #[derive(serde::Deserialize)]
-    struct CurrencyRates {
-        rates: HashMap<String, f64>,
-    }
-
-    /// Scans installed apps and decodes their icons on a background thread, then applies the result.
+    /// Scans installed apps and lets the platform populate any available icons.
     fn start_scan(
         background: &Background,
         http: &Client,
@@ -537,23 +512,9 @@ mod host {
     ) {
         let app_updates = updates.clone();
         background.spawn(async move {
-            let apps = spawn_blocking(move || {
-                let mut apps = Platform::desktop_apps();
-                apps.sort_by_key(|app| app.name.to_lowercase());
-                for app in &mut apps {
-                    let Some(path) = app.icon_path.take() else {
-                        continue;
-                    };
-                    if let Some(pixels) = load_icon_pixels(&path) {
-                        app.icon = Some(Image::rgba8([ICON_PX; 2], pixels));
-                    } else {
-                        warn!(?path, "Failed to decode app icon");
-                    }
-                }
-                apps
-            })
-            .await
-            .unwrap_or_default();
+            let mut apps = Platform::desktop_apps();
+            apps.sort_by_key(|app| app.name.to_lowercase());
+            Platform::populate_app_icons(&mut apps);
             let _ = app_updates.send(LauncherUpdate::Apps(apps));
         });
 
@@ -562,54 +523,11 @@ mod host {
             let http = http.clone();
             let updates = updates.clone();
             background.spawn(async move {
-                if let Some(pixels) = fetch_icon(&http, &icon).await {
+                if let Some(pixels) = Platform::provider_icon(http, icon).await {
                     let _ = updates.send(LauncherUpdate::ProviderIcon(index, Image::rgba8([ICON_PX; 2], pixels)));
                 }
             });
         }
-    }
-
-    async fn fetch_icon(http: &Client, url: &str) -> Option<Vec<u8>> {
-        let bytes = http
-            .get(url)
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .bytes()
-            .await
-            .ok()?;
-        spawn_blocking(move || load_raster(&bytes)).await.ok().flatten()
-    }
-
-    /// Rasterizes an icon to `ICON_PX` square, straight-alpha RGBA.
-    fn load_icon_pixels(path: &Path) -> Option<Vec<u8>> {
-        if path.extension().is_some_and(|extension| extension == "svg") {
-            return rasterize_svg(&fs::read(path).ok()?);
-        }
-        image::open(path).ok().map(|image| resize_icon(&image))
-    }
-
-    fn load_raster(bytes: &[u8]) -> Option<Vec<u8>> {
-        image::load_from_memory(bytes)
-            .map(|image| resize_icon(&image))
-            .ok()
-            .or_else(|| rasterize_svg(bytes))
-    }
-
-    fn rasterize_svg(bytes: &[u8]) -> Option<Vec<u8>> {
-        let tree = Tree::from_data(bytes, &usvg::Options::default()).ok()?;
-        let mut pixmap = Pixmap::new(ICON_PX, ICON_PX)?;
-        let source = tree.size();
-        let fit = Transform::from_scale(ICON_PX as f32 / source.width(), ICON_PX as f32 / source.height());
-        render(&tree, fit, &mut pixmap.as_mut());
-        Some(pixmap.take_demultiplied())
-    }
-
-    fn resize_icon(image: &image::DynamicImage) -> Vec<u8> {
-        let raster = image.resize_to_fill(ICON_PX, ICON_PX, FilterType::Triangle);
-        raster.into_rgba8().into_raw()
     }
     /// The search query with a caret and selection, edited like an ordinary text box.
     impl LauncherState {

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:,">
+    <title>Cantus</title>
+    <style>
+      html, body, #cantus { width: 100%; height: 100%; margin: 0; }
+      body { overflow: hidden; background: #030712; }
+      #cantus { display: block; }
+    </style>
+  </head>
+  <body>
+    <canvas id="cantus"></canvas>
+    <script type="module">
+      import init from "./cantus.js";
+      init();
+    </script>
+  </body>
+</html>

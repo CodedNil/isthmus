@@ -13,5 +13,7 @@ mouse gestures generic across programs
 
 web demo
 
+nix options as part of build
+
 
 do a pass through everything, cantus and isthmus, identify cruft and legacy stuff to remove, identify places where we arent using immediate mode to its fullest potential, identify some radical suggestions to improve both the backend and frontend of isthmus/cantus

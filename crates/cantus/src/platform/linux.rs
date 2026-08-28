@@ -12,17 +12,26 @@ use crate::{
     },
 };
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
+use futures_util::StreamExt;
+use image::imageops::FilterType;
+use isthmus::SurfaceHandle;
 use isthmus::glam::{FloatExt, vec2};
-use isthmus::{Image, SurfaceHandle};
 use microfft::real::rfft_1024;
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
     WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
 };
+use reqwest::Client;
+use resvg::{
+    render,
+    tiny_skia::{Pixmap, Transform},
+    usvg::{self, Tree},
+};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     env,
+    error::Error,
     ffi::c_void,
     fs::{self, File},
     io::{self, Read, Write},
@@ -42,7 +51,7 @@ use std::{
     time::{Duration, Instant},
 };
 use sysinfo::{Gpus, System};
-use tokio::net::UnixDatagram;
+use tokio::{net::UnixDatagram, sync::mpsc::UnboundedSender, time::sleep as tokio_sleep};
 use tracing::warn;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop, event_created_child,
@@ -79,7 +88,11 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 use xkbcommon::xkb;
-use zbus::Connection as DbusConnection;
+use zbus::{
+    Connection as DbusConnection, Proxy as DbusProxy,
+    proxy::{Builder as ProxyBuilder, CacheProperties},
+    zvariant::{OwnedObjectPath, OwnedValue, Value as DbusValue},
+};
 
 const PANEL_OVERFLOW: f32 = 16.0;
 
@@ -89,31 +102,82 @@ const AUDIO_BAND_EDGES: [f32; AUDIO_SPECTRUM_BANDS + 1] =
     [60.0, 120.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 12_000.0];
 const LAUNCHER_SOCKET_NAME: &str = "cantus-launcher.sock";
 const TEXT_MIME: &str = "text/plain;charset=utf-8";
+const ICON_PX: u32 = 48;
 
-/// One launchable desktop entry.
-pub struct DesktopApp {
-    pub name: String,
-    pub exec: String,
-    pub comment: String,
-    pub icon_path: Option<PathBuf>,
-    pub action: Option<(String, String)>,
-    pub icon: Option<Image>,
-}
-
-/// The Linux desktop implementation exposed as [`super::Platform`].
-pub struct Linux;
-
-impl Linux {
+impl super::Platform {
     pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
-    pub(crate) fn start_status_monitor(updates: Sender<SystemSample>, audio: Arc<AudioMonitor>) {
+    pub fn start_status_monitor(updates: Sender<SystemSample>, audio: Arc<AudioMonitor>) {
         let volume = Arc::clone(&audio);
         spawn_thread("cantus-audio-playback", move || monitor_playback(&audio.spectrum));
         spawn_thread("cantus-audio-volume", move || monitor_volume(&volume.volume));
         spawn_thread("cantus-system-status", move || monitor_status(&updates));
     }
 
-    pub(crate) fn set_volume(volume: f32) {
+    pub fn start_location_monitor(background: &Background, updates: UnboundedSender<[f32; 2]>) {
+        background.spawn(async move {
+            if let Err(error) = stream_location(&updates).await {
+                warn!(%error, "Location portal unavailable");
+            }
+        });
+    }
+
+    pub async fn sleep(duration: Duration) {
+        tokio_sleep(duration).await;
+    }
+
+    pub fn populate_app_icons(apps: &mut [super::DesktopApp]) {
+        for app in apps {
+            let Some(path) = app.icon_path.take() else {
+                continue;
+            };
+            if let Some(pixels) = load_icon_pixels(&path) {
+                app.icon = Some(isthmus::Image::rgba8([ICON_PX; 2], pixels));
+            } else {
+                warn!(?path, "Failed to decode app icon");
+            }
+        }
+    }
+
+    pub fn decode_icon(bytes: &[u8]) -> Option<Vec<u8>> {
+        load_raster(bytes)
+    }
+
+    pub async fn provider_icon(http: Client, url: String) -> Option<Vec<u8>> {
+        let bytes = http
+            .get(url)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .bytes()
+            .await
+            .ok()?;
+        load_raster(&bytes)
+    }
+
+    pub fn start_exchange_rates(background: &Background, http: Client, update: fn(HashMap<String, f64>)) {
+        background.spawn(async move {
+            if let Ok(response) = http
+                .get("https://open.er-api.com/v6/latest/USD")
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+                && let Ok(body) = response.json::<Value>().await
+                && let Some(rates) = body.get("rates").and_then(|rates| rates.as_object())
+            {
+                update(
+                    rates
+                        .iter()
+                        .filter_map(|(currency, rate)| Some((currency.clone(), rate.as_f64()?)))
+                        .collect(),
+                );
+            }
+        });
+    }
+
+    pub fn set_volume(volume: f32) {
         let volume = format!("{volume:.3}");
         if let Err(error) = Command::new("wpctl")
             .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume])
@@ -124,7 +188,7 @@ impl Linux {
     }
 
     /// Calls logind directly, which is what `systemctl poweroff` does under the hood.
-    pub(crate) fn run_power_action(background: &Background, action: usize) {
+    pub fn run_power_action(background: &Background, action: usize) {
         let method = ["PowerOff", "Reboot"][action];
         background.spawn_update(async move {
             let result = async {
@@ -148,7 +212,7 @@ impl Linux {
         });
     }
 
-    pub(crate) fn desktop_apps() -> Vec<DesktopApp> {
+    pub fn desktop_apps() -> Vec<super::DesktopApp> {
         let mut seen = HashSet::new();
         let locales = get_languages_from_env();
         desktop_entries(&locales)
@@ -165,7 +229,7 @@ impl Linux {
                             .zip(entry.action_entry(action, "Exec"))
                     })
                     .map(|(name, exec)| (name.into_owned(), exec.to_owned()));
-                Some(DesktopApp {
+                Some(super::DesktopApp {
                     name: entry.name(&locales)?.into_owned(),
                     exec: entry.exec()?.to_owned(),
                     comment: entry.comment(&locales).unwrap_or_default().into_owned(),
@@ -178,7 +242,7 @@ impl Linux {
     }
 
     /// Strips desktop-entry field codes (`%f %F %u %U %i %c %k`) and launches the command, detached.
-    pub(crate) fn spawn(exec: &str) {
+    pub fn spawn(exec: &str) {
         let mut fields = exec.split_whitespace().filter(|token| !token.starts_with('%'));
         let Some(program) = fields.next() else { return };
         let args = fields.collect::<Vec<_>>();
@@ -206,13 +270,13 @@ impl Linux {
         }
     }
 
-    pub(crate) fn open_url(url: &str) {
+    pub fn open_url(url: &str) {
         if let Err(error) = Command::new("xdg-open").arg(url).spawn() {
             warn!(%error, %url, "Failed to open URL");
         }
     }
 
-    pub(crate) fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
+    pub fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
         let path = launcher_socket_path();
         let _ = fs::remove_file(&path);
         let updater = updater.clone();
@@ -251,7 +315,7 @@ impl Linux {
     /// # Panics
     ///
     /// Panics when required Wayland globals or rendering resources cannot be initialized.
-    pub(crate) fn run() {
+    pub fn run() {
         let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
         let (globals, mut event_queue) =
             registry_queue_init::<LayerShellApp>(&connection).expect("Failed to read Wayland registry");
@@ -345,6 +409,88 @@ impl Linux {
     }
 }
 
+async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    const DESTINATION: &str = "org.freedesktop.portal.Desktop";
+    let connection = DbusConnection::session().await?;
+    let location = ProxyBuilder::<DbusProxy>::new(&connection)
+        .destination(DESTINATION)?
+        .path("/org/freedesktop/portal/desktop")?
+        .interface("org.freedesktop.portal.Location")?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
+    let session_token = format!("cantus_{:x}", fastrand::u64(..));
+    let session: OwnedObjectPath = location
+        .call(
+            "CreateSession",
+            &HashMap::from([
+                ("session_handle_token", DbusValue::from(session_token)),
+                ("accuracy", DbusValue::from(2u32)),
+            ]),
+        )
+        .await?;
+    let mut updates = location.receive_signal("LocationUpdated").await?;
+
+    let request_token = format!("cantus_{:x}", fastrand::u64(..));
+    let sender_name = connection
+        .unique_name()
+        .unwrap()
+        .trim_start_matches(':')
+        .replace('.', "_");
+    let request = ProxyBuilder::<DbusProxy>::new(&connection)
+        .destination(DESTINATION)?
+        .path(format!(
+            "/org/freedesktop/portal/desktop/request/{sender_name}/{request_token}"
+        ))?
+        .interface("org.freedesktop.portal.Request")?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
+    let mut response = request.receive_signal("Response").await?;
+    let _: OwnedObjectPath = location
+        .call(
+            "Start",
+            &(
+                &session,
+                "",
+                HashMap::from([("handle_token", DbusValue::from(request_token))]),
+            ),
+        )
+        .await?;
+    let (status, _): (u32, HashMap<String, OwnedValue>) = response
+        .next()
+        .await
+        .ok_or("Location portal returned no response")?
+        .body()
+        .deserialize()?;
+    if status != 0 {
+        return Err(format!("Location request failed with status {status}").into());
+    }
+
+    while let Some(update) = updates.next().await {
+        let (_, location): (OwnedObjectPath, HashMap<String, OwnedValue>) = update.body().deserialize()?;
+        if sender
+            .send([
+                f64::try_from(&location["Latitude"])? as f32,
+                f64::try_from(&location["Longitude"])? as f32,
+            ])
+            .is_err()
+        {
+            break;
+        }
+    }
+    ProxyBuilder::<DbusProxy>::new(&connection)
+        .destination(DESTINATION)?
+        .path(session)?
+        .interface("org.freedesktop.portal.Session")?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?
+        .call::<_, _, ()>("Close", &())
+        .await?;
+    Ok(())
+}
+
 fn launcher_socket_path() -> PathBuf {
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| "/tmp".into());
     PathBuf::from(runtime_dir).join(LAUNCHER_SOCKET_NAME)
@@ -356,6 +502,36 @@ fn resolve_icon(icon: &str) -> Option<PathBuf> {
         return path.exists().then(|| path.to_owned());
     }
     freedesktop_icons::lookup(icon).with_size(64).find()
+}
+
+fn load_icon_pixels(path: &Path) -> Option<Vec<u8>> {
+    if path.extension().is_some_and(|extension| extension == "svg") {
+        return rasterize_svg(&fs::read(path).ok()?);
+    }
+    image::open(path).ok().map(|image| resize_icon(&image))
+}
+
+fn load_raster(bytes: &[u8]) -> Option<Vec<u8>> {
+    image::load_from_memory(bytes)
+        .map(|image| resize_icon(&image))
+        .ok()
+        .or_else(|| rasterize_svg(bytes))
+}
+
+fn rasterize_svg(bytes: &[u8]) -> Option<Vec<u8>> {
+    let tree = Tree::from_data(bytes, &usvg::Options::default()).ok()?;
+    let mut pixmap = Pixmap::new(ICON_PX, ICON_PX)?;
+    let source = tree.size();
+    let fit = Transform::from_scale(ICON_PX as f32 / source.width(), ICON_PX as f32 / source.height());
+    render(&tree, fit, &mut pixmap.as_mut());
+    Some(pixmap.take_demultiplied())
+}
+
+fn resize_icon(image: &image::DynamicImage) -> Vec<u8> {
+    image
+        .resize_to_fill(ICON_PX, ICON_PX, FilterType::Triangle)
+        .into_rgba8()
+        .into_raw()
 }
 
 fn monitor_status(updates: &Sender<SystemSample>) {
@@ -389,7 +565,7 @@ fn monitor_status(updates: &Sender<SystemSample>) {
         {
             break;
         }
-        thread::sleep(Linux::STATUS_SAMPLE_INTERVAL);
+        thread::sleep(super::Platform::STATUS_SAMPLE_INTERVAL);
     }
 }
 
