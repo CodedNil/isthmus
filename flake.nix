@@ -52,13 +52,9 @@ rec {
         };
     in
     {
-      packages.${system} = rec {
-        default = cantus;
-        cantus = (nightlyRustPlatform pkgs).buildRustPackage {
-          inherit pname;
-          version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
-
-          src = lib.cleanSource ./.;
+      packages.${system} =
+        let
+          rustPlatform = nightlyRustPlatform pkgs;
           cargoLock = {
             lockFile = ./Cargo.lock;
             outputHashes = {
@@ -66,31 +62,72 @@ rec {
               "sysinfo-0.39.6" = "sha256-HgD13E5L5Gtwj1I1mD+vU3ln0dfj61Zeet8LHyUIdkk=";
             };
           };
-
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-            makeWrapper
-            mold
-          ];
-
-          buildInputs = runtimeLibraries pkgs;
-
-          postInstall = ''
-            wrapProgram "$out/bin/${pname}" \
-              --set LD_LIBRARY_PATH "${lib.makeLibraryPath (runtimeLibraries pkgs)}" \
-              --prefix PATH : "${lib.makeBinPath (runtimeTools pkgs)}"
+          src = lib.cleanSource ./.;
+          sysrootVendorPatch = ''
+            for crate in ${nightlyRust pkgs}/lib/rustlib/src/rust/library/vendor/*; do
+              name="$(basename "$crate")"
+              if [ ! -e "$cargoDepsCopy/$name" ]; then
+                cp -r "$crate" "$cargoDepsCopy/"
+              fi
+            done
           '';
-
-          meta = {
-            inherit description;
-            homepage = "https://github.com/CodedNil/cantus";
-            license = lib.licenses.mit;
-            maintainers = with lib.maintainers; [ CodedNil ];
-            platforms = lib.platforms.linux;
-            mainProgram = pname;
+          cantusShader = rustPlatform.buildRustPackage {
+            pname = "cantus-shader";
+            version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
+            inherit src cargoLock;
+            postPatch = sysrootVendorPatch;
+            doCheck = false;
+            dontCargoInstall = true;
+            buildPhase = ''
+              runHook preBuild
+              cargo run --release --offline \
+                --manifest-path crates/isthmus_build/Cargo.toml \
+                --bin shader-build -- \
+                cantus \
+                "$PWD/crates/cantus/src/render/mod.rs" \
+                "$PWD/crates/isthmus" \
+                "$PWD" \
+                "$PWD/isthmus.spv"
+              runHook postBuild
+            '';
+            installPhase = ''
+              install -Dm644 isthmus.spv "$out/isthmus.spv"
+            '';
+            nativeBuildInputs = with pkgs; [
+              pkg-config
+              mold
+            ];
+          };
+        in
+        rec {
+          default = cantus;
+          "cantus-shader" = cantusShader;
+          cantus = rustPlatform.buildRustPackage {
+            inherit pname src cargoLock;
+            version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
+            buildAndTestSubdir = "crates/cantus";
+            CANTUS_SHADER_SPV = "${cantusShader}/isthmus.spv";
+            nativeBuildInputs = with pkgs; [
+              pkg-config
+              makeWrapper
+              mold
+            ];
+            buildInputs = runtimeLibraries pkgs;
+            postInstall = ''
+              wrapProgram "$out/bin/${pname}" \
+                --set LD_LIBRARY_PATH "${lib.makeLibraryPath (runtimeLibraries pkgs)}" \
+                --prefix PATH : "${lib.makeBinPath (runtimeTools pkgs)}"
+            '';
+            meta = {
+              inherit description;
+              homepage = "https://github.com/CodedNil/cantus";
+              license = lib.licenses.mit;
+              maintainers = with lib.maintainers; [ CodedNil ];
+              platforms = lib.platforms.linux;
+              mainProgram = pname;
+            };
           };
         };
-      };
 
       devShells.${system}.default = pkgs.mkShell {
         name = pname;
