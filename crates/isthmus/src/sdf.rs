@@ -1,4 +1,7 @@
-use crate::{FloatExt, glam::Vec4, spirv_std::arch::Derivative};
+use crate::{
+    glam::{FloatExt, Vec4},
+    spirv_std::arch::Derivative,
+};
 use core::ops::{Add, Neg, Sub};
 
 /// Composable negative-inside signed-distance geometry.

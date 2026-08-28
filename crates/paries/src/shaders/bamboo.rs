@@ -1,8 +1,10 @@
 use super::{Fragment, fbm, hash, noise, tapered_segment};
 use core::f32::consts::PI;
+#[cfg(target_arch = "spirv")]
+use isthmus::Float as _;
 use isthmus::{
-    FloatExt, Quad,
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    Quad,
+    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
 };
 
 #[cfg(not(target_arch = "spirv"))]

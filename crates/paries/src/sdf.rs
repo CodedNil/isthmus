@@ -2,7 +2,12 @@
 pub mod bamboo;
 
 pub use bamboo::Bamboo;
-use isthmus::{FloatExt, Sdf, ShaderData, glam::Vec2};
+#[cfg(target_arch = "spirv")]
+use isthmus::Float as _;
+use isthmus::{
+    Sdf, ShaderData,
+    glam::{FloatExt, Vec2},
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, ShaderData)]
@@ -12,9 +17,6 @@ pub struct Globals {
 
 pub type Fragment = isthmus::Fragment<Globals>;
 isthmus::program!();
-
-#[cfg(target_arch = "spirv")]
-fn shader_module_marker() {}
 
 /// Signed distance to a line segment with a variable radius at each end.
 pub fn tapered_segment(point: Vec2, start: Vec2, end: Vec2, start_radius: f32, end_radius: f32) -> Sdf {

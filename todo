@@ -14,8 +14,4 @@ mouse gestures generic across programs
 web demo
 
 
-bugs:
-sun of weather shouldnt clip into just the primary pill
-images flicker in track
-
 do a pass through everything, cantus and isthmus, identify cruft and legacy stuff to remove, identify places where we arent using immediate mode to its fullest potential, identify some radical suggestions to improve both the backend and frontend of isthmus/cantus

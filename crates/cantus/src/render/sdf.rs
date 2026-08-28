@@ -1,7 +1,9 @@
 use crate::render::Globals;
+#[cfg(target_arch = "spirv")]
+use isthmus::Float as _;
 use isthmus::{
-    FloatExt, Quad, Sdf,
-    glam::{UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
+    Quad, Sdf,
+    glam::{FloatExt, UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
 };
 
 /// Where the drop shadow fades below the fragment kill threshold, plus an AA pixel.

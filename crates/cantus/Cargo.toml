@@ -74,7 +74,7 @@ tokio = { version = "1.53.1", features = [
     "time",
 ] }
 form_urlencoded = "1.2.2"
-flate2 = "1.1.9"
+flate2 = "1.1.10"
 futures-util = "0.3.34"
 freedesktop-desktop-entry = { version = "0.8.2", default-features = false }
 freedesktop-icons = "0.4.0"

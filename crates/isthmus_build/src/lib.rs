@@ -41,7 +41,7 @@ impl ShaderBuild {
         write_if_changed(
             &source_crate.join("lib.rs"),
             &format!(
-                "#![no_std]\n#![expect(dead_code, unused_imports, reason = \"shader compilation includes the complete render module\")]\n#[path = \"{}\"]\npub mod render;\n",
+                "#![no_std]\n#![allow(dead_code, unused_imports)]\n#[path = \"{}\"]\npub mod render;\n",
                 self.source.display(),
             ),
         )?;

@@ -1,4 +1,4 @@
-use super::{AudioFeatures, Music, MusicResult, TrackId, spotify::Spotify};
+use super::{ART_SIZE, AudioFeatures, Music, MusicResult, TrackId, spotify::Spotify};
 use crate::{
     app::{Background, CantusApp, update},
     render::music::PALETTE_COLORS,
@@ -19,7 +19,6 @@ use tokio::task::spawn_blocking;
 use tracing::warn;
 
 const RETRY_DELAY: Duration = Duration::from_secs(30);
-const IMAGE_SIZE: u32 = 64;
 pub type ArtState = Fetch<AlbumArt>;
 #[derive(Clone)]
 pub struct Enrichment {
@@ -98,12 +97,17 @@ async fn fetch_art(http: &Client, url: &str) -> ArtState {
     let result: MusicResult<_> = async {
         let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
         Ok(spawn_blocking(move || {
-            let image = image::load_from_memory(&bytes)?
-                .resize_to_fill(IMAGE_SIZE, IMAGE_SIZE, imageops::FilterType::Lanczos3)
-                .to_rgba8();
+            let image = image::load_from_memory(&bytes)?;
+            let image = if image.width() > ART_SIZE || image.height() > ART_SIZE {
+                image.resize_to_fill(ART_SIZE, ART_SIZE, imageops::FilterType::Triangle)
+            } else {
+                image
+            }
+            .into_rgba8();
+            let (width, height) = image.dimensions();
             Ok::<_, image::ImageError>(AlbumArt {
                 palette: image_palette(&image),
-                image: Image::rgba8([IMAGE_SIZE; 2], image.into_raw()),
+                image: Image::rgba8((width, height).into(), image.into_raw()),
             })
         })
         .await??)

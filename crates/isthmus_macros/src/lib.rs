@@ -99,7 +99,7 @@ pub fn program(input: TokenStream) -> TokenStream {
 
 /// Extracts inline paint closures and keeps their surrounding implementation on the host.
 ///
-/// Generated shaders receive Isthmus' cross-target float extension methods and lower
+/// Generated shaders receive glam's cross-target float extension methods and lower
 /// captured images to the renderer's internal descriptor heap.
 #[proc_macro_attribute]
 pub fn paint(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -350,7 +350,9 @@ fn rewrite_call(call: &syn::ExprMethodCall, rewrite: &Rewrite<'_>) -> syn::Expr 
     syn::parse2(quote!({
         #(#capture_bindings)*
         #receiver.#method #generics (#geometry, |__isthmus_frame, __isthmus_geometry| {
-            use #isthmus::FloatExt as _;
+            use #isthmus::glam::FloatExt as _;
+            #[cfg(target_arch = "spirv")]
+            use #isthmus::Float as _;
             let _ = #closure;
             #payload
         })
@@ -389,7 +391,9 @@ fn program_module() -> TokenStream2 {
         #[doc(hidden)]
         pub mod __isthmus_quad {
             use super::*;
-            use #isthmus::FloatExt as _;
+            use #isthmus::glam::FloatExt as _;
+            #[cfg(target_arch = "spirv")]
+            use #isthmus::Float as _;
 
             #[#isthmus::spirv_std::spirv(vertex)]
             pub fn vertex(

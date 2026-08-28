@@ -6,9 +6,11 @@ use crate::render::{
     },
 };
 use core::f32::consts::PI;
+#[cfg(target_arch = "spirv")]
+use isthmus::Float as _;
 use isthmus::{
-    FloatExt, Quad, ShaderData,
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    Quad, ShaderData,
+    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
 };
 

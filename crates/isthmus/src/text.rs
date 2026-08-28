@@ -1,5 +1,5 @@
 #[cfg(target_arch = "spirv")]
-use crate::FloatExt;
+use crate::Float as _;
 #[cfg(not(target_arch = "spirv"))]
 use crate::glam::Vec3;
 use crate::{
