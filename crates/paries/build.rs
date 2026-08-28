@@ -9,7 +9,7 @@ fn main() {
     let workspace = manifest.join("../..");
     rerun_for_sources(&manifest.join("src"));
     ShaderBuild {
-        name: "paries",
+        name: String::from("paries"),
         source: manifest.join("src/sdf.rs"),
         isthmus: manifest.join("../isthmus"),
         workspace,

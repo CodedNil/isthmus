@@ -9,7 +9,7 @@ const SHADER_TARGET: &str = "spirv-unknown-vulkan1.4";
 
 /// Describes a Rust-GPU shader compiled as part of a host package's build script.
 pub struct ShaderBuild {
-    pub name: &'static str,
+    pub name: String,
     pub source: PathBuf,
     pub isthmus: PathBuf,
     pub workspace: PathBuf,
@@ -24,7 +24,7 @@ impl ShaderBuild {
     /// Returns an error if the generated shader workspace cannot be written or Rust-GPU fails
     /// to produce exactly one SPIR-V module.
     pub fn build(self) -> Result<(), String> {
-        let cache = self.workspace.join("target/isthmus").join(self.name);
+        let cache = self.workspace.join("target/isthmus").join(&self.name);
         let source_crate = cache.join("source");
         let target = cache.join("target");
         fs::create_dir_all(&source_crate).map_err(io_error("create shader source directory"))?;
@@ -45,6 +45,10 @@ impl ShaderBuild {
                 self.source.display(),
             ),
         )?;
+
+        println!("cargo:rerun-if-changed={}", self.workspace.join("Cargo.lock").display());
+        fs::copy(self.workspace.join("Cargo.lock"), source_crate.join("Cargo.lock"))
+            .map_err(io_error("copy workspace Cargo.lock into shader workspace"))?;
 
         let build = SpirvBuilder::new(&source_crate, SHADER_TARGET)
             .deny_warnings(true)

@@ -1,6 +1,6 @@
 use isthmus_build::ShaderBuild;
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -17,12 +17,21 @@ fn main() {
     println!("cargo:rerun-if-changed={}", manifest.join("Cargo.toml").display());
     println!("cargo:rerun-if-changed={}", manifest.join("../Cargo.lock").display());
 
+    println!("cargo:rerun-if-env-changed=CANTUS_SHADER_SPV");
+    let output = out_dir.join("isthmus.spv");
+    if let Some(shader) = env::var_os("CANTUS_SHADER_SPV") {
+        if !output.exists() {
+            fs::copy(shader, &output).expect("failed to copy Cantus shader");
+        }
+        return;
+    }
+
     ShaderBuild {
-        name: "cantus",
+        name: String::from("cantus"),
         source,
         isthmus,
         workspace,
-        output: out_dir.join("isthmus.spv"),
+        output,
     }
     .build()
     .expect("failed to build Cantus shader");
