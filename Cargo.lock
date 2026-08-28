@@ -2414,6 +2414,14 @@ checksum = "6e6eb142958d64335fb0e345c5b9ead2ecd6fc438c307e9d7d3c4fd428dbaf12"
 [[package]]
 name = "paries"
 version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "isthmus",
+ "isthmus-build",
+ "raw-window-handle",
+ "wayland-client",
+ "wayland-protocols-wlr",
+]
 
 [[package]]
 name = "parking"

@@ -4,6 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+isthmus = { path = "../isthmus" }
+
+[target.'cfg(not(target_arch = "spirv"))'.dependencies]
+bytemuck.workspace = true
+raw-window-handle.workspace = true
+wayland-client = { version = "0.31.15", default-features = false, features = [
+    "system",
+] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+
+[build-dependencies]
+isthmus-build = { path = "../isthmus_build" }
 
 [lints]
 workspace = true
