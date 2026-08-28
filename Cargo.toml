@@ -11,7 +11,7 @@ members = [
 
 [workspace.dependencies]
 bytemuck = { version = "1.25.2", features = ["derive", "min_const_generics"] }
-glam = { version = "0.33.5", default-features = false, features = [
+glam = { version = "0.33.6", default-features = false, features = [
     "bytemuck",
     "u32",
 ] }

@@ -1,13 +1,13 @@
 use super::{
-    ArtState, AudioFeatures, CondensedPlaylist, LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult, PlaybackCommand,
-    PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime,
+    ART_SIZE, ArtState, AudioFeatures, CondensedPlaylist, LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult,
+    PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime,
 };
 use crate::app::{AppUpdater, Background, send_update};
 use crate::config::{self, Config};
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
 use futures_util::{StreamExt, future::try_join_all};
-use isthmus::FloatExt;
+use isthmus::glam::FloatExt;
 use librespot_core::{
     FileId, Session, SessionConfig, SpotifyId, authentication::Credentials, cache::Cache,
     dealer::protocol::Message as DealerMessage, error::ErrorKind,
@@ -49,6 +49,8 @@ use tokio::{
     time::sleep,
 };
 use tracing::{error, info, warn};
+
+const ART_SIZE_PX: i32 = ART_SIZE as i32;
 
 const CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 const REDIRECT_URI: &str = "http://127.0.0.1:8898/login";
@@ -859,7 +861,7 @@ fn track_from_provided(
         name: text("title", |details| &details.name),
         artist: text("artist_name", |details| &details.artist),
         album: text("album_title", |details| &details.album),
-        image: ["image_xlarge_url", "image_large_url", "image_url"]
+        image: ["image_url", "image_large_url", "image_xlarge_url"]
             .into_iter()
             .find_map(|key| metadata.get(key))
             .map(|url| {
@@ -886,7 +888,7 @@ fn track_image_url(track: &metadata::Track) -> Option<String> {
         .into_iter()
         .flat_map(|group| &group.image)
         .chain(&album.cover)
-        .max_by_key(|image| image.width());
+        .min_by_key(|image| image.width().abs_diff(ART_SIZE_PX));
     let image = image?;
     (!image.file_id().is_empty()).then(|| format!("https://i.scdn.co/image/{}", FileId::from(image)))
 }

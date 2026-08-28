@@ -1,6 +1,9 @@
 use super::{Enrichment, Fetch, TRACK_SPACING_MS, Track, TrackId, spotify::Spotify};
 use crate::app::update;
-use isthmus::{FloatExt, glam::vec2, text};
+use isthmus::{
+    glam::{FloatExt, vec2},
+    text,
+};
 use quick_xml::{
     Reader, XmlVersion,
     escape::unescape,
@@ -17,7 +20,7 @@ pub struct LyricSegment {
     pub start_ms: f32,
     pub end_ms: f32,
     pub text: String,
-    pub lane: usize,
+    pub background: bool,
     pub break_after: bool,
 }
 
@@ -29,7 +32,7 @@ impl LyricSegment {
             start_ms,
             end_ms: next_start_ms.map_or(estimated_end, |next| estimated_end.min(next)),
             text,
-            lane: 0,
+            background: false,
             break_after: true,
         }
     }
@@ -67,12 +70,9 @@ pub struct Lyrics {
 
 struct PositionedLyric {
     text: String,
-    start_ms: f32,
-    end_ms: f32,
+    background: bool,
     position: f32,
     width: f32,
-    lane: usize,
-    offset: f32,
 }
 
 impl Lyrics {
@@ -100,55 +100,29 @@ impl Lyrics {
 
         let mut words = Vec::with_capacity(segments.len());
         let mut timeline = vec![(0.0, 0.0)];
-        let mut cursors = [0.0f32; 2];
-        let mut vocal_end = [0.0f32; 2];
+        let mut cursor = 0.0;
+        let mut vocal_end = 0.0;
         let space = shaper.width(" ", 15.0, 700.0);
         for segment in &segments {
-            let lane = segment.lane.min(1);
-            let silence = (segment.start_ms - vocal_end[lane]).max(0.0);
-            cursors[lane] += silence * Self::SILENCE_SPEED;
+            let silence = (segment.start_ms - vocal_end).max(0.0);
+            cursor += silence * Self::SILENCE_SPEED;
             let value = segment.text.trim_start();
             let width = shaper.width(value, 15.0, 700.0);
-            let position = cursors[lane];
+            let position = cursor;
             words.push(PositionedLyric {
                 text: value.into(),
-                start_ms: segment.start_ms,
-                end_ms: segment.end_ms,
+                background: segment.background,
                 position,
                 width,
-                lane,
-                offset: 0.0,
             });
-            cursors[lane] += width + space * f32::from(segment.break_after);
+            cursor += width + space * f32::from(segment.break_after);
             let end_ms = segment.end_ms.max(segment.start_ms);
-            vocal_end[lane] = vocal_end[lane].max(end_ms);
-            if lane == 0 {
-                timeline.push((segment.start_ms, position));
-                timeline.push((end_ms, position + width));
-            }
+            vocal_end = vocal_end.max(end_ms);
+            timeline.push((segment.start_ms, position));
+            timeline.push((end_ms, position + width));
         }
 
-        let offsets = words
-            .iter()
-            .map(|word| {
-                let gap = words
-                    .iter()
-                    .filter(|other| other.lane != word.lane)
-                    .map(|other| {
-                        (other.start_ms - word.end_ms)
-                            .max(word.start_ms - other.end_ms)
-                            .max(0.0)
-                    })
-                    .fold(f32::MAX, f32::min);
-                (1.0 - gap / 400.0).clamp(0.0, 1.0).smoothstep(0.0, 1.0)
-            })
-            .collect::<Vec<_>>();
-        for (word, offset) in words.iter_mut().zip(offsets) {
-            word.offset = offset;
-        }
-
-        let vocal_end = vocal_end[0].max(vocal_end[1]);
-        let position = cursors[0].max(cursors[1]) + (duration_ms - vocal_end).max(0.0) * Self::SILENCE_SPEED;
+        let position = cursor + (duration_ms - vocal_end).max(0.0) * Self::SILENCE_SPEED;
         timeline.push((duration_ms.max(vocal_end), position));
         timeline.sort_by(|left, right| left.0.total_cmp(&right.0));
         Self {
@@ -179,23 +153,20 @@ impl Lyrics {
         }
     }
 
-    pub(crate) fn visible(&self, shaper: &text::Shaper, range: Range<f32>) -> [text::ShapedLine; 2] {
-        [0, 1].map(|lane| {
-            shaper.shape_positioned(
-                self.words
-                    .iter()
-                    .filter(move |word| {
-                        word.lane == lane && word.position <= range.end && word.position + word.width >= range.start
-                    })
-                    .map(|word| {
-                        let direction = word.lane as f32 * 2.0 - 1.0;
-                        (word.text.as_str(), vec2(word.position, direction * 8.0 * word.offset))
-                    }),
-                15.0,
-                700.0,
-                usize::MAX,
-            )
-        })
+    pub(crate) fn visible(&self, shaper: &text::Shaper, range: Range<f32>, background: bool) -> text::ShapedLine {
+        shaper.shape_positioned(
+            self.words
+                .iter()
+                .filter(|word| {
+                    word.background == background
+                        && word.position <= range.end
+                        && word.position + word.width >= range.start
+                })
+                .map(|word| (word.text.as_str(), vec2(word.position, 0.0))),
+            15.0,
+            700.0,
+            usize::MAX,
+        )
     }
 }
 
@@ -301,11 +272,10 @@ fn attribute(tag: &BytesStart<'_>, name: &str) -> Option<String> {
 
 fn parse_ttml(source: &str) -> Vec<LyricSegment> {
     let mut reader = Reader::from_str(source);
-    let (mut segments, mut line_lane) = (Vec::new(), None);
+    let (mut segments, mut in_line) = (Vec::new(), false);
     let mut line_start = 0;
     let mut line_time = None;
     let mut line_text = String::new();
-    let mut primary_agent = None;
     let mut span_roles = Vec::new();
     loop {
         match reader.read_event() {
@@ -316,13 +286,10 @@ fn parse_ttml(source: &str) -> Vec<LyricSegment> {
                     .as_deref()
                     .and_then(time)
                     .zip(attribute(&tag, "end").as_deref().and_then(time));
-                let agent = attribute(&tag, "agent").unwrap_or_default();
-                let lane = usize::from(primary_agent.as_ref().is_some_and(|primary| primary != &agent));
-                primary_agent.get_or_insert(agent);
-                line_lane = Some(lane);
+                in_line = true;
                 line_start = segments.len();
             }
-            Ok(Event::Start(tag)) if line_lane.is_some() && tag.local_name().as_ref() == "span" => {
+            Ok(Event::Start(tag)) if in_line && tag.local_name().as_ref() == "span" => {
                 let start = attribute(&tag, "begin").as_deref().and_then(time);
                 let end = attribute(&tag, "end").as_deref().and_then(time);
                 span_roles.push(match attribute(&tag, "role").as_deref() {
@@ -337,12 +304,12 @@ fn parse_ttml(source: &str) -> Vec<LyricSegment> {
                         start_ms,
                         end_ms: end.unwrap_or(start_ms + 1_000.0),
                         text: String::new(),
-                        lane: line_lane.unwrap() ^ usize::from(span_roles.iter().any(|&(background, _)| background)),
+                        background: span_roles.iter().any(|&(background, _)| background),
                         break_after: false,
                     });
                 }
             }
-            Ok(Event::Text(value)) if line_lane.is_some() && !span_roles.iter().any(|&(_, ignored)| ignored) => {
+            Ok(Event::Text(value)) if in_line && !span_roles.iter().any(|&(_, ignored)| ignored) => {
                 let value = value.xml_content(XmlVersion::Implicit1_0);
                 let Ok(value) = unescape(&value) else { return Vec::new() };
                 line_text.push_str(&value);
@@ -369,14 +336,14 @@ fn parse_ttml(source: &str) -> Vec<LyricSegment> {
                         start_ms,
                         end_ms,
                         text: mem::take(&mut line_text),
-                        lane: line_lane.unwrap_or_default(),
+                        background: false,
                         break_after: false,
                     });
                 }
                 if segments.len() > line_start {
                     segments.last_mut().unwrap().break_after = true;
                 }
-                line_lane = None;
+                in_line = false;
                 span_roles.clear();
             }
             Ok(Event::Eof) => break,

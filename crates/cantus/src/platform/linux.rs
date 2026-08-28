@@ -12,8 +12,8 @@ use crate::{
     },
 };
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
-use isthmus::glam::vec2;
-use isthmus::{FloatExt, Image, SurfaceHandle};
+use isthmus::glam::{FloatExt, vec2};
+use isthmus::{Image, SurfaceHandle};
 use microfft::real::rfft_1024;
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,

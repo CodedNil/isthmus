@@ -150,7 +150,9 @@ pub fn expand(
 
         pub mod #shader_name {
             use super::*;
-            use #isthmus::FloatExt as _;
+            use #isthmus::glam::FloatExt as _;
+            #[cfg(target_arch = "spirv")]
+            use #isthmus::Float as _;
 
             #[cfg(not(target_arch = "spirv"))]
             pub struct Pipeline;

@@ -1,5 +1,5 @@
 use crate::render::{TEXT_COLOR, TextFragment};
-use isthmus::glam::{Vec4, vec2};
+use isthmus::glam::{FloatExt, Vec4, vec2};
 
 pub const EXTENSION: f32 = 10.0;
 
@@ -8,9 +8,6 @@ use crate::{
     music::{Lyrics, Music, Track},
     render::{BarLayout, PANEL_START, UiContext},
 };
-#[cfg(not(target_arch = "spirv"))]
-use isthmus::FloatExt;
-
 #[isthmus::paint]
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     const CLIP_PADDING: f32 = 4.0;
@@ -74,20 +71,15 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         let Some(lyrics) = track.runtime.lyrics.ready() else {
             continue;
         };
-        let lines = lyrics.visible(&shaper, -x - CLIP_PADDING..screen_width - x + CLIP_PADDING);
-        for (lane, line) in lines.iter().enumerate() {
+        for (background, color) in [(false, TEXT_COLOR.extend(1.0)), (true, Vec4::new(0.72, 0.86, 1.0, 1.0))] {
+            let line = lyrics.visible(&shaper, -x - CLIP_PADDING..screen_width - x + CLIP_PADDING, background);
             if line.width <= 0.0 {
                 continue;
             }
-            let color = if lane == 0 {
-                TEXT_COLOR.extend(1.0)
-            } else {
-                Vec4::new(0.72, 0.86, 1.0, 1.0)
-            };
             let placed = context
                 .frame
                 .text()
-                .visible(line, vec2(x, y), 0.0..screen_width)
+                .visible(&line, vec2(x, y), 0.0..screen_width)
                 .with_color(color);
             let padding = placed.size * 0.2 + 1.0;
             context.frame.paint_text(

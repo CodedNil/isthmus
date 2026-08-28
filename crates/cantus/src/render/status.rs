@@ -7,9 +7,11 @@ use crate::render::{
     weathertime::{StatusSky, scene, sky_phase},
 };
 use core::f32::consts::TAU;
+#[cfg(target_arch = "spirv")]
+use isthmus::Float as _;
 use isthmus::{
-    FloatExt, Quad, Sdf, ShaderData,
-    glam::{Vec2, Vec3, vec2, vec3},
+    Quad, Sdf, ShaderData,
+    glam::{FloatExt, Vec2, Vec3, vec2, vec3},
     spirv_std::arch::kill,
 };
 

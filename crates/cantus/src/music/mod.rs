@@ -26,6 +26,7 @@ pub use lyrics::Lyrics;
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
 pub type MusicResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+pub const ART_SIZE: u32 = 128;
 pub const TRACK_SPACING_MS: f32 = 4000.0;
 pub const MAX_PLAYLIST_TARGETS: usize = 8;
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(1);

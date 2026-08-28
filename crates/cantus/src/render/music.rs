@@ -6,9 +6,11 @@ use crate::render::{
     },
 };
 use core::f32::consts::{FRAC_PI_2, TAU};
+#[cfg(target_arch = "spirv")]
+use isthmus::Float as _;
 use isthmus::{
-    FloatExt, Image, Quad, Sdf, Unorm8x4,
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    Image, Quad, Sdf, Unorm8x4,
+    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::{Derivative, kill},
 };
 
@@ -42,15 +44,28 @@ const ICON_REACTION_RADIUS: f32 = ICON_WIDTH * 2.5;
 const PRIMARY_SUPPORT_DEPTH: f32 = 7.0;
 const SECONDARY_SUPPORT_DEPTH: f32 = 18.0;
 
-#[derive(Default)]
 #[cfg(not(target_arch = "spirv"))]
 pub struct MusicView {
-    particles: [Particle; 32],
+    particles: [Particle; 64],
     particles_debt: f32,
     playlist_icons: Vec<usize>,
     bar_split: f32,
     icon_presence: f32,
     icon_morph: f32,
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl Default for MusicView {
+    fn default() -> Self {
+        Self {
+            particles: [Particle::default(); 64],
+            particles_debt: 0.0,
+            playlist_icons: Vec::new(),
+            bar_split: 0.0,
+            icon_presence: 0.0,
+            icon_morph: 0.0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -553,7 +568,7 @@ impl MusicView {
         // Particle emission
         let time = context.frame.time;
         if let Some((index, _)) = playhead_track {
-            self.particles_debt = (self.particles_debt + context.frame.delta_time * 60.0)
+            self.particles_debt = (self.particles_debt + context.frame.delta_time * 40.0)
                 * f32::from(music.timeline.movement.abs() > 0.00001);
             let emit_count = self.particles_debt.floor() as usize;
             self.particles_debt -= emit_count as f32;
