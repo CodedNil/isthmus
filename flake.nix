@@ -33,28 +33,38 @@ rec {
           pipewire
           wireplumber
         ];
-      nightlyRust =
-        pkgs:
-        pkgs.rust-bin.nightly."2026-05-22".default.override {
-          extensions = [
-            "clippy"
-            "rustfmt"
-            "rust-src"
-            "rustc-dev"
-            "llvm-tools"
-          ];
-        };
-      nightlyRustPlatform =
-        pkgs:
-        pkgs.makeRustPlatform {
-          rustc = nightlyRust pkgs;
-          cargo = nightlyRust pkgs;
-        };
+      rustToolchain = pkgs.rust-bin.nightly."2026-05-22";
+      appRust = rustToolchain.minimal.override {
+        extensions = [ "rustc-dev" ];
+      };
+      shaderRust = rustToolchain.minimal.override {
+        extensions = [
+          "rust-src"
+          "rustc-dev"
+          "llvm-tools"
+        ];
+      };
+      devRust = rustToolchain.default.override {
+        extensions = [
+          "clippy"
+          "rustfmt"
+          "rust-src"
+          "rustc-dev"
+          "llvm-tools"
+        ];
+      };
+      appRustPlatform = pkgs.makeRustPlatform {
+        rustc = appRust;
+        cargo = appRust;
+      };
+      shaderRustPlatform = pkgs.makeRustPlatform {
+        rustc = shaderRust;
+        cargo = shaderRust;
+      };
     in
     {
       packages.${system} =
         let
-          rustPlatform = nightlyRustPlatform pkgs;
           cargoLock = {
             lockFile = ./Cargo.lock;
             outputHashes = {
@@ -64,14 +74,14 @@ rec {
           };
           src = lib.cleanSource ./.;
           sysrootVendorPatch = ''
-            for crate in ${nightlyRust pkgs}/lib/rustlib/src/rust/library/vendor/*; do
+            for crate in ${shaderRust}/lib/rustlib/src/rust/library/vendor/*; do
               name="$(basename "$crate")"
               if [ ! -e "$cargoDepsCopy/$name" ]; then
                 cp -r "$crate" "$cargoDepsCopy/"
               fi
             done
           '';
-          cantusShader = rustPlatform.buildRustPackage {
+          cantusShader = shaderRustPlatform.buildRustPackage {
             pname = "cantus-shader";
             version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
             inherit src cargoLock;
@@ -102,7 +112,7 @@ rec {
         rec {
           default = cantus;
           "cantus-shader" = cantusShader;
-          cantus = rustPlatform.buildRustPackage {
+          cantus = appRustPlatform.buildRustPackage {
             inherit pname src cargoLock;
             version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
             buildAndTestSubdir = "crates/cantus";
@@ -132,7 +142,7 @@ rec {
       devShells.${system}.default = pkgs.mkShell {
         name = pname;
         packages = with pkgs; [
-          (nightlyRust pkgs)
+          devRust
           mold
           pkg-config
           just
