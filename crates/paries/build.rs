@@ -1,9 +1,8 @@
+use isthmus_build::ShaderBuild;
 use std::{
     env, fs,
     path::{Path, PathBuf},
 };
-
-use isthmus_build::ShaderBuild;
 
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));

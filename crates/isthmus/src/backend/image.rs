@@ -1,10 +1,8 @@
+use super::context::Context;
 use std::{
     rc::Rc,
     sync::{Arc, Weak},
-    vec::Vec,
 };
-
-use super::context::Context;
 
 pub(super) struct Image {
     /// Keeps the backing resource alive for the view used by bind groups.
@@ -26,10 +24,7 @@ pub(super) struct ImageCache {
 impl ImageCache {
     pub(crate) fn new(context: &Context) -> Self {
         let fallback = Arc::from([255, 255, 255, 255]);
-        Self {
-            images: Vec::new(),
-            fallback: upload(context, [1, 1], &fallback),
-        }
+        Self { images: Vec::new(), fallback: upload(context, [1, 1], &fallback) }
     }
 
     pub(crate) fn begin_frame(&mut self) {
@@ -55,11 +50,7 @@ impl ImageCache {
 fn upload(context: &Context, size: [u32; 2], pixels: &Arc<[u8]>) -> CachedImage {
     let texture = context.0.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("isthmus image"),
-        size: wgpu::Extent3d {
-            width: size[0],
-            height: size[1],
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -75,21 +66,10 @@ fn upload(context: &Context, size: [u32; 2], pixels: &Arc<[u8]>) -> CachedImage 
             aspect: wgpu::TextureAspect::All,
         },
         pixels,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(size[0] * 4),
-            rows_per_image: Some(size[1]),
-        },
-        wgpu::Extent3d {
-            width: size[0],
-            height: size[1],
-            depth_or_array_layers: 1,
-        },
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size[0] * 4), rows_per_image: Some(size[1]) },
+        wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let image = Rc::new(Image { texture, view });
-    CachedImage {
-        source: Arc::downgrade(pixels),
-        image,
-    }
+    CachedImage { source: Arc::downgrade(pixels), image }
 }

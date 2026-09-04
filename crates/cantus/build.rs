@@ -1,9 +1,8 @@
+use isthmus_build::ShaderBuild;
 use std::{
     env, fs,
     path::{Path, PathBuf},
 };
-
-use isthmus_build::ShaderBuild;
 
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
@@ -20,22 +19,16 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=CANTUS_SHADER_SPV");
     let output = out_dir.join("isthmus.spv");
-    if let Some(shader) = env::var_os("CANTUS_SHADER_SPV") {
-        if !output.exists() {
-            fs::copy(shader, &output).expect("failed to copy Cantus shader");
-        }
+    if let Some(shader) = env::var_os("CANTUS_SHADER_SPV")
+        && env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("wasm32")
+    {
+        fs::copy(shader, &output).expect("failed to copy Cantus shader");
         return;
     }
 
-    ShaderBuild {
-        name: String::from("cantus"),
-        source,
-        isthmus,
-        workspace,
-        output,
-    }
-    .build()
-    .expect("failed to build Cantus shader");
+    ShaderBuild { name: String::from("cantus"), source, isthmus, workspace, output }
+        .build()
+        .expect("failed to build Cantus shader");
 }
 
 fn rerun_for_sources(path: &Path) {

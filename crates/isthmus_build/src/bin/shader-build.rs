@@ -1,6 +1,5 @@
-use std::{env, ffi::OsString, path::PathBuf};
-
 use isthmus_build::ShaderBuild;
+use std::{env, ffi::OsString, path::PathBuf};
 
 fn main() {
     let mut args = env::args_os().skip(1);

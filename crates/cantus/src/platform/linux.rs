@@ -1,3 +1,34 @@
+use crate::{
+    app::{AppUpdater, Background, CantusApp, send_update, spawn_thread},
+    config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
+    interaction::InputEvent,
+    render::{
+        PANEL_START,
+        launcher::{BACKGROUND_RADIUS, LauncherKey},
+        lyrics::EXTENSION as LYRICS_EXTENSION,
+        status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
+        weathertime::EXTENSION as WEATHER_EXTENSION,
+    },
+};
+use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
+use futures_util::StreamExt;
+use image::imageops::FilterType;
+use isthmus::{
+    SurfaceHandle,
+    glam::{FloatExt, Vec2, vec2},
+};
+use microfft::real::rfft_1024;
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
+};
+use reqwest::Client;
+use resvg::{
+    render,
+    tiny_skia::{Pixmap, Transform},
+    usvg::{self, Tree},
+};
+use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -20,26 +51,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
-use futures_util::StreamExt;
-use image::imageops::FilterType;
-use isthmus::{
-    SurfaceHandle,
-    glam::{FloatExt, vec2},
-};
-use microfft::real::rfft_1024;
-use raw_window_handle::{
-    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
-    WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
-};
-use reqwest::Client;
-use resvg::{
-    render,
-    tiny_skia::{Pixmap, Transform},
-    usvg::{self, Tree},
-};
-use serde_json::Value;
 use sysinfo::{Gpus, System};
 use tokio::{net::UnixDatagram, sync::mpsc::UnboundedSender, time::sleep as tokio_sleep};
 use tracing::warn;
@@ -86,21 +97,7 @@ use zbus::{
     zvariant::{OwnedObjectPath, OwnedValue, Value as DbusValue},
 };
 
-use crate::{
-    app::{AppUpdater, Background, CantusApp, send_update, spawn_thread},
-    config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
-    interaction::InputEvent,
-    render::{
-        PANEL_START,
-        launcher::{BACKGROUND_RADIUS, LauncherKey},
-        lyrics::EXTENSION as LYRICS_EXTENSION,
-        status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
-        weathertime::EXTENSION as WEATHER_EXTENSION,
-    },
-};
-
 const PANEL_OVERFLOW: f32 = 16.0;
-
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const AUDIO_WINDOW_SIZE: usize = 1024;
 const AUDIO_BAND_EDGES: [f32; AUDIO_SPECTRUM_BANDS + 1] =
@@ -149,45 +146,13 @@ impl super::Platform {
     }
 
     pub async fn provider_icon(http: Client, url: String) -> Option<Vec<u8>> {
-        let bytes = http
-            .get(url)
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .bytes()
-            .await
-            .ok()?;
+        let bytes = http.get(url).send().await.ok()?.error_for_status().ok()?.bytes().await.ok()?;
         load_raster(&bytes)
-    }
-
-    pub fn start_exchange_rates(background: &Background, http: Client, update: fn(HashMap<String, f64>)) {
-        background.spawn(async move {
-            if let Ok(response) = http
-                .get("https://open.er-api.com/v6/latest/USD")
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-                && let Ok(body) = response.json::<Value>().await
-                && let Some(rates) = body.get("rates").and_then(|rates| rates.as_object())
-            {
-                update(
-                    rates
-                        .iter()
-                        .filter_map(|(currency, rate)| Some((currency.clone(), rate.as_f64()?)))
-                        .collect(),
-                );
-            }
-        });
     }
 
     pub fn set_volume(volume: f32) {
         let volume = format!("{volume:.3}");
-        if let Err(error) = Command::new("wpctl")
-            .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume])
-            .spawn()
-        {
+        if let Err(error) = Command::new("wpctl").args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume]).spawn() {
             warn!(%error, "Failed to set PipeWire volume");
         }
     }
@@ -229,14 +194,14 @@ impl super::Platform {
                     .actions()
                     .and_then(|actions| actions.into_iter().find(|action| !action.is_empty()))
                     .and_then(|action| {
-                        entry
-                            .action_entry_localized(action, "Name", &locales)
-                            .zip(entry.action_entry(action, "Exec"))
+                        entry.action_entry_localized(action, "Name", &locales).map(|name| (name, action))
                     })
-                    .map(|(name, exec)| (name.into_owned(), exec.to_owned()));
+                    .and_then(|(name, action)| {
+                        entry.parse_exec_action(action).ok().map(|exec| (name.into_owned(), exec))
+                    });
                 Some(super::DesktopApp {
                     name: entry.name(&locales)?.into_owned(),
-                    exec: entry.exec()?.to_owned(),
+                    exec: entry.parse_exec().ok()?,
                     comment: entry.comment(&locales).unwrap_or_default().into_owned(),
                     icon_path: entry.icon().and_then(resolve_icon),
                     action,
@@ -246,15 +211,14 @@ impl super::Platform {
             .collect()
     }
 
-    /// Strips desktop-entry field codes (`%f %F %u %U %i %c %k`) and launches the command, detached.
-    pub fn spawn(exec: &str) {
-        let mut fields = exec.split_whitespace().filter(|token| !token.starts_with('%'));
-        let Some(program) = fields.next() else { return };
-        let args = fields.collect::<Vec<_>>();
+    pub fn spawn(command: &[String]) {
+        let Some((program, args)) = command.split_first() else {
+            return;
+        };
         if Command::new("systemd-run")
             .args(["--user", "--collect", "--quiet", "--"])
             .arg(program)
-            .args(&args)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -283,6 +247,10 @@ impl super::Platform {
 
     pub fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
         let path = launcher_socket_path();
+        if BlockingUnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)).is_ok() {
+            warn!(?path, "Another Cantus instance owns the launcher socket");
+            return;
+        }
         let _ = fs::remove_file(&path);
         let updater = updater.clone();
         background.spawn(async move {
@@ -306,10 +274,7 @@ impl super::Platform {
     pub fn trigger_launcher() -> ! {
         let path = launcher_socket_path();
         if let Err(error) = BlockingUnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)) {
-            eprintln!(
-                "Failed to reach a running Cantus instance at {}: {error}",
-                path.display()
-            );
+            eprintln!("Failed to reach a running Cantus instance at {}: {error}", path.display());
             process::exit(1);
         }
         process::exit(0);
@@ -334,13 +299,10 @@ impl super::Platform {
             layer_shell: Some(layer_shell.clone()),
             repeat_delay: Duration::from_millis(600),
             repeat_interval: Duration::from_millis(40),
-            clipboard: globals
-                .bind::<WlDataDeviceManager, _, _>(&qhandle, 1..=3, ())
-                .ok()
-                .map(|manager| {
-                    let device = manager.get_data_device(&seat, &qhandle, ());
-                    (manager, device)
-                }),
+            clipboard: globals.bind::<WlDataDeviceManager, _, _>(&qhandle, 1..=3, ()).ok().map(|manager| {
+                let device = manager.get_data_device(&seat, &qhandle, ());
+                (manager, device)
+            }),
             ..LayerShellApp::default()
         };
 
@@ -359,8 +321,7 @@ impl super::Platform {
         let handle = |pointer: Option<NonNull<c_void>>| pointer.expect("Failed to get Wayland pointer");
         app.display_handle = Some(handle(NonNull::new(connection.backend().display_ptr().cast())));
         let output = app.output.take().expect("No Wayland outputs found");
-        // wl_pointer exposes a surface, not its output. Keep the configured output as the
-        // best protocol-level target for the launcher rather than letting the compositor choose.
+        // Use the configured output because wl_pointer exposes only its surface.
         app.output = Some(output.clone());
 
         app.wl_surface = Some(wl_surface);
@@ -401,15 +362,18 @@ impl super::Platform {
         layer_surface.set_exclusive_zone(
             (PANEL_START + config.height + f32::from(config.lyrics_enabled) * LYRICS_EXTENSION) as i32,
         );
-        resize_layer_surface(&layer_surface, &app);
+        layer_surface.set_size(0, app.bar_surface_height() as u32);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
         app.layer_surface = Some(layer_surface);
 
-        app.pending_bar_surface = Some(app.create_render_surface(surface));
         surface.commit();
         connection.flush().expect("Failed to flush initial commit");
 
         while !app.should_exit {
-            event_queue.blocking_dispatch(&mut app).expect("Wayland dispatch error");
+            if let Err(error) = event_queue.blocking_dispatch(&mut app) {
+                warn!(%error, "Wayland connection closed");
+                break;
+            }
         }
     }
 }
@@ -437,37 +401,20 @@ async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), Box<d
     let mut updates = location.receive_signal("LocationUpdated").await?;
 
     let request_token = format!("cantus_{:x}", fastrand::u64(..));
-    let sender_name = connection
-        .unique_name()
-        .unwrap()
-        .trim_start_matches(':')
-        .replace('.', "_");
+    let sender_name = connection.unique_name().unwrap().trim_start_matches(':').replace('.', "_");
     let request = ProxyBuilder::<DbusProxy>::new(&connection)
         .destination(DESTINATION)?
-        .path(format!(
-            "/org/freedesktop/portal/desktop/request/{sender_name}/{request_token}"
-        ))?
+        .path(format!("/org/freedesktop/portal/desktop/request/{sender_name}/{request_token}"))?
         .interface("org.freedesktop.portal.Request")?
         .cache_properties(CacheProperties::No)
         .build()
         .await?;
     let mut response = request.receive_signal("Response").await?;
     let _: OwnedObjectPath = location
-        .call(
-            "Start",
-            &(
-                &session,
-                "",
-                HashMap::from([("handle_token", DbusValue::from(request_token))]),
-            ),
-        )
+        .call("Start", &(&session, "", HashMap::from([("handle_token", DbusValue::from(request_token))])))
         .await?;
-    let (status, _): (u32, HashMap<String, OwnedValue>) = response
-        .next()
-        .await
-        .ok_or("Location portal returned no response")?
-        .body()
-        .deserialize()?;
+    let (status, _): (u32, HashMap<String, OwnedValue>) =
+        response.next().await.ok_or("Location portal returned no response")?.body().deserialize()?;
     if status != 0 {
         return Err(format!("Location request failed with status {status}").into());
     }
@@ -475,10 +422,7 @@ async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), Box<d
     while let Some(update) = updates.next().await {
         let (_, location): (OwnedObjectPath, HashMap<String, OwnedValue>) = update.body().deserialize()?;
         if sender
-            .send([
-                f64::try_from(&location["Latitude"])? as f32,
-                f64::try_from(&location["Longitude"])? as f32,
-            ])
+            .send([f64::try_from(&location["Latitude"])? as f32, f64::try_from(&location["Longitude"])? as f32])
             .is_err()
         {
             break;
@@ -517,10 +461,7 @@ fn load_icon_pixels(path: &Path) -> Option<Vec<u8>> {
 }
 
 fn load_raster(bytes: &[u8]) -> Option<Vec<u8>> {
-    image::load_from_memory(bytes)
-        .map(|image| resize_icon(&image))
-        .ok()
-        .or_else(|| rasterize_svg(bytes))
+    image::load_from_memory(bytes).map(|image| resize_icon(&image)).ok().or_else(|| rasterize_svg(bytes))
 }
 
 fn rasterize_svg(bytes: &[u8]) -> Option<Vec<u8>> {
@@ -533,10 +474,7 @@ fn rasterize_svg(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn resize_icon(image: &image::DynamicImage) -> Vec<u8> {
-    image
-        .resize_to_fill(ICON_PX, ICON_PX, FilterType::Triangle)
-        .into_rgba8()
-        .into_raw()
+    image.resize_to_fill(ICON_PX, ICON_PX, FilterType::Triangle).into_rgba8().into_raw()
 }
 
 fn monitor_status(updates: &Sender<SystemSample>) {
@@ -560,14 +498,7 @@ fn monitor_status(updates: &Sender<SystemSample>) {
         };
         let gpu = gpus.as_ref().and_then(gpu_sample);
         let battery_level = battery_sample(battery.as_deref());
-        if updates
-            .send(SystemSample {
-                cpu,
-                gpu,
-                battery_level,
-            })
-            .is_err()
-        {
+        if updates.send(SystemSample { cpu, gpu, battery_level }).is_err() {
             break;
         }
         thread::sleep(super::Platform::STATUS_SAMPLE_INTERVAL);
@@ -585,13 +516,9 @@ fn gpu_sample(gpus: &Gpus) -> Option<ProcessorSample> {
 }
 
 fn find_battery() -> Option<PathBuf> {
-    fs::read_dir("/sys/class/power_supply")
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| {
-            fs::read_to_string(path.join("type")).is_ok_and(|kind| kind.trim().eq_ignore_ascii_case("battery"))
-        })
+    fs::read_dir("/sys/class/power_supply").ok()?.flatten().map(|entry| entry.path()).find(|path| {
+        fs::read_to_string(path.join("type")).is_ok_and(|kind| kind.trim().eq_ignore_ascii_case("battery"))
+    })
 }
 
 /// Charge level, negated while charging, or absent with no battery or idle at full.
@@ -666,10 +593,7 @@ fn monitor_volume(volume: &AtomicU32) {
 
 fn piped(command: &mut Command) -> io::Result<(process::Child, process::ChildStdout)> {
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
-    let output = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("command stdout was not piped"))?;
+    let output = child.stdout.take().ok_or_else(|| io::Error::other("command stdout was not piped"))?;
     Ok((child, output))
 }
 
@@ -771,14 +695,12 @@ struct LayerShellApp {
     selection: Option<WlDataOffer>,
     offer_is_text: bool,
     output: Option<WlOutput>,
-    pending_bar_surface: Option<NativeSurface>,
-    pending_launcher_surface: Option<NativeSurface>,
     launcher_surface: Option<SurfaceHandle>,
+    frame_callback: Option<WlCallback>,
     scale: Option<f32>,
     surface_width: Option<f32>,
-    launcher_width: Option<f32>,
-    launcher_height: Option<f32>,
-    output_height: Option<f32>,
+    launcher_size: Option<(f32, f32)>,
+    launcher_blur_bounds: Option<(Vec2, Vec2)>,
     display_handle: Option<NonNull<c_void>>,
     wl_surface: Option<WlSurface>,
     launcher_wl_surface: Option<WlSurface>,
@@ -793,9 +715,6 @@ struct LayerShellApp {
     launcher_viewport: Option<WpViewport>,
     launcher_fractional: Option<WpFractionalScaleV1>,
     launcher_background_effect: Option<ExtBackgroundEffectSurfaceV1>,
-    launcher_configured: bool,
-    bar_frame_callback: Option<WlCallback>,
-    launcher_frame_callback: Option<WlCallback>,
 }
 
 macro_rules! destroy_proxies {
@@ -821,22 +740,12 @@ macro_rules! dispatch {
     };
 }
 
-/// Resizes the bar surface and sets keyboard focus for the launcher.
-fn resize_layer_surface(layer_surface: &ZwlrLayerSurfaceV1, app: &LayerShellApp) {
-    layer_surface.set_size(0, app.bar_surface_size().1 as u32);
-    layer_surface.set_keyboard_interactivity(if app.cantus.launcher.open {
-        KeyboardInteractivity::Exclusive
-    } else {
-        KeyboardInteractivity::None
-    });
-}
-
 impl LayerShellApp {
     fn scale(&self) -> f32 {
         self.scale.unwrap_or(1.0)
     }
 
-    fn bar_surface_size(&self) -> (f32, f32) {
+    fn bar_surface_height(&self) -> f32 {
         let extension = if self.cantus.config.weathertime_enabled {
             WEATHER_EXTENSION
         } else if self.cantus.config.lyrics_enabled {
@@ -844,24 +753,24 @@ impl LayerShellApp {
         } else {
             0.0
         } + PANEL_OVERFLOW;
-        (
-            self.surface_width.unwrap_or(1920.0),
-            self.cantus.config.height + PANEL_START + extension,
-        )
+        self.cantus.config.height + PANEL_START + extension
     }
 
-    fn launcher_surface_size(&self) -> (f32, f32) {
-        (
-            self.launcher_width.or(self.surface_width).unwrap_or(1920.0),
-            self.launcher_height
-                .or_else(|| self.output_height.map(|height| height / self.scale()))
-                .unwrap_or(1080.0),
-        )
+    fn bar_surface_size(&self) -> (f32, f32) {
+        (self.surface_width.unwrap(), self.bar_surface_height())
+    }
+
+    const fn launcher_surface_size(&self) -> (f32, f32) {
+        self.launcher_size.unwrap()
     }
 
     fn buffer_size(&self, logical: (f32, f32)) -> (u32, u32) {
         let scale = self.scale();
         ((logical.0 * scale).round() as u32, (logical.1 * scale).round() as u32)
+    }
+
+    const fn surfaces_ready(&self) -> bool {
+        self.surface_width.is_some() && (self.launcher_wl_surface.is_none() || self.launcher_size.is_some())
     }
 
     /// Re-fires the held key for as long as it stays down, once the initial delay has passed.
@@ -906,11 +815,7 @@ impl LayerShellApp {
     }
 
     const fn active_surface(&self) -> &WlSurface {
-        if let Some(surface) = self.launcher_wl_surface.as_ref() {
-            surface
-        } else {
-            self.wl_surface.as_ref().unwrap()
-        }
+        if let Some(surface) = self.launcher_wl_surface.as_ref() { surface } else { self.wl_surface.as_ref().unwrap() }
     }
 
     const fn active_background_effect(&self) -> Option<&ExtBackgroundEffectSurfaceV1> {
@@ -928,11 +833,10 @@ impl LayerShellApp {
             return;
         }
         self.repeat = None;
+        self.frame_callback = None;
+        self.launcher_blur_bounds = None;
         if open {
-            drop(self.bar_frame_callback.take());
-            self.launcher_configured = false;
-            self.launcher_width = None;
-            self.launcher_height = None;
+            self.launcher_size = None;
             let surface = self.compositor.as_ref().unwrap().create_surface(qhandle, ());
             let layer = self.layer_shell.as_ref().unwrap().get_layer_surface(
                 &surface,
@@ -957,11 +861,8 @@ impl LayerShellApp {
             }
             self.launcher_layer_surface = Some(layer);
             self.launcher_wl_surface = Some(surface);
-            let surface = self.launcher_wl_surface.as_ref().unwrap();
-            self.pending_launcher_surface = Some(self.create_render_surface(surface));
-            surface.commit();
+            self.launcher_wl_surface.as_ref().unwrap().commit();
         } else {
-            drop(self.launcher_frame_callback.take());
             if let Some(gpu) = self.cantus.gpu.as_mut()
                 && let Some(surface) = self.launcher_surface.take()
             {
@@ -975,8 +876,6 @@ impl LayerShellApp {
                 launcher_background_effect,
                 launcher_wl_surface
             );
-            let surface = self.wl_surface.as_ref().unwrap();
-            surface.commit();
         }
     }
 
@@ -984,37 +883,33 @@ impl LayerShellApp {
         self.pump_key_repeat();
         self.cantus.apply_pending_updates();
         self.sync_launcher_surface(qhandle);
-        if self.launcher_wl_surface.is_some() && !self.launcher_configured {
+        if !self.surfaces_ready() {
+            return;
+        }
+        if self.frame_callback.is_some() {
             return;
         }
 
-        // Initialize the program before draining updates so startup jobs cannot race surface configuration.
-        if self.cantus.gpu.is_none()
-            && let Some(surface) = self.pending_bar_surface.take()
-        {
+        if self.cantus.gpu.is_none() {
+            let surface = self.create_render_surface(self.wl_surface.as_ref().unwrap());
             let (width, height) = self.buffer_size(self.bar_surface_size());
-            if width > 0 && height > 0 {
-                self.cantus.initialize_renderer(&surface, width, height);
-            } else {
-                self.pending_bar_surface = Some(surface);
-            }
+            self.cantus.initialize_renderer(&surface, width, height);
         }
-        if let Some(surface) = self.pending_launcher_surface.take() {
+        if self.launcher_surface.is_none()
+            && let Some(wl_surface) = self.launcher_wl_surface.as_ref()
+        {
+            let surface = self.create_render_surface(wl_surface);
             let (width, height) = self.buffer_size(self.launcher_surface_size());
             if let Some(gpu) = &mut self.cantus.gpu {
-                self.launcher_surface = Some(
-                    gpu.add_surface(&surface, (width, height).into())
-                        .expect("launcher surface is incompatible"),
-                );
+                self.launcher_surface =
+                    Some(gpu.add_surface(&surface, (width, height).into()).expect("launcher surface is incompatible"));
             }
         }
-        self.update_scale_and_viewport();
-        self.update_blur_region(qhandle);
 
         let bar_size = self.bar_surface_size();
-        let launcher_logical_size = self.launcher_surface_size();
+        let launcher = self.launcher_surface.map(|surface| (surface, self.launcher_surface_size()));
         let (buffer_width, buffer_height) = self.buffer_size(bar_size);
-        let launcher_size = self.buffer_size(launcher_logical_size);
+        let launcher_buffer = launcher.map(|(surface, size)| (surface, self.buffer_size(size)));
         if buffer_width > 0
             && buffer_height > 0
             && let Some(gpu) = &mut self.cantus.gpu
@@ -1022,32 +917,22 @@ impl LayerShellApp {
             if let Some(surface) = self.cantus.bar_surface {
                 gpu.resize(surface, [buffer_width, buffer_height]);
             }
-            if let Some(surface) = self.launcher_surface {
-                let (width, height) = launcher_size;
+            if let Some((surface, (width, height))) = launcher_buffer {
                 gpu.resize(surface, (width, height).into());
             }
         }
 
-        self.cantus.render(
-            bar_size.into(),
-            self.launcher_surface
-                .map(|surface| (surface, launcher_logical_size.into())),
-        );
+        self.cantus.render(bar_size.into(), launcher.map(|(surface, size)| (surface, size.into())));
+        self.update_input_region(qhandle);
+        // Result updates are applied during rendering.
+        if self.cantus.launcher.open {
+            self.update_blur_region(qhandle);
+        }
+        self.frame_callback = Some(self.active_surface().frame(qhandle, ()));
+        // The callback needs a commit even when presentation is skipped.
+        self.active_surface().commit();
         if let Some(text) = self.cantus.launcher.pending_copy.take() {
             self.set_clipboard(&text, qhandle);
-        }
-        self.update_input_region(qhandle);
-        if let Some(launcher) = self.launcher_wl_surface.clone() {
-            if self.launcher_frame_callback.is_none() {
-                self.launcher_frame_callback = Some(launcher.frame(qhandle, ()));
-            }
-            launcher.commit();
-        } else {
-            let bar = self.wl_surface.as_ref().unwrap().clone();
-            if self.bar_frame_callback.is_none() {
-                self.bar_frame_callback = Some(bar.frame(qhandle, ()));
-            }
-            bar.commit();
         }
     }
 
@@ -1063,11 +948,7 @@ impl LayerShellApp {
         }
         if let Some(surface) = &self.launcher_wl_surface {
             let (width, height) = self.launcher_surface_size();
-            surface.set_buffer_scale(
-                self.launcher_viewport
-                    .as_ref()
-                    .map_or_else(|| scale.ceil() as i32, |_| 1),
-            );
+            surface.set_buffer_scale(self.launcher_viewport.as_ref().map_or_else(|| scale.ceil() as i32, |_| 1));
             if let Some(viewport) = &self.launcher_viewport {
                 viewport.set_destination(width as i32, height as i32);
             }
@@ -1090,7 +971,7 @@ impl LayerShellApp {
         region.destroy();
     }
 
-    fn update_blur_region(&self, qhandle: &QueueHandle<Self>) {
+    fn update_blur_region(&mut self, qhandle: &QueueHandle<Self>) {
         let Some(effect) = self.active_background_effect() else {
             return;
         };
@@ -1099,11 +980,14 @@ impl LayerShellApp {
             return;
         }
 
-        let compositor = self.compositor.as_ref().unwrap();
-        let region = compositor.create_region(qhandle, ());
         let (width, height) = self.launcher_surface_size();
         let (origin, size) = self.cantus.launcher.bounds(vec2(width, height));
-        // Keep the integer input region one pixel inside the shader's antialiased edge.
+        if self.launcher_blur_bounds == Some((origin, size)) {
+            return;
+        }
+        let compositor = self.compositor.as_ref().unwrap();
+        let region = compositor.create_region(qhandle, ());
+        // The blur region sits one pixel inside the antialiased panel edge.
         let x = origin.x.ceil() as i32 + 1;
         let y = origin.y.ceil() as i32 + 1;
         let width = (origin.x + size.x).floor() as i32 - 1 - x;
@@ -1119,6 +1003,7 @@ impl LayerShellApp {
         }
         effect.set_blur_region(Some(&region));
         region.destroy();
+        self.launcher_blur_bounds = Some((origin, size));
     }
 }
 
@@ -1126,35 +1011,27 @@ dispatch!(ZwlrLayerSurfaceV1, |state, proxy, event, qhandle| {
     match event {
         zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
             proxy.ack_configure(serial);
-            let is_launcher = state
-                .launcher_layer_surface
-                .as_ref()
-                .is_some_and(|launcher| launcher.id() == proxy.id());
-            if width > 0 {
-                if is_launcher {
-                    state.launcher_width = Some(width as f32);
-                } else {
-                    state.surface_width = Some(width as f32);
-                }
-            }
-            if height > 0 && is_launcher {
-                state.launcher_height = Some(height as f32);
-            }
+            let is_launcher = state.launcher_layer_surface.as_ref().is_some_and(|launcher| launcher.id() == proxy.id());
             if is_launcher {
-                state.launcher_configured = true;
+                if width > 0 && height > 0 {
+                    state.launcher_size = Some((width as f32, height as f32));
+                }
+            } else if width > 0 {
+                state.surface_width = Some(width as f32);
             }
-            state.update_scale_and_viewport();
-            state.update_blur_region(qhandle);
-            state.try_render_frame(qhandle);
+            if state.surfaces_ready() {
+                state.update_scale_and_viewport();
+                state.update_blur_region(qhandle);
+                state.try_render_frame(qhandle);
+            }
         }
         zwlr_layer_surface_v1::Event::Closed => {
-            if state
-                .launcher_layer_surface
-                .as_ref()
-                .is_some_and(|launcher| launcher.id() == proxy.id())
-            {
+            if state.launcher_layer_surface.as_ref().is_some_and(|launcher| launcher.id() == proxy.id()) {
                 state.cantus.launcher.open = false;
                 state.sync_launcher_surface(qhandle);
+                state.update_scale_and_viewport();
+                state.update_blur_region(qhandle);
+                state.try_render_frame(qhandle);
             } else {
                 state.should_exit = true;
             }
@@ -1163,38 +1040,21 @@ dispatch!(ZwlrLayerSurfaceV1, |state, proxy, event, qhandle| {
     }
 });
 
-dispatch!(WpFractionalScaleV1, |state, _proxy, event, qhandle| {
-    if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-        state.scale = Some(scale as f32 / 120.0);
-
-        if state.cantus.gpu.is_some() {
-            state.update_scale_and_viewport();
-            state.try_render_frame(qhandle);
-        }
+dispatch!(WlCallback, |state, proxy, event, qhandle| {
+    if matches!(event, wl_callback::Event::Done { .. })
+        && state.frame_callback.as_ref().is_some_and(|callback| callback.id() == proxy.id())
+    {
+        state.frame_callback = None;
+        state.try_render_frame(qhandle);
     }
 });
 
-dispatch!(WlCallback, |state, proxy, event, qhandle| {
-    if matches!(event, wl_callback::Event::Done { .. }) {
-        let consumed = if state
-            .bar_frame_callback
-            .as_ref()
-            .is_some_and(|callback| callback.id() == proxy.id())
-        {
-            state.bar_frame_callback.take();
-            true
-        } else if state
-            .launcher_frame_callback
-            .as_ref()
-            .is_some_and(|callback| callback.id() == proxy.id())
-        {
-            state.launcher_frame_callback.take();
-            true
-        } else {
-            false
-        };
-        if consumed {
-            state.try_render_frame(qhandle);
+dispatch!(WpFractionalScaleV1, |state, _proxy, event, _qhandle| {
+    if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+        state.scale = Some(scale as f32 / 120.0);
+
+        if state.cantus.gpu.is_some() && state.surfaces_ready() {
+            state.update_scale_and_viewport();
         }
     }
 });
@@ -1208,21 +1068,8 @@ impl Dispatch<WlOutput, ()> for LayerShellApp {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        let monitor = state
-            .cantus
-            .config
-            .monitor
-            .as_deref()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
+        let monitor = state.cantus.config.monitor.as_deref().unwrap_or_default().to_ascii_lowercase();
         match event {
-            wl_output::Event::Mode {
-                flags: WEnum::Value(flags),
-                height,
-                ..
-            } if flags.contains(wl_output::Mode::Current) => {
-                state.output_height = Some(height as f32);
-            }
             wl_output::Event::Name { name } | wl_output::Event::Description { description: name }
                 if name.to_ascii_lowercase().contains(&monitor) =>
             {
@@ -1255,6 +1102,10 @@ dispatch!(WlSeat, |state, proxy, event, qhandle| {
 });
 
 impl Dispatch<WlDataDevice, ()> for LayerShellApp {
+    event_created_child!(Self, WlDataDevice, [
+        wl_data_device::EVT_DATA_OFFER_OPCODE => (WlDataOffer, ()),
+    ]);
+
     fn event(
         state: &mut Self,
         _proxy: &WlDataDevice,
@@ -1275,10 +1126,6 @@ impl Dispatch<WlDataDevice, ()> for LayerShellApp {
             _ => {}
         }
     }
-
-    event_created_child!(Self, WlDataDevice, [
-        wl_data_device::EVT_DATA_OFFER_OPCODE => (WlDataOffer, ()),
-    ]);
 }
 
 dispatch!(WlDataOffer, |state, _proxy, event, _qhandle| {
@@ -1302,11 +1149,7 @@ dispatch!(WlDataSource, |state, proxy, event, _qhandle| {
 
 dispatch!(WlKeyboard, |state, _proxy, event, _qhandle| {
     match event {
-        wl_keyboard::Event::Keymap {
-            format: WEnum::Value(KeymapFormat::XkbV1),
-            fd,
-            size,
-        } => {
+        wl_keyboard::Event::Keymap { format: WEnum::Value(KeymapFormat::XkbV1), fd, size } => {
             let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
             // SAFETY: Wayland supplied fd and size for an XKB keymap in the declared format.
             let keymap = unsafe {
@@ -1320,13 +1163,7 @@ dispatch!(WlKeyboard, |state, _proxy, event, _qhandle| {
             };
             state.xkb_state = keymap.ok().flatten().map(|keymap| xkb::State::new(&keymap));
         }
-        wl_keyboard::Event::Modifiers {
-            mods_depressed,
-            mods_latched,
-            mods_locked,
-            group,
-            ..
-        } => {
+        wl_keyboard::Event::Modifiers { mods_depressed, mods_latched, mods_locked, group, .. } => {
             if let Some(xkb_state) = &mut state.xkb_state {
                 xkb_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
             }
@@ -1336,31 +1173,21 @@ dispatch!(WlKeyboard, |state, _proxy, event, _qhandle| {
             state.repeat_interval = Duration::from_micros(1_000_000 / rate as u64);
         }
         wl_keyboard::Event::Leave { .. } => state.repeat = None,
-        wl_keyboard::Event::Key {
-            serial,
-            key,
-            state: WEnum::Value(key_state),
-            ..
-        } => {
+        wl_keyboard::Event::Key { serial, key, state: WEnum::Value(key_state), .. } => {
             let keycode = xkb::Keycode::new(key + 8);
             state.key_serial = serial;
             if key_state == KeyState::Pressed {
                 // Modifiers are marked as non-repeating by the keymap, so they never latch here.
-                let repeats = state
-                    .xkb_state
-                    .as_ref()
-                    .is_some_and(|xkb_state| xkb_state.get_keymap().key_repeats(keycode));
+                let repeats =
+                    state.xkb_state.as_ref().is_some_and(|xkb_state| xkb_state.get_keymap().key_repeats(keycode));
                 state.repeat = repeats.then(|| (keycode, Instant::now() + state.repeat_delay));
                 handle_launcher_key(state, keycode);
             } else if state.repeat.is_some_and(|(held, _)| held == keycode) {
                 state.repeat = None;
             }
             if let Some(xkb_state) = &mut state.xkb_state {
-                let direction = if key_state == KeyState::Released {
-                    xkb::KeyDirection::Up
-                } else {
-                    xkb::KeyDirection::Down
-                };
+                let direction =
+                    if key_state == KeyState::Released { xkb::KeyDirection::Up } else { xkb::KeyDirection::Down };
                 xkb_state.update_key(keycode, direction);
             }
         }
@@ -1377,16 +1204,14 @@ fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
         return;
     };
     let sym = xkb_state.key_get_one_sym(keycode);
-    if !state.launcher_configured && matches!(sym.raw(), xkb::keysyms::KEY_Return | xkb::keysyms::KEY_KP_Enter) {
+    if state.launcher_size.is_none() && matches!(sym.raw(), xkb::keysyms::KEY_Return | xkb::keysyms::KEY_KP_Enter) {
         return;
     }
     let shift = xkb_state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE);
     let control = xkb_state.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE);
     let character = sym.key_char();
     // Held control turns `key_char` into a control code, so the shortcuts read the keysym instead.
-    let letter = char::from_u32(sym.raw())
-        .filter(char::is_ascii_alphabetic)
-        .map(|letter| letter.to_ascii_lowercase());
+    let letter = char::from_u32(sym.raw()).filter(char::is_ascii_alphabetic).map(|letter| letter.to_ascii_lowercase());
 
     if control && letter == Some('v') {
         if let Some(pasted) = state.paste() {
@@ -1414,10 +1239,7 @@ fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
     if let Some(key) = key {
         state.cantus.launcher.key(key, shift);
     } else if let Some(typed) = character.filter(|typed| !typed.is_control() && !control) {
-        state
-            .cantus
-            .launcher
-            .edit(|field| field.insert(typed.encode_utf8(&mut [0u8; 4])));
+        state.cantus.launcher.edit(|field| field.insert(typed.encode_utf8(&mut [0u8; 4])));
     }
 }
 
@@ -1432,28 +1254,17 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
     }
     let interaction = &mut state.cantus.interaction;
     match event {
-        wl_pointer::Event::Enter {
-            surface: wl_surface,
-            surface_x,
-            surface_y,
-            ..
-        } if surface_id == wl_surface.id() => {
+        wl_pointer::Event::Enter { surface: wl_surface, surface_x, surface_y, .. } if surface_id == wl_surface.id() => {
             interaction.apply(InputEvent::Enter(vec2(surface_x as f32, surface_y as f32)));
         }
-        wl_pointer::Event::Motion {
-            surface_x, surface_y, ..
-        } => {
+        wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
             let position = vec2(surface_x as f32, surface_y as f32);
             interaction.apply(InputEvent::Motion(position));
         }
         wl_pointer::Event::Leave { .. } => {
             interaction.apply(InputEvent::Leave);
         }
-        wl_pointer::Event::Button {
-            button,
-            state: button_state,
-            ..
-        } => match (button, button_state) {
+        wl_pointer::Event::Button { button, state: button_state, .. } => match (button, button_state) {
             (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => {
                 interaction.apply(InputEvent::Press);
             }
@@ -1465,11 +1276,7 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
             }
             _ => {}
         },
-        wl_pointer::Event::AxisDiscrete {
-            axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-            discrete,
-            ..
-        }
+        wl_pointer::Event::AxisDiscrete { axis: WEnum::Value(wl_pointer::Axis::VerticalScroll), discrete, .. }
         | wl_pointer::Event::AxisValue120 {
             axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
             value120: discrete,

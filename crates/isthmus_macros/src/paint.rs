@@ -1,7 +1,6 @@
+use crate::{fragment_entry, isthmus_path};
 use quote::{format_ident, quote};
 use syn::{Block, Expr, Ident, Pat, PatType, Type, parse_quote};
-
-use crate::{fragment_entry, isthmus_path};
 
 #[derive(Clone)]
 pub struct Capture {
@@ -31,11 +30,7 @@ impl Capture {
         } else {
             CaptureKind::Plain
         };
-        Ok(Self {
-            name: name.ident.clone(),
-            source,
-            kind,
-        })
+        Ok(Self { name: name.ident.clone(), source, kind })
     }
 
     pub const fn is_image(&self) -> bool {
@@ -55,7 +50,9 @@ impl Capture {
         match self.kind {
             CaptureKind::Plain => quote!(let #name = instance.#name;),
             CaptureKind::Bool => quote!(let #name = instance.#name != 0;),
-            CaptureKind::Image => quote!(let #name = #isthmus::__private::ShaderImage::new(images, instance.#name);),
+            CaptureKind::Image => {
+                quote!(let #name = #isthmus::__private::ShaderImage::new(image, *sampler, instance.#name);)
+            }
         }
     }
 
@@ -76,19 +73,18 @@ pub struct Expansion {
 
 pub fn expand(
     name: &Ident,
+    entry_name: &syn::LitStr,
     shader_input: &PatType,
     captures: &[Capture],
     body: &Block,
     text: bool,
 ) -> syn::Result<Expansion> {
     let isthmus = isthmus_path();
+    let web_entry_name = syn::LitStr::new(&format!("{}_", entry_name.value()), entry_name.span());
     let shader_name = format_ident!("__isthmus_paint_{name}");
     let instance_name = format_ident!("__IsthmusPaint{}", pascal(&name.to_string()));
     let Pat::Ident(shader_input_name) = shader_input.pat.as_ref() else {
-        return Err(syn::Error::new_spanned(
-            &shader_input.pat,
-            "shader fragment requires an identifier",
-        ));
+        return Err(syn::Error::new_spanned(&shader_input.pat, "shader fragment requires an identifier"));
     };
     let shader_input_name = &shader_input_name.ident;
     let shader_input_type = shader_input.ty.as_ref();
@@ -118,13 +114,20 @@ pub fn expand(
     });
     let shade_body = if text {
         quote!({
-            let #shader_input_name: #shader_input_type = #isthmus::TextFragment::new(fragment, line, placed_glyphs, glyphs, curves);
+            let #shader_input_name: #shader_input_type = #isthmus::TextFragment::new(
+                fragment,
+                line,
+                placed_glyphs,
+                glyphs,
+                curves,
+            );
             #body
         })
     } else {
         quote!(#body)
     };
     let entry = fragment_entry(
+        entry_name,
         text,
         !payload.is_empty(),
         captures.iter().any(Capture::is_image),
@@ -138,7 +141,6 @@ pub fn expand(
             *out_color = color.truncate().extend(1.0) * color.w;
         },
     );
-    let module_name = quote!(#isthmus::__private::shader_module_name(module_path!()));
     let items = quote! {
         #[repr(C)]
         #[derive(Clone, Copy)]
@@ -161,17 +163,14 @@ pub fn expand(
             #[cfg(not(target_arch = "spirv"))]
             impl #isthmus::__private::ShaderSpec for Pipeline {
                 type Instance = #instance_name;
-                const PIPELINE: #isthmus::__private::PaintPipeline = #isthmus::__private::PaintPipeline::new(#module_name);
+                const PIPELINE: #isthmus::__private::PaintPipeline =
+                    #isthmus::__private::PaintPipeline::new(#entry_name, #web_entry_name);
             }
 
             #entry
         }
     };
-    Ok(Expansion {
-        items,
-        instance: instance_name,
-        pipeline: shader_name,
-    })
+    Ok(Expansion { items, instance: instance_name, pipeline: shader_name })
 }
 
 fn pascal(name: &str) -> String {

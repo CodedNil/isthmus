@@ -1,7 +1,6 @@
+use crate::isthmus_path;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_quote};
-
-use crate::isthmus_path;
 
 pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     if !input.attrs.iter().any(
@@ -20,10 +19,7 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     let types = fields.named.iter().map(|field| &field.ty).collect::<Vec<_>>();
     let mut generics = input.generics.clone();
     for ty in &types {
-        generics
-            .make_where_clause()
-            .predicates
-            .push(parse_quote!(#ty: #isthmus::ShaderData));
+        generics.make_where_clause().predicates.push(parse_quote!(#ty: #isthmus::ShaderData));
     }
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     quote! {

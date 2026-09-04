@@ -25,8 +25,7 @@ pub fn tapered_segment(point: Vec2, start: Vec2, end: Vec2, start_radius: f32, e
     Sdf::new((point - start - line * t).length() - start_radius.lerp(end_radius, t))
 }
 
-/// Signed distance to an ellipse. This inexpensive approximation is stable enough
-/// for leaves and preserves a clean antialiased silhouette.
+/// Approximate signed distance to an ellipse with stable antialiasing.
 pub fn ellipse(point: Vec2, radii: Vec2) -> Sdf {
     let normalized = point / radii;
     Sdf::new((normalized.length() - 1.0) * radii.x.min(radii.y))

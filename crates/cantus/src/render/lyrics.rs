@@ -1,6 +1,5 @@
-use isthmus::glam::{FloatExt, Vec4, vec2};
-
 use crate::render::{TEXT_COLOR, TextFragment};
+use isthmus::glam::{FloatExt, Vec4, vec2};
 
 pub const EXTENSION: f32 = 10.0;
 
@@ -33,11 +32,8 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
 
     prepare(&mut music.queue[index]);
     let current = &music.queue[index];
-    let progress = current
-        .runtime
-        .lyrics
-        .ready()
-        .map_or(progress_ms * Lyrics::SILENCE_SPEED, |lyrics| {
+    let progress =
+        current.runtime.lyrics.ready().map_or(progress_ms * Lyrics::SILENCE_SPEED, |lyrics| {
             lyrics.position(progress_ms, current.duration_ms as f32)
         });
     let current_x = layout.playhead_x - progress;
@@ -77,11 +73,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
             if line.width <= 0.0 {
                 continue;
             }
-            let placed = context
-                .frame
-                .text()
-                .visible(&line, vec2(x, y), 0.0..screen_width)
-                .with_color(color);
+            let placed = context.frame.text().visible(&line, vec2(x, y), 0.0..screen_width).with_color(color);
             let padding = placed.size * 0.2 + 1.0;
             context.frame.paint_text(
                 placed.expanded(padding),

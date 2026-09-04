@@ -1,26 +1,24 @@
-use std::{
-    array,
-    collections::{HashMap, HashSet},
-    ops::Range,
-    time::Duration,
+use super::{ART_SIZE, AudioFeatures, Music, MusicResult, TrackId, spotify::Spotify};
+use crate::{
+    app::{Background, CantusApp, update},
+    render::music::PALETTE_COLORS,
 };
-
 use arrayvec::ArrayVec;
 use futures_util::future::join_all;
 use image::{RgbaImage, imageops};
 use isthmus::{Image, Unorm8x4, glam::Vec3};
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use reqwest::Client;
+use std::{
+    array,
+    collections::{HashMap, HashSet},
+    ops::Range,
+    time::Duration,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::spawn_blocking;
 use tracing::warn;
-
-use super::{ART_SIZE, AudioFeatures, Music, MusicResult, TrackId, spotify::Spotify};
-use crate::{
-    app::{Background, CantusApp, update},
-    render::music::PALETTE_COLORS,
-    time::Instant,
-};
+use web_time::Instant;
 
 const RETRY_DELAY: Duration = Duration::from_secs(30);
 pub type ArtState = Fetch<AlbumArt>;
@@ -32,13 +30,10 @@ pub struct Enrichment {
 
 impl Enrichment {
     pub(crate) fn new(background: Background) -> Self {
-        let client = Client::builder().user_agent(concat!("Cantus/", env!("CARGO_PKG_VERSION")));
+        let client = Client::builder();
         #[cfg(not(target_arch = "wasm32"))]
         let client = client.timeout(Duration::from_secs(15));
-        Self {
-            background,
-            http: client.build().expect("failed to construct HTTP client"),
-        }
+        Self { background, http: client.build().expect("failed to construct HTTP client") }
     }
 }
 
@@ -91,8 +86,7 @@ pub struct AlbumArt {
 
 impl Fetch<AlbumArt> {
     pub fn palette(&self) -> [Unorm8x4; PALETTE_COLORS] {
-        self.ready()
-            .map_or_else(|| [Unorm8x4::default(); PALETTE_COLORS], |art| art.palette)
+        self.ready().map_or_else(|| [Unorm8x4::default(); PALETTE_COLORS], |art| art.palette)
     }
 }
 
@@ -124,33 +118,30 @@ fn decode_art(bytes: &[u8]) -> Result<AlbumArt, image::ImageError> {
     }
     .into_rgba8();
     let (width, height) = image.dimensions();
-    Ok(AlbumArt {
-        palette: image_palette(&image),
-        image: Image::rgba8((width, height).into(), image.into_raw()),
-    })
+    Ok(AlbumArt { palette: image_palette(&image), image: Image::rgba8((width, height).into(), image.into_raw()) })
 }
 
 fn art_slots(music: &mut Music) -> impl Iterator<Item = (&str, &mut ArtState)> {
-    music
-        .queue
-        .iter_mut()
-        .filter_map(|track| track.image.as_deref().map(|url| (url, &mut track.runtime.art)))
-        .chain(
-            music
-                .playlists
-                .iter_mut()
-                .filter_map(|playlist| playlist.image_url.as_deref().map(|url| (url, &mut playlist.art))),
-        )
+    music.queue.iter_mut().filter_map(|track| track.image.as_deref().map(|url| (url, &mut track.runtime.art))).chain(
+        music
+            .playlists
+            .iter_mut()
+            .filter_map(|playlist| playlist.image_url.as_deref().map(|url| (url, &mut playlist.art))),
+    )
 }
 
 impl CantusApp {
     pub(crate) fn refresh_enrichment(&mut self, include_audio: bool) {
         let now = Instant::now();
         let mut lyric_uris = HashSet::new();
+        let current = self.music.timeline.index.min(self.music.queue.len().saturating_sub(1));
+        let nearby = current.saturating_sub(3)..current.saturating_add(4).min(self.music.queue.len());
         let lyrics = self
             .music
             .queue
-            .iter_mut()
+            .get_mut(nearby)
+            .into_iter()
+            .flatten()
             .filter_map(|track| {
                 if track.name.trim().is_empty()
                     || !track.runtime.lyrics.request(now)
@@ -234,9 +225,8 @@ fn complete_palette(colors: &mut ArrayVec<(Lch, f32), PALETTE_COLORS>) {
     let mut index = 1;
     while index < colors.len() {
         let (color, weight) = colors[index];
-        if let Some(duplicate) = colors[..index]
-            .iter()
-            .position(|(other, _)| (color.hue - other.hue).into_degrees().abs() < 20.0)
+        if let Some(duplicate) =
+            colors[..index].iter().position(|(other, _)| (color.hue - other.hue).into_degrees().abs() < 20.0)
         {
             colors[duplicate].1 += weight;
             colors.remove(index);
@@ -317,22 +307,15 @@ fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_
                 sum[2] += color.b;
                 sum
             });
-            (
-                palette::Lab::new(sum[0] / weight, sum[1] / weight, sum[2] / weight).into_color(),
-                weight,
-            )
+            (palette::Lab::new(sum[0] / weight, sum[1] / weight, sum[2] / weight).into_color(), weight)
         })
         .collect()
 }
 
 fn image_palette(image: &RgbaImage) -> [Unorm8x4; PALETTE_COLORS] {
     let srgb_to_lab = |pixel: &image::Rgba<u8>| {
-        palette::Srgb::new(
-            f32::from(pixel[0]) / 255.0,
-            f32::from(pixel[1]) / 255.0,
-            f32::from(pixel[2]) / 255.0,
-        )
-        .into_color()
+        palette::Srgb::new(f32::from(pixel[0]) / 255.0, f32::from(pixel[1]) / 255.0, f32::from(pixel[2]) / 255.0)
+            .into_color()
     };
     let mut pixels: Vec<palette::Lab> = image
         .pixels()

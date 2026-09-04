@@ -1,8 +1,3 @@
-use core::{error::Error, fmt};
-use std::{time::Instant, vec, vec::Vec};
-
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-
 use super::{
     Canvas, Context, SetupError,
     surface::{Present, SurfaceTarget},
@@ -13,6 +8,8 @@ use crate::{
     glam::{Vec2, Vec3},
     text::Text,
 };
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use web_time::Instant;
 
 pub struct Renderer {
     context: Context,
@@ -31,11 +28,7 @@ struct SurfaceSlot {
     push: PushBlock,
 }
 fn surface_slot(entries: &mut [SurfaceEntry], handle: SurfaceHandle) -> Option<&mut SurfaceSlot> {
-    entries
-        .get_mut(handle.index())
-        .filter(|e| e.generation == handle.generation())?
-        .slot
-        .as_mut()
+    entries.get_mut(handle.index()).filter(|e| e.generation == handle.generation())?.slot.as_mut()
 }
 pub struct Render<'a> {
     surfaces: &'a mut [SurfaceEntry],
@@ -44,20 +37,13 @@ pub struct Render<'a> {
     text: &'a mut Text,
     canvas: &'a mut Canvas,
 }
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RenderError {
+    #[error("presentation surface was lost")]
     SurfaceLost,
+    #[error("frame failed GPU validation")]
     Validation,
 }
-impl fmt::Display for RenderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SurfaceLost => f.write_str("presentation surface was lost"),
-            Self::Validation => f.write_str("frame failed GPU validation"),
-        }
-    }
-}
-impl Error for RenderError {}
 impl Render<'_> {
     pub fn surface(&mut self, surface: SurfaceHandle, screen_size: Vec2, draw: impl FnOnce(Frame<'_>)) {
         let Some(slot) = surface_slot(self.surfaces, surface) else {
@@ -65,22 +51,17 @@ impl Render<'_> {
         };
         slot.push.screen_size = screen_size;
         slot.push.time = self.time;
-        draw(Frame::new(
-            &slot.push,
-            self.time,
-            self.delta_time,
-            self.text,
-            self.canvas,
-            surface,
-        ));
+        draw(Frame::new(&slot.push, self.time, self.delta_time, self.text, self.canvas, surface));
+        self.canvas.set_frame(surface, slot.push);
         self.canvas.ensure_globals(surface);
     }
 }
 impl Renderer {
-    /// Creates a renderer and its primary presentation surface.
+    /// Creates a renderer and primary surface, validating both GPU and shader support.
     ///
     /// # Errors
-    /// Returns an error if GPU or surface initialization fails, or if the shader is invalid.
+    /// Returns GPU, surface, and shader initialization failures.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
         program: Program,
         surface: &(impl HasDisplayHandle + HasWindowHandle),
@@ -89,23 +70,44 @@ impl Renderer {
         text_color: Vec3,
     ) -> Result<(Self, SurfaceHandle), SetupError> {
         let (context, raw_surface) = Context::new(surface)?;
+        Self::from_surface(program, context, raw_surface, [width, height], font, text_color)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn new(
+        program: Program,
+        canvas: web_sys::HtmlCanvasElement,
+        size: [u32; 2],
+        font: &[u8],
+        text_color: Vec3,
+    ) -> Result<(Self, SurfaceHandle), SetupError> {
+        let (context, raw_surface) = Context::new(canvas).await?;
+        Self::from_surface(program, context, raw_surface, size, font, text_color)
+    }
+
+    fn from_surface(
+        program: Program,
+        context: Context,
+        raw_surface: wgpu::Surface<'static>,
+        [width, height]: [u32; 2],
+        font: &[u8],
+        text_color: Vec3,
+    ) -> Result<(Self, SurfaceHandle), SetupError> {
         let target = SurfaceTarget::from_raw(&context, raw_surface, width, height)?;
+        #[cfg(not(target_arch = "wasm32"))]
         if !program.bytes.len().is_multiple_of(4) {
             return Err(SetupError::InvalidShader);
         }
-        let (words, _) = program.bytes.as_chunks::<4>();
-        let shader = words.iter().map(|b| u32::from_le_bytes(*b)).collect();
-        let mut canvas = Canvas::new(&context, shader, target.format, program.root);
+        #[cfg(target_arch = "wasm32")]
+        std::str::from_utf8(program.bytes).map_err(|_| SetupError::InvalidShader)?;
+        let mut canvas = Canvas::new(&context, program.bytes, target.format);
         let text = Text::new(&context, &mut canvas, font, text_color);
         Ok((
             Self {
                 context,
                 surfaces: vec![SurfaceEntry {
                     generation: 0,
-                    slot: Some(SurfaceSlot {
-                        target,
-                        push: PushBlock::default(),
-                    }),
+                    slot: Some(SurfaceSlot { target, push: PushBlock::default() }),
                 }],
                 canvas,
                 text,
@@ -115,6 +117,7 @@ impl Renderer {
             SurfaceHandle::new(0, 0),
         ))
     }
+
     fn begin_frame(&mut self) -> (f32, f32) {
         self.canvas.begin_frame();
         self.text.begin_frame();
@@ -123,10 +126,11 @@ impl Renderer {
         self.last_frame = elapsed;
         (elapsed, delta)
     }
-    /// Records and presents one frame.
+
+    /// Records and presents one frame, returning surface loss or GPU validation errors.
     ///
     /// # Errors
-    /// Returns an error if a presentation surface is lost or GPU validation fails.
+    /// Returns presentation or GPU validation failures.
     pub fn render(&mut self, draw: impl FnOnce(&mut Render<'_>)) -> Result<(), RenderError> {
         let (elapsed, delta) = self.begin_frame();
         {
@@ -142,11 +146,7 @@ impl Renderer {
         let placed = self.text.finish_frame();
         self.canvas.prepare(placed);
         for index in 0..self.surfaces.len() {
-            let Some(generation) = self.surfaces[index]
-                .slot
-                .as_ref()
-                .map(|_| self.surfaces[index].generation)
-            else {
+            let Some(generation) = self.surfaces[index].slot.as_ref().map(|_| self.surfaces[index].generation) else {
                 continue;
             };
             let handle = SurfaceHandle::new(index, generation);
@@ -161,6 +161,7 @@ impl Renderer {
         }
         Ok(())
     }
+
     fn present(&mut self, surface: SurfaceHandle) -> Present {
         let Some(slot) = surface_slot(&mut self.surfaces, surface) else {
             return Present::Unavailable;
@@ -173,11 +174,8 @@ impl Renderer {
             .context
             .0
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("isthmus frame"),
-            });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("isthmus frame") });
         let extent = slot.target.extent;
-        let shared = bytemuck::bytes_of(&slot.push);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("isthmus render pass"),
@@ -197,23 +195,26 @@ impl Renderer {
             });
             pass.set_viewport(0.0, 0.0, extent[0] as f32, extent[1] as f32, 0.0, 1.0);
             pass.set_scissor_rect(0, 0, extent[0], extent[1]);
-            self.canvas.draw_surface(&mut pass, surface, shared);
+            self.canvas.draw_surface(&mut pass, surface);
         }
         self.context.0.queue.submit([encoder.finish()]);
         slot.target.present(frame)
     }
+
     pub fn device_name(&self) -> &str {
         &self.context.0.device_name
     }
+
     pub fn resize(&mut self, surface: SurfaceHandle, [width, height]: [u32; 2]) {
         if let Some(slot) = surface_slot(&mut self.surfaces, surface) {
             slot.target.resize(width, height);
         }
     }
-    /// Adds another presentation surface.
+
+    /// Adds a presentation surface when it supports the renderer's format.
     ///
     /// # Errors
-    /// Returns an error if the surface cannot be initialized or uses a different format.
+    /// Returns surface initialization and format compatibility failures.
     pub fn add_surface(
         &mut self,
         target: &(impl HasDisplayHandle + HasWindowHandle),
@@ -223,22 +224,17 @@ impl Renderer {
         if target.format != self.canvas.format() {
             return Err(SetupError::IncompatibleSurface);
         }
-        let slot = SurfaceSlot {
-            target,
-            push: PushBlock::default(),
-        };
+        let slot = SurfaceSlot { target, push: PushBlock::default() };
         if let Some((index, entry)) = self.surfaces.iter_mut().enumerate().find(|(_, e)| e.slot.is_none()) {
             entry.slot = Some(slot);
             Ok(SurfaceHandle::new(index, entry.generation))
         } else {
             let index = self.surfaces.len();
-            self.surfaces.push(SurfaceEntry {
-                generation: 0,
-                slot: Some(slot),
-            });
+            self.surfaces.push(SurfaceEntry { generation: 0, slot: Some(slot) });
             Ok(SurfaceHandle::new(index, 0))
         }
     }
+
     pub fn remove_surface(&mut self, surface: SurfaceHandle) {
         if let Some(entry) = self.surfaces.get_mut(surface.index())
             && entry.generation == surface.generation()

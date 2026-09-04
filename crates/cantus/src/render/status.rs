@@ -1,13 +1,3 @@
-use core::f32::consts::TAU;
-
-#[cfg(target_arch = "spirv")]
-use isthmus::Float as _;
-use isthmus::{
-    Quad, Sdf, ShaderData,
-    glam::{FloatExt, Vec2, Vec3, vec2, vec3},
-    spirv_std::arch::kill,
-};
-
 use crate::render::{
     Fragment, GAP, Globals, PANEL_START, TEXT_COLOR, TextFragment,
     sdf::{
@@ -15,6 +5,14 @@ use crate::render::{
         segment_distance,
     },
     weathertime::{StatusSky, scene, sky_phase},
+};
+use core::f32::consts::TAU;
+#[cfg(target_arch = "spirv")]
+use isthmus::Float as _;
+use isthmus::{
+    Quad, Sdf, ShaderData,
+    glam::{FloatExt, Vec2, Vec3, vec2, vec3},
+    spirv_std::arch::kill,
 };
 
 const STATUS_HISTORY_SAMPLES: usize = 32;
@@ -37,11 +35,7 @@ const BASE_WIDTH: f32 = GRAPH_WIDTH * 2.0 + DATA_WIDTH + ACTION_WIDTH * 2.0 + GA
 fn sample_graph(outer: Quad, graph: Quad, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
     let surface = sample_pill(outer, pixel, globals, time);
     let radius = graph.size.y * 0.5;
-    surface.layer(sd_capsule_box(
-        graph.local(surface.refract(pixel)),
-        graph.size.x * 0.5 - radius,
-        radius,
-    ))
+    surface.layer(sd_capsule_box(graph.local(surface.refract(pixel)), graph.size.x * 0.5 - radius, radius))
 }
 
 #[repr(C)]
@@ -54,6 +48,9 @@ pub struct ProcessorStatus {
 
 #[isthmus::paint]
 mod host {
+    use super::*;
+    use crate::{app::Background, interaction::Rect, platform::Platform, render::UiContext};
+    use arrayvec::ArrayString;
     use std::{
         fmt::Write,
         sync::{
@@ -62,11 +59,6 @@ mod host {
             mpsc::{self, Receiver},
         },
     };
-
-    use arrayvec::ArrayString;
-
-    use super::*;
-    use crate::{app::Background, interaction::Rect, platform::Platform, render::UiContext};
 
     impl ProcessorStatus {
         fn record(&mut self, sample: ProcessorSample) {
@@ -117,12 +109,7 @@ mod host {
     impl StatusPanel {
         /// Total on-screen width of the pill; grows to include the battery slot when shown.
         pub const fn width(&self) -> f32 {
-            BASE_WIDTH
-                + if self.battery_level.is_some() {
-                    DATA_WIDTH + GAP
-                } else {
-                    0.0
-                }
+            BASE_WIDTH + if self.battery_level.is_some() { DATA_WIDTH + GAP } else { 0.0 }
         }
 
         pub(crate) fn new(background: &Background) -> Self {
@@ -162,10 +149,7 @@ mod host {
             let pill_quad: Quad = pill.into();
             let mut cursor = STATUS_INSET;
             let section = |center: f32, section_width: f32| {
-                Rect::from_center(
-                    vec2(x + center, PANEL_START + height * 0.5),
-                    vec2(section_width * 0.5, height * 0.5),
-                )
+                Rect::from_center(vec2(x + center, PANEL_START + height * 0.5), vec2(section_width * 0.5, height * 0.5))
             };
 
             // GPU: Status background.
@@ -349,9 +333,8 @@ mod host {
                     let muted = if volume < 0.0 { 1.0 } else { 0.0 };
                     let volume = volume.abs();
                     let middle = (AUDIO_SPECTRUM_BANDS - 1) as f32 * 0.5;
-                    let bar = (point.x / AUDIO_BAR_SPACING + middle)
-                        .round()
-                        .clamp(0.0, AUDIO_SPECTRUM_BANDS as f32 - 1.0);
+                    let bar =
+                        (point.x / AUDIO_BAR_SPACING + middle).round().clamp(0.0, AUDIO_SPECTRUM_BANDS as f32 - 1.0);
                     let active = audio_spectrum[bar as usize] * (1.0 - muted);
                     let height = 1.2 + 7.7 * active;
                     let bars = sd_rounded_box(

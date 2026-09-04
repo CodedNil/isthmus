@@ -1,8 +1,6 @@
-use std::{mem, vec::Vec};
-
-use isthmus::{Quad, glam::Vec2};
-
 use crate::render::RipplePulse;
+use isthmus::{Quad, glam::Vec2};
+use std::{mem, vec::Vec};
 
 #[derive(Clone, Copy)]
 pub struct Rect {
@@ -12,17 +10,11 @@ pub struct Rect {
 
 impl Rect {
     pub const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
-        Self {
-            min: Vec2::new(x0, y0),
-            max: Vec2::new(x1, y1),
-        }
+        Self { min: Vec2::new(x0, y0), max: Vec2::new(x1, y1) }
     }
 
     pub fn from_center(center: Vec2, half_size: Vec2) -> Self {
-        Self {
-            min: center - half_size,
-            max: center + half_size,
-        }
+        Self { min: center - half_size, max: center + half_size }
     }
 
     pub fn contains(self, point: Vec2) -> bool {
@@ -46,11 +38,7 @@ struct Widget {
 enum Pointer {
     Outside(Vec2),
     Hovering(Vec2),
-    Held {
-        position: Vec2,
-        origin: Vec2,
-        dragging: bool,
-    },
+    Held { position: Vec2, origin: Vec2, dragging: bool },
 }
 
 impl Default for Pointer {
@@ -175,15 +163,8 @@ impl Interaction {
         };
         self.pressure += (target_pressure - self.pressure).clamp(-5.0 * delta_time, 5.0 * delta_time);
         if matches!(self.event, Some(ButtonEvent::Press)) {
-            let pulse = RipplePulse {
-                origin: self.mouse_pos(),
-                start_time: time,
-            };
-            if let Some(ripple) = self
-                .ripples
-                .iter_mut()
-                .min_by(|a, b| a.start_time.total_cmp(&b.start_time))
-            {
+            let pulse = RipplePulse { origin: self.mouse_pos(), start_time: time };
+            if let Some(ripple) = self.ripples.iter_mut().min_by(|a, b| a.start_time.total_cmp(&b.start_time)) {
                 *ripple = pulse;
             }
         }
@@ -217,9 +198,7 @@ impl Interaction {
     }
 
     pub fn take_regions(&mut self) -> impl Iterator<Item = Rect> + '_ {
-        self.regions
-            .drain(..)
-            .chain(self.previous_widgets.iter().map(|widget| widget.rect))
+        self.regions.drain(..).chain(self.previous_widgets.iter().map(|widget| widget.rect))
     }
 
     pub const fn mouse_pos(&self) -> Vec2 {
@@ -259,19 +238,14 @@ impl Interaction {
         if self.down() {
             match self.active {
                 Some(Active::Widget(slot))
-                    if self
-                        .previous_widgets
-                        .get(slot)
-                        .is_some_and(|widget| widget.rect.contains(point)) =>
+                    if self.previous_widgets.get(slot).is_some_and(|widget| widget.rect.contains(point)) =>
                 {
                     Some(slot)
                 }
                 _ => None,
             }
         } else {
-            self.previous_widgets
-                .iter()
-                .rposition(|widget| widget.rect.contains(point))
+            self.previous_widgets.iter().rposition(|widget| widget.rect.contains(point))
         }
     }
 
@@ -284,11 +258,7 @@ impl Interaction {
             matches!(self.active, Some(Active::Widget(active)) if active == slot)
         };
         let hovered = self.pointer().is_some()
-            && if drag.is_some() && active {
-                rect.contains(self.mouse_pos())
-            } else {
-                self.hot == Some(slot)
-            };
+            && if drag.is_some() && active { rect.contains(self.mouse_pos()) } else { self.hot == Some(slot) };
         let release = matches!(self.event, Some(ButtonEvent::Release { .. }));
         let was_dragging = matches!(self.event, Some(ButtonEvent::Release { was_dragging: true, .. }));
         let gesture = if drag.is_some() && active && was_dragging {
@@ -309,13 +279,9 @@ impl Interaction {
             held_seconds: self.held_seconds,
             previous_held_seconds: self.previous_held_seconds,
             drag_origin: match (self.pointer, self.event) {
-                (Pointer::Held { origin, .. }, _)
-                | (
-                    _,
-                    Some(ButtonEvent::Release {
-                        drag_origin: origin, ..
-                    }),
-                ) => origin,
+                (Pointer::Held { origin, .. }, _) | (_, Some(ButtonEvent::Release { drag_origin: origin, .. })) => {
+                    origin
+                }
                 _ => self.mouse_pos(),
             },
         }
@@ -334,20 +300,9 @@ impl Interaction {
 
     fn press(&mut self) {
         let position = self.mouse_pos();
-        self.pointer = Pointer::Held {
-            position,
-            origin: position,
-            dragging: false,
-        };
-        self.hot = self
-            .previous_widgets
-            .iter()
-            .rposition(|widget| widget.rect.contains(position));
-        self.active = self.hot.map(|slot| {
-            self.previous_widgets[slot]
-                .drag
-                .map_or(Active::Widget(slot), Active::Drag)
-        });
+        self.pointer = Pointer::Held { position, origin: position, dragging: false };
+        self.hot = self.previous_widgets.iter().rposition(|widget| widget.rect.contains(position));
+        self.active = self.hot.map(|slot| self.previous_widgets[slot].drag.map_or(Active::Widget(slot), Active::Drag));
         self.event = Some(ButtonEvent::Press);
         self.held_seconds = 0.0;
         self.previous_held_seconds = 0.0;
@@ -355,10 +310,9 @@ impl Interaction {
 
     fn release(&mut self) {
         self.event = match self.pointer {
-            Pointer::Held { origin, dragging, .. } => Some(ButtonEvent::Release {
-                drag_origin: origin,
-                was_dragging: dragging,
-            }),
+            Pointer::Held { origin, dragging, .. } => {
+                Some(ButtonEvent::Release { drag_origin: origin, was_dragging: dragging })
+            }
             _ => None,
         };
         let position = self.mouse_pos();

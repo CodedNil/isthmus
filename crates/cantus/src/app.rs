@@ -1,3 +1,13 @@
+use crate::{
+    config::{self, Config},
+    interaction::Interaction,
+    music::{Enrichment, Music},
+    platform::Platform,
+    render::{Bar, TEXT_COLOR, UiContext, launcher::LauncherState, program},
+};
+use isthmus::{Renderer, SurfaceHandle, glam::vec2};
+#[cfg(not(target_arch = "wasm32"))]
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 #[cfg(target_arch = "wasm32")]
 use std::marker::PhantomData;
 #[cfg(not(target_arch = "wasm32"))]
@@ -8,21 +18,10 @@ use std::{
     sync::mpsc::{self, Sender},
     thread::Builder,
 };
-
-use isthmus::{Renderer, SurfaceHandle, glam::vec2};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{Layer, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
-
-use crate::{
-    config::{self, Config},
-    interaction::Interaction,
-    music::{Enrichment, Music},
-    platform::Platform,
-    render::{Bar, TEXT_COLOR, UiContext, launcher::LauncherState, program},
-};
 
 pub type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 pub type AppUpdater = Sender<Update<CantusApp>>;
@@ -40,38 +39,25 @@ pub fn run() {
     #[cfg(all(debug_assertions, feature = "generate-nix"))]
     config::nix_options::generate();
 
-    let filter = Targets::new()
-        .with_default(LevelFilter::WARN)
-        .with_target("cantus", Level::INFO);
-    tracing_subscriber::registry()
-        .with(fmt::layer().with_writer(io::stderr).with_filter(filter))
-        .init();
+    let filter = Targets::new().with_default(LevelFilter::WARN).with_target("cantus", Level::INFO);
+    tracing_subscriber::registry().with(fmt::layer().with_writer(io::stderr).with_filter(filter)).init();
 
     Platform::run();
 }
 
 pub fn spawn_thread(name: &'static str, job: impl FnOnce() + Send + 'static) {
-    Builder::new()
-        .name(name.into())
-        .spawn(job)
-        .expect("failed to spawn background thread");
+    Builder::new().name(name.into()).spawn(job).expect("failed to spawn background thread");
 }
 
 impl Background {
     #[cfg(not(target_arch = "wasm32"))]
     fn new(runtime: &Runtime, updater: &AppUpdater) -> Self {
-        Self {
-            runtime: runtime.handle().clone(),
-            updater: updater.clone(),
-        }
+        Self { runtime: runtime.handle().clone(), updater: updater.clone() }
     }
 
     #[cfg(target_arch = "wasm32")]
     fn new(updater: &AppUpdater) -> Self {
-        Self {
-            _runtime: PhantomData,
-            updater: updater.clone(),
-        }
+        Self { _runtime: PhantomData, updater: updater.clone() }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -162,6 +148,7 @@ impl CantusApp {
     ///
     /// # Panics
     /// Panics if initialized twice or GPU setup fails.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn initialize_renderer(
         &mut self,
         surface: &(impl HasDisplayHandle + HasWindowHandle),
@@ -182,6 +169,22 @@ impl CantusApp {
         self.bar_surface = Some(bar_surface);
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn initialize_web_renderer(
+        &mut self,
+        canvas: web_sys::HtmlCanvasElement,
+        size: [u32; 2],
+    ) -> Result<(), isthmus::SetupError> {
+        assert!(self.gpu.is_none(), "GPU initialized twice");
+        let (gpu, bar_surface) =
+            Renderer::new(program(), canvas, size, include_bytes!("../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR)
+                .await?;
+        tracing::info!("Using GPU device: {}", gpu.device_name());
+        self.gpu = Some(gpu);
+        self.bar_surface = Some(bar_surface);
+        Ok(())
+    }
+
     pub(crate) fn apply_pending_updates(&mut self) {
         while let Ok(update) = self.app_updates.try_recv() {
             update(self);
@@ -196,11 +199,8 @@ impl CantusApp {
             return;
         };
         let result = gpu.render(|render| {
-            let bar_interaction = if launcher.is_some() {
-                &mut self.occluded_interaction
-            } else {
-                &mut self.interaction
-            };
+            let bar_interaction =
+                if launcher.is_some() { &mut self.occluded_interaction } else { &mut self.interaction };
             render.surface(bar_surface, vec2(screen_size[0], screen_size[1]), |gpu| {
                 let mut context = UiContext::new(gpu, &self.config, bar_interaction);
                 self.bar.show(&mut context, &mut self.music);
@@ -217,6 +217,25 @@ impl CantusApp {
         });
         if let Err(error) = result {
             tracing::error!(%error, "Could not render frame");
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn render_web(&mut self, screen_size: [f32; 2]) {
+        self.launcher.open = true;
+        let (Some(gpu), Some(surface)) = (&mut self.gpu, self.bar_surface) else {
+            return;
+        };
+        let result = gpu.render(|render| {
+            render.surface(surface, vec2(screen_size[0], screen_size[1]), |frame| {
+                let mut context = UiContext::new(frame, &self.config, &mut self.interaction);
+                self.bar.show(&mut context, &mut self.music);
+                self.launcher.show(&mut context);
+                context.finish();
+            });
+        });
+        if let Err(error) = result {
+            tracing::error!(%error, "Could not render web frame");
         }
     }
 }

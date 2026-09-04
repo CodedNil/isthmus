@@ -1,3 +1,9 @@
+use crate::{
+    app::{AppUpdater, Background},
+    config::Config,
+    render::music::AudioFeatures,
+};
+use arrayvec::ArrayString;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
@@ -7,16 +13,8 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-
-use arrayvec::ArrayString;
 use tracing::{info, warn};
-
-use crate::{
-    app::{AppUpdater, Background},
-    config::Config,
-    render::music::AudioFeatures,
-    time::Instant,
-};
+use web_time::Instant;
 
 mod enrichment;
 mod lyrics;
@@ -86,8 +84,7 @@ impl Timeline {
     }
 
     pub fn track_at_playhead(&self, queue: &[Track]) -> Option<(usize, f32)> {
-        self.span_at_playhead(queue)
-            .filter(|(index, elapsed)| *elapsed <= queue[*index].duration_ms as f32)
+        self.span_at_playhead(queue).filter(|(index, elapsed)| *elapsed <= queue[*index].duration_ms as f32)
     }
 
     /// Returns the queue item covering the playhead, including its trailing spacing.
@@ -163,11 +160,7 @@ impl Music {
             + drag_offset_ms;
         let predicted = self.timeline.queue_start_ms - self.timeline.rate * delta_time * 1_000.0;
         let correction = target - predicted;
-        let next = if dragging {
-            target
-        } else {
-            predicted + correction * (1.0 - (-delta_time / 0.3).exp())
-        };
+        let next = if dragging { target } else { predicted + correction * (1.0 - (-delta_time / 0.3).exp()) };
         let target_movement = (next - self.timeline.queue_start_ms) * delta_time;
         self.timeline.movement += (target_movement - self.timeline.movement) * (delta_time * 10.0).min(1.0);
         self.timeline.queue_start_ms = next;
@@ -214,8 +207,7 @@ impl Music {
             self.spotify.command(PlaybackCommand::Seek(milliseconds));
         } else {
             let direction = if self.timeline.index < clicked_index { 1 } else { -1 };
-            self.spotify
-                .command(PlaybackCommand::Skip(direction * skip_count.min(10) as i8));
+            self.spotify.command(PlaybackCommand::Skip(direction * skip_count.min(10) as i8));
         }
     }
 }
@@ -264,9 +256,5 @@ enum PlaybackCommand {
     SetPlaying(bool),
     Seek(u32),
     Skip(i8),
-    UpdateLibrary {
-        track_id: TrackId,
-        playlists: Vec<(PlaylistId, bool)>,
-        liked: Option<bool>,
-    },
+    UpdateLibrary { track_id: TrackId, playlists: Vec<(PlaylistId, bool)>, liked: Option<bool> },
 }

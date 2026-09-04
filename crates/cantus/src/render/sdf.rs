@@ -1,11 +1,10 @@
+use crate::render::Globals;
 #[cfg(target_arch = "spirv")]
 use isthmus::Float as _;
 use isthmus::{
     Quad, Sdf,
     glam::{FloatExt, UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
 };
-
-use crate::render::Globals;
 
 /// Where the drop shadow fades below the fragment kill threshold, plus an AA pixel.
 const SHADOW_REACH: f32 = 18.0;
@@ -28,19 +27,10 @@ pub fn cantus_surface(
     shape: impl Fn(Vec2) -> Sdf,
 ) -> SurfaceSample {
     let distance = shape(pixel).distance;
-    let mouse_distance = if globals.pressure > 0.0 {
-        shape(globals.pointer).distance
-    } else {
-        1.0
-    };
+    let mouse_distance = if globals.pressure > 0.0 { shape(globals.pointer).distance } else { 1.0 };
     let mouse_mask = mouse_distance.smoothstep(0.5, -0.5);
     let interaction = interaction(pixel, globals, time, mouse_mask);
-    SurfaceSample::new(
-        quad.local(pixel) + quad.size * 0.5,
-        quad.size,
-        Sdf::new(distance),
-        interaction,
-    )
+    SurfaceSample::new(quad.local(pixel) + quad.size * 0.5, quad.size, Sdf::new(distance), interaction)
 }
 
 #[derive(Clone, Copy)]
@@ -103,8 +93,7 @@ impl SurfaceSample {
         pixel + self.displacement()
     }
 
-    /// Moves content with pointer and ripple interaction without applying the
-    /// static edge lens, which would bend text baselines near a surface edge.
+    /// Moves content with interaction while avoiding edge distortion of text baselines.
     pub fn content_point(self, pixel: Vec2) -> Vec2 {
         pixel - self.refraction
     }
@@ -124,8 +113,7 @@ impl SurfaceSample {
 
     /// Straight-alpha surface color including its outer shadow.
     pub fn color(self, color: Vec3) -> Vec4 {
-        // The render pipeline uses straight-alpha blending. `mask / alpha`
-        // retains the black outer shadow without applying edge coverage twice.
+        // Preserve the outer shadow without applying straight-alpha coverage twice.
         (self.shade(color) * self.mask / self.alpha.max(0.0001)).extend(self.alpha)
     }
 
@@ -137,9 +125,7 @@ impl SurfaceSample {
 
 /// Core 2-lane avalanche mixer for hash functions
 pub fn avalanche(mut value: UVec2) -> UVec2 {
-    value = value
-        .wrapping_mul(UVec2::splat(1_664_525))
-        .wrapping_add(UVec2::splat(1_013_904_223));
+    value = value.wrapping_mul(UVec2::splat(1_664_525)).wrapping_add(UVec2::splat(1_013_904_223));
     value.x = value.x.wrapping_add(value.y.wrapping_mul(1_664_525));
     value.y = value.y.wrapping_add(value.x.wrapping_mul(1_664_525));
     value ^= value >> 16;
@@ -154,8 +140,7 @@ pub fn hash(p: Vec2) -> Vec2 {
     vec2(value.x as f32, value.y as f32) * 2.328_306_4e-10
 }
 
-// This substantial helper is shared across shader entry points; keeping it as
-// one SPIR-V function avoids duplicating the complete noise graph in each one.
+// Keep this shared to avoid duplicating its noise graph in every shader entry point.
 #[inline(never)]
 pub fn simplex_noise(p: Vec2) -> f32 {
     const K1: f32 = 0.366_025_42;
@@ -214,7 +199,8 @@ fn interaction(pixel: Vec2, globals: Globals, time: f32, mouse_mask: f32) -> Int
         if pulse.start_time > 0.0 && progress < 1.0 {
             let offset = pixel - pulse.origin;
             let distance = offset.length();
-            let direction = offset.normalize_or_zero();
+            // Avoid normalize_or_zero's Naga-invalid infinity constant and duplicate square root.
+            let direction = if distance > 0.0001 { offset / distance } else { Vec2::ZERO };
             let wave = (distance - progress * 600.0).abs().smoothstep(80.0, 0.0) * (1.0 - progress);
             ripple += direction * wave * (1.0 - progress) * 0.5;
             ripple_flash = (ripple_flash + wave * 0.5).min(1.0);
@@ -222,11 +208,8 @@ fn interaction(pixel: Vec2, globals: Globals, time: f32, mouse_mask: f32) -> Int
     }
 
     let pointer_offset = pixel - globals.pointer;
-    let mouse_lift = if globals.pressure > 0.0 {
-        pointer_offset.length().smoothstep(150.0, 0.0) * globals.pressure
-    } else {
-        0.0
-    };
+    let mouse_lift =
+        if globals.pressure > 0.0 { pointer_offset.length().smoothstep(150.0, 0.0) * globals.pressure } else { 0.0 };
     Interaction {
         bulge: mouse_lift * mouse_mask * 8.0 + ripple.length() * 22.0,
         refraction: pointer_offset * mouse_lift * mouse_mask * 0.035 + ripple * 3.0,
@@ -264,12 +247,8 @@ pub fn sd_rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> Sdf {
     let mut point = vec2(point.x.abs(), point.y);
     let h = (point.x + k * point.y).max(0.0);
     point -= 0.5 * vec2(h, h * k);
-    point -= vec2(
-        point
-            .x
-            .clamp(-0.5 * (side_len - radius) * k, 0.5 * (side_len - radius) * k),
-        -0.5 * (side_len - radius),
-    );
+    point -=
+        vec2(point.x.clamp(-0.5 * (side_len - radius) * k, 0.5 * (side_len - radius) * k), -0.5 * (side_len - radius));
     Sdf::new(point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius)
 }
 

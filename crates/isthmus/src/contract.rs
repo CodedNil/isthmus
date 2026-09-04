@@ -1,15 +1,7 @@
-use spirv_std::image::{Image2d, SampledImage};
-
 use crate::{ShaderData, data::ImageHandle};
+use spirv_std::{Sampler, image::Image2d};
 
-pub const IMAGE_CAPACITY: usize = 16;
-pub type ImageHeap = [SampledImage<Image2d>; IMAGE_CAPACITY];
-
-/// Loads one generated shader value from a byte-addressed storage buffer.
-///
-/// The shader generator only calls this for values and offsets it recorded
-/// while constructing the frame, so alignment and bounds are part of the
-/// generated host/shader contract.
+/// Loads a generated shader value from its recorded byte-addressed buffer offset.
 #[doc(hidden)]
 pub fn load<T>(buffer: &[u32], byte_index: u32) -> T {
     // SAFETY: Generated shaders only request recorded, correctly aligned values of T.
@@ -18,17 +10,18 @@ pub fn load<T>(buffer: &[u32], byte_index: u32) -> T {
 
 #[doc(hidden)]
 pub struct ShaderImage<'a> {
-    heap: &'a ImageHeap,
-    handle: ImageHandle,
+    image: &'a Image2d,
+    sampler: Sampler,
+    _handle: ImageHandle,
 }
 
 impl<'a> ShaderImage<'a> {
-    pub const fn new(heap: &'a ImageHeap, handle: ImageHandle) -> Self {
-        Self { heap, handle }
+    pub const fn new(image: &'a Image2d, sampler: Sampler, handle: ImageHandle) -> Self {
+        Self { image, sampler, _handle: handle }
     }
 
     pub fn sample(&self, uv: glam::Vec2) -> glam::Vec4 {
-        self.heap[self.handle.index() as usize].sample(uv)
+        self.image.sample(self.sampler, uv)
     }
 }
 
@@ -38,6 +31,7 @@ impl<'a> ShaderImage<'a> {
 pub struct PushBlock {
     pub screen_size: glam::Vec2,
     pub time: f32,
+    _padding: f32,
 }
 
 // SAFETY: repr(C) gives PushBlock the scalar-layout-compatible field order and padding.
@@ -53,13 +47,12 @@ unsafe impl bytemuck::Pod for PushBlock {}
 #[derive(Clone, Copy)]
 pub struct Program {
     pub(crate) bytes: &'static [u8],
-    pub(crate) root: &'static str,
 }
 
 #[cfg(not(target_arch = "spirv"))]
 impl Program {
-    pub const fn new(bytes: &'static [u8], root: &'static str) -> Self {
-        Self { bytes, root }
+    pub const fn new(bytes: &'static [u8]) -> Self {
+        Self { bytes }
     }
 }
 
@@ -71,8 +64,17 @@ pub struct PaintPipeline {
 
 #[cfg(not(target_arch = "spirv"))]
 impl PaintPipeline {
-    pub const fn new(entry: &'static str) -> Self {
-        Self { entry }
+    pub const fn new(native: &'static str, web: &'static str) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = native;
+            return Self { entry: web };
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = web;
+            Self { entry: native }
+        }
     }
 }
 
@@ -94,6 +96,7 @@ unsafe impl ShaderData for Quad {}
 pub struct DrawRecord {
     pub quad: Quad,
     pub payload: u32,
+    pub(crate) _padding: u32,
 }
 
 // SAFETY: repr(C) DrawRecord consists of a valid Quad followed by one u32.
@@ -104,8 +107,7 @@ impl Quad {
         Self { center, size, axis }
     }
 
-    /// Creates a rotated quad from a direction, falling back to an unrotated quad
-    /// when the direction has no usable length.
+    /// Creates an oriented quad, falling back to the x-axis for a zero direction.
     pub fn oriented(center: glam::Vec2, size: glam::Vec2, direction: glam::Vec2) -> Self {
         Self::new(center, size, direction.normalize_or(glam::Vec2::X))
     }
@@ -117,10 +119,7 @@ impl Quad {
     pub fn sample(self, vertex: u32, screen_size: glam::Vec2) -> RasterSample {
         let local = (quad_coord(vertex) - 0.5) * self.size;
         let pixel = self.center + self.axis * local.x + self.axis.perp() * local.y;
-        RasterSample {
-            position: pixel_to_ndc(pixel, screen_size),
-            pixel,
-        }
+        RasterSample { position: pixel_to_ndc(pixel, screen_size), pixel }
     }
 
     pub fn local(self, pixel: glam::Vec2) -> glam::Vec2 {
@@ -147,13 +146,7 @@ pub struct Fragment<Globals = ()> {
 
 impl<Globals> Fragment<Globals> {
     pub fn new(pixel: glam::Vec2, local: glam::Vec2, size: glam::Vec2, time: f32, globals: Globals) -> Self {
-        Self {
-            pixel,
-            local,
-            uv: local / size + 0.5,
-            time,
-            globals,
-        }
+        Self { pixel, local, uv: local / size + 0.5, time, globals }
     }
 }
 
@@ -167,9 +160,7 @@ const fn quad_coord(vertex: u32) -> glam::Vec2 {
     glam::vec2((vertex & 1) as f32, (vertex >> 1) as f32)
 }
 
-/// Converts a top-left-origin pixel position to clip space.
-///
-/// Converts the renderer's top-left coordinates to wgpu's clip-space convention.
+/// Converts the renderer's top-left pixel coordinates to wgpu clip space.
 fn pixel_to_ndc(pixel: glam::Vec2, screen_size: glam::Vec2) -> glam::Vec4 {
     let ndc = pixel / screen_size * 2.0 - 1.0;
     glam::vec4(ndc.x, -ndc.y, 0.0, 1.0)
@@ -185,10 +176,7 @@ pub struct SurfaceHandle {
 #[cfg(not(target_arch = "spirv"))]
 impl SurfaceHandle {
     pub(crate) const fn new(index: usize, generation: u32) -> Self {
-        Self {
-            index: index as u32,
-            generation,
-        }
+        Self { index: index as u32, generation }
     }
 
     pub(crate) const fn index(self) -> usize {
@@ -205,19 +193,4 @@ impl SurfaceHandle {
 pub trait ShaderSpec {
     type Instance: ShaderData;
     const PIPELINE: PaintPipeline;
-}
-
-/// Removes the crate name from a Rust module path.
-#[cfg(not(target_arch = "spirv"))]
-#[must_use]
-pub const fn shader_module_name(path: &str) -> &str {
-    let bytes = path.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && bytes[i] != b':' {
-        i += 1;
-    }
-    while i < bytes.len() && bytes[i] == b':' {
-        i += 1;
-    }
-    path.split_at(i).1
 }

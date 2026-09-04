@@ -48,8 +48,9 @@ jiff = { version = "0.2.35", default-features = false, features = [
     "serde",
     "std",
     "tz-system",
-    "tzdb-zoneinfo",
+    "tzdb-bundle-always",
 ] }
+web-time = "1.1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 resvg = { version = "0.48.1", default-features = false, features = [
@@ -99,7 +100,6 @@ sysinfo = { git = "https://github.com/CodedNil/sysinfo", branch = "gpu_temp", de
     "system",
     "gpu",
 ] }
-
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 bytemuck.workspace = true
 reqwest = { version = "0.12.28", default-features = false, features = ["json"] }
@@ -110,18 +110,25 @@ js-sys = "0.3.104"
 wasm-bindgen = "0.2.127"
 web-sys = { version = "0.3.104", features = [
     "console",
+    "Clipboard",
     "Coordinates",
+    "Document",
+    "EventTarget",
+    "Event",
     "Geolocation",
+    "HtmlCanvasElement",
+    "KeyboardEvent",
     "Navigator",
+    "PointerEvent",
     "Position",
     "Window",
+    "WheelEvent",
 ] }
 jiff = { version = "0.2.35", default-features = false, features = [
     "js",
     "serde",
     "std",
     "tz-system",
-    "tzdb-zoneinfo",
 ] }
 
 [build-dependencies]

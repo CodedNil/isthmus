@@ -3,12 +3,7 @@ pub mod render;
 
 #[cfg(not(target_arch = "spirv"))]
 mod host {
-    use std::{
-        ffi::c_void,
-        ptr::NonNull,
-        time::{Duration, Instant},
-    };
-
+    use crate::render::{Bamboo, program};
     use isthmus::{
         Renderer, SurfaceHandle,
         glam::{Vec3, vec2},
@@ -16,6 +11,11 @@ mod host {
     use raw_window_handle::{
         DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
         WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
+    };
+    use std::{
+        ffi::c_void,
+        ptr::NonNull,
+        time::{Duration, Instant},
     };
     use wayland_client::{
         Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
@@ -34,8 +34,6 @@ mod host {
         zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
     };
 
-    use crate::render::{Bamboo, program};
-
     type OutputId = u32;
     const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
@@ -48,11 +46,7 @@ mod host {
     impl HasDisplayHandle for NativeSurface {
         fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
             // SAFETY: Wallpaper owns the Wayland connection that supplied this live display pointer.
-            Ok(
-                unsafe {
-                    DisplayHandle::borrow_raw(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(self.display)))
-                },
-            )
+            Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(self.display))) })
         }
     }
 
@@ -156,9 +150,7 @@ mod host {
                     window: NonNull::new(output.surface.id().as_ptr().cast()).expect("Wayland surface pointer exists"),
                 };
                 let render_surface = if let Some(renderer) = &mut self.renderer {
-                    renderer
-                        .add_surface(&native, size)
-                        .expect("wallpaper surface is incompatible with the renderer")
+                    renderer.add_surface(&native, size).expect("wallpaper surface is incompatible with the renderer")
                 } else {
                     let (renderer, surface) = Renderer::new(
                         program(),
@@ -274,10 +266,7 @@ mod host {
         ) {
             if matches!(event, wl_callback::Event::Done { .. })
                 && let Some(index) = state.output_index(*data)
-                && state.outputs[index]
-                    .frame_callback
-                    .as_ref()
-                    .is_some_and(|callback| callback.id() == proxy.id())
+                && state.outputs[index].frame_callback.as_ref().is_some_and(|callback| callback.id() == proxy.id())
             {
                 state.outputs[index].frame_callback.take();
                 state.draw(*data, qhandle);
@@ -313,11 +302,7 @@ mod host {
             qhandle: &QueueHandle<Self>,
         ) {
             match event {
-                wl_registry::Event::Global {
-                    name,
-                    interface,
-                    version,
-                } if interface == "wl_output" => {
+                wl_registry::Event::Global { name, interface, version } if interface == "wl_output" => {
                     let output = proxy.bind(name, version.min(4), qhandle, name);
                     state.add_output(name, output, qhandle);
                 }

@@ -1,49 +1,32 @@
-use core::{error::Error, fmt};
-use std::{
-    rc::Rc,
-    string::{String, ToString},
-    vec,
-};
-
+use crate::data::ShaderData;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-
-use crate::{contract, data::ShaderData};
-
-pub const IMAGE_CAPACITY: u32 = contract::IMAGE_CAPACITY as u32;
+use std::rc::Rc;
 
 #[derive(Clone, Default)]
 pub struct BufferRange {
     pub(super) raw: Option<wgpu::Buffer>,
-    pub(super) offset: u64,
+    capacity: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SetupError {
+    #[error(transparent)]
     Handle(raw_window_handle::HandleError),
+    #[error("GPU adapter error: {0}")]
     Adapter(String),
+    #[error("GPU device error: {0}")]
     Device(String),
+    #[error("surface error: {0}")]
     Surface(String),
+    #[error("surface is unsupported")]
     UnsupportedSurface,
+    #[error("replacement surface is incompatible")]
     IncompatibleSurface,
+    #[error("shader is not valid SPIR-V")]
     InvalidShader,
-    MissingFeature(&'static str),
+    #[error("WebGPU is unavailable in this browser")]
+    WebGpuUnavailable,
 }
-
-impl fmt::Display for SetupError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Handle(e) => e.fmt(f),
-            Self::Adapter(e) => write!(f, "GPU adapter error: {e}"),
-            Self::Device(e) => write!(f, "GPU device error: {e}"),
-            Self::Surface(e) => write!(f, "surface error: {e}"),
-            Self::UnsupportedSurface => f.write_str("surface is unsupported"),
-            Self::IncompatibleSurface => f.write_str("replacement surface is incompatible"),
-            Self::InvalidShader => f.write_str("shader is not valid SPIR-V"),
-            Self::MissingFeature(feature) => write!(f, "GPU is missing required feature `{feature}`"),
-        }
-    }
-}
-impl Error for SetupError {}
 impl From<raw_window_handle::HandleError> for SetupError {
     fn from(e: raw_window_handle::HandleError) -> Self {
         Self::Handle(e)
@@ -66,9 +49,7 @@ pub(super) fn create_surface(
     instance: &wgpu::Instance,
     source: &(impl HasDisplayHandle + HasWindowHandle),
 ) -> Result<wgpu::Surface<'static>, SetupError> {
-    // SAFETY: The caller owns the display/window handles for the lifetime of the
-    // returned surface; wgpu cannot express that relationship for generic
-    // raw handles, so this is the required API boundary.
+    // SAFETY: The caller keeps both raw handles alive for the returned surface.
     unsafe {
         instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
             raw_display_handle: Some(source.display_handle()?.as_raw()),
@@ -88,80 +69,91 @@ impl Context {
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let surface = create_surface(&instance, source)?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .map_err(|e| SetupError::Adapter(e.to_string()))?;
-        let required = wgpu::Features::TEXTURE_BINDING_ARRAY
-            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
-            | wgpu::Features::IMMEDIATES
-            | wgpu::Features::PASSTHROUGH_SHADERS;
-        let supported = adapter.features();
-        if !supported.contains(required) {
-            return Err(SetupError::MissingFeature("descriptor arrays and immediate data"));
+        pollster::block_on(Self::finish(instance, surface, wgpu::PowerPreference::HighPerformance))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) async fn new(canvas: web_sys::HtmlCanvasElement) -> Result<(Self, wgpu::Surface<'static>), SetupError> {
+        if !wgpu::util::is_browser_webgpu_supported().await {
+            return Err(SetupError::WebGpuUnavailable);
         }
-        let mut limits = adapter.limits();
-        limits.max_binding_array_elements_per_shader_stage = IMAGE_CAPACITY;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("isthmus"),
-            required_features: required,
-            required_limits: limits,
-            ..Default::default()
-        }))
-        .map_err(|e| SetupError::Device(e.to_string()))?;
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::BROWSER_WEBGPU;
+        let instance = wgpu::Instance::new(descriptor);
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+            .map_err(|error| SetupError::Surface(error.to_string()))?;
+        Self::finish(instance, surface, wgpu::PowerPreference::None).await
+    }
+
+    async fn finish(
+        instance: wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        power_preference: wgpu::PowerPreference,
+    ) -> Result<(Self, wgpu::Surface<'static>), SetupError> {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference,
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| SetupError::Adapter(error.to_string()))?;
+        let info = adapter.get_info();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("isthmus"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| SetupError::Device(error.to_string()))?;
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("isthmus image sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let device_name = adapter.get_info().name;
-        Ok((
-            Self(Rc::new(Inner {
-                instance,
-                adapter,
-                device,
-                queue,
-                sampler,
-                device_name,
-            })),
-            surface,
-        ))
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(super) fn new(
-        _source: &(impl HasDisplayHandle + HasWindowHandle),
-    ) -> Result<(Self, wgpu::Surface<'static>), SetupError> {
-        Err(SetupError::UnsupportedSurface)
+        let device_name = info.name;
+        Ok((Self(Rc::new(Inner { instance, adapter, device, queue, sampler, device_name })), surface))
     }
 
     pub(crate) fn upload<T: ShaderData>(&self, values: &[T]) -> BufferRange {
         self.upload_bytes(bytemuck::cast_slice(values))
     }
+
+    pub(crate) fn upload_into<T: ShaderData>(&self, target: &mut BufferRange, values: &[T]) {
+        self.upload_bytes_into(target, bytemuck::cast_slice(values));
+    }
+
     pub(super) fn upload_bytes(&self, bytes: &[u8]) -> BufferRange {
+        let mut range = BufferRange::default();
+        self.upload_bytes_into(&mut range, bytes);
+        range
+    }
+
+    pub(super) fn upload_bytes_into(&self, target: &mut BufferRange, bytes: &[u8]) {
         let size = bytes.len().max(4) as u64;
-        let buffer = self.0.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("isthmus upload"),
-            size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        if !bytes.is_empty() {
-            self.0.queue.write_buffer(&buffer, 0, bytes);
+        if target.capacity < size {
+            let capacity = size.next_power_of_two();
+            target.raw = Some(self.0.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("isthmus upload"),
+                size: capacity,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            target.capacity = capacity;
         }
-        BufferRange {
-            raw: Some(buffer),
-            offset: 0,
+        if !bytes.is_empty() {
+            self.0.queue.write_buffer(target.raw.as_ref().unwrap(), 0, bytes);
         }
     }
+
     pub(super) fn configure_surface(
         &self,
         surface: &wgpu::Surface<'static>,
@@ -174,17 +166,15 @@ impl Context {
             .iter()
             .copied()
             .find(|format| *format == wgpu::TextureFormat::Bgra8Unorm)
-            .or_else(|| {
-                caps.formats
-                    .iter()
-                    .copied()
-                    .find(|format| *format == wgpu::TextureFormat::Rgba8Unorm)
-            })
+            .or_else(|| caps.formats.iter().copied().find(|format| *format == wgpu::TextureFormat::Rgba8Unorm))
             .or_else(|| caps.formats.first().copied())
             .ok_or(SetupError::UnsupportedSurface)?;
-        if !caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
-            return Err(SetupError::UnsupportedSurface);
-        }
+        let alpha_mode =
+            [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::Auto, wgpu::CompositeAlphaMode::Opaque]
+                .into_iter()
+                .find(|mode| caps.alpha_modes.contains(mode))
+                .or_else(|| caps.alpha_modes.first().copied())
+                .ok_or(SetupError::UnsupportedSurface)?;
         Ok(wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -192,7 +182,7 @@ impl Context {
             width: width.max(1),
             height: height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         })

@@ -1,9 +1,8 @@
-use std::collections::HashSet;
-
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+use std::collections::HashSet;
 use syn::{
     visit::{self, Visit},
     visit_mut::{VisitMut, visit_expr_mut},
@@ -13,6 +12,7 @@ mod buffer;
 mod paint;
 
 fn fragment_entry(
+    entry_name: &syn::LitStr,
     text: bool,
     payload: bool,
     images: bool,
@@ -35,23 +35,28 @@ fn fragment_entry(
     });
     let payload_resource =
         payload.then(|| quote!(#[spirv(storage_buffer, descriptor_set = 0, binding = 1)] payload: &[u32],));
-    let image_resource =
-        images.then(|| quote!(#[spirv(descriptor_set = 0, binding = 5)] images: &#isthmus::__private::ImageHeap,));
+    let image_resources = images.then(|| {
+        quote! {
+            #[spirv(descriptor_set = 0, binding = 5)] image: &#isthmus::spirv_std::image::Image2d,
+            #[spirv(descriptor_set = 0, binding = 7)] sampler: &#isthmus::spirv_std::Sampler,
+        }
+    });
     quote! {
-        #[#isthmus::spirv_std::spirv(fragment)]
+        #[#isthmus::spirv_std::spirv(fragment(entry_point_name = #entry_name))]
         pub fn fragment(
             #[spirv(location = 0)] pixel: #isthmus::glam::Vec2,
             #[spirv(location = 1, flat)] draw_index: u32,
             #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] draws: &[#isthmus::__private::DrawRecord],
             #[spirv(storage_buffer, descriptor_set = 0, binding = 6)] globals: &[u32],
-            #[spirv(push_constant)] frame: &#isthmus::__private::PushBlock,
+            #[spirv(storage_buffer, descriptor_set = 0, binding = 8)] frames: &[#isthmus::__private::PushBlock],
             #payload_resource
             #text_resources
-            #image_resource
+            #image_resources
             #[spirv(location = 0)] out_color: &mut #isthmus::glam::Vec4,
         ) {
             let _ = draws;
             let draw = draws[draw_index as usize];
+            let frame = frames[0];
             let local = draw.quad.local(pixel);
             #fragment
             #body
@@ -80,9 +85,7 @@ pub fn derive_shader_data(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn program(input: TokenStream) -> TokenStream {
     if !input.is_empty() {
-        return syn::Error::new(proc_macro2::Span::call_site(), "program takes no arguments")
-            .to_compile_error()
-            .into();
+        return syn::Error::new(proc_macro2::Span::call_site(), "program takes no arguments").to_compile_error().into();
     }
     let module = program_module();
     let isthmus = isthmus_path();
@@ -92,35 +95,38 @@ pub fn program(input: TokenStream) -> TokenStream {
         #[cfg(not(target_arch = "spirv"))]
         pub const fn program() -> #isthmus::__private::Program {
             #isthmus::__private::Program::new(
-                include_bytes!(concat!(env!("OUT_DIR"), "/isthmus.spv")),
-                #isthmus::__private::shader_module_name(module_path!()),
+                {
+                    #[cfg(target_arch = "wasm32")]
+                    { include_bytes!(concat!(env!("OUT_DIR"), "/isthmus.wgsl")) }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    { include_bytes!(concat!(env!("OUT_DIR"), "/isthmus.spv")) }
+                },
             )
         }
     }
     .into()
 }
 
-/// Extracts inline paint closures and keeps their surrounding implementation on the host.
-///
-/// Generated shaders receive glam's cross-target float extension methods and lower
-/// captured images to the renderer's internal descriptor heap.
+/// Extracts inline paint closures, imports shader float methods, and lowers captured images.
 #[proc_macro_attribute]
 pub fn paint(args: TokenStream, input: TokenStream) -> TokenStream {
     if !args.is_empty() {
-        return syn::Error::new(proc_macro2::Span::call_site(), "paint takes no arguments")
-            .to_compile_error()
-            .into();
+        return syn::Error::new(proc_macro2::Span::call_site(), "paint takes no arguments").to_compile_error().into();
     }
     extract_paints(input)
 }
 
 fn extract_paints(input: TokenStream) -> TokenStream {
     let mut item = syn::parse_macro_input!(input as syn::Item);
+    let namespace = quote!(#item)
+        .to_string()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3));
     let host_module = match &item {
         syn::Item::Mod(module) => Some(module.ident.clone()),
         _ => None,
     };
-    let mut inline = InlinePaints::default();
+    let mut inline = InlinePaints { namespace: format!("{namespace:x}"), ..Default::default() };
     inline.visit_item_mut(&mut item);
     if let Some(error) = inline.error {
         return error.to_compile_error().into();
@@ -137,6 +143,7 @@ fn extract_paints(input: TokenStream) -> TokenStream {
 
 #[derive(Default)]
 struct InlinePaints {
+    namespace: String,
     method: String,
     bindings: HashSet<String>,
     method_receiver: bool,
@@ -199,10 +206,7 @@ impl InlinePaints {
             ));
         }
         if closure.inputs.is_empty() {
-            return Err(syn::Error::new_spanned(
-                &closure.inputs,
-                "inline paint closures require the fragment input",
-            ));
+            return Err(syn::Error::new_spanned(&closure.inputs, "inline paint closures require the fragment input"));
         }
         let input_start = 1;
         let input_values = self.input_values(&closure, input_start)?;
@@ -210,6 +214,10 @@ impl InlinePaints {
             syn::Expr::Block(body) => body.block.clone(),
             expression => syn::parse_quote!({ #expression }),
         };
+        let entry_name = syn::LitStr::new(
+            &format!("isthmus_{}_{}_{}", self.namespace, self.method, self.next),
+            proc_macro2::Span::call_site(),
+        );
         let name = format_ident!("__isthmus_inline_{}_{}", self.method, self.next);
         self.next += 1;
         let mut inputs = closure.inputs.iter().filter_map(|input| match input {
@@ -220,10 +228,7 @@ impl InlinePaints {
             syn::Error::new_spanned(&closure.inputs, "inline paint closure requires a fragment input")
         })?;
         let syn::Pat::Ident(shader_name) = shader_input.pat.as_ref() else {
-            return Err(syn::Error::new_spanned(
-                &shader_input.pat,
-                "shader fragment requires an identifier",
-            ));
+            return Err(syn::Error::new_spanned(&shader_input.pat, "shader fragment requires an identifier"));
         };
         if text {
             let shader_type = match shader_input.ty.as_ref() {
@@ -243,30 +248,20 @@ impl InlinePaints {
             ));
         }
         let shader_inputs = inputs.cloned().collect::<Vec<_>>();
-        let captures = shader_inputs
-            .iter()
-            .map(paint::Capture::new)
-            .collect::<syn::Result<Vec<_>>>()?;
-        let expansion = paint::expand(&name, shader_input, &captures, &block, text)?;
-        let paint::Expansion {
-            items,
-            instance,
-            pipeline,
-        } = expansion;
+        let captures = shader_inputs.iter().map(paint::Capture::new).collect::<syn::Result<Vec<_>>>()?;
+        let expansion = paint::expand(&name, &entry_name, shader_input, &captures, &block, text)?;
+        let paint::Expansion { items, instance, pipeline } = expansion;
         self.shaders.push(items);
         let geometry = call.args[0].clone();
-        Ok(Some(rewrite_call(
-            call,
-            &Rewrite {
-                text,
-                closure: &closure,
-                geometry: &geometry,
-                captures: &captures,
-                input_values: &input_values,
-                instance: &instance,
-                pipeline: &pipeline,
-            },
-        )))
+        Ok(Some(rewrite_call(call, &Rewrite {
+            text,
+            closure: &closure,
+            geometry: &geometry,
+            captures: &captures,
+            input_values: &input_values,
+            instance: &instance,
+            pipeline: &pipeline,
+        })))
     }
 
     fn input_values(&self, closure: &syn::ExprClosure, input_start: usize) -> syn::Result<Vec<syn::Expr>> {
@@ -307,24 +302,14 @@ struct Rewrite<'a> {
 }
 
 fn rewrite_call(call: &syn::ExprMethodCall, rewrite: &Rewrite<'_>) -> syn::Expr {
-    let Rewrite {
-        text,
-        closure,
-        geometry,
-        captures,
-        input_values,
-        instance,
-        pipeline,
-    } = rewrite;
+    let Rewrite { text, closure, geometry, captures, input_values, instance, pipeline } = rewrite;
     let capture_names = input_values
         .iter()
         .enumerate()
         .map(|(index, _)| format_ident!("__isthmus_capture_{index}"))
         .collect::<Vec<_>>();
-    let capture_bindings = capture_names
-        .iter()
-        .zip(input_values.iter())
-        .map(|(name, value)| quote!(let #name = #value;));
+    let capture_bindings =
+        capture_names.iter().zip(input_values.iter()).map(|(name, value)| quote!(let #name = #value;));
     let values = captures
         .iter()
         .zip(capture_names.iter())
@@ -344,11 +329,7 @@ fn rewrite_call(call: &syn::ExprMethodCall, rewrite: &Rewrite<'_>) -> syn::Expr 
         quote!(#instance { #(#values),* })
     };
     let isthmus = isthmus_path();
-    let generics = if *text {
-        quote!(::<#pipeline::Pipeline, _>)
-    } else {
-        quote!(::<#pipeline::Pipeline, _, _>)
-    };
+    let generics = if *text { quote!(::<#pipeline::Pipeline, _>) } else { quote!(::<#pipeline::Pipeline, _, _>) };
     let receiver = &call.receiver;
     let method = &call.method;
     syn::parse2(quote!({
@@ -399,17 +380,18 @@ fn program_module() -> TokenStream2 {
             #[cfg(target_arch = "spirv")]
             use #isthmus::Float as _;
 
-            #[#isthmus::spirv_std::spirv(vertex)]
+            #[#isthmus::spirv_std::spirv(vertex(entry_point_name = "isthmus_vertex"))]
             pub fn vertex(
                 #[spirv(vertex_index)] vertex: u32,
                 #[spirv(instance_index)] draw_index: u32,
-                #[spirv(push_constant)] frame: &#isthmus::__private::PushBlock,
+                #[spirv(storage_buffer, descriptor_set = 0, binding = 8)] frames: &[#isthmus::__private::PushBlock],
                 #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] draws: &[#isthmus::__private::DrawRecord],
                 #[spirv(position)] out_position: &mut #isthmus::glam::Vec4,
                 #[spirv(location = 0)] out_pixel: &mut #isthmus::glam::Vec2,
                 #[spirv(location = 1, flat)] out_draw_index: &mut u32,
             ) {
                 let draw = draws[draw_index as usize];
+                let frame = frames[0];
                 let sample = draw.quad.sample(vertex, frame.screen_size);
                 *out_position = sample.position;
                 *out_pixel = sample.pixel;

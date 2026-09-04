@@ -1,18 +1,12 @@
-//! Browser music placeholder.
-//!
-//! The native worker speaks Spotify's Connect protocol through librespot. That
-//! protocol uses native sockets and cannot be carried into a browser directly;
-//! this small implementation keeps the visual demo populated until a browser
-//! Web API/Web Playback integration is added.
-
-use std::sync::Arc;
+//! Browser demo data standing in for librespot's native socket protocol.
 
 use super::{AudioFeatures, LyricSegment, MusicResult, PlaybackCommand, Track, TrackRuntime};
 use crate::{
     app::{AppUpdater, Background, send_update},
     config::Config,
-    time::Instant,
 };
+use std::sync::Arc;
+use web_time::Instant;
 
 #[derive(Clone)]
 pub struct Spotify {
@@ -21,9 +15,7 @@ pub struct Spotify {
 
 impl Spotify {
     pub(super) fn new(_config: &Config, updater: &AppUpdater, _background: &Background) -> Self {
-        let spotify = Self {
-            updater: Arc::new(updater.clone()),
-        };
+        let spotify = Self { updater: Arc::new(updater.clone()) };
         let queue = example_queue();
         send_update(updater, move |app| {
             app.music.replace_queue(queue, 0, 42_000.0, 1.0, Instant::now());
