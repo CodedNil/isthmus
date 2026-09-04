@@ -1,7 +1,4 @@
-#![no_std]
-
-#[cfg(not(target_arch = "spirv"))]
-extern crate std;
+#![cfg_attr(target_arch = "spirv", no_std)]
 
 extern crate self as isthmus;
 
@@ -34,12 +31,11 @@ pub use text::TextFragment;
 #[doc(hidden)]
 pub mod __private {
     #[cfg(not(target_arch = "spirv"))]
-    pub use bytemuck;
-
-    #[cfg(not(target_arch = "spirv"))]
-    pub use crate::contract::{PaintPipeline, Program, ShaderSpec, shader_module_name};
+    pub use crate::contract::{PaintPipeline, Program, ShaderSpec};
     pub use crate::{
-        contract::{DrawRecord, ImageHeap, PushBlock, ShaderImage, load},
+        contract::{DrawRecord, PushBlock, ShaderImage, load},
         data::ImageHandle,
     };
+    #[cfg(not(target_arch = "spirv"))]
+    pub use bytemuck;
 }

@@ -1,9 +1,8 @@
-use core::ops::{Add, Neg, Sub};
-
 use crate::{
     glam::{FloatExt, Vec4},
     spirv_std::arch::Derivative,
 };
+use core::ops::{Add, Neg, Sub};
 
 /// Composable negative-inside signed-distance geometry.
 #[derive(Clone, Copy)]
@@ -54,6 +53,7 @@ impl Sdf {
 
 impl Add<f32> for Sdf {
     type Output = Self;
+
     fn add(self, rhs: f32) -> Self {
         Self::new(self.distance + rhs)
     }
@@ -61,6 +61,7 @@ impl Add<f32> for Sdf {
 
 impl Sub<f32> for Sdf {
     type Output = Self;
+
     fn sub(self, rhs: f32) -> Self {
         Self::new(self.distance - rhs)
     }
@@ -68,6 +69,7 @@ impl Sub<f32> for Sdf {
 
 impl Neg for Sdf {
     type Output = Self;
+
     fn neg(self) -> Self {
         Self::new(-self.distance)
     }
@@ -84,8 +86,7 @@ impl SdfSample {
     pub fn new(distance: f32) -> Self {
         Self {
             distance,
-            // Derivatives can spike at primitive boundaries, so AA must remain
-            // local to the actual shape rather than its raster geometry.
+            // Keep antialiasing local because derivatives spike at primitive boundaries.
             half_width: (distance.fwidth() * 0.5).clamp(0.35, 1.0),
         }
     }

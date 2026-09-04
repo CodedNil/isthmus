@@ -1,5 +1,5 @@
-use std::{mem, ops::Range};
-
+use super::{Enrichment, Fetch, TRACK_SPACING_MS, Track, TrackId, spotify::Spotify};
+use crate::app::update;
 use isthmus::{
     glam::{FloatExt, vec2},
     text,
@@ -11,10 +11,8 @@ use quick_xml::{
 };
 use reqwest::Client;
 use serde::Deserialize;
+use std::{mem, ops::Range};
 use tracing::warn;
-
-use super::{Enrichment, Fetch, TRACK_SPACING_MS, Track, TrackId, spotify::Spotify};
-use crate::app::update;
 
 const API: &str = "https://lyrics-api.binimum.org/";
 #[derive(Clone)]
@@ -82,10 +80,7 @@ impl Lyrics {
     const SONG_GAP: f32 = 96.0;
 
     fn new(segments: Vec<LyricSegment>) -> Self {
-        Self {
-            segments: Some(segments),
-            ..Self::default()
-        }
+        Self { segments: Some(segments), ..Self::default() }
     }
 
     pub(crate) fn prepare(&mut self, duration_ms: f32, shaper: &text::Shaper) {
@@ -111,12 +106,7 @@ impl Lyrics {
             let value = segment.text.trim_start();
             let width = shaper.width(value, 15.0, 700.0);
             let position = cursor;
-            words.push(PositionedLyric {
-                text: value.into(),
-                background: segment.background,
-                position,
-                width,
-            });
+            words.push(PositionedLyric { text: value.into(), background: segment.background, position, width });
             cursor += width + space * f32::from(segment.break_after);
             let end_ms = segment.end_ms.max(segment.start_ms);
             vocal_end = vocal_end.max(end_ms);
@@ -127,12 +117,7 @@ impl Lyrics {
         let position = cursor + (duration_ms - vocal_end).max(0.0) * Self::SILENCE_SPEED;
         timeline.push((duration_ms.max(vocal_end), position));
         timeline.sort_by(|left, right| left.0.total_cmp(&right.0));
-        Self {
-            segments: None,
-            words,
-            timeline,
-            span: position + Self::SONG_GAP,
-        }
+        Self { segments: None, words, timeline, span: position + Self::SONG_GAP }
     }
 
     pub(crate) fn position(&self, time: f32, duration_ms: f32) -> f32 {
@@ -240,16 +225,7 @@ async fn fetch_precise(http: &Client, query: &LyricsRequest) -> Option<Vec<Lyric
         .results
         .into_iter()
         .find(|result| result.timing_type == "word")?;
-    let source = http
-        .get(result.url)
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .text()
-        .await
-        .ok()?;
+    let source = http.get(result.url).send().await.ok()?.error_for_status().ok()?.text().await.ok()?;
     let segments = parse_ttml(&source);
     (!segments.is_empty()).then_some(segments)
 }

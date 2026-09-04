@@ -1,3 +1,10 @@
+use crate::render::{
+    Fragment, GAP, Globals, PADDING, TEXT_COLOR, TextFragment,
+    sdf::{
+        PILL_MARGIN, SurfaceSample, VISIBLE_ALPHA, cantus_surface, presence, sample_pill, sd_rounded_box,
+        segment_distance,
+    },
+};
 #[cfg(target_arch = "spirv")]
 use isthmus::Float as _;
 use isthmus::{
@@ -5,14 +12,6 @@ use isthmus::{
     glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
     text,
-};
-
-use crate::render::{
-    Fragment, GAP, Globals, PADDING, TEXT_COLOR, TextFragment,
-    sdf::{
-        PILL_MARGIN, SurfaceSample, VISIBLE_ALPHA, cantus_surface, presence, sample_pill, sd_rounded_box,
-        segment_distance,
-    },
 };
 
 const PANEL_WIDTH: f32 = 520.0;
@@ -90,6 +89,16 @@ fn sample_launcher(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> Surf
 
 #[isthmus::paint]
 mod host {
+    use super::*;
+    use crate::{
+        app::Background,
+        config::SearchProvider,
+        interaction::Rect,
+        platform::{DesktopApp, Platform},
+        render::UiContext,
+    };
+    use fend_core::Context;
+    use reqwest::Client;
     use std::{
         collections::HashMap,
         error::Error,
@@ -98,18 +107,6 @@ mod host {
             OnceLock,
             mpsc::{self, Receiver, Sender},
         },
-    };
-
-    use fend_core::Context;
-    use reqwest::Client;
-
-    use super::*;
-    use crate::{
-        app::Background,
-        config::SearchProvider,
-        interaction::Rect,
-        platform::{DesktopApp, Platform},
-        render::UiContext,
     };
 
     #[derive(Default)]
@@ -131,11 +128,7 @@ mod host {
         }
 
         pub const fn selection(&self) -> Range<usize> {
-            if self.cursor < self.anchor {
-                self.cursor..self.anchor
-            } else {
-                self.anchor..self.cursor
-            }
+            if self.cursor < self.anchor { self.cursor..self.anchor } else { self.anchor..self.cursor }
         }
 
         pub fn selected_text(&self) -> &str {
@@ -279,13 +272,9 @@ mod host {
                     action: "Open",
                     alternate: app.action.as_ref().map(|(label, _)| label.as_str()),
                 },
-                Self::Answer(answer) => EntryView {
-                    icon: EntryIcon::Calculator,
-                    name: answer,
-                    detail: "",
-                    action: "Copy",
-                    alternate: None,
-                },
+                Self::Answer(answer) => {
+                    EntryView { icon: EntryIcon::Calculator, name: answer, detail: "", action: "Copy", alternate: None }
+                }
                 Self::Search(engine) => EntryView {
                     icon: engine.icon.as_ref().map_or(EntryIcon::Search, EntryIcon::Image),
                     name: &engine.label,
@@ -308,11 +297,7 @@ mod host {
             calc.set_exchange_rate_handler_v2(ExchangeRates);
             let providers = providers
                 .into_iter()
-                .map(|config| SearchEngine {
-                    label: format!("Search with {}", config.name),
-                    config,
-                    icon: None,
-                })
+                .map(|config| SearchEngine { label: format!("Search with {}", config.name), config, icon: None })
                 .collect::<Vec<_>>();
             let (updates, inbox) = mpsc::channel();
             start_scan(background, http, &providers, &updates);
@@ -391,8 +376,7 @@ mod host {
                 .filter(|_| !explicit_search)
                 .filter_map(|(index, app)| {
                     let name = app.name.to_lowercase();
-                    name.contains(&lower_query)
-                        .then(|| (index, name.starts_with(&lower_query)))
+                    name.contains(&lower_query).then(|| (index, name.starts_with(&lower_query)))
                 })
                 .collect::<Vec<_>>();
             scored.sort_by_key(|&(_, prefix_match)| !prefix_match);
@@ -416,30 +400,21 @@ mod host {
                 .get(row)
                 .and_then(|&app| self.apps.get(app))
                 .map(LauncherEntry::App)
-                .or_else(|| {
-                    self.search_provider()
-                        .filter(|_| row == self.matches.len())
-                        .map(LauncherEntry::Search)
-                })
+                .or_else(|| self.search_provider().filter(|_| row == self.matches.len()).map(LauncherEntry::Search))
         }
 
         /// Moves the highlight by `delta` rows, stopping at either end.
         pub fn move_selection(&mut self, delta: i32) {
-            self.selected = self
-                .selected
-                .saturating_add_signed(delta as isize)
-                .min(self.entry_count().saturating_sub(1));
+            self.selected =
+                self.selected.saturating_add_signed(delta as isize).min(self.entry_count().saturating_sub(1));
         }
 
         /// Runs row `index`'s action — its alternative one when `alternate` is set — then dismisses.
         pub fn activate(&mut self, index: usize, alternate: bool) {
             match self.entry(index) {
-                Some(LauncherEntry::App(app)) => Platform::spawn(
-                    app.action
-                        .as_ref()
-                        .filter(|_| alternate)
-                        .map_or(&app.exec, |(_, exec)| exec),
-                ),
+                Some(LauncherEntry::App(app)) => {
+                    Platform::spawn(app.action.as_ref().filter(|_| alternate).map_or(&app.exec, |(_, exec)| exec));
+                }
                 Some(LauncherEntry::Answer(answer)) => self.pending_copy = Some(answer.to_owned()),
                 Some(LauncherEntry::Search(engine)) => {
                     let terms = self.search_query().1;
@@ -463,16 +438,12 @@ mod host {
                             .strip_prefix(&provider.config.alias)
                             .is_some_and(|rest| rest.starts_with(char::is_whitespace))
                 })
-                .map_or((None, query), |index| {
-                    (Some(index), query[self.providers[index].config.alias.len()..].trim())
-                })
+                .map_or((None, query), |index| (Some(index), query[self.providers[index].config.alias.len()..].trim()))
         }
 
         fn search_provider(&self) -> Option<&SearchEngine> {
             let (provider, query) = self.search_query();
-            self.providers
-                .get(provider.unwrap_or_default())
-                .filter(|_| provider.is_some() || !query.is_empty())
+            self.providers.get(provider.unwrap_or_default()).filter(|_| provider.is_some() || !query.is_empty())
         }
 
         pub(crate) fn bounds(&self, screen_size: Vec2) -> (Vec2, Vec2) {
@@ -532,7 +503,6 @@ mod host {
             });
         }
     }
-    /// The search query with a caret and selection, edited like an ordinary text box.
     impl LauncherState {
         /// Draws the panel and its search field, then the rows beneath it.
         pub fn show(&mut self, context: &mut UiContext) {
@@ -555,35 +525,41 @@ mod host {
                 return;
             }
             let (origin, size) = self.bounds(context.frame.screen_size);
-            let screen = Rect::new(0.0, 0.0, context.frame.screen_size.x, context.frame.screen_size.y);
-            let backdrop = context.interaction.interact(screen);
-            context.interaction.input_region(screen);
-            if backdrop.clicked()
-                && !Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y)
-                    .contains(context.interaction.mouse_pos())
+            #[cfg(not(target_arch = "wasm32"))]
             {
-                self.close();
-                return;
+                let screen = Rect::new(0.0, 0.0, context.frame.screen_size.x, context.frame.screen_size.y);
+                let backdrop = context.interaction.interact(screen);
+                context.interaction.input_region(screen);
+                if backdrop.clicked()
+                    && !Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y)
+                        .contains(context.interaction.mouse_pos())
+                {
+                    self.close();
+                    return;
+                }
             }
+            #[cfg(target_arch = "wasm32")]
+            context.interaction.interact(Rect::from_center(origin + size * 0.5, size));
+
+            self.show_search(context, Quad::from_min_max(origin, origin + size));
+            self.show_entries(context, origin);
+        }
+
+        fn show_search(&mut self, context: &mut UiContext, quad: Quad) {
+            let origin = quad.center - quad.size * 0.5;
+            let size = quad.size;
             let (left, right) = (PADDING + 34.0, size.x - PADDING);
             if self.field.touched {
                 self.field.touched = false;
                 self.field.blink_start = context.frame.time;
             }
-            let line = if self.field.text.is_empty() {
-                context
-                    .frame
-                    .text()
-                    .line("Search anything…", 18.0, 600.0)
-                    .left(vec2(left, HEADER_HEIGHT * 0.5))
-                    .with_color(MUTED_COLOR)
-            } else {
-                context
-                    .frame
-                    .text()
-                    .line(&self.field.text, 18.0, 600.0)
-                    .visible(vec2(left, HEADER_HEIGHT * 0.5), left..right)
-            };
+            let empty = self.field.text.is_empty();
+            let query = if empty { "Search anything…" } else { &self.field.text };
+            let mut line =
+                context.frame.text().line(query, 18.0, 600.0).visible(vec2(left, HEADER_HEIGHT * 0.5), left..right);
+            if empty {
+                line = line.with_color(MUTED_COLOR);
+            }
             let selection_range = self.field.selection();
             let blink = ((context.frame.time - self.field.blink_start) * 1.4).fract();
             let (caret, selection) = {
@@ -598,8 +574,6 @@ mod host {
                 };
                 (caret, selection)
             };
-            let quad = Quad::from_min_max(origin, origin + size);
-            // GPU: Launcher panel and search selection.
             context.frame.paint(
                 quad.expanded(PILL_MARGIN),
                 |fragment: Fragment, quad: Quad, size: Vec2, caret: Vec2, selection: Vec2| {
@@ -607,6 +581,7 @@ mod host {
                     if surface.mask <= 0.0 {
                         kill();
                     }
+                    let content = quad.local(surface.content_point(fragment.pixel)) + quad.size * 0.5;
                     let mut color = Vec3::splat(0.09).lerp(
                         Vec3::splat(0.17),
                         sd_rounded_box(
@@ -616,25 +591,18 @@ mod host {
                         )
                         .fill(),
                     );
-                    color = color.lerp(
-                        ICON_COLOR,
-                        magnifier_icon(surface.refracted - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)),
-                    );
+                    color = color.lerp(ICON_COLOR, magnifier_icon(content - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
 
                     let selection_width = selection.y - selection.x;
                     let highlight = sd_rounded_box(
-                        surface.refracted - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5),
+                        content - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5),
                         vec2(selection_width * 0.5, 13.0),
                         3.0,
                     )
                     .fill();
                     color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
-                    let caret_mask = sd_rounded_box(
-                        surface.refracted - vec2(caret.x, HEADER_HEIGHT * 0.5),
-                        vec2(0.9, 12.0),
-                        0.9,
-                    )
-                    .fill();
+                    let caret_mask =
+                        sd_rounded_box(content - vec2(caret.x, HEADER_HEIGHT * 0.5), vec2(0.9, 12.0), 0.9).fill();
                     color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
 
                     let mut output = surface.color(color);
@@ -643,26 +611,20 @@ mod host {
                 },
             );
             let padding = line.size * 0.5 + 2.0;
-            // GPU: Launcher query text.
-            context.frame.paint_text(
-                line.expanded(padding).translated(origin),
-                |text: TextFragment, quad: Quad| {
-                    let surface = sample_launcher(quad, text.pixel, text.globals, text.time);
-                    text.color(text.alpha_at(surface.content_point(text.pixel)) * surface.mask)
-                },
-            );
-
-            self.show_entries(context, origin);
+            context.frame.paint_text(line.expanded(padding).translated(origin), |text: TextFragment, quad: Quad| {
+                let surface = sample_launcher(quad, text.pixel, text.globals, text.time);
+                text.color(text.alpha_at(surface.content_point(text.pixel)) * surface.mask)
+            });
         }
 
         /// Draws and interacts with calculator, application and search rows in visual order.
         fn show_entries(&mut self, context: &mut UiContext, origin: Vec2) {
             let (x, width) = (origin.x + PADDING, PANEL_WIDTH - PADDING * 2.0);
-            let mut y = origin.y + HEADER_HEIGHT + PADDING;
             let text_left = ROW_HEIGHT * 0.5 + ICON_SIZE * 0.5 + GAP * 2.0;
 
             let mut activated = None;
             for index in 0..self.entry_count() {
+                let y = origin.y + HEADER_HEIGHT + PADDING + index as f32 * (ROW_HEIGHT + GAP);
                 let pill = Rect::new(x, y, x + width, y + ROW_HEIGHT);
                 let response = context.interaction.interact(pill);
                 if response.hovered() {
@@ -674,8 +636,7 @@ mod host {
                 let pill: Quad = pill.into();
                 let entry = self.entry(index).unwrap().view(self.search_query().1);
 
-                // Only the highlighted row spells out what enter and shift+enter would do.
-                let mut edge = width - GAP * 2.0 - 4.0;
+                let mut edge = width - ROW_HEIGHT * 0.5;
                 let mut badge = |label: Option<&str>, width: f32| {
                     let Some(label) = label.filter(|_| self.selected == index) else {
                         return (Vec2::ZERO, text::Line::default());
@@ -700,11 +661,8 @@ mod host {
                 } else {
                     (ROW_HEIGHT * 0.34, ROW_HEIGHT * 0.68)
                 };
-                let name_line = context
-                    .frame
-                    .text()
-                    .line(entry.name, 16.0, 700.0)
-                    .visible(vec2(text_left, name_y), clip.clone());
+                let name_line =
+                    context.frame.text().line(entry.name, 16.0, 700.0).visible(vec2(text_left, name_y), clip.clone());
                 let detail_line = if entry.detail.is_empty() {
                     text::Line::default()
                 } else {
@@ -721,7 +679,6 @@ mod host {
                     EntryIcon::Calculator => (None, CALCULATOR_ICON),
                     EntryIcon::Search => (None, SEARCH_ICON),
                 };
-                // GPU: Launcher result row.
                 context.frame.paint(
                     pill.expanded(PILL_MARGIN),
                     |fragment: Fragment, pill: Quad, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
@@ -729,7 +686,6 @@ mod host {
                         if surface.alpha <= VISIBLE_ALPHA {
                             kill();
                         }
-                        // Only the highlighted row carries an enter badge, so it doubles as its highlight flag.
                         let mut color = Vec3::splat(0.15)
                             .lerp(Vec3::splat(0.235), presence(enter_badge.y))
                             .lerp(Vec3::splat(0.3), (surface.bulge() / 8.0).min(1.0));
@@ -742,18 +698,13 @@ mod host {
                             color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
                         }
 
-                        let enter = action_badge(
-                            surface.refracted - vec2(enter_badge.x, surface.size.y * 0.5),
-                            enter_badge.y,
-                            false,
-                        );
-                        color = color.lerp(enter.truncate(), enter.w);
-                        let alternate = action_badge(
-                            surface.refracted - vec2(alternate_badge.x, surface.size.y * 0.5),
-                            alternate_badge.y,
-                            true,
-                        );
-                        color = color.lerp(alternate.truncate(), alternate.w);
+                        let content = pill.local(surface.content_point(fragment.pixel)) + pill.size * 0.5;
+                        let paint_badge = |color: Vec3, badge: Vec2, shift: bool| {
+                            let ink = action_badge(content - vec2(badge.x, ROW_HEIGHT * 0.5), badge.y, shift);
+                            color.lerp(ink.truncate(), ink.w)
+                        };
+                        color = paint_badge(color, enter_badge, false);
+                        color = paint_badge(color, alternate_badge, true);
 
                         surface.color(color)
                     },
@@ -764,16 +715,12 @@ mod host {
                         Vec2::splat(ICON_SIZE),
                         Vec2::X,
                     );
-                    // GPU: Launcher result image.
-                    context
-                        .frame
-                        .paint(icon, |fragment: Fragment, image: Image| image.sample(fragment.uv));
+                    context.frame.paint(icon, |fragment: Fragment, image: Image| image.sample(fragment.uv));
                 }
 
                 let origin = vec2(x, y);
                 for line in [name_line, detail_line, action_line, alternate_line] {
                     if !line.is_empty() {
-                        // GPU: Launcher result text.
                         context.frame.paint_text(
                             line.expanded(20.0).translated(origin),
                             |text: TextFragment, pill: Quad| {
@@ -783,7 +730,6 @@ mod host {
                         );
                     }
                 }
-                y += ROW_HEIGHT + GAP;
             }
             if let Some(index) = activated {
                 self.activate(index, false);

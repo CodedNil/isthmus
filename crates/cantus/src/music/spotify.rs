@@ -1,13 +1,11 @@
-use std::{
-    collections::HashMap,
-    error::Error,
-    io::{self, Write},
-    path::PathBuf,
-    str,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+use super::{
+    ART_SIZE, ArtState, AudioFeatures, CondensedPlaylist, LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult,
+    PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime,
 };
-
+use crate::{
+    app::{AppUpdater, Background, send_update},
+    config::{self, Config},
+};
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
 use futures_util::{StreamExt, future::try_join_all};
@@ -38,22 +36,22 @@ use reqwest::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use std::{
+    collections::HashMap,
+    error::Error,
+    io::{self, Write},
+    path::PathBuf,
+    str,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::spawn_blocking,
     time::sleep,
 };
 use tracing::{error, info, warn};
-
-use super::{
-    ART_SIZE, ArtState, AudioFeatures, CondensedPlaylist, LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult,
-    PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime,
-};
-use crate::{
-    app::{AppUpdater, Background, send_update},
-    config::{self, Config},
-    time::Instant,
-};
+use web_time::Instant;
 
 const ART_SIZE_PX: i32 = ART_SIZE as i32;
 
@@ -71,10 +69,7 @@ pub struct Spotify {
 
 enum WorkerEvent {
     Command(PlaybackCommand),
-    Metadata {
-        generation: u64,
-        values: HashMap<String, TrackDetails>,
-    },
+    Metadata { generation: u64, values: HashMap<String, TrackDetails> },
 }
 
 impl Spotify {
@@ -126,11 +121,7 @@ impl Spotify {
     }
 
     pub(super) async fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
-        let session = self
-            .session
-            .lock()
-            .clone()
-            .ok_or_else(|| io::Error::other("Spotify is not connected"))?;
+        let session = self.session.lock().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
         let id = SpotifyId::from_base62(&track_id)?;
         let lines = match Lyrics::get(&session, &id).await {
             Ok(lyrics) if lyrics.lyrics.sync_type == SyncType::LineSynced => lyrics.lyrics.lines,
@@ -160,18 +151,10 @@ impl Spotify {
             instrumentalness: f32,
         }
 
-        let session = self
-            .session
-            .lock()
-            .clone()
-            .ok_or_else(|| io::Error::other("Spotify is not connected"))?;
+        let session = self.session.lock().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
         let path = format!("/audio-attributes/v1/audio-features/{track_id}?format=json");
-        let features: Features = serde_json::from_slice(
-            &session
-                .spclient()
-                .request_as_json(&Method::GET, &path, None, None)
-                .await?,
-        )?;
+        let features: Features =
+            serde_json::from_slice(&session.spclient().request_as_json(&Method::GET, &path, None, None).await?)?;
         Ok(AudioFeatures {
             energy: features.energy.saturate(),
             danceability: features.danceability.saturate(),
@@ -218,10 +201,7 @@ async fn run_spotify(
 ) -> ClientResult<()> {
     let dealer = session.dealer();
     let mut connections = dealer.listen_for("hm://pusher/v1/connections", Ok)?;
-    let mut clusters = dealer.listen_for(
-        "hm://connect-state/v1/cluster",
-        DealerMessage::from_raw::<ClusterUpdate>,
-    )?;
+    let mut clusters = dealer.listen_for("hm://connect-state/v1/cluster", DealerMessage::from_raw::<ClusterUpdate>)?;
     let mut playlist_changes = dealer.listen_for("hm://playlist/v2", |_| Ok(()))?;
     dealer.start().await?;
 
@@ -312,8 +292,7 @@ impl SpotifyWorker {
             WorkerEvent::Metadata { generation, values } if generation == self.generation => {
                 self.track_metadata.retain(|_, metadata| metadata.is_some());
                 if !values.is_empty() {
-                    self.track_metadata
-                        .extend(values.into_iter().map(|(uri, metadata)| (uri, Some(metadata))));
+                    self.track_metadata.extend(values.into_iter().map(|(uri, metadata)| (uri, Some(metadata))));
                     self.publish_snapshot(true);
                 }
             }
@@ -330,11 +309,9 @@ impl SpotifyWorker {
                     self.player_command(PlayerCommand::Skip(count > 0)).await;
                 }
             }
-            PlaybackCommand::UpdateLibrary {
-                track_id,
-                playlists,
-                liked,
-            } => self.update_library(track_id, &playlists, liked).await,
+            PlaybackCommand::UpdateLibrary { track_id, playlists, liked } => {
+                self.update_library(track_id, &playlists, liked).await;
+            }
         }
     }
 
@@ -370,10 +347,7 @@ impl SpotifyWorker {
             }),
             member_type: EnumOrUnknown::new(MemberType::CONNECT_STATE),
             put_state_reason: EnumOrUnknown::new(PutStateReason::NEW_DEVICE),
-            client_side_timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64,
+            client_side_timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
             ..Default::default()
         };
         let bytes = self.session.spclient().put_connect_state_request(&request).await?;
@@ -396,8 +370,7 @@ impl SpotifyWorker {
             provided.push(current);
         }
         provided.extend(player.next_tracks);
-        self.track_metadata
-            .retain(|uri, _| provided.iter().any(|track| track.uri == *uri));
+        self.track_metadata.retain(|uri, _| provided.iter().any(|track| track.uri == *uri));
         self.schedule_metadata(&provided);
         let current_duration_ms = u32::try_from(player.duration).ok();
         let rebuild_queue = self.queue.as_ref().is_none_or(|previous| {
@@ -409,12 +382,7 @@ impl SpotifyWorker {
             tracks: provided,
             current: current_position,
             current_duration_ms,
-            playback: PlaybackUpdate {
-                playing,
-                position_ms: position,
-                rate,
-                observed_at,
-            },
+            playback: PlaybackUpdate { playing, position_ms: position, rate, observed_at },
         });
         self.publish_snapshot(rebuild_queue);
     }
@@ -435,9 +403,7 @@ impl SpotifyWorker {
                     track_from_provided(
                         track,
                         self.track_metadata.get(&track.uri).and_then(Option::as_ref),
-                        snapshot
-                            .current_duration_ms
-                            .filter(|_| provided_index == snapshot.current),
+                        snapshot.current_duration_ms.filter(|_| provided_index == snapshot.current),
                     )
                 })
                 .collect()
@@ -445,12 +411,10 @@ impl SpotifyWorker {
         let playback = snapshot.playback;
         send_update(&self.updater, move |app| {
             let queue_changed = if let Some(queue) = queue {
-                app.music
-                    .replace_queue(queue, index, playback.position_ms, playback.rate, playback.observed_at);
+                app.music.replace_queue(queue, index, playback.position_ms, playback.rate, playback.observed_at);
                 true
             } else {
-                app.music
-                    .observe(index, playback.position_ms, playback.rate, playback.observed_at);
+                app.music.observe(index, playback.position_ms, playback.rate, playback.observed_at);
                 false
             };
             if playback.playing && !app.music.playing {
@@ -485,10 +449,7 @@ impl SpotifyWorker {
         let generation = self.generation;
         tokio::spawn(async move {
             let metadata = fetch_track_metadata(&session, &requested).await;
-            let _ = sender.send(WorkerEvent::Metadata {
-                generation,
-                values: metadata,
-            });
+            let _ = sender.send(WorkerEvent::Metadata { generation, values: metadata });
         });
     }
 
@@ -526,15 +487,8 @@ impl SpotifyWorker {
             headers.insert("x-spotify-connection-id", self.session.connection_id().parse()?);
             headers.insert(header::CONTENT_TYPE, "application/json".parse()?);
             headers.insert(header::CONTENT_ENCODING, "gzip".parse()?);
-            let path = format!(
-                "/connect-state/v1/player/command/from/{}/to/{target}",
-                self.session.device_id()
-            );
-            Ok(self
-                .session
-                .spclient()
-                .request(&Method::POST, &path, Some(headers), Some(&body))
-                .await?)
+            let path = format!("/connect-state/v1/player/command/from/{}/to/{target}", self.session.device_id());
+            Ok(self.session.spclient().request(&Method::POST, &path, Some(headers), Some(&body)).await?)
         }
         .await;
         if let Err(error) = result {
@@ -547,12 +501,7 @@ impl SpotifyWorker {
         headers.insert(header::CONTENT_TYPE, "application/json".parse()?);
         headers.insert("x-spotify-connection-id", self.session.connection_id().parse()?);
         let body = serde_json::to_string(&body)?;
-        Ok(self
-            .session
-            .spclient()
-            .request_as_json(&Method::POST, path, Some(headers), Some(&body))
-            .await?
-            .to_vec())
+        Ok(self.session.spclient().request_as_json(&Method::POST, path, Some(headers), Some(&body)).await?.to_vec())
     }
 
     async fn request_connected_proto<T: protobuf::Message>(
@@ -581,38 +530,23 @@ impl SpotifyWorker {
                 warn!(%playlist_id, "Spotify playlist is not loaded");
                 continue;
             };
-            let item = Item {
-                uri: Some(uri.clone()),
-                ..Default::default()
-            };
+            let item = Item { uri: Some(uri.clone()), ..Default::default() };
             let operation = if add {
                 Op {
                     kind: Some(op::Kind::ADD.into()),
-                    add: MessageField::some(Add {
-                        items: vec![item],
-                        add_last: Some(true),
-                        ..Default::default()
-                    }),
+                    add: MessageField::some(Add { items: vec![item], add_last: Some(true), ..Default::default() }),
                     ..Default::default()
                 }
             } else {
                 Op {
                     kind: Some(op::Kind::REM.into()),
-                    rem: MessageField::some(Rem {
-                        items: vec![item],
-                        items_as_key: Some(true),
-                        ..Default::default()
-                    }),
+                    rem: MessageField::some(Rem { items: vec![item], items_as_key: Some(true), ..Default::default() }),
                     ..Default::default()
                 }
             };
             let request = ListChanges {
                 base_revision: Some(revision.clone()),
-                deltas: vec![Delta {
-                    base_version: Some(revision),
-                    ops: vec![operation],
-                    ..Default::default()
-                }],
+                deltas: vec![Delta { base_version: Some(revision), ops: vec![operation], ..Default::default() }],
                 want_resulting_revisions: Some(true),
                 ..Default::default()
             };
@@ -637,10 +571,7 @@ impl SpotifyWorker {
                     "is_removed": !should_like,
                 }],
             });
-            if let Err(error) = self
-                .request_connected_json("/collection/v2/write?market=from_token", body)
-                .await
-            {
+            if let Err(error) = self.request_connected_json("/collection/v2/write?market=from_token", body).await {
                 error!(%error, %track_id, "Failed to update Spotify library");
             }
         }
@@ -666,10 +597,7 @@ impl SpotifyWorker {
             .iter()
             .zip(&root.contents.get_or_default().meta_items)
             .filter_map(|(item, metadata)| {
-                let id = item
-                    .uri()
-                    .strip_prefix("spotify:playlist:")
-                    .and_then(|id| id.parse::<PlaylistId>().ok())?;
+                let id = item.uri().strip_prefix("spotify:playlist:").and_then(|id| id.parse::<PlaylistId>().ok())?;
                 let attributes = metadata.attributes.get_or_default();
                 let name = attributes.name();
                 let rating_index = RATING_PLAYLISTS
@@ -690,12 +618,8 @@ impl SpotifyWorker {
             })
             .collect::<Vec<_>>();
 
-        let tracks = try_join_all(
-            requests
-                .iter()
-                .map(|request| fetch_playlist_tracks(&self.session, request.id)),
-        )
-        .await?;
+        let tracks =
+            try_join_all(requests.iter().map(|request| fetch_playlist_tracks(&self.session, request.id))).await?;
         let mut updates = Vec::with_capacity(requests.len());
         for (request, tracks) in requests.into_iter().zip(tracks) {
             self.playlist_revisions.insert(request.id, request.revision);
@@ -711,11 +635,8 @@ impl SpotifyWorker {
 
         send_update(&self.updater, move |app| {
             for playlist in &mut updates {
-                if let Some(old) = app
-                    .music
-                    .playlists
-                    .iter()
-                    .find(|old| old.id == playlist.id && old.image_url == playlist.image_url)
+                if let Some(old) =
+                    app.music.playlists.iter().find(|old| old.id == playlist.id && old.image_url == playlist.image_url)
                 {
                     playlist.art = old.art.clone();
                 }
@@ -776,10 +697,7 @@ fn playlist_image(attributes: &ListAttributes) -> Option<String> {
 
 fn player_position(player: &PlayerState, rate: f32) -> f32 {
     let position = player.position_as_of_timestamp.max(0) as f64;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
     let age_ms = now.saturating_sub(player.timestamp);
     (position + age_ms as f64 * f64::from(rate)) as f32
 }
@@ -800,10 +718,7 @@ async fn fetch_track_metadata(session: &Session, tracks: &[ProvidedTrack]) -> Ha
     if entity_request.is_empty() {
         return HashMap::new();
     }
-    let request = BatchedEntityRequest {
-        entity_request,
-        ..Default::default()
-    };
+    let request = BatchedEntityRequest { entity_request, ..Default::default() };
     let Ok(response) = session.spclient().get_extended_metadata(request).await else {
         warn!("Failed to fetch Spotify track metadata");
         return HashMap::new();
@@ -815,10 +730,7 @@ async fn fetch_track_metadata(session: &Session, tracks: &[ProvidedTrack]) -> Ha
         .flat_map(|array| array.extension_data)
         .filter_map(|data| {
             let bytes = data.extension_data.into_option()?.value;
-            Some((
-                data.entity_uri,
-                TrackDetails::from_spotify(&metadata::Track::parse_from_bytes(&bytes).ok()?),
-            ))
+            Some((data.entity_uri, TrackDetails::from_spotify(&metadata::Track::parse_from_bytes(&bytes).ok()?)))
         })
         .collect()
 }
@@ -835,10 +747,7 @@ impl TrackDetails {
     fn from_spotify(track: &metadata::Track) -> Self {
         Self {
             name: track.name().to_owned(),
-            artist: track
-                .artist
-                .first()
-                .map_or_else(String::new, |artist| artist.name().to_owned()),
+            artist: track.artist.first().map_or_else(String::new, |artist| artist.name().to_owned()),
             album: track.album.get_or_default().name().to_owned(),
             image: track_image_url(track),
             duration_ms: u32::try_from(track.duration()).unwrap_or_default(),

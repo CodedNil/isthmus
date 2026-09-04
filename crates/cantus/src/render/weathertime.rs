@@ -1,19 +1,17 @@
-use core::f32::consts::PI;
-
-#[cfg(target_arch = "spirv")]
-use isthmus::Float as _;
-use isthmus::{
-    Quad, ShaderData,
-    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
-    spirv_std::arch::kill,
-};
-
 use crate::render::{
     Fragment, GAP, Globals, PANEL_START, TEXT_COLOR, TextFragment, UNIT,
     sdf::{
         PILL_MARGIN, SurfaceSample, VISIBLE_ALPHA, cantus_surface, cloud_mass, fbm, hash, sample_pill, sd_capsule_box,
         sd_rounded_box,
     },
+};
+use core::f32::consts::PI;
+#[cfg(target_arch = "spirv")]
+use isthmus::Float as _;
+use isthmus::{
+    Quad, ShaderData,
+    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
+    spirv_std::arch::kill,
 };
 
 /// Number of conditions shown in the hourly forecast row.
@@ -80,22 +78,13 @@ fn expanded_x(x: f32, expansion: f32) -> f32 {
 
 fn sample_weather_panel(pill: Quad, expansion: f32, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
     let pill_min = pill.center - pill.size * 0.5;
-    let popup_size = vec2(
-        WIDTH + FORECAST_X * expansion,
-        ((EXTENSION - GAP) * expansion).max(0.001),
-    );
-    let popup_center = vec2(
-        expanded_x(pill_min.x, expansion),
-        pill_min.y + pill.size.y + GAP * expansion,
-    ) + popup_size * 0.5;
+    let popup_size = vec2(WIDTH + FORECAST_X * expansion, ((EXTENSION - GAP) * expansion).max(0.001));
+    let popup_center =
+        vec2(expanded_x(pill_min.x, expansion), pill_min.y + pill.size.y + GAP * expansion) + popup_size * 0.5;
     let radius = (popup_size.y * 0.5).min(18.0);
     cantus_surface(pill, pixel, globals, time, |point| {
         let body = sd_capsule_box(pill.local(point), (pill.size.x - pill.size.y) * 0.5, pill.size.y * 0.5);
-        body.smooth_union(
-            sd_rounded_box(point - popup_center, popup_size * 0.5, radius),
-            56.0,
-            expansion,
-        )
+        body.smooth_union(sd_rounded_box(point - popup_center, popup_size * 0.5, radius), 56.0, expansion)
     })
 }
 
@@ -117,11 +106,7 @@ fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
         [phase, height(phase)]
     } else {
         let night = 24.0 - daylight;
-        let phase = if hour < sunrise {
-            (hour + 24.0 - sunset) / night
-        } else {
-            (hour - sunset) / night
-        };
+        let phase = if hour < sunrise { (hour + 24.0 - sunset) / night } else { (hour - sunset) / night };
         [if hour >= sunset { 1.0 } else { 0.0 }, -height(phase)]
     }
 }
@@ -174,14 +159,8 @@ pub fn scene(time: f32, cloud_scale: f32, p: Vec2, width: f32, phase: Vec3, weat
     let mut color = vec3(0.006, 0.012, 0.035)
         .lerp(vec3(0.025, 0.04, 0.095), vertical)
         .lerp(vec3(0.08, 0.34, 0.62).lerp(vec3(0.32, 0.67, 0.87), vertical), phase.x)
-        .lerp(
-            vec3(0.10, 0.16, 0.30).lerp(vec3(0.22, 0.25, 0.45), vertical),
-            phase.y * 0.8,
-        )
-        .lerp(
-            vec3(0.78, 0.30, 0.20).lerp(vec3(0.38, 0.22, 0.42), vertical),
-            phase.z * 0.9,
-        );
+        .lerp(vec3(0.10, 0.16, 0.30).lerp(vec3(0.22, 0.25, 0.45), vertical), phase.y * 0.8)
+        .lerp(vec3(0.78, 0.30, 0.20).lerp(vec3(0.38, 0.22, 0.42), vertical), phase.z * 0.9);
 
     let star_cell = (p / 18.0).floor();
     let star_center = (star_cell + 0.2 + hash(star_cell) * 0.6) * 18.0;
@@ -197,10 +176,7 @@ pub fn scene(time: f32, cloud_scale: f32, p: Vec2, width: f32, phase: Vec3, weat
         let cloud_color = vec3(0.16, 0.2, 0.28)
             .lerp(vec3(0.32, 0.36, 0.43), cloud_light)
             .lerp(vec3(0.62, 0.7, 0.78).lerp(vec3(0.92, 0.94, 0.96), cloud_light), phase.x)
-            .lerp(
-                vec3(0.5, 0.36, 0.4).lerp(vec3(0.76, 0.59, 0.56), cloud_light),
-                phase.z * 0.45,
-            );
+            .lerp(vec3(0.5, 0.36, 0.4).lerp(vec3(0.76, 0.59, 0.56), cloud_light), phase.z * 0.45);
         color = color.lerp(cloud_color, weather.cloud * (0.12 + cloud_shape * 0.7));
     }
 
@@ -223,37 +199,25 @@ pub fn scene(time: f32, cloud_scale: f32, p: Vec2, width: f32, phase: Vec3, weat
 
     if weather.fog > VISIBLE_ALPHA {
         let fog = fbm(vec2(p.x / width * 0.9 + time * 0.008, sky_y * 0.32 + 12.0));
-        color = color.lerp(
-            vec3(0.63, 0.69, 0.73),
-            weather.fog * (0.58 + fog.smoothstep(0.35, 0.7) * 0.18),
-        );
+        color = color.lerp(vec3(0.63, 0.69, 0.73), weather.fog * (0.58 + fog.smoothstep(0.35, 0.7) * 0.18));
     }
     color
 }
 
 fn sun_layer(color: Vec3, point: Vec2, size: Vec2, [sun_x, sun_y]: [f32; 2], cloud: f32, time: f32) -> Vec3 {
-    let sun = vec2(
-        16.0 + sun_x * (size.x - 32.0),
-        size.y * (0.72 - sun_y.saturate() * 0.45),
-    );
+    let sun = vec2(16.0 + sun_x * (size.x - 32.0), size.y * (0.72 - sun_y.saturate() * 0.45));
     let sun_color = vec3(0.96, 0.98, 1.0).lerp(vec3(0.98, 0.74, 0.66), sun_y.smoothstep(0.55, 0.02));
-    let obstruction = if cloud > VISIBLE_ALPHA {
-        cloud_mass(sun, size.y, time).smoothstep(0.43, 0.69) * cloud * 0.82
-    } else {
-        0.0
-    };
+    let obstruction =
+        if cloud > VISIBLE_ALPHA { cloud_mass(sun, size.y, time).smoothstep(0.43, 0.69) * cloud * 0.82 } else { 0.0 };
     let clear = sun_y.smoothstep(-0.02, 0.04) * (1.0 - obstruction);
     let distance = point.distance(sun);
-    color.lerp(
-        sun_color,
-        (distance.smoothstep(62.0, 4.0) * 0.24 + distance.smoothstep(11.0, 1.0) * 0.7) * clear,
-    )
+    color.lerp(sun_color, (distance.smoothstep(62.0, 4.0) * 0.24 + distance.smoothstep(11.0, 1.0) * 0.7) * clear)
 }
 
 #[isthmus::paint]
 mod host {
-    use std::{array::from_fn, fmt::Write};
-
+    use super::*;
+    use crate::{app::Background, interaction::Rect, render::UiContext};
     use arrayvec::{ArrayString, ArrayVec};
     use jiff::{
         Span, Timestamp, Zoned,
@@ -261,11 +225,9 @@ mod host {
         tz::{Offset, TimeZone},
     };
     use reqwest::Client;
+    use std::{array::from_fn, fmt::Write};
     use tokio::sync::mpsc::{self, UnboundedReceiver};
     use tracing::warn;
-
-    use super::*;
-    use crate::{app::Background, interaction::Rect, render::UiContext};
 
     #[derive(Default)]
     struct ForecastItem {
@@ -298,8 +260,8 @@ mod host {
     }
 
     mod monitor {
-        use std::{array::from_fn, time::Duration};
-
+        use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, WeatherCondition, WeatherPanel};
+        use crate::{app::Background, platform::Platform};
         use futures_util::future::join_all;
         use jiff::{
             civil::DateTime,
@@ -307,11 +269,9 @@ mod host {
         };
         use reqwest::Client;
         use serde::{Deserialize, de::DeserializeOwned};
+        use std::{array::from_fn, time::Duration};
         use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
         use tracing::warn;
-
-        use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, WeatherCondition, WeatherPanel};
-        use crate::{app::Background, platform::Platform};
 
         const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
         const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
@@ -467,11 +427,9 @@ mod host {
                     ready.push((index, [latitude, longitude]));
                 }
                 let forecasts = match fetch(http, &ready).await {
-                    Ok(results) => ready
-                        .into_iter()
-                        .zip(results)
-                        .map(|((index, _), forecast)| (index, forecast))
-                        .collect(),
+                    Ok(results) => {
+                        ready.into_iter().zip(results).map(|((index, _), forecast)| (index, forecast)).collect()
+                    }
                     Err(error) => {
                         retry = true;
                         warn!(%error, "Failed to refresh weather");
@@ -494,10 +452,7 @@ mod host {
 
         fn apply_forecast(weather_model: &mut WeatherPanel, index: usize, forecast: &Forecast) {
             // Index 0 is the local forecast; the rest fill in each configured world clock.
-            if let Some(timezone) = index
-                .checked_sub(1)
-                .and_then(|index| weather_model.timezones.get_mut(index))
-            {
+            if let Some(timezone) = index.checked_sub(1).and_then(|index| weather_model.timezones.get_mut(index)) {
                 timezone.weather = format!(
                     "{} · {:.0}°/{:.0}°",
                     weather(forecast.daily.weather_code[0]).0,
@@ -559,11 +514,8 @@ mod host {
         async fn geocode(http: &Client, timezone: &str) -> Result<[f32; 2], String> {
             let city = timezone.rsplit('/').next().unwrap_or(timezone).replace('_', " ");
             let query: String = form_urlencoded::byte_serialize(city.as_bytes()).collect();
-            let results: SearchResults = get_json(
-                http,
-                format!("https://geocoding-api.open-meteo.com/v1/search?name={query}&count=10"),
-            )
-            .await?;
+            let results: SearchResults =
+                get_json(http, format!("https://geocoding-api.open-meteo.com/v1/search?name={query}&count=10")).await?;
             let place = results
                 .results
                 .iter()
@@ -577,16 +529,10 @@ mod host {
             if locations.is_empty() {
                 return Ok(Vec::new());
             }
-            let latitude = locations
-                .iter()
-                .map(|(_, [latitude, _])| latitude.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            let longitude = locations
-                .iter()
-                .map(|(_, [_, longitude])| longitude.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
+            let latitude =
+                locations.iter().map(|(_, [latitude, _])| latitude.to_string()).collect::<Vec<_>>().join(",");
+            let longitude =
+                locations.iter().map(|(_, [_, longitude])| longitude.to_string()).collect::<Vec<_>>().join(",");
             let url = format!(
                 "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current={WEATHER_FIELDS},relative_humidity_2m,wind_speed_10m&hourly={WEATHER_FIELDS}&forecast_hours=24&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&temperature_unit=celsius&timezone=auto&forecast_days=6"
             );
@@ -653,14 +599,11 @@ mod host {
             let hovered = Self::visible_rects(x, height, self.expansion)
                 .into_iter()
                 .any(|rect| context.interaction.pointer_in(rect));
-            self.expansion = self
-                .expansion
-                .move_towards(f32::from(hovered), context.frame.delta_time.min(1.0 / 30.0) * 3.0);
+            self.expansion =
+                self.expansion.move_towards(f32::from(hovered), context.frame.delta_time.min(1.0 / 30.0) * 3.0);
             let (weather_label, hour) = self.collapsed_label();
-            let status_sky = StatusSky {
-                sun_height: sun_position(hour, self.sun_hours)[1],
-                conditions: self.hourly[0].conditions,
-            };
+            let status_sky =
+                StatusSky { sun_height: sun_position(hour, self.sun_hours)[1], conditions: self.hourly[0].conditions };
             let current = self.hourly[0].conditions;
             let next = self.hourly[1].conditions;
             let sun = Vec2::from(sun_position(hour, self.sun_hours));
@@ -700,14 +643,8 @@ mod host {
                         conditions,
                     );
                     if in_body {
-                        color = sun_layer(
-                            color,
-                            body_local,
-                            pill.size,
-                            sun.into(),
-                            body_conditions.cloud,
-                            fragment.time,
-                        );
+                        color =
+                            sun_layer(color, body_local, pill.size, sun.into(), body_conditions.cloud, fragment.time);
                     }
                     surface.color(color)
                 },
@@ -738,21 +675,15 @@ mod host {
             pill: Quad,
             expansion: f32,
         ) {
-            let line = ui
-                .frame
-                .text()
-                .line(content, size, weight)
-                .centered(center)
-                .with_color(color.extend(alpha));
+            let line = ui.frame.text().line(content, size, weight).centered(center).with_color(color.extend(alpha));
             // GPU: Weather text.
-            ui.frame
-                .paint_text(line.expanded(20.0), |text: TextFragment, pill: Quad, expansion: f32| {
-                    let panel = sample_weather_panel(pill, expansion, text.pixel, text.globals, text.time);
-                    let sample = text.sample_with_weight(panel.content_point(text.pixel), text.line.weight);
-                    let mut color = sample.color(text.line.color.to_vec4(), Vec4::new(0.0, 0.0, 0.0, 0.18), 0.8);
-                    color.w *= panel.mask;
-                    color
-                });
+            ui.frame.paint_text(line.expanded(20.0), |text: TextFragment, pill: Quad, expansion: f32| {
+                let panel = sample_weather_panel(pill, expansion, text.pixel, text.globals, text.time);
+                let sample = text.sample_with_weight(panel.content_point(text.pixel), text.line.weight);
+                let mut color = sample.color(text.line.color.to_vec4(), Vec4::new(0.0, 0.0, 0.0, 0.18), 0.8);
+                color.w *= panel.mask;
+                color
+            });
         }
 
         fn pair(
@@ -808,20 +739,16 @@ mod host {
             let pill: Quad = bounds.into();
             let reveal = reveal_progress(expansion, TITLE.y);
 
-            let title = context
-                .interaction
-                .interact(Rect::from_center(origin + TITLE, Vec2::new(UNIT * 26.0, UNIT * 4.0)));
+            let title =
+                context.interaction.interact(Rect::from_center(origin + TITLE, Vec2::new(UNIT * 26.0, UNIT * 4.0)));
             if title.clicked() {
                 self.month_offset = 0;
             }
-            self.month_hover = self
-                .month_hover
-                .move_towards(f32::from(title.hovered()), context.frame.delta_time / 0.12);
+            self.month_hover =
+                self.month_hover.move_towards(f32::from(title.hovered()), context.frame.delta_time / 0.12);
 
             let today = Zoned::now().date();
-            let month = today
-                .first_of_month()
-                .saturating_add(Span::new().months(self.month_offset));
+            let month = today.first_of_month().saturating_add(Span::new().months(self.month_offset));
             Self::label(
                 context,
                 &month.strftime("%B %Y").to_string(),
@@ -839,17 +766,12 @@ mod host {
                     WIDTH * 0.5 + side * (WIDTH * 0.5 - UNIT * 7.0) * reveal,
                     TITLE.y - (1.0 - reveal) * UNIT * 3.0,
                 );
-                let response = context
-                    .interaction
-                    .interact(Rect::from_center(origin + position, Vec2::splat(UNIT * 5.0)));
+                let response =
+                    context.interaction.interact(Rect::from_center(origin + position, Vec2::splat(UNIT * 5.0)));
                 if response.clicked() {
                     self.month_offset = (self.month_offset + side as i32).clamp(-1200, 1200);
                 }
-                let hover = if index == 0 {
-                    &mut self.previous_month_hover
-                } else {
-                    &mut self.next_month_hover
-                };
+                let hover = if index == 0 { &mut self.previous_month_hover } else { &mut self.next_month_hover };
                 *hover = hover.move_towards(f32::from(response.hovered()), context.frame.delta_time / 0.12);
                 Self::label(
                     context,
@@ -919,10 +841,7 @@ mod host {
                 );
                 for (column, forecast) in items.iter().enumerate() {
                     let center = origin + row_origin + vec2(step * (column as f32 + 0.5), size.y * 0.5);
-                    if context
-                        .interaction
-                        .pointer_in(Rect::from_center(center, vec2(step, size.y) * 0.5))
-                    {
+                    if context.interaction.pointer_in(Rect::from_center(center, vec2(step, size.y) * 0.5)) {
                         hovered_detail = Some(forecast.hover_text.as_str());
                     }
                     let [primary, secondary] = &forecast.text;

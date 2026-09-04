@@ -1,26 +1,25 @@
-//! Browser implementation of the shared Cantus platform services.
-//!
-//! The browser cannot inspect native CPU/GPU/battery state or speaker output,
-//! so those services use plausible demo values. Weather location uses the
-//! browser's permission-gated approximate geolocation API.
-
-use std::{
-    collections::HashMap,
-    sync::{Arc, atomic::Ordering, mpsc::Sender},
-    time::Duration,
-};
-
-use gloo_timers::future::TimeoutFuture;
-use js_sys::Date;
-use reqwest::Client;
-use tokio::sync::mpsc::UnboundedSender;
-use wasm_bindgen::{JsCast, closure::Closure};
+//! Browser services and permission-gated geolocation.
 
 use super::{DesktopApp, Platform};
 use crate::{
     app::{AppUpdater, Background},
-    render::status::{AudioMonitor, ProcessorSample, SystemSample},
+    interaction::InputEvent,
+    render::{
+        launcher::LauncherKey,
+        status::{AudioMonitor, ProcessorSample, SystemSample},
+    },
 };
+use gloo_timers::future::TimeoutFuture;
+use js_sys::Date;
+use reqwest::Client;
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{Arc, atomic::Ordering, mpsc::Sender},
+    time::Duration,
+};
+use tokio::sync::mpsc::UnboundedSender;
+use wasm_bindgen::{JsCast, closure::Closure};
 
 /// Entry point used by the generated browser glue.
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
@@ -28,7 +27,11 @@ pub fn start() {
     std::panic::set_hook(Box::new(|panic| {
         web_sys::console::error_1(&format!("Cantus panic: {panic}").into());
     }));
-    Platform::run();
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(error) = run_web().await {
+            web_sys::console::error_1(&format!("Cantus could not start: {error}").into());
+        }
+    });
 }
 
 impl Platform {
@@ -49,8 +52,7 @@ impl Platform {
         }
     }
 
-    /// Browsers do not expose speaker output without an explicit capture
-    /// stream, so keep the status visual useful with a small demo spectrum.
+    /// Uses a demo spectrum because browsers require explicit speaker capture.
     fn sample_audio(time: f32, audio: &AudioMonitor) {
         let level = 0.52 + (time * 1.7).sin() * 0.18;
         audio.volume.store(level.to_bits(), Ordering::Relaxed);
@@ -104,14 +106,6 @@ impl Platform {
         None
     }
 
-    pub fn start_exchange_rates(_background: &Background, _http: Client, update: fn(HashMap<String, f64>)) {
-        update(HashMap::from([
-            (String::from("EUR"), 0.92),
-            (String::from("GBP"), 0.79),
-            (String::from("JPY"), 149.0),
-        ]));
-    }
-
     pub fn set_volume(_volume: f32) {}
 
     pub fn run_power_action(_background: &Background, _action: usize) {}
@@ -127,7 +121,7 @@ impl Platform {
         .into_iter()
         .map(|(name, comment)| DesktopApp {
             name: name.into(),
-            exec: String::new(),
+            exec: Vec::new(),
             comment: comment.into(),
             icon_path: None,
             action: None,
@@ -136,7 +130,7 @@ impl Platform {
         .collect()
     }
 
-    pub fn spawn(_exec: &str) {}
+    pub fn spawn(_command: &[String]) {}
 
     pub fn open_url(url: &str) {
         if let Some(window) = web_sys::window() {
@@ -150,11 +144,109 @@ impl Platform {
         panic!("Cantus launcher triggering is unavailable in a browser")
     }
 
-    /// Starts the web data layer. Frame presentation is kept behind the
-    /// isthmus canvas adapter, which currently only accepts native Vulkan/
-    /// SPIR-V surfaces; the page shell still provides the eventual mount
-    /// point without pretending to have a browser renderer today.
-    pub fn run() {
-        let _app = Box::leak(Box::new(crate::app::CantusApp::default()));
+    pub fn run() {}
+}
+
+async fn run_web() -> Result<(), String> {
+    let window = web_sys::window().ok_or("browser window is unavailable")?;
+    let canvas = window
+        .document()
+        .and_then(|document| document.get_element_by_id("cantus"))
+        .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        .ok_or("#cantus is not a canvas")?;
+    let app = Rc::new(RefCell::new(crate::app::CantusApp::default()));
+    let logical_size = || {
+        [
+            window.inner_width().ok().and_then(|value| value.as_f64()).unwrap_or(1.0) as f32,
+            window.inner_height().ok().and_then(|value| value.as_f64()).unwrap_or(1.0) as f32,
+        ]
+    };
+    let [width, height] = logical_size();
+    let scale = window.device_pixel_ratio() as f32;
+    app.borrow_mut()
+        .initialize_web_renderer(canvas.clone(), [(width * scale).round() as u32, (height * scale).round() as u32])
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let pointer_app = Rc::clone(&app);
+    let pointer = Closure::<dyn FnMut(web_sys::PointerEvent)>::new(move |event: web_sys::PointerEvent| {
+        let position = isthmus::glam::vec2(event.client_x() as f32, event.client_y() as f32);
+        let input = match event.type_().as_str() {
+            "pointerdown" => InputEvent::Press,
+            "pointerup" => InputEvent::Release,
+            "pointerleave" => InputEvent::Leave,
+            _ => InputEvent::Motion(position),
+        };
+        let mut app = pointer_app.borrow_mut();
+        if matches!(input, InputEvent::Press) {
+            app.interaction.apply(InputEvent::Enter(position));
+        }
+        app.interaction.apply(input);
+    });
+    for event in ["pointermove", "pointerdown", "pointerup", "pointerleave"] {
+        canvas.add_event_listener_with_callback(event, pointer.as_ref().unchecked_ref()).expect("pointer listener");
+    }
+    pointer.forget();
+
+    let wheel_app = Rc::clone(&app);
+    let wheel = Closure::<dyn FnMut(web_sys::WheelEvent)>::new(move |event: web_sys::WheelEvent| {
+        event.prevent_default();
+        wheel_app.borrow_mut().interaction.apply(InputEvent::Scroll(event.delta_y().signum() as i32));
+    });
+    canvas.add_event_listener_with_callback("wheel", wheel.as_ref().unchecked_ref()).expect("wheel listener");
+    wheel.forget();
+
+    let key_app = Rc::clone(&app);
+    let key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
+        let mut app = key_app.borrow_mut();
+        let command = match event.key().as_str() {
+            "Escape" => None,
+            "Enter" => Some(LauncherKey::Activate),
+            "ArrowUp" => Some(LauncherKey::Up),
+            "ArrowDown" => Some(LauncherKey::Down),
+            "Backspace" => Some(LauncherKey::Backspace),
+            "Delete" => Some(LauncherKey::Delete),
+            "ArrowLeft" => Some(LauncherKey::Left),
+            "ArrowRight" => Some(LauncherKey::Right),
+            "Home" => Some(LauncherKey::Home),
+            "End" => Some(LauncherKey::End),
+            "a" if event.ctrl_key() => Some(LauncherKey::SelectAll),
+            "c" if event.ctrl_key() => Some(LauncherKey::Copy),
+            "x" if event.ctrl_key() => Some(LauncherKey::Cut),
+            _ => None,
+        };
+        if let Some(command) = command {
+            app.launcher.key(command, event.shift_key());
+            event.prevent_default();
+        } else if !event.ctrl_key() && event.key().chars().count() == 1 {
+            let value = event.key();
+            app.launcher.edit(|field| field.insert(&value));
+        }
+    });
+    window.add_event_listener_with_callback("keydown", key.as_ref().unchecked_ref()).expect("keyboard listener");
+    key.forget();
+
+    loop {
+        let [width, height] = logical_size();
+        let scale = window.device_pixel_ratio() as f32;
+        let physical = [(width * scale).round() as u32, (height * scale).round() as u32];
+        if canvas.width() != physical[0] || canvas.height() != physical[1] {
+            canvas.set_width(physical[0]);
+            canvas.set_height(physical[1]);
+            let mut state = app.borrow_mut();
+            let surface = state.bar_surface;
+            if let (Some(gpu), Some(surface)) = (&mut state.gpu, surface) {
+                gpu.resize(surface, physical);
+            }
+        }
+        {
+            let mut app = app.borrow_mut();
+            app.apply_pending_updates();
+            app.render_web([width, height]);
+            if let Some(text) = app.launcher.pending_copy.take() {
+                let _ = window.navigator().clipboard().write_text(&text);
+            }
+        }
+        TimeoutFuture::new(16).await;
     }
 }

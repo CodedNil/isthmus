@@ -6,18 +6,17 @@ pub mod status;
 pub mod weathertime;
 
 #[cfg(not(target_arch = "spirv"))]
-use isthmus::Frame;
-use isthmus::{
-    ShaderData,
-    glam::{Vec2, Vec3},
-};
-
-#[cfg(not(target_arch = "spirv"))]
 use crate::{
     app::Background,
     config::Config,
     interaction::Interaction,
     music::{Enrichment, Music},
+};
+#[cfg(not(target_arch = "spirv"))]
+use isthmus::Frame;
+use isthmus::{
+    ShaderData,
+    glam::{Vec2, Vec3},
 };
 
 pub const TEXT_COLOR: Vec3 = Vec3::splat(0.94);
@@ -69,11 +68,7 @@ pub struct BarLayout {
 impl<'a> UiContext<'a> {
     pub fn new(frame: Frame<'a>, config: &'a Config, interaction: &'a mut Interaction) -> Self {
         interaction.begin_frame(frame.delta_time, frame.time);
-        Self {
-            frame,
-            config,
-            interaction,
-        }
+        Self { frame, config, interaction }
     }
 
     pub fn finish(mut self) {
@@ -124,9 +119,7 @@ impl Bar {
         let sky = self
             .weather
             .as_mut()
-            .map_or_else(weathertime::StatusSky::default, |weather| {
-                weather.show(context, status_width)
-            });
+            .map_or_else(weathertime::StatusSky::default, |weather| weather.show(context, status_width));
         if let Some(status) = self.status.as_mut() {
             status.show(context, sky);
         }

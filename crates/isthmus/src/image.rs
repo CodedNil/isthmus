@@ -18,11 +18,7 @@ impl Image {
     pub fn rgba8(size: [u32; 2], pixels: impl Into<Arc<[u8]>>) -> Self {
         assert!(size[0] > 0 && size[1] > 0, "image dimensions must be non-zero");
         let pixels = pixels.into();
-        assert_eq!(
-            pixels.len(),
-            size[0] as usize * size[1] as usize * 4,
-            "RGBA8 image data has the wrong length"
-        );
+        assert_eq!(pixels.len(), size[0] as usize * size[1] as usize * 4, "RGBA8 image data has the wrong length");
         Self { size, pixels }
     }
 
@@ -35,18 +31,10 @@ impl Image {
         let pixel = |point: glam::UVec2| {
             let offset = (point.y * size.x + point.x) as usize * 4;
             let rgba = &self.pixels[offset..offset + 4];
-            glam::Vec4::new(
-                f32::from(rgba[0]),
-                f32::from(rgba[1]),
-                f32::from(rgba[2]),
-                f32::from(rgba[3]),
-            ) / 255.0
+            glam::Vec4::new(f32::from(rgba[0]), f32::from(rgba[1]), f32::from(rgba[2]), f32::from(rgba[3])) / 255.0
         };
         pixel(lower)
             .lerp(pixel(glam::uvec2(upper.x, lower.y)), fraction.x)
-            .lerp(
-                pixel(glam::uvec2(lower.x, upper.y)).lerp(pixel(upper), fraction.x),
-                fraction.y,
-            )
+            .lerp(pixel(glam::uvec2(lower.x, upper.y)).lerp(pixel(upper), fraction.x), fraction.y)
     }
 }

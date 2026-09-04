@@ -1,10 +1,14 @@
+use naga::{
+    back::wgsl::{WriterFlags, write_string},
+    front::spv::{Options, parse_u8_slice},
+    valid::{Capabilities, ValidationFlags, Validator},
+};
+use spirv_builder::{ModuleResult, SpirvBuilder, SpirvMetadata};
 use std::{
-    fs,
+    env, fs,
     io::Error,
     path::{Path, PathBuf},
 };
-
-use spirv_builder::{Capability, ModuleResult, SpirvBuilder, SpirvMetadata};
 
 const SHADER_TARGET: &str = "spirv-unknown-vulkan1.4";
 
@@ -18,12 +22,10 @@ pub struct ShaderBuild {
 }
 
 impl ShaderBuild {
-    /// Builds the shader into Cargo's output directory while retaining the nested Cargo cache.
+    /// Builds one SPIR-V module in Cargo's output directory while retaining the nested cache.
     ///
     /// # Errors
-    ///
-    /// Returns an error if the generated shader workspace cannot be written or Rust-GPU fails
-    /// to produce exactly one SPIR-V module.
+    /// Returns filesystem and Rust-GPU build failures.
     pub fn build(self) -> Result<(), String> {
         let cache = self.workspace.join("target/isthmus").join(&self.name);
         let source_crate = cache.join("source");
@@ -62,10 +64,6 @@ impl ShaderBuild {
             .target_dir_path(target)
             .spirv_metadata(SpirvMetadata::None)
             .scalar_block_layout(true)
-            .capability(Capability::RuntimeDescriptorArray)
-            .capability(Capability::SampledImageArrayNonUniformIndexing)
-            .capability(Capability::ShaderNonUniform)
-            .extension("SPV_EXT_descriptor_indexing")
             .release(true)
             .build()
             .map_err(|error| format!("Rust-GPU shader build failed: {error}"))?;
@@ -75,9 +73,21 @@ impl ShaderBuild {
                 return Err(String::from("Rust-GPU unexpectedly produced multiple shader modules"));
             }
         };
-        fs::copy(module, self.output)
-            .map(|_| ())
-            .map_err(io_error("copy generated SPIR-V module"))
+        if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
+            let bytes = fs::read(module).map_err(io_error("read generated SPIR-V module"))?;
+            let options =
+                Options { adjust_coordinate_space: false, strict_capabilities: true, block_ctx_dump_prefix: None };
+            let module = parse_u8_slice(&bytes, &options)
+                .map_err(|error| format!("failed to parse generated SPIR-V: {error}"))?;
+            let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+                .validate(&module)
+                .map_err(|error| format!("failed to validate generated SPIR-V: {error}"))?;
+            let wgsl = write_string(&module, &info, WriterFlags::empty())
+                .map_err(|error| format!("failed to generate WGSL: {error}"))?;
+            fs::write(self.output.with_extension("wgsl"), wgsl).map_err(io_error("write generated WGSL"))
+        } else {
+            fs::copy(module, self.output).map(|_| ()).map_err(io_error("copy generated SPIR-V module"))
+        }
     }
 }
 
