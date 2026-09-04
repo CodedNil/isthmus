@@ -1,6 +1,7 @@
-use crate::{fragment_entry, isthmus_path};
 use quote::{format_ident, quote};
 use syn::{Block, Expr, Ident, Pat, PatType, Type, parse_quote};
+
+use crate::{fragment_entry, isthmus_path};
 
 #[derive(Clone)]
 pub struct Capture {

@@ -1,3 +1,13 @@
+use core::f32::consts::TAU;
+
+#[cfg(target_arch = "spirv")]
+use isthmus::Float as _;
+use isthmus::{
+    Quad, Sdf, ShaderData,
+    glam::{FloatExt, Vec2, Vec3, vec2, vec3},
+    spirv_std::arch::kill,
+};
+
 use crate::render::{
     Fragment, GAP, Globals, PANEL_START, TEXT_COLOR, TextFragment,
     sdf::{
@@ -5,14 +15,6 @@ use crate::render::{
         segment_distance,
     },
     weathertime::{StatusSky, scene, sky_phase},
-};
-use core::f32::consts::TAU;
-#[cfg(target_arch = "spirv")]
-use isthmus::Float as _;
-use isthmus::{
-    Quad, Sdf, ShaderData,
-    glam::{FloatExt, Vec2, Vec3, vec2, vec3},
-    spirv_std::arch::kill,
 };
 
 const STATUS_HISTORY_SAMPLES: usize = 32;
@@ -52,9 +54,6 @@ pub struct ProcessorStatus {
 
 #[isthmus::paint]
 mod host {
-    use super::*;
-    use crate::{app::Background, interaction::Rect, platform::Platform, render::UiContext};
-    use arrayvec::ArrayString;
     use std::{
         fmt::Write,
         sync::{
@@ -63,6 +62,11 @@ mod host {
             mpsc::{self, Receiver},
         },
     };
+
+    use arrayvec::ArrayString;
+
+    use super::*;
+    use crate::{app::Background, interaction::Rect, platform::Platform, render::UiContext};
 
     impl ProcessorStatus {
         fn record(&mut self, sample: ProcessorSample) {

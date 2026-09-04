@@ -1,5 +1,6 @@
-use crate::render::{TEXT_COLOR, TextFragment};
 use isthmus::glam::{FloatExt, Vec4, vec2};
+
+use crate::render::{TEXT_COLOR, TextFragment};
 
 pub const EXTENSION: f32 = 10.0;
 

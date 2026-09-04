@@ -5,13 +5,12 @@ pub mod sdf;
 pub mod status;
 pub mod weathertime;
 
+#[cfg(not(target_arch = "spirv"))]
+use isthmus::Frame;
 use isthmus::{
     ShaderData,
     glam::{Vec2, Vec3},
 };
-
-#[cfg(not(target_arch = "spirv"))]
-use isthmus::Frame;
 
 #[cfg(not(target_arch = "spirv"))]
 use crate::{

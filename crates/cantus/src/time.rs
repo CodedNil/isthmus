@@ -1,11 +1,9 @@
-#[cfg(not(target_arch = "wasm32"))]
-pub use std::time::Instant;
-
 #[cfg(target_arch = "wasm32")]
 use std::ops::Add;
-
 #[cfg(target_arch = "wasm32")]
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+pub use std::time::Instant;
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]

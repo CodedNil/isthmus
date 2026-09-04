@@ -5,13 +5,14 @@
 //! this small implementation keeps the visual demo populated until a browser
 //! Web API/Web Playback integration is added.
 
+use std::sync::Arc;
+
 use super::{AudioFeatures, LyricSegment, MusicResult, PlaybackCommand, Track, TrackRuntime};
 use crate::{
     app::{AppUpdater, Background, send_update},
     config::Config,
     time::Instant,
 };
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Spotify {

@@ -3,7 +3,12 @@ pub mod render;
 
 #[cfg(not(target_arch = "spirv"))]
 mod host {
-    use crate::render::{Bamboo, program};
+    use std::{
+        ffi::c_void,
+        ptr::NonNull,
+        time::{Duration, Instant},
+    };
+
     use isthmus::{
         Renderer, SurfaceHandle,
         glam::{Vec3, vec2},
@@ -11,11 +16,6 @@ mod host {
     use raw_window_handle::{
         DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
         WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
-    };
-    use std::{
-        ffi::c_void,
-        ptr::NonNull,
-        time::{Duration, Instant},
     };
     use wayland_client::{
         Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
@@ -34,6 +34,8 @@ mod host {
         zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
     };
 
+    use crate::render::{Bamboo, program};
+
     type OutputId = u32;
     const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
@@ -45,6 +47,7 @@ mod host {
 
     impl HasDisplayHandle for NativeSurface {
         fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+            // SAFETY: Wallpaper owns the Wayland connection that supplied this live display pointer.
             Ok(
                 unsafe {
                     DisplayHandle::borrow_raw(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(self.display)))
@@ -55,6 +58,7 @@ mod host {
 
     impl HasWindowHandle for NativeSurface {
         fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            // SAFETY: OutputSurface owns the live wl_surface represented by this pointer.
             Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Wayland(WaylandWindowHandle::new(self.window))) })
         }
     }

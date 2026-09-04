@@ -1,10 +1,3 @@
-use crate::render::{
-    Fragment, GAP, Globals, PADDING, TEXT_COLOR, TextFragment,
-    sdf::{
-        PILL_MARGIN, SurfaceSample, VISIBLE_ALPHA, cantus_surface, presence, sample_pill, sd_rounded_box,
-        segment_distance,
-    },
-};
 #[cfg(target_arch = "spirv")]
 use isthmus::Float as _;
 use isthmus::{
@@ -12,6 +5,14 @@ use isthmus::{
     glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
     text,
+};
+
+use crate::render::{
+    Fragment, GAP, Globals, PADDING, TEXT_COLOR, TextFragment,
+    sdf::{
+        PILL_MARGIN, SurfaceSample, VISIBLE_ALPHA, cantus_surface, presence, sample_pill, sd_rounded_box,
+        segment_distance,
+    },
 };
 
 const PANEL_WIDTH: f32 = 520.0;
@@ -89,16 +90,6 @@ fn sample_launcher(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> Surf
 
 #[isthmus::paint]
 mod host {
-    use super::*;
-    use crate::{
-        app::Background,
-        config::SearchProvider,
-        interaction::Rect,
-        platform::{DesktopApp, Platform},
-        render::UiContext,
-    };
-    use fend_core::Context;
-    use reqwest::Client;
     use std::{
         collections::HashMap,
         error::Error,
@@ -107,6 +98,18 @@ mod host {
             OnceLock,
             mpsc::{self, Receiver, Sender},
         },
+    };
+
+    use fend_core::Context;
+    use reqwest::Client;
+
+    use super::*;
+    use crate::{
+        app::Background,
+        config::SearchProvider,
+        interaction::Rect,
+        platform::{DesktopApp, Platform},
+        render::UiContext,
     };
 
     #[derive(Default)]

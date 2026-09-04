@@ -1,6 +1,7 @@
-use crate::isthmus_path;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_quote};
+
+use crate::isthmus_path;
 
 pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     if !input.attrs.iter().any(

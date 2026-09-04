@@ -1,9 +1,10 @@
-use super::context::Context;
 use std::{
     rc::Rc,
     sync::{Arc, Weak},
     vec::Vec,
 };
+
+use super::context::Context;
 
 pub(super) struct Image {
     /// Keeps the backing resource alive for the view used by bind groups.
@@ -38,10 +39,10 @@ impl ImageCache {
     pub(crate) fn image(&mut self, context: &Context, size: [u32; 2], pixels: &Arc<[u8]>) -> Rc<Image> {
         let source = Arc::downgrade(pixels);
         if let Some(cached) = self.images.iter().find(|cached| cached.source.ptr_eq(&source)) {
-            return cached.image.clone();
+            return Rc::clone(&cached.image);
         }
         let cached = upload(context, size, pixels);
-        let image = cached.image.clone();
+        let image = Rc::clone(&cached.image);
         self.images.push(cached);
         image
     }

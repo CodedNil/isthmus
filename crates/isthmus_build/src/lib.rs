@@ -1,9 +1,10 @@
-use spirv_builder::{Capability, ModuleResult, SpirvBuilder, SpirvMetadata};
 use std::{
     fs,
     io::Error,
     path::{Path, PathBuf},
 };
+
+use spirv_builder::{Capability, ModuleResult, SpirvBuilder, SpirvMetadata};
 
 const SHADER_TARGET: &str = "spirv-unknown-vulkan1.4";
 
@@ -41,7 +42,12 @@ impl ShaderBuild {
         write_if_changed(
             &source_crate.join("lib.rs"),
             &format!(
-                "#![no_std]\n#![allow(dead_code, unused_imports)]\n#[path = \"{}\"]\npub mod render;\n",
+                "#![no_std]\n#![expect(unused_imports, reason = \"the generated shader crate compiles only the selected entry points\")]\n{}#[path = \"{}\"]\npub mod render;\n",
+                if self.name == "cantus" {
+                    "#![expect(dead_code, reason = \"host-only rendering helpers are unused in the generated shader crate\")]\n"
+                } else {
+                    ""
+                },
                 self.source.display(),
             ),
         )?;

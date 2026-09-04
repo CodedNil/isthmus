@@ -1,8 +1,9 @@
+use core::ops::{Add, Neg, Sub};
+
 use crate::{
     glam::{FloatExt, Vec4},
     spirv_std::arch::Derivative,
 };
-use core::ops::{Add, Neg, Sub};
 
 /// Composable negative-inside signed-distance geometry.
 #[derive(Clone, Copy)]
@@ -76,7 +77,7 @@ impl Neg for Sdf {
 #[must_use]
 pub struct SdfSample {
     pub distance: f32,
-    half_width: f32,
+    pub half_width: f32,
 }
 
 impl SdfSample {

@@ -4,21 +4,23 @@
 //! so those services use plausible demo values. Weather location uses the
 //! browser's permission-gated approximate geolocation API.
 
-use super::{DesktopApp, Platform};
-use crate::{
-    app::{AppUpdater, Background},
-    render::status::{AudioMonitor, ProcessorSample, SystemSample},
-};
-use gloo_timers::future::TimeoutFuture;
-use js_sys::Date;
-use reqwest::Client;
 use std::{
     collections::HashMap,
     sync::{Arc, atomic::Ordering, mpsc::Sender},
     time::Duration,
 };
+
+use gloo_timers::future::TimeoutFuture;
+use js_sys::Date;
+use reqwest::Client;
 use tokio::sync::mpsc::UnboundedSender;
 use wasm_bindgen::{JsCast, closure::Closure};
+
+use super::{DesktopApp, Platform};
+use crate::{
+    app::{AppUpdater, Background},
+    render::status::{AudioMonitor, ProcessorSample, SystemSample},
+};
 
 /// Entry point used by the generated browser glue.
 #[wasm_bindgen::prelude::wasm_bindgen(start)]

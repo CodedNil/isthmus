@@ -1,3 +1,6 @@
+use core::{array::from_fn, mem::size_of, num::NonZeroU32};
+use std::{borrow::Cow, collections::HashMap, format, rc::Rc, sync::Arc, vec, vec::Vec};
+
 use super::{
     context::{BufferRange, Context, IMAGE_CAPACITY},
     image::ImageCache,
@@ -6,8 +9,6 @@ use crate::{
     contract::{DrawRecord, PaintPipeline, PushBlock, Quad, ShaderSpec, SurfaceHandle},
     data::ImageHandle,
 };
-use core::{array::from_fn, mem::size_of, num::NonZeroU32};
-use std::{borrow::Cow, collections::HashMap, format, rc::Rc, sync::Arc, vec, vec::Vec};
 
 pub struct Canvas {
     context: Context,
@@ -183,10 +184,16 @@ impl Canvas {
         self.group.as_mut().expect("paint layer outside a group").1[layer as usize].extend(paints);
     }
     fn finish_payload<S: ShaderSpec>(&mut self) -> Option<usize> {
-        const { assert!(size_of::<S::Instance>() % 4 == 0) };
+        const {
+            assert!(
+                size_of::<S::Instance>() % 4 == 0,
+                "shader payload size must be a multiple of four"
+            );
+        };
         assert_eq!(
             self.payload_pipeline.take().map(|pipeline| pipeline.entry),
-            Some(S::PIPELINE.entry)
+            Some(S::PIPELINE.entry),
+            "payload pipeline must match the emitted shader",
         );
         self.payload_images.take()
     }
@@ -194,7 +201,7 @@ impl Canvas {
         if !self.pipelines.contains_key(spec.entry) {
             let vertex_entry = format!("{}::__isthmus_quad::vertex", self.root);
             let fragment_entry = format!("{}::fragment", spec.entry);
-            // The SPIR-V is generated from the same Rust-GPU sources as the
+            // SAFETY: The SPIR-V is generated from the same Rust-GPU sources as the
             // entry-point names below; passthrough is required because naga
             // cannot represent Rust-GPU's non-uniform descriptor operations.
             let module = unsafe {
@@ -295,7 +302,7 @@ impl Canvas {
         &mut self.paints[surface.index()]
     }
     pub(crate) fn begin_group(&mut self, surface: SurfaceHandle) {
-        assert!(self.group.is_none());
+        assert!(self.group.is_none(), "paint groups cannot be nested");
         self.group = Some((surface, from_fn(|_| Vec::new())));
     }
     pub(crate) fn end_group(&mut self) {

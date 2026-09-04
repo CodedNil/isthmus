@@ -16,4 +16,10 @@ web demo
 nix options as part of build
 
 
-do a pass through everything, cantus and isthmus, identify cruft and legacy stuff to remove, identify places where we arent using immediate mode to its fullest potential, identify some radical suggestions to improve both the backend and frontend of isthmus/cantus
+do a MASSIVE refactor pass throughout, do every audit you can imagine for code quality
+performance, deduplication, inlining single use small functions/variables in ways that doesnt hurt readability, consistency, reduce unnecessary wrapper functions, reduced reexports, correctness, idiomatic rust pass, reduce overengineering/complexity, simplify away boilerplate code, increase usage of immediate mode
+major focus on LOC reduction, remove legacy cruft
+genuine simplifications, radical suggestions including deep refactors
+reevaluate it all from first principles always, greenfield treat it as a fresh project where nothing is off limits, keep it simple and elegant
+
+for cantus + isthmus

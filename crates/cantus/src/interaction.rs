@@ -1,6 +1,8 @@
-use crate::render::RipplePulse;
-use isthmus::{Quad, glam::Vec2};
 use std::{mem, vec::Vec};
+
+use isthmus::{Quad, glam::Vec2};
+
+use crate::render::RipplePulse;
 
 #[derive(Clone, Copy)]
 pub struct Rect {

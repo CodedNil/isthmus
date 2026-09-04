@@ -1,11 +1,13 @@
-use crate::{contract, data::ShaderData};
 use core::{error::Error, fmt};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
     rc::Rc,
     string::{String, ToString},
     vec,
 };
+
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+use crate::{contract, data::ShaderData};
 
 pub const IMAGE_CAPACITY: u32 = contract::IMAGE_CAPACITY as u32;
 
@@ -18,7 +20,7 @@ pub struct BufferRange {
 #[derive(Debug)]
 pub enum SetupError {
     Handle(raw_window_handle::HandleError),
-    Adapter,
+    Adapter(String),
     Device(String),
     Surface(String),
     UnsupportedSurface,
@@ -31,7 +33,7 @@ impl fmt::Display for SetupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Handle(e) => e.fmt(f),
-            Self::Adapter => f.write_str("no suitable GPU adapter found"),
+            Self::Adapter(e) => write!(f, "GPU adapter error: {e}"),
             Self::Device(e) => write!(f, "GPU device error: {e}"),
             Self::Surface(e) => write!(f, "surface error: {e}"),
             Self::UnsupportedSurface => f.write_str("surface is unsupported"),
@@ -64,7 +66,7 @@ pub(super) fn create_surface(
     instance: &wgpu::Instance,
     source: &(impl HasDisplayHandle + HasWindowHandle),
 ) -> Result<wgpu::Surface<'static>, SetupError> {
-    // The caller owns the display/window handles for the lifetime of the
+    // SAFETY: The caller owns the display/window handles for the lifetime of the
     // returned surface; wgpu cannot express that relationship for generic
     // raw handles, so this is the required API boundary.
     unsafe {
@@ -92,7 +94,7 @@ impl Context {
             force_fallback_adapter: false,
             apply_limit_buckets: false,
         }))
-        .map_err(|_| SetupError::Adapter)?;
+        .map_err(|e| SetupError::Adapter(e.to_string()))?;
         let required = wgpu::Features::TEXTURE_BINDING_ARRAY
             | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
             | wgpu::Features::IMMEDIATES

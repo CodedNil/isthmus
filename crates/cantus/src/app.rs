@@ -1,12 +1,3 @@
-use crate::{
-    config::{self, Config},
-    interaction::Interaction,
-    music::{Enrichment, Music},
-    platform::Platform,
-    render::{Bar, TEXT_COLOR, UiContext, launcher::LauncherState, program},
-};
-use isthmus::{Renderer, SurfaceHandle, glam::vec2};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 #[cfg(target_arch = "wasm32")]
 use std::marker::PhantomData;
 #[cfg(not(target_arch = "wasm32"))]
@@ -17,10 +8,21 @@ use std::{
     sync::mpsc::{self, Sender},
     thread::Builder,
 };
+
+use isthmus::{Renderer, SurfaceHandle, glam::vec2};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{Layer, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+
+use crate::{
+    config::{self, Config},
+    interaction::Interaction,
+    music::{Enrichment, Music},
+    platform::Platform,
+    render::{Bar, TEXT_COLOR, UiContext, launcher::LauncherState, program},
+};
 
 pub type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 pub type AppUpdater = Sender<Update<CantusApp>>;
