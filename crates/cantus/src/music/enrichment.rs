@@ -1,24 +1,26 @@
-use super::{ART_SIZE, AudioFeatures, Music, MusicResult, TrackId, spotify::Spotify};
-use crate::{
-    app::{Background, CantusApp, update},
-    render::music::PALETTE_COLORS,
-    time::Instant,
-};
-use arrayvec::ArrayVec;
-use futures_util::future::join_all;
-use image::{RgbaImage, imageops};
-use isthmus::{Image, Unorm8x4, glam::Vec3};
-use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
-use reqwest::Client;
 use std::{
     array,
     collections::{HashMap, HashSet},
     ops::Range,
     time::Duration,
 };
+
+use arrayvec::ArrayVec;
+use futures_util::future::join_all;
+use image::{RgbaImage, imageops};
+use isthmus::{Image, Unorm8x4, glam::Vec3};
+use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
+use reqwest::Client;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::spawn_blocking;
 use tracing::warn;
+
+use super::{ART_SIZE, AudioFeatures, Music, MusicResult, TrackId, spotify::Spotify};
+use crate::{
+    app::{Background, CantusApp, update},
+    render::music::PALETTE_COLORS,
+    time::Instant,
+};
 
 const RETRY_DELAY: Duration = Duration::from_secs(30);
 pub type ArtState = Fetch<AlbumArt>;

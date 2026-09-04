@@ -1,3 +1,11 @@
+#[cfg(not(target_arch = "spirv"))]
+use {
+    crate::backend::{BufferRange, Canvas, Context},
+    smallvec::SmallVec,
+    std::{ops::Range, sync::Arc, vec::Vec},
+    ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
+};
+
 #[cfg(target_arch = "spirv")]
 use crate::Float as _;
 #[cfg(not(target_arch = "spirv"))]
@@ -5,14 +13,6 @@ use crate::glam::Vec3;
 use crate::{
     Fragment, Quad, Sdf, SdfSample, Unorm8x4,
     glam::{Vec2, Vec4, vec2},
-};
-
-#[cfg(not(target_arch = "spirv"))]
-use {
-    crate::backend::{BufferRange, Canvas, Context},
-    smallvec::SmallVec,
-    std::{ops::Range, sync::Arc, vec::Vec},
-    ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
 };
 
 const EFFECT_PADDING: f32 = 3.5;
@@ -30,7 +30,7 @@ impl F16x2 {
     fn new(value: Vec2) -> Self {
         Self {
             value: u32::from(half::f16::from_f32(value.x).to_bits())
-                | u32::from(half::f16::from_f32(value.y).to_bits()) << 16,
+                | (u32::from(half::f16::from_f32(value.y).to_bits()) << 16),
         }
     }
 
@@ -226,7 +226,10 @@ fn quadratic(start: Vec2, control: Vec2, end: Vec2, t: f32) -> Vec2 {
     start * inverse * inverse + control * 2.0 * inverse * t + end * t * t
 }
 
-#[allow(clippy::manual_range_contains)] // Range::contains does not lower cleanly through Rust-GPU.
+#[expect(
+    clippy::manual_range_contains,
+    reason = "Range::contains does not lower cleanly through Rust-GPU"
+)]
 fn curve_winding(start: Vec2, control: Vec2, end: Vec2, point: Vec2) -> i32 {
     let a = start.y - 2.0 * control.y + end.y;
     let b = 2.0 * (control.y - start.y);

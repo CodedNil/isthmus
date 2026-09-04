@@ -1,5 +1,6 @@
-use super::context::{Context, SetupError, create_surface};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+use super::context::{Context, SetupError, create_surface};
 
 pub(super) enum Present {
     Rendered,

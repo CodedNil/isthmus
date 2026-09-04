@@ -1,10 +1,3 @@
-use crate::{
-    app::{AppUpdater, Background},
-    config::Config,
-    render::music::AudioFeatures,
-    time::Instant,
-};
-use arrayvec::ArrayString;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
@@ -14,7 +7,16 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+
+use arrayvec::ArrayString;
 use tracing::{info, warn};
+
+use crate::{
+    app::{AppUpdater, Background},
+    config::Config,
+    render::music::AudioFeatures,
+    time::Instant,
+};
 
 mod enrichment;
 mod lyrics;
@@ -23,11 +25,10 @@ mod spotify;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
-#[cfg(target_arch = "wasm32")]
-use web as spotify;
-
 pub use enrichment::{ArtState, Enrichment, Fetch};
 pub use lyrics::Lyrics;
+#[cfg(target_arch = "wasm32")]
+use web as spotify;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;

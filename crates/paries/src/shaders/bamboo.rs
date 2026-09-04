@@ -1,14 +1,15 @@
-use super::{Fragment, fbm, hash, noise, tapered_segment};
 use core::f32::consts::PI;
+
 #[cfg(target_arch = "spirv")]
 use isthmus::Float as _;
+#[cfg(not(target_arch = "spirv"))]
+use isthmus::Frame;
 use isthmus::{
     Quad,
     glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
 };
 
-#[cfg(not(target_arch = "spirv"))]
-use isthmus::Frame;
+use super::{Fragment, fbm, hash, noise, tapered_segment};
 
 pub struct Bamboo;
 
@@ -157,7 +158,6 @@ fn terrain_height(x: f32, base: f32, drift: f32, character: f32) -> f32 {
     base + terrain_profile(x, drift, character)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn paint_terrain(
     color: Vec3,
     uv: Vec2,
@@ -184,7 +184,6 @@ fn paint_terrain(
     over(color, paint, mask)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn forest_layer(
     color: Vec3,
     point: Vec2,
@@ -236,7 +235,6 @@ fn forest_layer(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn grass_layer(
     color: Vec3,
     point: Vec2,

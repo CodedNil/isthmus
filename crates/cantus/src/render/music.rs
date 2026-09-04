@@ -1,17 +1,19 @@
-use crate::render::{
-    Fragment, PANEL_START, TextFragment,
-    sdf::{
-        PILL_MARGIN, VISIBLE_ALPHA, cantus_surface, hash, sample_pill, sd_capsule_box, sd_rounded_box,
-        sd_rounded_triangle, sd_star, simplex_noise,
-    },
-};
 use core::f32::consts::{FRAC_PI_2, TAU};
+
 #[cfg(target_arch = "spirv")]
 use isthmus::Float as _;
 use isthmus::{
     Image, Quad, Sdf, Unorm8x4,
     glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::{Derivative, kill},
+};
+
+use crate::render::{
+    Fragment, PANEL_START, TextFragment,
+    sdf::{
+        PILL_MARGIN, VISIBLE_ALPHA, cantus_surface, hash, sample_pill, sd_capsule_box, sd_rounded_box,
+        sd_rounded_triangle, sd_star, simplex_noise,
+    },
 };
 
 /// Spotify audio characteristics normalized for shader and UI use.

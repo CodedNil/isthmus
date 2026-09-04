@@ -1,12 +1,13 @@
-use super::{
-    ART_SIZE, ArtState, AudioFeatures, CondensedPlaylist, LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult,
-    PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime,
+use std::{
+    collections::HashMap,
+    error::Error,
+    io::{self, Write},
+    path::PathBuf,
+    str,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use crate::config::{self, Config};
-use crate::{
-    app::{AppUpdater, Background, send_update},
-    time::Instant,
-};
+
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
 use futures_util::{StreamExt, future::try_join_all};
@@ -37,21 +38,22 @@ use reqwest::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::{
-    collections::HashMap,
-    error::Error,
-    io::{self, Write},
-    path::PathBuf,
-    str,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
-use tokio::task::spawn_blocking;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    task::spawn_blocking,
     time::sleep,
 };
 use tracing::{error, info, warn};
+
+use super::{
+    ART_SIZE, ArtState, AudioFeatures, CondensedPlaylist, LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult,
+    PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime,
+};
+use crate::{
+    app::{AppUpdater, Background, send_update},
+    config::{self, Config},
+    time::Instant,
+};
 
 const ART_SIZE_PX: i32 = ART_SIZE as i32;
 

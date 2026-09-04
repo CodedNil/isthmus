@@ -1,17 +1,19 @@
-use crate::render::{
-    Fragment, GAP, Globals, PANEL_START, TEXT_COLOR, TextFragment, UNIT,
-    sdf::{
-        PILL_MARGIN, SurfaceSample, VISIBLE_ALPHA, cantus_surface, cloud_mass, fbm, hash, sample_pill, sd_capsule_box,
-        sd_rounded_box,
-    },
-};
 use core::f32::consts::PI;
+
 #[cfg(target_arch = "spirv")]
 use isthmus::Float as _;
 use isthmus::{
     Quad, ShaderData,
     glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
+};
+
+use crate::render::{
+    Fragment, GAP, Globals, PANEL_START, TEXT_COLOR, TextFragment, UNIT,
+    sdf::{
+        PILL_MARGIN, SurfaceSample, VISIBLE_ALPHA, cantus_surface, cloud_mass, fbm, hash, sample_pill, sd_capsule_box,
+        sd_rounded_box,
+    },
 };
 
 /// Number of conditions shown in the hourly forecast row.
@@ -250,10 +252,8 @@ fn sun_layer(color: Vec3, point: Vec2, size: Vec2, [sun_x, sun_y]: [f32; 2], clo
 
 #[isthmus::paint]
 mod host {
-    use super::*;
+    use std::{array::from_fn, fmt::Write};
 
-    use crate::interaction::Rect;
-    use crate::{app::Background, render::UiContext};
     use arrayvec::{ArrayString, ArrayVec};
     use jiff::{
         Span, Timestamp, Zoned,
@@ -261,9 +261,11 @@ mod host {
         tz::{Offset, TimeZone},
     };
     use reqwest::Client;
-    use std::{array::from_fn, fmt::Write};
     use tokio::sync::mpsc::{self, UnboundedReceiver};
     use tracing::warn;
+
+    use super::*;
+    use crate::{app::Background, interaction::Rect, render::UiContext};
 
     #[derive(Default)]
     struct ForecastItem {
@@ -296,8 +298,8 @@ mod host {
     }
 
     mod monitor {
-        use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, WeatherCondition, WeatherPanel};
-        use crate::{app::Background, platform::Platform};
+        use std::{array::from_fn, time::Duration};
+
         use futures_util::future::join_all;
         use jiff::{
             civil::DateTime,
@@ -305,9 +307,11 @@ mod host {
         };
         use reqwest::Client;
         use serde::{Deserialize, de::DeserializeOwned};
-        use std::{array::from_fn, time::Duration};
         use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
         use tracing::warn;
+
+        use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, WeatherCondition, WeatherPanel};
+        use crate::{app::Background, platform::Platform};
 
         const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
         const REFRESH_INTERVAL: Duration = Duration::from_mins(15);

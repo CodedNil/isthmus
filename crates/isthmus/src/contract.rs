@@ -1,5 +1,6 @@
-use crate::{ShaderData, data::ImageHandle};
 use spirv_std::image::{Image2d, SampledImage};
+
+use crate::{ShaderData, data::ImageHandle};
 
 pub const IMAGE_CAPACITY: usize = 16;
 pub type ImageHeap = [SampledImage<Image2d>; IMAGE_CAPACITY];
@@ -11,6 +12,7 @@ pub type ImageHeap = [SampledImage<Image2d>; IMAGE_CAPACITY];
 /// generated host/shader contract.
 #[doc(hidden)]
 pub fn load<T>(buffer: &[u32], byte_index: u32) -> T {
+    // SAFETY: Generated shaders only request recorded, correctly aligned values of T.
     unsafe { spirv_std::ByteAddressableBuffer::from_slice(buffer).load(byte_index) }
 }
 
@@ -38,10 +40,13 @@ pub struct PushBlock {
     pub time: f32,
 }
 
+// SAFETY: repr(C) gives PushBlock the scalar-layout-compatible field order and padding.
 unsafe impl ShaderData for PushBlock {}
 #[cfg(not(target_arch = "spirv"))]
+// SAFETY: PushBlock contains only Pod fields and has no invalid bit patterns.
 unsafe impl bytemuck::Zeroable for PushBlock {}
 #[cfg(not(target_arch = "spirv"))]
+// SAFETY: PushBlock is repr(C), contains only Pod fields, and has no uninitialized padding.
 unsafe impl bytemuck::Pod for PushBlock {}
 
 #[cfg(not(target_arch = "spirv"))]
@@ -80,6 +85,7 @@ pub struct Quad {
     pub axis: glam::Vec2,
 }
 
+// SAFETY: repr(C) Quad consists entirely of scalar-layout-compatible Vec2 fields.
 unsafe impl ShaderData for Quad {}
 
 #[repr(C)]
@@ -90,6 +96,7 @@ pub struct DrawRecord {
     pub payload: u32,
 }
 
+// SAFETY: repr(C) DrawRecord consists of a valid Quad followed by one u32.
 unsafe impl ShaderData for DrawRecord {}
 
 impl Quad {

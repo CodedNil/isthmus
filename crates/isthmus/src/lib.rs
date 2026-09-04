@@ -16,12 +16,6 @@ pub mod text;
 #[cfg(not(target_arch = "spirv"))]
 mod backend;
 
-pub use glam;
-pub use spirv_std;
-pub use spirv_std::num_traits::Float;
-
-pub use isthmus_macros::{ShaderData, paint, program};
-
 #[cfg(not(target_arch = "spirv"))]
 pub use backend::{Render, RenderError, Renderer, SetupError};
 #[cfg(not(target_arch = "spirv"))]
@@ -30,16 +24,22 @@ pub use contract::{Fragment, Quad};
 pub use data::{ShaderData, Unorm8x4};
 #[cfg(not(target_arch = "spirv"))]
 pub use frame::Frame;
+pub use glam;
 pub use image::Image;
+pub use isthmus_macros::{ShaderData, paint, program};
 pub use sdf::{Sdf, SdfSample};
+pub use spirv_std::{self, num_traits::Float};
 pub use text::TextFragment;
 
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::contract::{DrawRecord, ImageHeap, PushBlock, ShaderImage, load};
-    #[cfg(not(target_arch = "spirv"))]
-    pub use crate::contract::{PaintPipeline, Program, ShaderSpec, shader_module_name};
-    pub use crate::data::ImageHandle;
     #[cfg(not(target_arch = "spirv"))]
     pub use bytemuck;
+
+    #[cfg(not(target_arch = "spirv"))]
+    pub use crate::contract::{PaintPipeline, Program, ShaderSpec, shader_module_name};
+    pub use crate::{
+        contract::{DrawRecord, ImageHeap, PushBlock, ShaderImage, load},
+        data::ImageHandle,
+    };
 }

@@ -1,10 +1,13 @@
+use std::collections::HashSet;
+
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use std::collections::HashSet;
-use syn::visit::{self, Visit};
-use syn::visit_mut::{VisitMut, visit_expr_mut};
+use syn::{
+    visit::{self, Visit},
+    visit_mut::{VisitMut, visit_expr_mut},
+};
 
 mod buffer;
 mod paint;
@@ -129,7 +132,7 @@ fn extract_paints(input: TokenStream) -> TokenStream {
             pub use #module::*;
         }
     });
-    quote!(#(#shaders)* #[cfg(not(target_arch = "spirv"))] #[allow(clippy::wildcard_imports)] #item #exports).into()
+    quote!(#(#shaders)* #[cfg(not(target_arch = "spirv"))] #[expect(clippy::wildcard_imports, reason = "the host facade re-exports its paint module prelude")] #item #exports).into()
 }
 
 #[derive(Default)]
@@ -209,10 +212,13 @@ impl InlinePaints {
         };
         let name = format_ident!("__isthmus_inline_{}_{}", self.method, self.next);
         self.next += 1;
-        let mut inputs = closure.inputs.iter();
-        let syn::Pat::Type(shader_input) = inputs.next().unwrap() else {
-            unreachable!()
-        };
+        let mut inputs = closure.inputs.iter().filter_map(|input| match input {
+            syn::Pat::Type(input) => Some(input),
+            _ => None,
+        });
+        let shader_input = inputs.next().ok_or_else(|| {
+            syn::Error::new_spanned(&closure.inputs, "inline paint closure requires a fragment input")
+        })?;
         let syn::Pat::Ident(shader_name) = shader_input.pat.as_ref() else {
             return Err(syn::Error::new_spanned(
                 &shader_input.pat,
@@ -236,12 +242,7 @@ impl InlinePaints {
                 "paint shader input must be the first parameter and named `fragment`",
             ));
         }
-        let shader_inputs = inputs
-            .map(|input| {
-                let syn::Pat::Type(input) = input else { unreachable!() };
-                input.clone()
-            })
-            .collect::<Vec<_>>();
+        let shader_inputs = inputs.cloned().collect::<Vec<_>>();
         let captures = shader_inputs
             .iter()
             .map(paint::Capture::new)
@@ -253,7 +254,7 @@ impl InlinePaints {
             pipeline,
         } = expansion;
         self.shaders.push(items);
-        let geometry = call.args.first().unwrap().clone();
+        let geometry = call.args[0].clone();
         Ok(Some(rewrite_call(
             call,
             &Rewrite {
@@ -273,8 +274,11 @@ impl InlinePaints {
             .inputs
             .iter()
             .skip(input_start)
+            .filter_map(|input| match input {
+                syn::Pat::Type(input) => Some(input),
+                _ => None,
+            })
             .map(|input| {
-                let syn::Pat::Type(input) = input else { unreachable!() };
                 let syn::Pat::Ident(name) = input.pat.as_ref() else {
                     return Err(syn::Error::new_spanned(
                         &input.pat,

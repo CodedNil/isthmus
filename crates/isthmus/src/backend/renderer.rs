@@ -1,3 +1,8 @@
+use core::{error::Error, fmt};
+use std::{time::Instant, vec, vec::Vec};
+
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
 use super::{
     Canvas, Context, SetupError,
     surface::{Present, SurfaceTarget},
@@ -8,9 +13,6 @@ use crate::{
     glam::{Vec2, Vec3},
     text::Text,
 };
-use core::{error::Error, fmt};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::{time::Instant, vec, vec::Vec};
 
 pub struct Renderer {
     context: Context,

@@ -1,33 +1,3 @@
-use crate::app::spawn_thread;
-use crate::interaction::InputEvent;
-use crate::{
-    app::{AppUpdater, Background, CantusApp, send_update},
-    config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
-    render::{
-        PANEL_START,
-        launcher::{BACKGROUND_RADIUS, LauncherKey},
-        lyrics::EXTENSION as LYRICS_EXTENSION,
-        status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
-        weathertime::EXTENSION as WEATHER_EXTENSION,
-    },
-};
-use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
-use futures_util::StreamExt;
-use image::imageops::FilterType;
-use isthmus::SurfaceHandle;
-use isthmus::glam::{FloatExt, vec2};
-use microfft::real::rfft_1024;
-use raw_window_handle::{
-    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
-    WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
-};
-use reqwest::Client;
-use resvg::{
-    render,
-    tiny_skia::{Pixmap, Transform},
-    usvg::{self, Tree},
-};
-use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -50,6 +20,26 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
+use futures_util::StreamExt;
+use image::imageops::FilterType;
+use isthmus::{
+    SurfaceHandle,
+    glam::{FloatExt, vec2},
+};
+use microfft::real::rfft_1024;
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
+};
+use reqwest::Client;
+use resvg::{
+    render,
+    tiny_skia::{Pixmap, Transform},
+    usvg::{self, Tree},
+};
+use serde_json::Value;
 use sysinfo::{Gpus, System};
 use tokio::{net::UnixDatagram, sync::mpsc::UnboundedSender, time::sleep as tokio_sleep};
 use tracing::warn;
@@ -72,16 +62,18 @@ use wayland_client::{
         wl_surface::WlSurface,
     },
 };
-use wayland_protocols::ext::background_effect::v1::client::{
-    ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
-    ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
-};
-use wayland_protocols::wp::{
-    fractional_scale::v1::client::{
-        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
-        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+use wayland_protocols::{
+    ext::background_effect::v1::client::{
+        ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
+        ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
     },
-    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+    wp::{
+        fractional_scale::v1::client::{
+            wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+            wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+        },
+        viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+    },
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer as LayerStyle, ZwlrLayerShellV1},
@@ -92,6 +84,19 @@ use zbus::{
     Connection as DbusConnection, Proxy as DbusProxy,
     proxy::{Builder as ProxyBuilder, CacheProperties},
     zvariant::{OwnedObjectPath, OwnedValue, Value as DbusValue},
+};
+
+use crate::{
+    app::{AppUpdater, Background, CantusApp, send_update, spawn_thread},
+    config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
+    interaction::InputEvent,
+    render::{
+        PANEL_START,
+        launcher::{BACKGROUND_RADIUS, LauncherKey},
+        lyrics::EXTENSION as LYRICS_EXTENSION,
+        status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
+        weathertime::EXTENSION as WEATHER_EXTENSION,
+    },
 };
 
 const PANEL_OVERFLOW: f32 = 16.0;
@@ -728,6 +733,7 @@ struct NativeSurface {
 impl HasDisplayHandle for NativeSurface {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
         let handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(self.display));
+        // SAFETY: LayerShellApp owns the Wayland connection that supplied this live display pointer.
         Ok(unsafe { DisplayHandle::borrow_raw(handle) })
     }
 }
@@ -735,6 +741,7 @@ impl HasDisplayHandle for NativeSurface {
 impl HasWindowHandle for NativeSurface {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
         let handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(self.window));
+        // SAFETY: LayerShellApp owns the live wl_surface represented by this pointer.
         Ok(unsafe { WindowHandle::borrow_raw(handle) })
     }
 }
@@ -1301,6 +1308,7 @@ dispatch!(WlKeyboard, |state, _proxy, event, _qhandle| {
             size,
         } => {
             let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+            // SAFETY: Wayland supplied fd and size for an XKB keymap in the declared format.
             let keymap = unsafe {
                 xkb::Keymap::new_from_fd(
                     &context,

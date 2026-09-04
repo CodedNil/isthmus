@@ -1,3 +1,5 @@
+use core::ops::{Deref, DerefMut};
+
 use crate::{
     Image,
     backend::Canvas,
@@ -5,7 +7,6 @@ use crate::{
     data::ImageHandle,
     text::{Line, Text, TextScope},
 };
-use core::ops::{Deref, DerefMut};
 
 pub struct Frame<'a> {
     pub time: f32,
@@ -59,7 +60,6 @@ impl<'a> Frame<'a> {
     ///
     /// The inline closure receives [`crate::Fragment`], followed by explicitly typed
     /// values inferred from its surrounding host function.
-    ///
     pub fn paint<S, Geometry, Payload>(&mut self, geometry: Geometry, payload: Payload)
     where
         S: ShaderSpec,
@@ -74,7 +74,6 @@ impl<'a> Frame<'a> {
     /// Paints shaped text with an inline Rust-GPU fragment shader.
     ///
     /// The closure inputs match [`Self::paint`], starting with [`crate::TextFragment`].
-    ///
     pub fn paint_text<S, Payload>(&mut self, line: Line, payload: Payload)
     where
         S: ShaderSpec,

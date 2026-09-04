@@ -1,5 +1,6 @@
+use std::{env, ffi::OsString, path::PathBuf};
+
 use isthmus_build::ShaderBuild;
-use std::{env, path::PathBuf};
 
 fn main() {
     let mut args = env::args_os().skip(1);
@@ -9,9 +10,7 @@ fn main() {
     let workspace = required(&mut args, "workspace");
     let output = required(&mut args, "output");
 
-    if args.next().is_some() {
-        panic!("unexpected argument");
-    }
+    assert!(args.next().is_none(), "unexpected argument");
 
     ShaderBuild {
         name: name.to_string_lossy().into_owned(),
@@ -24,6 +23,6 @@ fn main() {
     .expect("shader build failed");
 }
 
-fn required(args: &mut impl Iterator<Item = std::ffi::OsString>, name: &str) -> std::ffi::OsString {
+fn required(args: &mut impl Iterator<Item = OsString>, name: &str) -> OsString {
     args.next().unwrap_or_else(|| panic!("missing {name} argument"))
 }

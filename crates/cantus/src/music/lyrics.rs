@@ -1,5 +1,5 @@
-use super::{Enrichment, Fetch, TRACK_SPACING_MS, Track, TrackId, spotify::Spotify};
-use crate::app::update;
+use std::{mem, ops::Range};
+
 use isthmus::{
     glam::{FloatExt, vec2},
     text,
@@ -11,8 +11,10 @@ use quick_xml::{
 };
 use reqwest::Client;
 use serde::Deserialize;
-use std::{mem, ops::Range};
 use tracing::warn;
+
+use super::{Enrichment, Fetch, TRACK_SPACING_MS, Track, TrackId, spotify::Spotify};
+use crate::app::update;
 
 const API: &str = "https://lyrics-api.binimum.org/";
 #[derive(Clone)]
