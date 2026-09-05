@@ -1,8 +1,8 @@
 use super::{Enrichment, Fetch, TRACK_SPACING_MS, Track, TrackId, spotify::Spotify};
 use crate::app::update;
 use isthmus::{
+    geometry::text,
     glam::{FloatExt, vec2},
-    text,
 };
 use quick_xml::{
     Reader, XmlVersion,

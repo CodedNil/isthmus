@@ -191,7 +191,7 @@ impl StatusPanel {
             .unwrap();
             let half_width = GRAPH_WIDTH * 0.5 - GAP * 0.5;
             let line =
-                context.frame.text().line(&label, 11.0, 700.0).fit(GAP + 5.0, center - half_width..center + half_width);
+                context.frame.text.line(&label, 11.0, 700.0).fit(GAP + 5.0, center - half_width..center + half_width);
             let history_scroll = self.history_scroll;
             context.frame.paint(
                 graph_pill.expanded(PILL_MARGIN),
@@ -348,12 +348,12 @@ impl StatusPanel {
             let center = cursor + ACTION_WIDTH * 0.5;
             let response = context.interaction.interact(section(center, ACTION_WIDTH));
             self.action_hover[action] =
-                self.action_hover[action].move_towards(f32::from(response.hovered()), context.frame.delta_time / 0.12);
-            if response.hovered() && response.held_for(1.5) {
+                self.action_hover[action].move_towards(f32::from(response.hovered), context.frame.delta_time / 0.12);
+            if response.hovered && response.held_for(1.5) {
                 Platform::run_power_action(&self.background, action);
             }
             let hover = self.action_hover[action];
-            let selected = f32::from(response.held() && response.hovered());
+            let selected = f32::from(response.held() && response.hovered);
             let power_progress = (response.held_seconds / 1.5).saturate();
             let reboot = action == 1;
             context.frame.paint(

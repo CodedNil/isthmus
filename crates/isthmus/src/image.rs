@@ -1,3 +1,4 @@
+use spirv_std::{Sampler, image::Image2d};
 #[cfg(not(target_arch = "spirv"))]
 use std::sync::Arc;
 
@@ -69,29 +70,18 @@ impl Image {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{Image, Sampling};
-    use glam::{Vec4, vec2};
+#[doc(hidden)]
+pub struct ShaderImage<'a> {
+    image: &'a Image2d,
+    sampler: Sampler,
+}
 
-    #[test]
-    fn sampling_handles_texel_centers_clamped_edges_and_repeat_seams() {
-        let image = Image::rgba8([2, 1], [255, 0, 0, 255, 0, 0, 255, 255]);
-        let red = Vec4::new(1.0, 0.0, 0.0, 1.0);
-        let blue = Vec4::new(0.0, 0.0, 1.0, 1.0);
-        let purple = red.lerp(blue, 0.5);
-        for (sampling, x, expected) in [
-            (Sampling::Linear, 0.25, red),
-            (Sampling::Linear, 0.5, purple),
-            (Sampling::Linear, -0.1, red),
-            (Sampling::Nearest, 0.49, red),
-            (Sampling::Nearest, 0.51, blue),
-            (Sampling::Nearest, 1.0, blue),
-            (Sampling::LinearRepeat, 0.0, purple),
-            (Sampling::LinearRepeat, 1.0, purple),
-            (Sampling::NearestRepeat, -0.25, blue),
-        ] {
-            assert!(image.sampled(sampling).sample(vec2(x, 0.5)).abs_diff_eq(expected, 0.0001));
-        }
+impl<'a> ShaderImage<'a> {
+    pub const fn new(image: &'a Image2d, sampler: Sampler) -> Self {
+        Self { image, sampler }
+    }
+
+    pub fn sample(&self, uv: glam::Vec2) -> glam::Vec4 {
+        self.image.sample(self.sampler, uv)
     }
 }

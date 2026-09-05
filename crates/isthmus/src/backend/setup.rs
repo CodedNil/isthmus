@@ -20,7 +20,7 @@ pub enum SetupError {
     WebGpuUnavailable,
 }
 
-pub(super) fn create_surface(
+pub(super) unsafe fn create_surface(
     instance: &wgpu::Instance,
     source: &(impl HasDisplayHandle + HasWindowHandle),
 ) -> Result<wgpu::Surface<'static>, SetupError> {
@@ -35,7 +35,7 @@ pub(super) fn create_surface(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn new<P: Program>(
+pub(super) unsafe fn new<P: Program>(
     source: &(impl HasDisplayHandle + HasWindowHandle),
     size: [u32; 2],
 ) -> Result<(Gpu, SurfaceTarget), SetupError> {
@@ -43,7 +43,8 @@ pub(super) fn new<P: Program>(
         backends: wgpu::Backends::VULKAN,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let surface = create_surface(&instance, source)?;
+    // SAFETY: The caller keeps both native handles alive for the returned surface.
+    let surface = unsafe { create_surface(&instance, source) }?;
     pollster::block_on(finish::<P>(instance, surface, size, wgpu::PowerPreference::HighPerformance))
 }
 
@@ -81,6 +82,7 @@ async fn finish<P: Program>(
             label: Some("isthmus"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         })
         .await?;

@@ -1,20 +1,16 @@
+mod references;
 use crate::syntax::{Shader, program, vertex};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, quote};
+use references::{DefaultFields, References};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     fs,
     io::Write,
-    mem,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-use syn::{
-    Item, UseTree,
-    punctuated::Punctuated,
-    spanned::Spanned,
-    visit::{self, Visit},
-};
+use syn::{Item, UseTree, punctuated::Punctuated, visit::Visit};
 
 pub struct Generated {
     pub source: String,
@@ -105,7 +101,10 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
         }
     }
     let items = graph.emit(0);
-    let vertex = vertex(&quote!(::isthmus));
+    let vertices = [false, true]
+        .into_iter()
+        .filter(|&triangle| entries.iter().any(|shader| shader.is_triangle() == triangle))
+        .map(|triangle| vertex(&quote!(::isthmus), triangle));
     let mut defaults = DefaultFields(false);
     defaults.visit_file(&syn::parse2(items.clone()).map_err(|error| error.to_string())?);
     let feature = defaults.0.then(|| quote!(#![feature(default_field_values)]));
@@ -113,7 +112,7 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
         #![no_std]
         #feature
         #![allow(dead_code, unused_imports, reason = "shader extraction conservatively retains shared methods and trait imports")]
-        pub mod render { #items #vertex }
+        pub mod render { #items #(#vertices)* }
     }.to_string();
     let mut formatter = Command::new("rustfmt")
         .args(["--edition", "2024", "--emit", "stdout"])
@@ -315,18 +314,8 @@ impl Graph {
         for &index in &module.selected {
             let mut item = module.items[index].clone();
             if let Item::Struct(item) = &mut item {
-                for attribute in item.attrs.iter_mut().filter(|attr| attr.path().is_ident("derive")) {
-                    if let Ok(mut paths) =
-                        attribute.parse_args_with(Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
-                    {
-                        paths = paths
-                            .into_iter()
-                            .filter(|path| {
-                                path.segments.last().is_none_or(|segment| {
-                                    segment.ident != "Deserialize" && segment.ident != "Serialize"
-                                })
-                            })
-                            .collect();
+                for attribute in &mut item.attrs {
+                    if let Some(paths) = shader_derives(attribute) {
                         *attribute = syn::parse_quote!(#[derive(#paths)]);
                     }
                 }
@@ -424,342 +413,20 @@ fn flatten(tree: &UseTree, mut prefix: Vec<syn::Ident>, output: &mut Vec<(String
     }
 }
 
-#[derive(Default)]
-struct References {
-    paths: Vec<syn::Path>,
-    methods: HashSet<String>,
-    locals: Vec<HashSet<String>>,
-    declarations: Vec<(syn::Macro, proc_macro2::LineColumn, HashSet<String>)>,
-}
-
-impl References {
-    fn bind(&mut self, pattern: &syn::Pat) {
-        if self.locals.is_empty() {
-            self.locals.push(HashSet::new());
-        }
-        let mut names = Bindings(self.locals.last_mut().expect("a local scope was created"));
-        names.visit_pat(pattern);
+fn shader_derives(attribute: &syn::Attribute) -> Option<Punctuated<syn::Path, syn::Token![,]>> {
+    if !attribute.path().is_ident("derive") {
+        return None;
     }
-}
-
-impl<'ast> Visit<'ast> for References {
-    fn visit_attribute(&mut self, i: &'ast syn::Attribute) {
-        if i.path().is_ident("derive")
-            && let Ok(paths) = i.parse_args_with(Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
-        {
-            self.paths.extend(paths.into_iter().filter(|path| {
+    Some(
+        attribute
+            .parse_args_with(Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+            .ok()?
+            .into_iter()
+            .filter(|path| {
                 path.segments
                     .last()
                     .is_none_or(|segment| segment.ident != "Deserialize" && segment.ident != "Serialize")
-            }));
-        }
-    }
-
-    fn visit_macro(&mut self, i: &'ast syn::Macro) {
-        if i.path.segments.last().is_some_and(|segment| segment.ident == "shader") {
-            self.declarations.push((i.clone(), i.path.span().start(), self.locals.iter().flatten().cloned().collect()));
-        }
-    }
-
-    fn visit_item_mod(&mut self, _: &'ast syn::ItemMod) {}
-
-    fn visit_expr_path(&mut self, i: &'ast syn::ExprPath) {
-        if i.path
-            .get_ident()
-            .is_none_or(|name| !self.locals.iter().rev().any(|scope| scope.contains(&name.to_string())))
-        {
-            self.paths.push(i.path.clone());
-        }
-        if i.path.segments.len() > 1 {
-            self.methods.insert(i.path.segments.last().expect("path has segments").ident.to_string());
-        }
-        visit::visit_expr_path(self, i);
-    }
-
-    fn visit_type_path(&mut self, i: &'ast syn::TypePath) {
-        self.paths.push(i.path.clone());
-        visit::visit_type_path(self, i);
-    }
-
-    fn visit_expr_struct(&mut self, i: &'ast syn::ExprStruct) {
-        self.paths.push(i.path.clone());
-        visit::visit_expr_struct(self, i);
-    }
-
-    fn visit_expr_method_call(&mut self, i: &'ast syn::ExprMethodCall) {
-        self.methods.insert(i.method.to_string());
-        visit::visit_expr_method_call(self, i);
-    }
-
-    fn visit_block(&mut self, i: &'ast syn::Block) {
-        self.locals.push(HashSet::new());
-        for statement in &i.stmts {
-            if let syn::Stmt::Item(item) = statement
-                && let Some(name) = item_name(item)
-            {
-                self.locals.last_mut().expect("a block scope was created").insert(name);
-            }
-        }
-        visit::visit_block(self, i);
-        self.locals.pop();
-    }
-
-    fn visit_item_fn(&mut self, i: &'ast syn::ItemFn) {
-        let outer = mem::take(&mut self.locals);
-        visit::visit_item_fn(self, i);
-        self.locals = outer;
-    }
-
-    fn visit_impl_item_fn(&mut self, i: &'ast syn::ImplItemFn) {
-        let outer = mem::take(&mut self.locals);
-        visit::visit_impl_item_fn(self, i);
-        self.locals = outer;
-    }
-
-    fn visit_trait_bound(&mut self, i: &'ast syn::TraitBound) {
-        self.paths.push(i.path.clone());
-        visit::visit_trait_bound(self, i);
-    }
-
-    fn visit_pat_struct(&mut self, i: &'ast syn::PatStruct) {
-        self.paths.push(i.path.clone());
-        visit::visit_pat_struct(self, i);
-    }
-
-    fn visit_pat_tuple_struct(&mut self, i: &'ast syn::PatTupleStruct) {
-        self.paths.push(i.path.clone());
-        visit::visit_pat_tuple_struct(self, i);
-    }
-
-    fn visit_local(&mut self, i: &'ast syn::Local) {
-        if let Some(init) = &i.init {
-            self.visit_local_init(init);
-        }
-        self.visit_pat(&i.pat);
-        self.bind(&i.pat);
-    }
-
-    fn visit_fn_arg(&mut self, i: &'ast syn::FnArg) {
-        visit::visit_fn_arg(self, i);
-        if let syn::FnArg::Typed(input) = i {
-            self.bind(&input.pat);
-        }
-    }
-
-    fn visit_expr_closure(&mut self, i: &'ast syn::ExprClosure) {
-        self.locals.push(HashSet::new());
-        for input in &i.inputs {
-            self.visit_pat(input);
-            self.bind(input);
-        }
-        self.visit_expr(&i.body);
-        self.locals.pop();
-    }
-
-    fn visit_expr_for_loop(&mut self, i: &'ast syn::ExprForLoop) {
-        self.visit_expr(&i.expr);
-        self.locals.push(HashSet::new());
-        self.bind(&i.pat);
-        self.visit_block(&i.body);
-        self.locals.pop();
-    }
-
-    fn visit_arm(&mut self, i: &'ast syn::Arm) {
-        self.locals.push(HashSet::new());
-        self.bind(&i.pat);
-        visit::visit_arm(self, i);
-        self.locals.pop();
-    }
-
-    fn visit_expr_let(&mut self, i: &'ast syn::ExprLet) {
-        self.visit_expr(&i.expr);
-        self.visit_pat(&i.pat);
-        self.bind(&i.pat);
-    }
-
-    fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
-        self.locals.push(HashSet::new());
-        self.visit_expr(&i.cond);
-        self.visit_block(&i.then_branch);
-        self.locals.pop();
-        if let Some((_, branch)) = &i.else_branch {
-            self.visit_expr(branch);
-        }
-    }
-
-    fn visit_item_use(&mut self, i: &'ast syn::ItemUse) {
-        let mut imports = Vec::new();
-        flatten(&i.tree, Vec::new(), &mut imports);
-        self.paths.extend(imports.into_iter().map(|(_, path)| path));
-    }
-
-    fn visit_expr_while(&mut self, i: &'ast syn::ExprWhile) {
-        self.locals.push(HashSet::new());
-        self.visit_expr(&i.cond);
-        self.visit_block(&i.body);
-        self.locals.pop();
-    }
-}
-
-struct Bindings<'a>(&'a mut HashSet<String>);
-impl<'ast> Visit<'ast> for Bindings<'_> {
-    fn visit_pat_ident(&mut self, i: &'ast syn::PatIdent) {
-        self.0.insert(i.ident.to_string());
-        visit::visit_pat_ident(self, i);
-    }
-}
-
-struct DefaultFields(bool);
-impl<'ast> Visit<'ast> for DefaultFields {
-    fn visit_field(&mut self, i: &'ast syn::Field) {
-        self.0 |= i.default.is_some();
-        visit::visit_field(self, i);
-    }
-
-    fn visit_expr_struct(&mut self, i: &'ast syn::ExprStruct) {
-        self.0 |= i.dot2_token.is_some() && i.rest.is_none();
-        visit::visit_expr_struct(self, i);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::generate;
-    use std::{
-        env, fs,
-        path::Path,
-        process,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
-
-    fn try_extract(source: &str) -> Result<String, String> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = env::temp_dir().join(format!(
-            "isthmus-extract-{}-{}.rs",
-            process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::write(&path, source).unwrap();
-        let result = generate(&path).map(|generated| generated.source);
-        fs::remove_file(path).unwrap();
-        result
-    }
-
-    fn extract(source: &str) -> String {
-        try_extract(source).unwrap()
-    }
-
-    #[test]
-    fn rejects_implicit_and_unsupported_captures() {
-        let error = try_extract(
-            "const GAIN: f32 = 1.0;
-            fn draw() {
-                const GAIN: f32 = 2.0;
-                isthmus::shader!(|fragment: Fragment| Vec4::splat(GAIN));
-            }",
-        )
-        .unwrap_err();
-        assert!(error.contains("GAIN belongs to the surrounding function"));
-        let generated = extract(
-            "fn draw(gain: f32) {
-                isthmus::shader!(|fragment: Fragment, gain: f32| Vec4::splat(gain));
-            }",
-        );
-        assert!(generated.contains("gain: f32"));
-        let error = try_extract(
-            "fn draw() {
-                isthmus::shader!(|fragment: Fragment, image: Image, other: Image| Vec4::ONE);
-            }",
-        )
-        .unwrap_err();
-        assert!(error.contains("a shader may capture one Image"));
-    }
-
-    #[test]
-    fn compiles_image_early_returns_and_shared_defaults_to_spirv() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let output = workspace.join("target/isthmus/extraction-test");
-        fs::create_dir_all(&output).unwrap();
-        crate::ShaderBuild {
-            name: "extraction-test".into(),
-            source: workspace.join("crates/isthmus_build/tests/fixtures/render.rs"),
-            isthmus: workspace.join("crates/isthmus"),
-            workspace,
-            output: output.join("shader.spv"),
-        }
-        .build()
-        .unwrap();
-        let manifest = fs::read_to_string(output.join("shader.manifest.rs")).unwrap();
-        assert_eq!(manifest.matches("ShaderEntry {").count(), 3);
-        assert!(manifest.contains("Blend :: Add") && manifest.contains("Primitive :: Triangle"));
-        assert!(manifest.contains("Blend :: Replace"));
-    }
-
-    #[test]
-    fn follows_aliased_helpers_without_importing_cpu_code() {
-        let generated = extract(
-            "
-            use unavailable_cpu_crate::Cpu;
-            use math::weight as amount;
-            mod math {
-                const SCALE: f32 = 2.0;
-                pub fn weight() -> f32 { SCALE }
-                fn unused() -> Cpu { panic!() }
-            }
-            fn draw() {
-                frame.paint(quad, isthmus::shader!(|fragment: Fragment| Vec4::splat(amount())));
-            }
-        ",
-        );
-        assert!(generated.contains("fn weight"));
-        assert!(generated.contains("const SCALE"));
-        assert!(generated.contains("use math::weight as amount"));
-        assert!(!generated.contains("unavailable_cpu_crate"));
-        assert!(!generated.contains("fn unused"));
-        assert!(!generated.contains("fn draw"));
-    }
-
-    #[test]
-    fn resolves_block_loop_and_nested_function_scopes() {
-        let generated = extract(
-            "
-            use unavailable_cpu_crate::local;
-            use math::weight;
-            use math::weight as inner_weight;
-            mod math { pub fn weight() -> f32 { 2.0 } }
-            fn helper() -> f32 {
-                let local = 1.0;
-                { let weight = 3.0; let _ = weight; }
-                while let Some(weight) = None::<f32> { let _ = weight; }
-                let inner_weight = 1.0;
-                fn inner() -> f32 { inner_weight() }
-                weight() + local + inner() + inner_weight
-            }
-            fn draw() {
-                frame.paint(quad, isthmus::shader!(|fragment: Fragment| Vec4::splat(helper())));
-            }
-        ",
-        );
-        assert!(generated.contains("fn weight"));
-        assert!(generated.contains("weight as inner_weight"));
-        assert!(!generated.contains("unavailable_cpu_crate"));
-    }
-
-    #[test]
-    fn follows_glob_imports_without_copying_unrelated_items() {
-        let generated = extract(
-            "
-            use math::*;
-            mod math {
-                pub const USED: f32 = 1.0;
-                pub const UNUSED: f32 = 2.0;
-            }
-            fn draw() {
-                frame.paint(quad, isthmus::shader!(|fragment: Fragment| Vec4::splat(USED)));
-            }
-        ",
-        );
-        assert!(generated.contains("const USED"));
-        assert!(!generated.contains("const UNUSED"));
-    }
+            })
+            .collect(),
+    )
 }

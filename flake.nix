@@ -145,6 +145,7 @@ rec {
           pkg-config
           just
           nixfmt
+          spirv-tools
           pipewire
           wireplumber
         ];

@@ -45,32 +45,20 @@ fn fragment_entry(
     let frames_binding = bindings::FRAMES;
     let image_binding = bindings::IMAGE;
     let sampler_binding = bindings::SAMPLER;
-    let geometry = if kind == InputKind::Triangle {
-        quote!(let triangle = #isthmus::Triangle::from_data(draw.geometry);)
+    let (geometry, input) = if kind == InputKind::Triangle {
+        (quote!(#isthmus::Triangle), quote!(#isthmus::TriangleFragment))
     } else {
-        quote!(let quad = #isthmus::Quad::from_data(draw.geometry); let local = quad.local(pixel);)
+        (quote!(#isthmus::Quad), quote!(#isthmus::Fragment))
     };
-    let fragment = if kind == InputKind::Triangle {
-        quote!(let #shader_name: #shader_input = #isthmus::TriangleFragment::new(
-            pixel, triangle, frame.time, unsafe { #isthmus::__private::load(globals, 0) },
-        );)
-    } else if kind == InputKind::Text {
-        quote!(let fragment = #isthmus::Fragment::new(
-            pixel, local, quad.size, frame.time, unsafe { #isthmus::__private::load(globals, 0) },
-        );)
-    } else {
-        quote!(let #shader_name: #shader_input = #isthmus::Fragment::new(
-            pixel, local, quad.size, frame.time, unsafe { #isthmus::__private::load(globals, 0) },
-        );)
-    };
+    let binding = if kind == InputKind::Text { quote!(fragment) } else { quote!(#shader_name: #shader_input) };
     let text_resources = (kind == InputKind::Text).then(|| {
         quote! {
             #[spirv(storage_buffer, descriptor_set = 0, binding = #placed_binding)]
-            placed_glyphs: &[#isthmus::text::PlacedGlyph],
+            placed_glyphs: &[#isthmus::geometry::text::PlacedGlyph],
             #[spirv(storage_buffer, descriptor_set = 0, binding = #glyphs_binding)]
-            glyphs: &[#isthmus::text::Glyph],
+            glyphs: &[#isthmus::geometry::text::Glyph],
             #[spirv(storage_buffer, descriptor_set = 0, binding = #curves_binding)]
-            curves: &[#isthmus::text::Curve],
+            curves: &[#isthmus::geometry::text::Curve],
         }
     });
     let payload_resource = payload
@@ -95,7 +83,7 @@ fn fragment_entry(
             #[spirv(storage_buffer, descriptor_set = 0, binding = #globals_binding)]
             globals: &[u32],
             #[spirv(storage_buffer, descriptor_set = 0, binding = #frames_binding)]
-            frames: &[#isthmus::__private::PushBlock],
+            frames: &#isthmus::__private::PushBlock,
             #payload_resource
             #text_resources
             #image_resources
@@ -103,56 +91,47 @@ fn fragment_entry(
             out_color: &mut #isthmus::glam::Vec4,
         ) {
             let draw = draws[draw_index as usize];
-            let frame = frames[0];
-            #geometry
+            let frame = *frames;
             // SAFETY: The frame globals use the generated shader's declared layout.
-            #fragment
+            let #binding = #input::new(
+                pixel, #geometry::from_data(draw.geometry), frame.time,
+                unsafe { #isthmus::__private::load(globals, 0) },
+            );
             #body
         }
     }
 }
 
-pub fn vertex(isthmus: &TokenStream2) -> TokenStream2 {
+pub fn vertex(isthmus: &TokenStream2, triangle: bool) -> TokenStream2 {
     let draws_binding = bindings::DRAWS;
     let frames_binding = bindings::FRAMES;
-    let entries = [("isthmus_quad", false), ("isthmus_triangle", true)].map(|(entry, triangle)| {
-        let name = quote::format_ident!("{entry}");
-        let pixel = if triangle {
-            quote!(match vertex {
-                0 => draw.geometry[0],
-                1 => draw.geometry[1],
-                _ => draw.geometry[2],
-            })
-        } else {
-            quote!(#isthmus::Quad::from_data(draw.geometry).vertex(vertex))
-        };
-        quote! {
-            #[#isthmus::spirv_std::spirv(vertex(entry_point_name = #entry))]
-            pub fn #name(
-                #[spirv(vertex_index)]
-                vertex: u32,
-                #[spirv(instance_index)]
-                draw_index: u32,
-                #[spirv(storage_buffer, descriptor_set = 0, binding = #frames_binding)]
-                frames: &[#isthmus::__private::PushBlock],
-                #[spirv(storage_buffer, descriptor_set = 0, binding = #draws_binding)]
-                draws: &[#isthmus::__private::DrawRecord],
-                #[spirv(position)]
-                out_position: &mut #isthmus::glam::Vec4,
-                #[spirv(location = 0)]
-                out_pixel: &mut #isthmus::glam::Vec2,
-                #[spirv(location = 1, flat)]
-                out_draw_index: &mut u32,
-            ) {
-                let draw = draws[draw_index as usize];
-                let frame = frames[0];
-                let pixel = #pixel;
-                let ndc = pixel / frame.screen_size * 2.0 - 1.0;
-                *out_position = #isthmus::glam::vec4(ndc.x, -ndc.y, 0.0, 1.0);
-                *out_pixel = pixel;
-                *out_draw_index = draw_index;
-            }
+    let entry = if triangle { "isthmus_triangle" } else { "isthmus_quad" };
+    let name = quote::format_ident!("{entry}");
+    let geometry = if triangle { quote!(#isthmus::Triangle) } else { quote!(#isthmus::Quad) };
+    quote! {
+        #[#isthmus::spirv_std::spirv(vertex(entry_point_name = #entry))]
+        pub fn #name(
+            #[spirv(vertex_index)]
+            vertex: u32,
+            #[spirv(instance_index)]
+            draw_index: u32,
+            #[spirv(storage_buffer, descriptor_set = 0, binding = #frames_binding)]
+            frame: &#isthmus::__private::PushBlock,
+            #[spirv(storage_buffer, descriptor_set = 0, binding = #draws_binding)]
+            draws: &[#isthmus::__private::DrawRecord],
+            #[spirv(position)]
+            out_position: &mut #isthmus::glam::Vec4,
+            #[spirv(location = 0)]
+            out_pixel: &mut #isthmus::glam::Vec2,
+            #[spirv(location = 1, flat)]
+            out_draw_index: &mut u32,
+        ) {
+            let draw = draws[draw_index as usize];
+            let pixel = #geometry::from_data(draw.geometry).vertex(vertex);
+            let ndc = pixel / frame.screen_size * 2.0 - 1.0;
+            *out_position = #isthmus::glam::vec4(ndc.x, -ndc.y, 0.0, 1.0);
+            *out_pixel = pixel;
+            *out_draw_index = draw_index;
         }
-    });
-    quote!(#(#entries)*)
+    }
 }

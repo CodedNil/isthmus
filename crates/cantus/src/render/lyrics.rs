@@ -17,7 +17,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         return;
     };
     let screen_width = context.frame.screen_size.x;
-    let shaper = context.frame.text().shaper();
+    let shaper = context.frame.text.shaper();
     let prepare = |track: &mut Track| {
         if let Some(lyrics) = track.runtime.lyrics.ready_mut() {
             lyrics.prepare(track.duration_ms as f32, shaper);
@@ -54,7 +54,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
             break;
         }
         if let Some(lyrics) = track.runtime.lyrics.ready_mut() {
-            lyrics.prepare(track.duration_ms as f32, context.frame.text().shaper());
+            lyrics.prepare(track.duration_ms as f32, context.frame.text.shaper());
         }
         let track_x = x;
         x += span(track);
@@ -63,14 +63,14 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         };
         for (background, color) in [(false, TEXT_COLOR.extend(1.0)), (true, Vec4::new(0.72, 0.86, 1.0, 1.0))] {
             let line = lyrics.visible(
-                context.frame.text().shaper(),
+                context.frame.text.shaper(),
                 -track_x - CLIP_PADDING..screen_width - track_x + CLIP_PADDING,
                 background,
             );
             if line.width <= 0.0 {
                 continue;
             }
-            let placed = context.frame.text().visible(&line, vec2(track_x, y), 0.0..screen_width).with_color(color);
+            let placed = context.frame.text.visible(&line, vec2(track_x, y), 0.0..screen_width).with_color(color);
             let padding = placed.size * 0.2 + 1.0;
             context.frame.paint(
                 placed.expanded(padding),

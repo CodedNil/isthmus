@@ -1,5 +1,4 @@
 #![feature(default_field_values, trait_alias)]
-#![cfg_attr(target_os = "linux", feature(try_blocks))]
 
 mod app;
 pub(crate) mod config;

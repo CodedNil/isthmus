@@ -3,7 +3,7 @@ use crate::{
     interaction::Interaction,
     music::{Enrichment, Music},
     platform::{Platform, Task},
-    render::{Bar, Frame, UiContext, launcher::LauncherState},
+    render::{Bar, Frame, Globals, UiContext, launcher::LauncherState},
 };
 use std::{
     io,
@@ -16,8 +16,8 @@ use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{Layer, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use web_time::Instant;
 
-pub type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
-pub type AppUpdater = Sender<Update<CantusApp>>;
+pub type Update = Box<dyn FnOnce(&mut CantusApp) + Send>;
+pub type AppUpdater = Sender<Update>;
 
 #[derive(Clone)]
 pub struct Background {
@@ -42,7 +42,7 @@ impl Background {
         }
     }
 
-    pub(crate) fn spawn_update(&self, task: impl Task<Output = Option<Update<CantusApp>>>) {
+    pub(crate) fn spawn_update(&self, task: impl Task<Output = Option<Update>>) {
         let updater = self.updater.clone();
         self.spawn(async move {
             if let Some(event) = task.await {
@@ -56,11 +56,10 @@ pub struct CantusApp {
     pub(crate) music: Music,
     pub(crate) launcher: LauncherState,
     pub(crate) bar: Bar,
-    pub(crate) app_updates: mpsc::Receiver<Update<Self>>,
+    pub(crate) app_updates: mpsc::Receiver<Update>,
     pub(crate) config: Config,
     pub(crate) enrichment: Enrichment,
     pub(crate) interaction: Interaction,
-    occluded_interaction: Interaction,
     next_enrichment: Instant,
 }
 
@@ -78,7 +77,6 @@ impl Default for CantusApp {
             enrichment,
             music: Music::spotify(&config, &updater, &background),
             interaction: Interaction::default(),
-            occluded_interaction: Interaction::default(),
             next_enrichment: Instant::now(),
             config,
         }
@@ -92,25 +90,42 @@ impl CantusApp {
         }
         if Instant::now() >= self.next_enrichment {
             self.next_enrichment = Instant::now() + Duration::from_secs(1);
-            self.refresh_enrichment(true);
+            self.refresh_enrichment();
         }
     }
 
     pub(crate) fn draw(&mut self, frame: Frame<'_>, bar: bool, launcher: bool) {
-        let interaction =
-            if self.launcher.open && !launcher { &mut self.occluded_interaction } else { &mut self.interaction };
-        let mut context = UiContext::new(frame, &self.config, interaction);
+        let launcher_open = self.launcher.open;
+        let owns_input = if launcher_open { launcher } else { bar };
+        if owns_input {
+            self.interaction.begin_frame(frame.delta_time, frame.time);
+        }
+        let mut context = UiContext { frame, config: &self.config, interaction: &mut self.interaction };
+        context.interaction.enabled = !self.launcher.open;
         if bar {
             self.bar.show(&mut context, &mut self.music);
         }
         if launcher {
-            self.launcher.show(&mut context, !bar);
+            context.interaction.enabled = true;
+            self.launcher.show(&mut context);
         }
-        context.finish();
+        *context.frame.globals = Globals {
+            pointer: context.interaction.mouse_pos(),
+            pressure: context.interaction.pressure(),
+            bar_height: self.config.height,
+            ripples: if owns_input { context.interaction.ripples } else { Default::default() },
+        };
+        context.interaction.enabled = true;
+        if owns_input {
+            context.interaction.end_frame();
+        }
+        if launcher_open != self.launcher.open {
+            *context.interaction = Interaction::default();
+        }
     }
 }
 
-pub fn update(work: impl FnOnce(&mut CantusApp) + Send + 'static) -> Update<CantusApp> {
+pub fn update(work: impl FnOnce(&mut CantusApp) + Send + 'static) -> Update {
     Box::new(work)
 }
 

@@ -10,10 +10,10 @@ use crate::{
         status::{AudioMonitor, ProcessorSample, SystemSample},
     },
 };
+use gloo_events::{EventListener, EventListenerOptions};
+use gloo_render::request_animation_frame;
 use gloo_timers::future::TimeoutFuture;
 use isthmus::glam::vec2;
-use js_sys::Date;
-use reqwest::Client;
 use std::{
     cell::RefCell,
     future::Future,
@@ -21,8 +21,9 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{mpsc::UnboundedSender, oneshot};
 use wasm_bindgen::{JsCast, closure::Closure};
+use web_time::Instant;
 
 pub trait Task = Future + 'static;
 
@@ -78,10 +79,10 @@ impl Platform {
     pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
     pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
-        let start = Date::now();
+        let start = Instant::now();
         wasm_bindgen_futures::spawn_local(async move {
             loop {
-                let time = ((Date::now() - start) / 1_000.0) as f32;
+                let time = start.elapsed().as_secs_f32();
                 if !send_update(&updates, move |app| {
                     if let Some(status) = &mut app.bar.status {
                         status.record(Self::sample_status(time));
@@ -111,16 +112,6 @@ impl Platform {
         TimeoutFuture::new(duration.as_millis() as u32).await;
     }
 
-    pub fn populate_app_icons(_apps: &mut [DesktopApp]) {}
-
-    pub fn decode_icon(_bytes: &[u8]) -> Option<Vec<u8>> {
-        None
-    }
-
-    pub async fn provider_icon(_http: Client, _url: String) -> Option<Vec<u8>> {
-        None
-    }
-
     pub fn set_volume(_volume: f32) {}
 
     pub fn run_power_action(_background: &Background, _action: usize) {}
@@ -138,7 +129,6 @@ impl Platform {
             name: name.into(),
             exec: Vec::new(),
             comment: comment.into(),
-            icon_path: None,
             action: None,
             icon: None,
         })
@@ -170,6 +160,7 @@ async fn run_web() -> Result<(), String> {
         .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
         .ok_or("#cantus is not a canvas")?;
     let app = Rc::new(RefCell::new(crate::app::CantusApp::default()));
+    app.borrow_mut().launcher.open = true;
     let logical_size = || {
         [
             window.inner_width().ok().and_then(|value| value.as_f64()).unwrap_or(1.0) as f32,
@@ -187,63 +178,108 @@ async fn run_web() -> Result<(), String> {
     .await
     .map_err(|error| error.to_string())?;
 
-    let pointer_app = Rc::clone(&app);
-    let pointer = Closure::<dyn FnMut(web_sys::PointerEvent)>::new(move |event: web_sys::PointerEvent| {
-        let position = vec2(event.client_x() as f32, event.client_y() as f32);
-        let input = match event.type_().as_str() {
-            "pointerdown" => InputEvent::Press,
-            "pointerup" => InputEvent::Release,
-            "pointerleave" => InputEvent::Leave,
-            _ => InputEvent::Motion(position),
-        };
-        let mut app = pointer_app.borrow_mut();
-        if matches!(input, InputEvent::Press) {
-            app.interaction.apply(InputEvent::Enter(position));
-        }
-        app.interaction.apply(input);
-    });
-    for event in ["pointermove", "pointerdown", "pointerup", "pointerleave"] {
-        canvas.add_event_listener_with_callback(event, pointer.as_ref().unchecked_ref()).expect("pointer listener");
-    }
-    pointer.forget();
+    let _pointer =
+        ["pointerenter", "pointermove", "pointerdown", "pointerup", "pointerleave", "pointercancel"].map(|name| {
+            let app = Rc::clone(&app);
+            EventListener::new(&canvas, name, move |event| {
+                let event = event.unchecked_ref::<web_sys::PointerEvent>();
+                let position = vec2(event.client_x() as f32, event.client_y() as f32);
+                let mut app = app.borrow_mut();
+                let input = match name {
+                    "pointerdown" if event.button() == 0 => {
+                        app.interaction.apply(InputEvent::Enter(position));
+                        InputEvent::Press
+                    }
+                    "pointerup" if event.button() == 0 => {
+                        app.interaction.apply(InputEvent::Motion(position));
+                        InputEvent::Release
+                    }
+                    "pointerenter" => InputEvent::Enter(position),
+                    "pointerleave" => InputEvent::Leave,
+                    "pointercancel" => InputEvent::CancelDrag,
+                    "pointermove" => InputEvent::Motion(position),
+                    _ => return,
+                };
+                app.interaction.apply(input);
+            })
+        });
 
     let wheel_app = Rc::clone(&app);
-    let wheel = Closure::<dyn FnMut(web_sys::WheelEvent)>::new(move |event: web_sys::WheelEvent| {
-        event.prevent_default();
-        wheel_app.borrow_mut().interaction.apply(InputEvent::Scroll(event.delta_y().signum() as i32));
-    });
-    canvas.add_event_listener_with_callback("wheel", wheel.as_ref().unchecked_ref()).expect("wheel listener");
-    wheel.forget();
+    let _wheel = EventListener::new_with_options(
+        &canvas,
+        "wheel",
+        EventListenerOptions::enable_prevent_default(),
+        move |event| {
+            let event = event.unchecked_ref::<web_sys::WheelEvent>();
+            event.prevent_default();
+            wheel_app.borrow_mut().interaction.apply(InputEvent::Scroll(event.delta_y().signum() as i32));
+        },
+    );
 
     let key_app = Rc::clone(&app);
-    let key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
-        let mut app = key_app.borrow_mut();
-        let command = match event.key().as_str() {
-            "Escape" => None,
-            "Enter" => Some(LauncherKey::Activate),
-            "ArrowUp" => Some(LauncherKey::Up),
-            "ArrowDown" => Some(LauncherKey::Down),
-            "Backspace" => Some(LauncherKey::Backspace),
-            "Delete" => Some(LauncherKey::Delete),
-            "ArrowLeft" => Some(LauncherKey::Left),
-            "ArrowRight" => Some(LauncherKey::Right),
-            "Home" => Some(LauncherKey::Home),
-            "End" => Some(LauncherKey::End),
-            "a" if event.ctrl_key() => Some(LauncherKey::SelectAll),
-            "c" if event.ctrl_key() => Some(LauncherKey::Copy),
-            "x" if event.ctrl_key() => Some(LauncherKey::Cut),
-            _ => None,
-        };
-        if let Some(command) = command {
-            app.launcher.key(command, event.shift_key());
-            event.prevent_default();
-        } else if !event.ctrl_key() && event.key().chars().count() == 1 {
-            let value = event.key();
-            app.launcher.edit(|field| field.insert(&value));
-        }
-    });
-    window.add_event_listener_with_callback("keydown", key.as_ref().unchecked_ref()).expect("keyboard listener");
-    key.forget();
+    let _key = EventListener::new_with_options(
+        &window,
+        "keydown",
+        EventListenerOptions::enable_prevent_default(),
+        move |event| {
+            let event = event.unchecked_ref::<web_sys::KeyboardEvent>();
+            let mut app = key_app.borrow_mut();
+            if event.ctrl_key() && event.key() == "k" {
+                app.launcher.toggle();
+                app.interaction = Default::default();
+                event.prevent_default();
+                return;
+            }
+            if !app.launcher.open {
+                return;
+            }
+            let command = match event.key().as_str() {
+                "Escape" => Some(LauncherKey::Escape),
+                "Enter" => Some(LauncherKey::Activate),
+                "ArrowUp" => Some(LauncherKey::Up),
+                "ArrowDown" => Some(LauncherKey::Down),
+                "Backspace" => Some(LauncherKey::Backspace),
+                "Delete" => Some(LauncherKey::Delete),
+                "ArrowLeft" => Some(LauncherKey::Left),
+                "ArrowRight" => Some(LauncherKey::Right),
+                "Home" => Some(LauncherKey::Home),
+                "End" => Some(LauncherKey::End),
+                "a" if event.ctrl_key() => Some(LauncherKey::SelectAll),
+                "c" if event.ctrl_key() => Some(LauncherKey::Copy),
+                "x" if event.ctrl_key() => Some(LauncherKey::Cut),
+                _ => None,
+            };
+            if let Some(command) = command {
+                app.launcher.key(command, event.shift_key());
+                if !app.launcher.open {
+                    app.interaction = Default::default();
+                }
+                event.prevent_default();
+            } else if !event.ctrl_key() && event.key().chars().count() == 1 {
+                let value = event.key();
+                app.launcher.edit(|field| field.insert(&value));
+            }
+        },
+    );
+    let paste_app = Rc::clone(&app);
+    let _paste = EventListener::new_with_options(
+        &window,
+        "paste",
+        EventListenerOptions::enable_prevent_default(),
+        move |event| {
+            let event = event.unchecked_ref::<web_sys::ClipboardEvent>();
+            let mut app = paste_app.borrow_mut();
+            if !app.launcher.open {
+                return;
+            }
+            if let Some(data) = event.clipboard_data()
+                && let Ok(text) = data.get_data("text/plain")
+            {
+                event.prevent_default();
+                app.launcher.edit(|field| field.insert(&text.replace(['\n', '\r'], " ")));
+            }
+        },
+    );
 
     loop {
         let [width, height] = logical_size();
@@ -257,7 +293,6 @@ async fn run_web() -> Result<(), String> {
         {
             let mut app = app.borrow_mut();
             app.apply_pending_updates();
-            app.launcher.open = true;
             gpu.render(|render| {
                 render.surface(surface, vec2(width, height), |frame| app.draw(frame, true, true));
             })
@@ -266,6 +301,10 @@ async fn run_web() -> Result<(), String> {
                 let _ = window.navigator().clipboard().write_text(&text);
             }
         }
-        TimeoutFuture::new(16).await;
+        let (sender, frame) = oneshot::channel();
+        let _animation = request_animation_frame(move |_| {
+            let _ = sender.send(());
+        });
+        let _ = frame.await;
     }
 }

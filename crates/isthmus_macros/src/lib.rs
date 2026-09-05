@@ -3,7 +3,7 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 
-mod buffer;
+mod data;
 #[path = "../../isthmus_build/src/syntax/mod.rs"]
 mod syntax;
 
@@ -21,7 +21,7 @@ fn isthmus_path() -> TokenStream2 {
 #[proc_macro_derive(ShaderData)]
 pub fn derive_shader_data(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
-    buffer::derive(&input).into()
+    data::derive(&input).into()
 }
 
 /// Declares the shader program owned by the surrounding module.

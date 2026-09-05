@@ -1,16 +1,18 @@
 use crate::{Image, bindings};
 use core::array::from_fn;
-use std::sync::{Arc, Weak};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
+};
 
 struct CachedImage {
     source: Weak<[u8]>,
-    size: [u32; 2],
     view: wgpu::TextureView,
     bindings: [Option<wgpu::BindGroup>; 4],
 }
 
 pub(super) struct ImageCache {
-    images: Vec<CachedImage>,
+    images: HashMap<(usize, [u32; 2]), CachedImage>,
     pub layout: wgpu::BindGroupLayout,
     samplers: [wgpu::Sampler; 4],
     pub fallback: wgpu::BindGroup,
@@ -52,27 +54,21 @@ impl ImageCache {
             })
         });
         let fallback = bind(device, &layout, &upload(device, queue, [1, 1], &[255; 4]), &samplers[0]);
-        Self { images: Vec::new(), layout, samplers, fallback }
+        Self { images: HashMap::new(), layout, samplers, fallback }
     }
 
     pub fn retain_live(&mut self) {
-        self.images.retain(|image| image.source.strong_count() != 0);
+        self.images.retain(|_, image| image.source.strong_count() != 0);
     }
 
     pub fn image(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &Image) -> wgpu::BindGroup {
-        let source = Arc::downgrade(&image.pixels);
-        let existing = self.images.iter().position(|cached| cached.size == image.size && cached.source.ptr_eq(&source));
-        let index = existing.unwrap_or_else(|| {
-            self.images.push(CachedImage {
-                source,
-                size: image.size,
-                view: upload(device, queue, image.size, &image.pixels),
-                bindings: from_fn(|_| None),
-            });
-            self.images.len() - 1
+        let key = (image.pixels.as_ptr() as usize, image.size);
+        let cached = self.images.entry(key).or_insert_with(|| CachedImage {
+            source: Arc::downgrade(&image.pixels),
+            view: upload(device, queue, image.size, &image.pixels),
+            bindings: from_fn(|_| None),
         });
         let sampling = image.sampling as usize;
-        let cached = &mut self.images[index];
         cached.bindings[sampling]
             .get_or_insert_with(|| bind(device, &self.layout, &cached.view, &self.samplers[sampling]))
             .clone()

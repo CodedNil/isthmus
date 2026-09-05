@@ -4,10 +4,10 @@ use super::{
     surface::SurfaceTarget,
 };
 use crate::{
-    Frame, Program, SurfaceHandle,
-    contract::PushBlock,
+    Frame, Program, SurfaceHandle, bindings,
+    data::PushBlock,
+    geometry::text::Text,
     glam::{Vec2, Vec3},
-    text::Text,
 };
 use core::marker::PhantomData;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -38,16 +38,18 @@ impl<P: Program> Render<'_, P> {
     pub fn surface(&mut self, surface: SurfaceHandle, screen_size: Vec2, draw: impl FnOnce(Frame<'_, P>)) {
         let renderer = &mut *self.renderer;
         let Some(surface) = renderer.surfaces.get_mut(surface) else { return };
+        surface.paints.recorded = true;
         let push = PushBlock { screen_size, time: self.time, ..Default::default() };
         let mut globals = P::Globals::default();
-        draw(Frame::new(
-            &push,
-            self.delta_time,
-            &mut globals,
-            &mut renderer.text,
-            &mut renderer.gpu,
-            &mut surface.paints,
-        ));
+        draw(Frame {
+            time: self.time,
+            screen_size,
+            delta_time: self.delta_time,
+            globals: &mut globals,
+            text: &mut renderer.text,
+            gpu: &mut renderer.gpu,
+            surface: &mut surface.paints,
+        });
         surface.paints.globals.upload(&renderer.gpu.device, &renderer.gpu.queue, &[globals]);
         surface.paints.frame.upload(&renderer.gpu.device, &renderer.gpu.queue, &[push]);
     }
@@ -67,7 +69,8 @@ impl<P: Program> Renderer<P> {
         font: &[u8],
         text_color: Vec3,
     ) -> Result<(Self, SurfaceHandle), SetupError> {
-        let (gpu, target) = setup::new::<P>(surface, [width, height])?;
+        // SAFETY: The caller keeps both native handles alive until this surface is removed.
+        let (gpu, target) = unsafe { setup::new::<P>(surface, [width, height]) }?;
         Ok(Self::from_surface(gpu, target, font, text_color))
     }
 
@@ -83,7 +86,9 @@ impl<P: Program> Renderer<P> {
     }
 
     fn from_surface(mut gpu: Gpu, target: SurfaceTarget, font: &[u8], text_color: Vec3) -> (Self, SurfaceHandle) {
-        let text = Text::new(&mut gpu, font, text_color);
+        let (text, glyphs, curves) = Text::new(font, text_color);
+        gpu.buffers[bindings::GLYPHS as usize].upload(&gpu.device, &gpu.queue, &glyphs);
+        gpu.buffers[bindings::CURVES as usize].upload(&gpu.device, &gpu.queue, &curves);
         let mut surfaces = SlotMap::with_key();
         let handle = surfaces.insert(target);
         (Self { surfaces, gpu, text, started: Instant::now(), last_frame: 0.0, program: PhantomData }, handle)
@@ -97,15 +102,16 @@ impl<P: Program> Renderer<P> {
         self.gpu.begin_frame();
         for surface in self.surfaces.values_mut() {
             surface.paints.paints.clear();
+            surface.paints.recorded = false;
         }
-        self.text.begin_frame();
+        self.text.placed.clear();
         let elapsed = self.started.elapsed().as_secs_f32();
         let delta = (elapsed - self.last_frame).min(0.1);
         self.last_frame = elapsed;
         draw(&mut Render { renderer: self, time: elapsed, delta_time: delta });
         self.gpu.prepare(&self.text.placed);
         for surface in self.surfaces.values_mut() {
-            if surface.paints.paints.is_empty() {
+            if !surface.paints.recorded {
                 continue;
             }
             let Some(output) = surface.acquire(&self.gpu)? else { continue };
@@ -131,9 +137,7 @@ impl<P: Program> Renderer<P> {
                     timestamp_writes: None,
                     multiview_mask: None,
                 });
-                pass.set_viewport(0.0, 0.0, surface.config.width as f32, surface.config.height as f32, 0.0, 1.0);
-                pass.set_scissor_rect(0, 0, surface.config.width, surface.config.height);
-                self.gpu.draw_surface(&mut pass, &surface.paints);
+                self.gpu.draw_surface(&mut pass, &mut surface.paints);
             }
             self.gpu.queue.submit([encoder.finish()]);
             self.gpu.queue.present(output);
@@ -163,11 +167,13 @@ impl<P: Program> Renderer<P> {
         target: &(impl HasDisplayHandle + HasWindowHandle),
         [width, height]: [u32; 2],
     ) -> Result<SurfaceHandle, SetupError> {
-        let target = SurfaceTarget::new(&self.gpu, target, width, height)?;
-        if target.config.format != self.gpu.format {
+        // SAFETY: The caller keeps both native handles alive until this surface is removed.
+        let surface = unsafe { setup::create_surface(&self.gpu.instance, target) }?;
+        let config = setup::configure_surface(&self.gpu.adapter, &surface, width, height)?;
+        if config.format != self.gpu.format {
             return Err(SetupError::IncompatibleSurface);
         }
-        Ok(self.surfaces.insert(target))
+        Ok(self.surfaces.insert(SurfaceTarget::from_raw(&self.gpu.device, surface, config)))
     }
 
     pub fn remove_surface(&mut self, surface: SurfaceHandle) {

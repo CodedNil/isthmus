@@ -1,8 +1,8 @@
 use super::{buffer::UploadBuffer, image::ImageCache};
 use crate::{
     Blend, Image, Program, bindings,
-    contract::{DrawRecord, Primitive, ShaderSpec},
-    text::PlacedGlyph,
+    geometry::{DrawRecord, Primitive, text::PlacedGlyph},
+    program::ShaderSpec,
 };
 use core::array::from_fn;
 use std::ops::Range;
@@ -39,7 +39,11 @@ impl Gpu {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("isthmus"), source });
         let entries = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|binding| wgpu::BindGroupLayoutEntry {
             binding: binding as u32,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            visibility: if matches!(binding as u32, bindings::DRAWS | bindings::FRAMES) {
+                wgpu::ShaderStages::VERTEX_FRAGMENT
+            } else {
+                wgpu::ShaderStages::FRAGMENT
+            },
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: true },
                 has_dynamic_offset: false,
@@ -58,7 +62,7 @@ impl Gpu {
         let pipelines = P::SHADERS
             .iter()
             .map(|entry| {
-                let (vertex, topology, count) = match entry.primitive {
+                let (vertex, topology, vertices) = match entry.primitive {
                     Primitive::Quad => ("isthmus_quad", wgpu::PrimitiveTopology::TriangleStrip, 4),
                     Primitive::Triangle => ("isthmus_triangle", wgpu::PrimitiveTopology::TriangleList, 3),
                 };
@@ -95,7 +99,7 @@ impl Gpu {
                     multiview_mask: None,
                     cache: None,
                 });
-                (pipeline, count)
+                (pipeline, vertices)
             })
             .collect();
         let buffers = from_fn(|_| UploadBuffer::new(&device));
@@ -161,21 +165,27 @@ impl Gpu {
         self.buffers[bindings::PLACED_GLYPHS as usize].upload(&self.device, &self.queue, placed);
     }
 
-    pub fn draw_surface(&self, pass: &mut wgpu::RenderPass<'_>, surface: &SurfacePaints) {
-        let entries = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|index| wgpu::BindGroupEntry {
-            binding: index as u32,
-            resource: match index as u32 {
-                bindings::GLOBALS => surface.globals.binding(),
-                bindings::FRAMES => surface.frame.binding(),
-                _ => self.buffers[index].binding(),
-            },
+    pub fn draw_surface(&self, pass: &mut wgpu::RenderPass<'_>, surface: &mut SurfacePaints) {
+        let buffers = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|index| match index as u32 {
+            bindings::GLOBALS => &surface.globals,
+            bindings::FRAMES => &surface.frame,
+            _ => &self.buffers[index],
         });
-        let frame = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frame"),
-            layout: &self.bind_layout,
-            entries: &entries,
-        });
-        pass.set_bind_group(0, &frame, &[]);
+        // Upload buffers are replaced only when they grow, so capacities identify the bound allocations.
+        let sizes = buffers.map(|buffer| buffer.0.size());
+        if surface.binding.as_ref().is_none_or(|(previous, _)| *previous != sizes) {
+            let entries = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|index| wgpu::BindGroupEntry {
+                binding: index as u32,
+                resource: buffers[index].0.as_entire_binding(),
+            });
+            let frame = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("frame"),
+                layout: &self.bind_layout,
+                entries: &entries,
+            });
+            surface.binding = Some((sizes, frame));
+        }
+        pass.set_bind_group(0, &surface.binding.as_ref().unwrap().1, &[]);
         for paint in &surface.paints {
             let (pipeline, vertices) = &self.pipelines[paint.shader];
             pass.set_pipeline(pipeline);
@@ -192,6 +202,8 @@ pub(super) struct Paint {
 }
 
 pub struct SurfacePaints {
+    binding: Option<([u64; bindings::BUFFER_COUNT], wgpu::BindGroup)>,
+    pub(super) recorded: bool,
     pub(super) paints: Vec<Paint>,
     pub(super) globals: UploadBuffer,
     pub(super) frame: UploadBuffer,
@@ -199,6 +211,12 @@ pub struct SurfacePaints {
 
 impl SurfacePaints {
     pub fn new(device: &wgpu::Device) -> Self {
-        Self { paints: Vec::new(), globals: UploadBuffer::new(device), frame: UploadBuffer::new(device) }
+        Self {
+            binding: None,
+            recorded: false,
+            paints: Vec::new(),
+            globals: UploadBuffer::new(device),
+            frame: UploadBuffer::new(device),
+        }
     }
 }

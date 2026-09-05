@@ -12,13 +12,16 @@ path = "src/main.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+resvg = { version = "0.48.1", default-features = false, features = [
+    "raster-images",
+] }
 isthmus = { path = "../isthmus" }
 bytemuck.workspace = true
 reqwest = { version = "0.12.28", default-features = false, features = [
     "json",
     "rustls-tls-webpki-roots",
 ] }
-tokio = { version = "1.53.1", features = ["rt", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
 arrayvec = { version = "0.7.8", features = ["serde"] }
 smallvec.workspace = true
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
@@ -52,9 +55,6 @@ web-time = "1.1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 schemars = { version = "1.2.2", features = ["arrayvec07", "preserve_order"] }
-resvg = { version = "0.48.1", default-features = false, features = [
-    "raster-images",
-] }
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 librespot-protocol = "0.8.0"
 librespot-core = { version = "0.8.0", default-features = false, features = [
@@ -92,12 +92,15 @@ sysinfo = { git = "https://github.com/CodedNil/sysinfo", branch = "gpu_temp", de
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4.78"
+gloo-events = "0.3.0"
+gloo-render = "0.3.0"
 gloo-timers = { version = "0.4.0", features = ["futures"] }
-js-sys = "0.3.105"
 wasm-bindgen = "0.2.128"
 web-sys = { version = "0.3.105", features = [
     "console",
     "Clipboard",
+    "ClipboardEvent",
+    "DataTransfer",
     "Coordinates",
     "Document",
     "EventTarget",
