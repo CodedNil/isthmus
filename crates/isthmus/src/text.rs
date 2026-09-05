@@ -1,16 +1,16 @@
 #[cfg(target_arch = "spirv")]
 use crate::Float as _;
-#[cfg(not(target_arch = "spirv"))]
-use crate::glam::Vec3;
 use crate::{
-    Fragment, Quad, Sdf, SdfSample, Unorm8x4,
+    Fragment, Program, Sdf, SdfSample, Unorm8x4,
     glam::{Vec2, Vec4, vec2},
 };
 #[cfg(not(target_arch = "spirv"))]
+use crate::{Quad, glam::Vec3};
+#[cfg(not(target_arch = "spirv"))]
 use {
-    crate::backend::{BufferRange, Canvas, Context},
+    crate::{backend::gpu::Gpu, bindings},
     smallvec::SmallVec,
-    std::{ops::Range, sync::Arc},
+    std::ops::Range,
     ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
 };
 
@@ -82,11 +82,6 @@ impl Line {
         self.count == 0
     }
 
-    #[doc(hidden)]
-    pub fn quad(self) -> Quad {
-        Quad::from_min_max(self.min, self.max)
-    }
-
     /// Extends rasterization beyond the font's normal effect padding.
     #[must_use]
     pub fn expanded(mut self, padding: f32) -> Self {
@@ -109,42 +104,25 @@ impl Line {
         self.color = Unorm8x4::from_vec4(color);
         self
     }
-
-    fn distance(self, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], curves: &[Curve], point: Vec2) -> f32 {
-        self.distance_scaled(placed_glyphs, glyphs, curves, point, 1.0)
-    }
-
-    fn distance_scaled(
-        self,
-        placed_glyphs: &[PlacedGlyph],
-        glyphs: &[Glyph],
-        curves: &[Curve],
-        point: Vec2,
-        scale: f32,
-    ) -> f32 {
-        line_distance_scaled(self, placed_glyphs, glyphs, curves, point, scale)
-    }
 }
 
 /// Shader-side text geometry plus the fragment coordinates of its raster quad.
-pub struct TextFragment<'a, Globals = ()> {
+pub struct TextFragment<'a, P: Program> {
     pub pixel: Vec2,
     pub local: Vec2,
     pub uv: Vec2,
     pub time: f32,
-    pub globals: Globals,
+    pub globals: P::Globals,
     pub line: Line,
     placed_glyphs: &'a [PlacedGlyph],
     glyphs: &'a [Glyph],
     curves: &'a [Curve],
 }
 
-pub type TextSample = SdfSample;
-
-impl<'a, Globals: Copy> TextFragment<'a, Globals> {
+impl<'a, P: Program> TextFragment<'a, P> {
     #[doc(hidden)]
     pub const fn new(
-        fragment: Fragment<Globals>,
+        fragment: Fragment<P>,
         line: Line,
         placed_glyphs: &'a [PlacedGlyph],
         glyphs: &'a [Glyph],
@@ -164,25 +142,46 @@ impl<'a, Globals: Copy> TextFragment<'a, Globals> {
     }
 
     pub fn distance(&self, point: Vec2) -> f32 {
-        self.line.distance(self.placed_glyphs, self.glyphs, self.curves, point)
-    }
-
-    pub fn distance_scaled(&self, point: Vec2, scale: f32) -> f32 {
-        self.line.distance_scaled(self.placed_glyphs, self.glyphs, self.curves, point, scale)
+        self.distance_scaled_with_weight(point, 1.0, self.line.weight)
     }
 
     pub fn distance_scaled_with_weight(&self, point: Vec2, scale: f32, weight: f32) -> f32 {
-        let mut line = self.line;
-        line.weight = weight;
-        line.distance_scaled(self.placed_glyphs, self.glyphs, self.curves, point, scale)
+        let line = self.line;
+        let inverse_size = 1.0 / line.size;
+        let line_point = (point - line.origin) * inverse_size;
+        let after = glyph_after(self.placed_glyphs, line.first, line.count, line_point.x);
+        let mut best: f32 = 1e6;
+        let padding = EFFECT_PADDING * inverse_size / scale;
+        // Include the next origin too: italic/curved glyphs and the effect padding can overhang left.
+        let mut glyph_index = (after + 1).min(line.count);
+        while glyph_index > 0 {
+            glyph_index -= 1;
+            let placed = self.placed_glyphs[(line.first + glyph_index) as usize];
+            let glyph = self.glyphs[placed.glyph as usize];
+            let glyph_point = vec2(line_point.x - placed.x, placed.y - line_point.y) / scale;
+            if glyph_point.x > glyph.max.x + padding {
+                break;
+            }
+            if glyph_point.x >= glyph.min.x - padding
+                && glyph_point.y >= glyph.min.y - padding
+                && glyph_point.x <= glyph.max.x + padding
+                && glyph_point.y <= glyph.max.y + padding
+            {
+                best = best.min(glyph_distance(
+                    self.curves,
+                    glyph.start,
+                    glyph.count,
+                    weight,
+                    glyph_point,
+                    line.size * scale,
+                ));
+            }
+        }
+        best
     }
 
-    pub fn sample_with_weight(&self, point: Vec2, weight: f32) -> TextSample {
+    pub fn sample_with_weight(&self, point: Vec2, weight: f32) -> SdfSample {
         Sdf::new(self.distance_scaled_with_weight(point, 1.0, weight)).sample()
-    }
-
-    pub fn alpha(&self) -> f32 {
-        self.alpha_at(self.pixel)
     }
 
     pub fn alpha_at(&self, point: Vec2) -> f32 {
@@ -316,41 +315,6 @@ fn glyph_after(placed_glyphs: &[PlacedGlyph], first: u32, count: u32, x: f32) ->
     low
 }
 
-fn line_distance_scaled(
-    line: Line,
-    placed_glyphs: &[PlacedGlyph],
-    glyphs: &[Glyph],
-    curves: &[Curve],
-    local: Vec2,
-    scale: f32,
-) -> f32 {
-    let inverse_size = 1.0 / line.size;
-    let line_point = (local - line.origin) * inverse_size;
-    let after = glyph_after(placed_glyphs, line.first, line.count, line_point.x);
-    let mut best: f32 = 1e6;
-    let padding = EFFECT_PADDING * inverse_size / scale;
-    // Include the next origin too: italic/curved glyphs and the effect padding can overhang left.
-    let mut glyph_index = (after + 1).min(line.count);
-    while glyph_index > 0 {
-        glyph_index -= 1;
-        let placed = placed_glyphs[(line.first + glyph_index) as usize];
-        let glyph = glyphs[placed.glyph as usize];
-        let glyph_point = vec2(line_point.x - placed.x, placed.y - line_point.y) / scale;
-        if glyph_point.x > glyph.max.x + padding {
-            break;
-        }
-        if glyph_point.x >= glyph.min.x - padding
-            && glyph_point.y >= glyph.min.y - padding
-            && glyph_point.x <= glyph.max.x + padding
-            && glyph_point.y <= glyph.max.y + padding
-        {
-            best =
-                best.min(glyph_distance(curves, glyph.start, glyph.count, line.weight, glyph_point, line.size * scale));
-        }
-    }
-    best
-}
-
 #[cfg(not(target_arch = "spirv"))]
 const WGHT: Tag = Tag::from_bytes(b"wght");
 #[cfg(not(target_arch = "spirv"))]
@@ -369,7 +333,6 @@ const RANGES: &[(u32, u32)] = &[
 #[cfg(not(target_arch = "spirv"))]
 #[derive(Clone, Copy)]
 struct Meta {
-    glyph: u32,
     data: Glyph,
     advance: [f32; 2],
 }
@@ -453,19 +416,17 @@ pub struct ShapedLine {
 }
 
 #[cfg(not(target_arch = "spirv"))]
-#[derive(Clone)]
 pub struct Shaper {
-    characters: Arc<[(char, Meta)]>,
+    characters: Vec<(char, usize)>,
+    glyphs: Vec<Meta>,
     baseline: f32,
 }
 
 #[cfg(not(target_arch = "spirv"))]
-pub(crate) struct Text {
+pub struct Text {
     shaper: Shaper,
-    glyphs: Arc<[Glyph]>,
-    context: Context,
-    placed: Vec<PlacedGlyph>,
-    uploaded_placed: BufferRange,
+    pub(crate) placed: Vec<PlacedGlyph>,
+
     color: Unorm8x4,
 }
 
@@ -476,48 +437,22 @@ pub struct TextLayout<'a> {
 }
 
 #[cfg(not(target_arch = "spirv"))]
-pub struct TextScope<'a> {
-    text: &'a mut Text,
-}
-
-#[cfg(not(target_arch = "spirv"))]
-impl<'a> TextScope<'a> {
-    pub(crate) const fn new(text: &'a mut Text) -> Self {
-        Self { text }
-    }
-
+impl Text {
     pub fn line(&mut self, content: &str, size: f32, weight: f32) -> TextLayout<'_> {
-        TextLayout::new(self.text, content, size, weight)
+        TextLayout { shaped: self.shaper.shape(content, size, weight), text: self }
     }
 
     pub fn width(&self, content: &str, size: f32, weight: f32) -> f32 {
-        self.text.shaper.width(content, size, weight)
+        self.shaper.width(content, size, weight)
     }
 
-    pub fn fit(&mut self, shaped: &ShapedLine, y: f32, bounds: Range<f32>) -> Line {
-        self.text.fit_shaped(shaped, y, bounds.start, bounds.end)
-    }
-
-    pub fn visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
-        self.text.place_visible(shaped, left, clip)
-    }
-
-    pub fn shaper(&self) -> Shaper {
-        self.text.shaper.clone()
+    pub const fn shaper(&self) -> &Shaper {
+        &self.shaper
     }
 }
 
 #[cfg(not(target_arch = "spirv"))]
-impl<'a> TextLayout<'a> {
-    pub(crate) fn new(text: &'a mut Text, content: &str, size: f32, weight: f32) -> Self {
-        let shaped = text.shaper.shape(content, size, weight);
-        Self { text, shaped }
-    }
-
-    pub fn shape(self) -> ShapedLine {
-        self.shaped
-    }
-
+impl TextLayout<'_> {
     pub fn centered(self, center: Vec2) -> Line {
         let origin = vec2(center.x - self.shaped.width * 0.5, center.y + self.shaped.baseline);
         self.text.place(&self.shaped, origin)
@@ -534,11 +469,11 @@ impl<'a> TextLayout<'a> {
     }
 
     pub fn fit(self, y: f32, bounds: Range<f32>) -> Line {
-        self.text.fit_shaped(&self.shaped, y, bounds.start, bounds.end)
+        self.text.fit(&self.shaped, y, bounds)
     }
 
     pub fn visible(self, left: Vec2, clip: Range<f32>) -> Line {
-        self.text.place_visible(&self.shaped, left, clip)
+        self.text.visible(&self.shaped, left, clip)
     }
 }
 
@@ -549,7 +484,7 @@ impl Text {
     /// # Panics
     ///
     /// Panics if the supplied variable font cannot be parsed or its outlines cannot be read.
-    pub(crate) fn new(context: &Context, canvas: &mut Canvas, font: &[u8], color: Vec3) -> Self {
+    pub(crate) fn new(gpu: &mut Gpu, font: &[u8], color: Vec3) -> Self {
         let mut face = Face::parse(font, 0).expect("parse variable font");
         let characters = RANGES
             .iter()
@@ -585,9 +520,8 @@ impl Text {
             );
         }
         let (mut curves, mut metadata) = (Vec::new(), Vec::new());
-        for (index, id) in ids.iter().copied().enumerate() {
-            let (low, low_advance, low_bounds) = &outlines[0][index];
-            let (high, high_advance, high_bounds) = &outlines[1][index];
+        for ((low, low_advance, low_bounds), (high, high_advance, high_bounds)) in outlines[0].iter().zip(&outlines[1])
+        {
             assert_eq!(low.len(), high.len(), "variable outline topology changed");
             let start = curves.len() as u32;
             for (&[a, b, c], &[d, e, f]) in low.iter().zip(high) {
@@ -602,33 +536,26 @@ impl Text {
                     max: a.max(b).max(c).max(d).max(e).max(f),
                 });
             }
-            let count = curves.len() - start as usize;
-            metadata.push((id, Meta {
-                glyph: index as u32,
+            metadata.push(Meta {
                 data: Glyph {
                     start,
-                    count: count as u32,
+                    count: curves.len() as u32 - start,
                     min: low_bounds.0.min(high_bounds.0),
                     max: low_bounds.1.max(high_bounds.1),
                 },
                 advance: [*low_advance, *high_advance],
-            }));
+            });
         }
         let characters = characters
             .into_iter()
-            .filter_map(|(character, id)| {
-                metadata.binary_search_by_key(&id, |&(id, _)| id).ok().map(|index| (character, metadata[index].1))
-            })
+            .filter_map(|(character, id)| ids.binary_search(&id).ok().map(|index| (character, index)))
             .collect::<Vec<_>>();
-        let curves = context.upload(&curves);
-        let glyphs = metadata.iter().map(|(_, meta)| meta.data).collect::<Arc<[_]>>();
-        canvas.register_text(context.upload(&glyphs), curves);
+        let glyphs = metadata.iter().map(|meta| meta.data).collect::<Vec<_>>();
+        gpu.buffers[bindings::GLYPHS as usize].upload(&gpu.device, &gpu.queue, &glyphs);
+        gpu.buffers[bindings::CURVES as usize].upload(&gpu.device, &gpu.queue, &curves);
         Self {
-            shaper: Shaper { characters: characters.into(), baseline },
-            glyphs,
-            context: context.clone(),
+            shaper: Shaper { characters, glyphs: metadata, baseline },
             placed: Vec::with_capacity(GLYPH_CAPACITY),
-            uploaded_placed: BufferRange::default(),
             color: Unorm8x4::from_vec3(color),
         }
     }
@@ -637,42 +564,32 @@ impl Text {
         self.placed.clear();
     }
 
-    pub(crate) fn finish_frame(&mut self) -> BufferRange {
-        self.context.upload_into(&mut self.uploaded_placed, &self.placed);
-        self.uploaded_placed.clone()
-    }
-
-    pub(crate) fn quads(&self, line: Line) -> SmallVec<[Quad; 32]> {
+    pub(crate) fn quads(&self, line: Line) -> impl Iterator<Item = Quad> {
         let placed = &self.placed[line.first as usize..(line.first + line.count) as usize];
-        let bounds = |placed: PlacedGlyph| {
-            let glyph = self.glyphs[placed.glyph as usize];
+        let bounds = move |placed: PlacedGlyph| {
+            let glyph = self.shaper.glyphs[placed.glyph as usize].data;
             vec2(
                 line.origin.x + (placed.x + glyph.min.x) * line.size - line.padding,
                 line.origin.x + (placed.x + glyph.max.x) * line.size + line.padding,
             )
         };
-        placed
-            .iter()
-            .copied()
-            .enumerate()
-            .filter_map(|(index, glyph)| {
-                let own = bounds(glyph);
-                let left = index.checked_sub(1).map_or(own.x, |previous| {
-                    let previous = bounds(placed[previous]);
-                    if previous.y < own.x { own.x } else { (previous.y + own.x) * 0.5 }
-                });
-                let right = placed.get(index + 1).map_or(own.y, |&next| {
-                    let next = bounds(next);
-                    if own.y < next.x { own.y } else { (own.y + next.x) * 0.5 }
-                });
-                let min = vec2(left.max(line.min.x), line.min.y);
-                let max = vec2(right.min(line.max.x), line.max.y);
-                (min.x < max.x).then(|| Quad::from_min_max(min, max))
-            })
-            .collect()
+        placed.iter().copied().enumerate().filter_map(move |(index, glyph)| {
+            let own = bounds(glyph);
+            let left = index.checked_sub(1).map_or(own.x, |previous| {
+                let previous = bounds(placed[previous]);
+                if previous.y < own.x { own.x } else { (previous.y + own.x) * 0.5 }
+            });
+            let right = placed.get(index + 1).map_or(own.y, |&next| {
+                let next = bounds(next);
+                if own.y < next.x { own.y } else { (own.y + next.x) * 0.5 }
+            });
+            let min = vec2(left.max(line.min.x), line.min.y);
+            let max = vec2(right.min(line.max.x), line.max.y);
+            (min.x < max.x).then(|| Quad::from_min_max(min, max))
+        })
     }
 
-    pub(crate) fn place_visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
+    pub fn visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
         let origin = vec2(left.x, left.y + shaped.baseline);
         let local = |x| (x - origin.x) / shaped.size;
         let start =
@@ -685,7 +602,7 @@ impl Text {
         line
     }
 
-    pub(crate) fn fit_shaped(&mut self, shaped: &ShapedLine, y: f32, left: f32, right: f32) -> Line {
+    pub fn fit(&mut self, shaped: &ShapedLine, y: f32, Range { start: left, end: right }: Range<f32>) -> Line {
         let x = if shaped.width <= right - left + 0.5 { (left + right - shaped.width) * 0.5 } else { left };
         self.place(shaped, vec2(x, y + shaped.baseline))
     }
@@ -719,19 +636,21 @@ impl Text {
 
 #[cfg(not(target_arch = "spirv"))]
 impl Shaper {
-    fn glyph(&self, character: char) -> Option<Meta> {
-        self.characters.binary_search_by_key(&character, |glyph| glyph.0).ok().map(|index| self.characters[index].1)
+    fn glyph(&self, character: char) -> Option<(usize, &Meta)> {
+        let index = self.characters.binary_search_by_key(&character, |glyph| glyph.0).ok()?;
+        let glyph = self.characters[index].1;
+        Some((glyph, &self.glyphs[glyph]))
     }
 
     pub fn shape(&self, text: &str, size: f32, weight: f32) -> ShapedLine {
-        self.shape_positioned([(text, Vec2::ZERO)], size, weight, usize::MAX)
+        self.shape_positioned([(text, Vec2::ZERO)], size, weight)
     }
 
     pub fn width(&self, text: &str, size: f32, weight: f32) -> f32 {
         let weight = normalized_weight(weight);
         text.chars()
             .filter_map(|character| self.glyph(character))
-            .map(|meta| meta.advance[0] + (meta.advance[1] - meta.advance[0]) * weight)
+            .map(|(_, meta)| meta.advance[0] + (meta.advance[1] - meta.advance[0]) * weight)
             .sum::<f32>()
             * size
     }
@@ -741,7 +660,6 @@ impl Shaper {
         parts: impl IntoIterator<Item = (&'a str, Vec2)>,
         size: f32,
         font_weight: f32,
-        max_glyphs: usize,
     ) -> ShapedLine {
         let mut min = Vec2::splat(f32::MAX);
         let mut max = Vec2::splat(f32::MIN);
@@ -751,14 +669,11 @@ impl Shaper {
         for (text, position) in parts {
             let mut x = position.x / size;
             let y = position.y / size;
-            for meta in text.chars().filter_map(|character| self.glyph(character)) {
-                if glyphs.len() == max_glyphs {
-                    break;
-                }
+            for (glyph, meta) in text.chars().filter_map(|character| self.glyph(character)) {
                 if meta.data.count > 0 {
                     min = min.min(vec2(x + meta.data.min.x, y - meta.data.max.y));
                     max = max.max(vec2(x + meta.data.max.x, y - meta.data.min.y));
-                    glyphs.push(PlacedGlyph { x, y, glyph: meta.glyph });
+                    glyphs.push(PlacedGlyph { x, y, glyph: glyph as u32 });
                 }
                 x += meta.advance[0] + (meta.advance[1] - meta.advance[0]) * weight;
             }

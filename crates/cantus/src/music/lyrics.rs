@@ -152,7 +152,6 @@ impl Lyrics {
                 .map(|word| (word.text.as_str(), vec2(word.position, 0.0))),
             15.0,
             700.0,
-            usize::MAX,
         )
     }
 }

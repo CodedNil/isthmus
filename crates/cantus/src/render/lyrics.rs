@@ -1,24 +1,26 @@
-use crate::render::{TEXT_COLOR, TextFragment};
-use isthmus::glam::{FloatExt, Vec4, vec2};
+use crate::{
+    music::{Lyrics, Music, Track},
+    render::{BarLayout, PANEL_START, TEXT_COLOR, TextFragment, UiContext},
+};
+use isthmus::{
+    ColorExt as _, Float as _,
+    glam::{Vec4, vec2},
+    shader,
+};
 
 pub const EXTENSION: f32 = 10.0;
 
-#[cfg(not(target_arch = "spirv"))]
-use crate::{
-    music::{Lyrics, Music, Track},
-    render::{BarLayout, PANEL_START, UiContext},
-};
-#[isthmus::paint]
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     const CLIP_PADDING: f32 = 4.0;
 
     let Some((index, progress_ms)) = music.timeline.span_at_playhead(&music.queue) else {
         return;
     };
+    let screen_width = context.frame.screen_size.x;
     let shaper = context.frame.text().shaper();
     let prepare = |track: &mut Track| {
         if let Some(lyrics) = track.runtime.lyrics.ready_mut() {
-            lyrics.prepare(track.duration_ms as f32, &shaper);
+            lyrics.prepare(track.duration_ms as f32, shaper);
         }
     };
     let span = |track: &Track| {
@@ -37,47 +39,42 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
             lyrics.position(progress_ms, current.duration_ms as f32)
         });
     let current_x = layout.playhead_x - progress;
-    let screen_width = context.frame.screen_size.x;
-    let mut visible = vec![(index, current_x)];
-
+    let mut first = index;
     let mut x = current_x;
-    for item in (0..index).rev() {
-        prepare(&mut music.queue[item]);
-        x -= span(&music.queue[item]);
-        if x + span(&music.queue[item]) < -CLIP_PADDING {
-            break;
-        }
-        visible.push((item, x));
-    }
-    visible.reverse();
-
-    x = current_x + span(&music.queue[index]);
-    for item in index + 1..music.queue.len() {
-        if x > screen_width + CLIP_PADDING {
-            break;
-        }
-        prepare(&mut music.queue[item]);
-        visible.push((item, x));
-        x += span(&music.queue[item]);
+    while first > 0 && x >= -CLIP_PADDING {
+        first -= 1;
+        prepare(&mut music.queue[first]);
+        x -= span(&music.queue[first]);
     }
 
     let y = PANEL_START + context.config.height + EXTENSION;
     let playhead_x = layout.playhead_x;
-    for (item, x) in visible {
-        let track = &music.queue[item];
+    for track in &mut music.queue[first..] {
+        if x > screen_width + CLIP_PADDING {
+            break;
+        }
+        if let Some(lyrics) = track.runtime.lyrics.ready_mut() {
+            lyrics.prepare(track.duration_ms as f32, context.frame.text().shaper());
+        }
+        let track_x = x;
+        x += span(track);
         let Some(lyrics) = track.runtime.lyrics.ready() else {
             continue;
         };
         for (background, color) in [(false, TEXT_COLOR.extend(1.0)), (true, Vec4::new(0.72, 0.86, 1.0, 1.0))] {
-            let line = lyrics.visible(&shaper, -x - CLIP_PADDING..screen_width - x + CLIP_PADDING, background);
+            let line = lyrics.visible(
+                context.frame.text().shaper(),
+                -track_x - CLIP_PADDING..screen_width - track_x + CLIP_PADDING,
+                background,
+            );
             if line.width <= 0.0 {
                 continue;
             }
-            let placed = context.frame.text().visible(&line, vec2(x, y), 0.0..screen_width).with_color(color);
+            let placed = context.frame.text().visible(&line, vec2(track_x, y), 0.0..screen_width).with_color(color);
             let padding = placed.size * 0.2 + 1.0;
-            context.frame.paint_text(
+            context.frame.paint(
                 placed.expanded(padding),
-                |text: TextFragment, playhead_x: f32, screen_width: f32| {
+                shader!(|text: TextFragment, playhead_x: f32, screen_width: f32| {
                     let edge_fade =
                         text.pixel.x.smoothstep(0.0, 32.0) * text.pixel.x.smoothstep(screen_width, screen_width - 32.0);
                     let emphasis = (text.pixel.x - playhead_x).abs().smoothstep(110.0, 0.0);
@@ -85,10 +82,8 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                     let sample = text.sample_with_weight(text.pixel, weight);
                     let sung = text.pixel.x.smoothstep(playhead_x + 4.0, playhead_x - 4.0);
                     let fade = edge_fade * (1.0 - sung * 0.5);
-                    let mut color = sample.color(text.line.color.to_vec4(), Vec4::new(0.0, 0.0, 0.0, 0.4), 1.5);
-                    color.w *= fade;
-                    color
-                },
+                    sample.color(text.line.color.to_vec4(), Vec4::new(0.0, 0.0, 0.0, 0.4), 1.5).opacity(fade)
+                }),
             );
         }
     }

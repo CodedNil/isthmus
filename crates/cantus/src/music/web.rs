@@ -5,17 +5,16 @@ use crate::{
     app::{AppUpdater, Background, send_update},
     config::Config,
 };
-use std::sync::Arc;
 use web_time::Instant;
 
 #[derive(Clone)]
 pub struct Spotify {
-    updater: Arc<AppUpdater>,
+    updater: AppUpdater,
 }
 
 impl Spotify {
     pub(super) fn new(_config: &Config, updater: &AppUpdater, _background: &Background) -> Self {
-        let spotify = Self { updater: Arc::new(updater.clone()) };
+        let spotify = Self { updater: updater.clone() };
         let queue = example_queue();
         send_update(updater, move |app| {
             app.music.replace_queue(queue, 0, 42_000.0, 1.0, Instant::now());
@@ -26,8 +25,12 @@ impl Spotify {
 
     pub(super) fn command(&self, command: PlaybackCommand) {
         if let PlaybackCommand::SetPlaying(playing) = command {
-            let updater = Arc::clone(&self.updater);
-            send_update(&updater, move |app| app.music.playing = playing);
+            send_update(&self.updater, move |app| {
+                app.music.timeline.position_ms = app.music.timeline.position_now();
+                app.music.timeline.observed_at = Instant::now();
+                app.music.timeline.rate = f32::from(playing);
+                app.music.playing = playing;
+            });
         }
     }
 

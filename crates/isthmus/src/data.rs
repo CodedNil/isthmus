@@ -6,19 +6,6 @@ use glam::{UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
 #[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct Unorm8x4(u32);
 
-/// Opaque marker for an image captured by a paint payload.
-#[repr(transparent)]
-#[derive(Clone, Copy)]
-#[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct ImageHandle(u32);
-
-impl ImageHandle {
-    #[cfg(not(target_arch = "spirv"))]
-    pub(crate) const fn new(image: u32) -> Self {
-        Self(image)
-    }
-}
-
 impl Unorm8x4 {
     pub fn from_vec4(value: Vec4) -> Self {
         let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
@@ -53,13 +40,13 @@ impl Unorm8x4 {
 /// Data with identical Rust and scalar-layout SPIR-V representations and four-byte granularity.
 ///
 /// # Safety
-/// Implementations must uphold the documented representation contract.
+/// Implementations must have no padding, alignment at most four, and identical host/shader layouts.
 #[cfg(target_arch = "spirv")]
 pub unsafe trait ShaderData: Copy {}
 /// Data with identical Rust and scalar-layout SPIR-V representations and four-byte granularity.
 ///
 /// # Safety
-/// Implementations must uphold the documented representation contract.
+/// Implementations must have no padding, alignment at most four, and identical host/shader layouts.
 #[cfg(not(target_arch = "spirv"))]
 pub unsafe trait ShaderData: Copy + bytemuck::Pod {}
 
@@ -69,7 +56,7 @@ macro_rules! shader_data {
         unsafe impl ShaderData for $ty {}
     )* };
 }
-shader_data!(u32, i32, f32, (), Unorm8x4, ImageHandle, Vec2, Vec3, Vec4, UVec2, UVec3, UVec4);
+shader_data!(u32, i32, f32, (), Unorm8x4, Vec2, Vec3, Vec4, UVec2, UVec3, UVec4);
 #[cfg(target_arch = "spirv")]
 // SAFETY: An array preserves the representation of its ShaderData elements.
 unsafe impl<T: ShaderData, const N: usize> ShaderData for [T; N] {}

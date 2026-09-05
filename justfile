@@ -1,7 +1,10 @@
 default: cantus
 
-cantus:
-    cargo run -p cantus --features generate-nix
+cantus: nix-options
+    cargo run -p cantus
+
+nix-options:
+    cargo run -p cantus -- --generate-nix-options
 
 cantusweb:
     cargo build --release -Zbuild-std=std,panic_abort --lib -p cantus --target wasm32-unknown-unknown

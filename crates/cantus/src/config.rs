@@ -1,50 +1,69 @@
-use crate::{music::MAX_PLAYLIST_TARGETS, render::weathertime};
 use arrayvec::ArrayVec;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use std::io;
 use std::{env, fs, path::PathBuf};
 use tracing::warn;
 
+pub const MAX_PLAYLIST_TARGETS: usize = 8;
+pub const MAX_WORLD_CLOCKS: usize = 3;
+
 #[derive(Deserialize)]
-#[cfg_attr(all(debug_assertions, feature = "generate-nix"), derive(schemars::JsonSchema))]
-#[serde(default)]
 #[expect(clippy::struct_excessive_bools, reason = "independent user-facing toggles")]
+#[cfg_attr(target_os = "linux", derive(schemars::JsonSchema))]
+#[serde(default)]
 pub struct Config {
     /// The monitor to display on.
-    pub monitor: Option<String>,
+    pub monitor: Option<String> = None,
     /// The layer the app should be on.
-    pub layer: Layer,
+    pub layer: Layer = Layer::Top,
     /// The corner/edge the application should anchor to.
-    pub layer_anchor: LayerAnchor,
+    pub layer_anchor: LayerAnchor = LayerAnchor::Top,
     /// The height of the bar in logical pixels.
-    pub height: f32,
+    pub height: f32 = 50.0,
 
     /// How many minutes in the future to display in the timeline.
-    pub timeline_future_minutes: f32,
+    pub timeline_future_minutes: f32 = 12.0,
     /// How many minutes before the current time to display in the timeline.
-    pub timeline_past_minutes: f32,
+    pub timeline_past_minutes: f32 = 1.5,
     /// The width in logical pixels on the left where previous tracks are displayed.
-    pub history_width: f32,
+    pub history_width: f32 = 100.0,
     /// Favourite playlists to display as buttons.
-    pub playlists: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
+    pub playlists: ArrayVec<String, MAX_PLAYLIST_TARGETS> = ArrayVec::new_const(),
     /// Whether star ratings should be enabled.
-    pub ratings_enabled: bool,
+    pub ratings_enabled: bool = false,
     /// Whether to show synchronized lyrics.
-    pub lyrics_enabled: bool,
+    pub lyrics_enabled: bool = true,
 
     /// Whether to show the weather and calendar module.
-    pub weathertime_enabled: bool,
+    pub weathertime_enabled: bool = true,
     /// Up to three IANA timezones shown with approximate city weather.
-    pub timezones: ArrayVec<String, { weathertime::MAX_WORLD_CLOCKS }>,
+    pub timezones: ArrayVec<String, MAX_WORLD_CLOCKS>,
 
     /// Whether to show the system status module.
-    pub status_enabled: bool,
+    pub status_enabled: bool = true,
 
     /// Web search providers; the first is the unprefixed fallback.
     pub search_providers: Vec<SearchProvider>,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            timezones: ["Europe/London", "America/Los_Angeles", "Australia/Sydney"].map(String::from).into(),
+            search_providers: vec![SearchProvider {
+                name: "DuckDuckGo".into(),
+                url: "https://duckduckgo.com/?q={searchTerms}".into(),
+                icon: "https://duckduckgo.com/assets/logo_header.v109.svg".into(),
+                alias: "!ddg".into(),
+            }],
+            ..
+        }
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
-#[cfg_attr(all(debug_assertions, feature = "generate-nix"), derive(schemars::JsonSchema))]
+#[cfg_attr(target_os = "linux", derive(schemars::JsonSchema))]
 pub struct SearchProvider {
     /// Display name, such as `DuckDuckGo` or `GitHub`.
     pub name: String,
@@ -57,7 +76,7 @@ pub struct SearchProvider {
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
-#[cfg_attr(all(debug_assertions, feature = "generate-nix"), derive(schemars::JsonSchema))]
+#[cfg_attr(target_os = "linux", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Layer {
     Background,
@@ -67,37 +86,11 @@ pub enum Layer {
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
-#[cfg_attr(all(debug_assertions, feature = "generate-nix"), derive(schemars::JsonSchema))]
+#[cfg_attr(target_os = "linux", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum LayerAnchor {
     Top,
     Bottom,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            monitor: None,
-            height: 50.0,
-            timezones: ArrayVec::new(),
-            weathertime_enabled: true,
-            status_enabled: true,
-            layer: Layer::Top,
-            layer_anchor: LayerAnchor::Top,
-            timeline_future_minutes: 12.0,
-            timeline_past_minutes: 1.5,
-            history_width: 100.0,
-            playlists: ArrayVec::new(),
-            ratings_enabled: false,
-            lyrics_enabled: true,
-            search_providers: vec![SearchProvider {
-                name: "DuckDuckGo".into(),
-                url: "https://duckduckgo.com/?q={searchTerms}".into(),
-                icon: "https://duckduckgo.com/assets/logo_header.v109.svg".into(),
-                alias: "!ddg".into(),
-            }],
-        }
-    }
 }
 
 pub fn directory() -> PathBuf {
@@ -120,40 +113,18 @@ pub fn load() -> Config {
         })
 }
 
-#[cfg(all(debug_assertions, feature = "generate-nix"))]
-pub mod nix_options {
-    use super::Config;
+#[cfg(target_os = "linux")]
+/// # Errors
+/// Returns errors writing `generated-options.nix` in the current directory.
+/// # Panics
+/// Panics if the configuration schema contains unsupported types or missing defaults.
+pub fn generate_nix_options() -> io::Result<()> {
     use schemars::generate::SchemaSettings;
     use serde_json::Value;
-    use std::{fmt::Write as _, fs};
+    use std::fmt::Write as _;
 
-    const OUTPUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../generated-options.nix");
-    const HEADER: &str = "# Generated by config.rs.\n# Do not edit this file directly.\n\n{ lib }: {\n";
-
-    /// Writes the Nix option declarations generated from [`Config`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if the generated schema has an unexpected shape or the output file cannot be written.
-    pub fn generate() {
-        let schema = SchemaSettings::default()
-            .with(|settings| settings.inline_subschemas = true)
-            .into_generator()
-            .into_root_schema_for::<Config>();
-        let schema = schema.as_value();
-        let mut output = HEADER.to_owned();
-        for (name, property) in schema["properties"].as_object().unwrap() {
-            writeln!(
-                output,
-                "  {name} = lib.mkOption {{\n    type = {};\n    default = builtins.fromJSON {};\n    description = {};\n  }};",
-                nix_type(property),
-                nix_string(&property["default"].to_string()),
-                nix_string(property["description"].as_str().unwrap()),
-            )
-            .unwrap();
-        }
-        output.push_str("}\n");
-        fs::write(OUTPUT, output).unwrap();
+    fn nix_string(value: &str) -> String {
+        serde_json::to_string(value).unwrap().replace("${", "\\${")
     }
 
     fn nix_type(schema: &Value) -> String {
@@ -166,7 +137,14 @@ pub mod nix_options {
             return format!("lib.types.enum [\n{values}\n    ]");
         }
         match schema["type"].as_str() {
-            None => "lib.types.nullOr (lib.types.str)".into(),
+            None => {
+                let types = schema["type"].as_array().expect("config type must be explicit");
+                assert_eq!(types.len(), 2, "only nullable unions are supported");
+                assert!(types.iter().any(|kind| kind == "null"), "union must contain null");
+                let mut inner = schema.clone();
+                inner["type"] = types.iter().find(|kind| *kind != "null").unwrap().clone();
+                format!("lib.types.nullOr ({})", nix_type(&inner))
+            }
             Some("string") => "lib.types.str".into(),
             Some("number") => "lib.types.number".into(),
             Some("boolean") => "lib.types.bool".into(),
@@ -184,7 +162,24 @@ pub mod nix_options {
         }
     }
 
-    fn nix_string(value: &str) -> String {
-        serde_json::to_string(value).unwrap().replace("${", "\\${")
+    let schema = SchemaSettings::default()
+        .with(|settings| settings.inline_subschemas = true)
+        .into_generator()
+        .into_root_schema_for::<Config>();
+    let mut output = String::from("# Generated from Cantus configuration; do not edit.\n\n{ lib }: {\n");
+    for (name, property) in schema.as_value()["properties"].as_object().unwrap() {
+        writeln!(
+            output,
+            "  {name} = lib.mkOption {{\n    type = {};\n    default = builtins.fromJSON {};\n    description = {};\n  }};",
+            nix_type(property),
+            nix_string(&property["default"].to_string()),
+            nix_string(property["description"].as_str().unwrap()),
+        ).unwrap();
     }
+    output.push_str("}\n");
+    let path = "generated-options.nix";
+    if !fs::read_to_string(path).is_ok_and(|contents| contents == output) {
+        fs::write(path, output)?;
+    }
+    Ok(())
 }

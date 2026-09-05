@@ -2,24 +2,35 @@
 
 use super::{DesktopApp, Platform};
 use crate::{
-    app::{AppUpdater, Background},
+    app::{AppUpdater, Background, send_update},
     interaction::InputEvent,
     render::{
+        Renderer, TEXT_COLOR,
         launcher::LauncherKey,
         status::{AudioMonitor, ProcessorSample, SystemSample},
     },
 };
 use gloo_timers::future::TimeoutFuture;
+use isthmus::glam::vec2;
 use js_sys::Date;
 use reqwest::Client;
 use std::{
     cell::RefCell,
+    future::Future,
     rc::Rc,
-    sync::{Arc, atomic::Ordering, mpsc::Sender},
+    sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use wasm_bindgen::{JsCast, closure::Closure};
+
+pub trait Task = Future + 'static;
+
+impl Background {
+    pub(crate) fn spawn(&self, task: impl Task<Output = ()>) {
+        wasm_bindgen_futures::spawn_local(task);
+    }
+}
 
 /// Entry point used by the generated browser glue.
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
@@ -66,12 +77,16 @@ impl Platform {
 impl Platform {
     pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
-    pub fn start_status_monitor(updates: Sender<SystemSample>, audio: Arc<AudioMonitor>) {
+    pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
         let start = Date::now();
         wasm_bindgen_futures::spawn_local(async move {
             loop {
                 let time = ((Date::now() - start) / 1_000.0) as f32;
-                if updates.send(Self::sample_status(time)).is_err() {
+                if !send_update(&updates, move |app| {
+                    if let Some(status) = &mut app.bar.status {
+                        status.record(Self::sample_status(time));
+                    }
+                }) {
                     break;
                 }
                 Self::sample_audio(time, &audio);
@@ -163,14 +178,18 @@ async fn run_web() -> Result<(), String> {
     };
     let [width, height] = logical_size();
     let scale = window.device_pixel_ratio() as f32;
-    app.borrow_mut()
-        .initialize_web_renderer(canvas.clone(), [(width * scale).round() as u32, (height * scale).round() as u32])
-        .await
-        .map_err(|error| error.to_string())?;
+    let (mut gpu, surface) = Renderer::new(
+        canvas.clone(),
+        [(width * scale).round() as u32, (height * scale).round() as u32],
+        include_bytes!("../../../../assets/NotoSans-Variable.ttf"),
+        TEXT_COLOR,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
 
     let pointer_app = Rc::clone(&app);
     let pointer = Closure::<dyn FnMut(web_sys::PointerEvent)>::new(move |event: web_sys::PointerEvent| {
-        let position = isthmus::glam::vec2(event.client_x() as f32, event.client_y() as f32);
+        let position = vec2(event.client_x() as f32, event.client_y() as f32);
         let input = match event.type_().as_str() {
             "pointerdown" => InputEvent::Press,
             "pointerup" => InputEvent::Release,
@@ -233,16 +252,16 @@ async fn run_web() -> Result<(), String> {
         if canvas.width() != physical[0] || canvas.height() != physical[1] {
             canvas.set_width(physical[0]);
             canvas.set_height(physical[1]);
-            let mut state = app.borrow_mut();
-            let surface = state.bar_surface;
-            if let (Some(gpu), Some(surface)) = (&mut state.gpu, surface) {
-                gpu.resize(surface, physical);
-            }
+            gpu.resize(surface, physical);
         }
         {
             let mut app = app.borrow_mut();
             app.apply_pending_updates();
-            app.render_web([width, height]);
+            app.launcher.open = true;
+            gpu.render(|render| {
+                render.surface(surface, vec2(width, height), |frame| app.draw(frame, true, true));
+            })
+            .map_err(|error| error.to_string())?;
             if let Some(text) = app.launcher.pending_copy.take() {
                 let _ = window.navigator().clipboard().write_text(&text);
             }

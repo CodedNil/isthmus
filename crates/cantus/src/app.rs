@@ -2,26 +2,19 @@ use crate::{
     config::{self, Config},
     interaction::Interaction,
     music::{Enrichment, Music},
-    platform::Platform,
-    render::{Bar, TEXT_COLOR, UiContext, launcher::LauncherState, program},
+    platform::{Platform, Task},
+    render::{Bar, Frame, UiContext, launcher::LauncherState},
 };
-use isthmus::{Renderer, SurfaceHandle, glam::vec2};
-#[cfg(not(target_arch = "wasm32"))]
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-#[cfg(target_arch = "wasm32")]
-use std::marker::PhantomData;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Duration;
 use std::{
-    future::Future,
     io,
     sync::mpsc::{self, Sender},
-    thread::Builder,
+    time::Duration,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
+use tokio::runtime::Handle;
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{Layer, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use web_time::Instant;
 
 pub type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 pub type AppUpdater = Sender<Update<CantusApp>>;
@@ -29,71 +22,37 @@ pub type AppUpdater = Sender<Update<CantusApp>>;
 #[derive(Clone)]
 pub struct Background {
     #[cfg(not(target_arch = "wasm32"))]
-    runtime: Handle,
-    #[cfg(target_arch = "wasm32")]
-    _runtime: PhantomData<()>,
-    updater: AppUpdater,
+    pub(crate) runtime: Handle,
+    pub(crate) updater: AppUpdater,
 }
 
 pub fn run() {
-    #[cfg(all(debug_assertions, feature = "generate-nix"))]
-    config::nix_options::generate();
-
     let filter = Targets::new().with_default(LevelFilter::WARN).with_target("cantus", Level::INFO);
     tracing_subscriber::registry().with(fmt::layer().with_writer(io::stderr).with_filter(filter)).init();
 
     Platform::run();
 }
 
-pub fn spawn_thread(name: &'static str, job: impl FnOnce() + Send + 'static) {
-    Builder::new().name(name.into()).spawn(job).expect("failed to spawn background thread");
-}
-
 impl Background {
-    #[cfg(not(target_arch = "wasm32"))]
-    fn new(runtime: &Runtime, updater: &AppUpdater) -> Self {
-        Self { runtime: runtime.handle().clone(), updater: updater.clone() }
-    }
-
-    #[cfg(target_arch = "wasm32")]
     fn new(updater: &AppUpdater) -> Self {
-        Self { _runtime: PhantomData, updater: updater.clone() }
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            runtime: Handle::current(),
+            updater: updater.clone(),
+        }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn spawn_update(&self, task: impl Future<Output = Option<Update<CantusApp>>> + Send + 'static) {
+    pub(crate) fn spawn_update(&self, task: impl Task<Output = Option<Update<CantusApp>>>) {
         let updater = self.updater.clone();
-        self.runtime.spawn(async move {
+        self.spawn(async move {
             if let Some(event) = task.await {
                 let _ = updater.send(event);
             }
         });
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn spawn_update(&self, task: impl Future<Output = Option<Update<CantusApp>>> + 'static) {
-        let updater = self.updater.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Some(event) = task.await {
-                let _ = updater.send(event);
-            }
-        });
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
-        self.runtime.spawn(task);
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn spawn(&self, task: impl Future<Output = ()> + 'static) {
-        wasm_bindgen_futures::spawn_local(task);
     }
 }
 
 pub struct CantusApp {
-    pub(crate) gpu: Option<Renderer>,
-    pub(crate) bar_surface: Option<SurfaceHandle>,
     pub(crate) music: Music,
     pub(crate) launcher: LauncherState,
     pub(crate) bar: Bar,
@@ -102,141 +61,52 @@ pub struct CantusApp {
     pub(crate) enrichment: Enrichment,
     pub(crate) interaction: Interaction,
     occluded_interaction: Interaction,
-    #[cfg(not(target_arch = "wasm32"))]
-    _runtime: Runtime,
+    next_enrichment: Instant,
 }
 
 impl Default for CantusApp {
     fn default() -> Self {
         let (updater, app_updates) = mpsc::channel();
-        #[cfg(not(target_arch = "wasm32"))]
-        let runtime = RuntimeBuilder::new_multi_thread()
-            .worker_threads(2)
-            .max_blocking_threads(8)
-            .thread_keep_alive(Duration::from_secs(10))
-            .thread_name("cantus-async")
-            .thread_stack_size(512 * 1024)
-            .enable_all()
-            .build()
-            .expect("failed to start Cantus async runtime");
-        #[cfg(not(target_arch = "wasm32"))]
-        let background = Background::new(&runtime, &updater);
-        #[cfg(target_arch = "wasm32")]
         let background = Background::new(&updater);
         let enrichment = Enrichment::new(background.clone());
         let config = config::load();
         Platform::start_launcher_listener(&background, &updater);
         Self {
-            gpu: None,
-            bar_surface: None,
-            launcher: LauncherState::new(&background, &enrichment.http, config.search_providers.clone()),
+            launcher: LauncherState::new(&background, &enrichment.http, config.search_providers.iter().cloned()),
             bar: Bar::new(&config, &background, &enrichment),
             app_updates,
             enrichment,
             music: Music::spotify(&config, &updater, &background),
             interaction: Interaction::default(),
             occluded_interaction: Interaction::default(),
+            next_enrichment: Instant::now(),
             config,
-            #[cfg(not(target_arch = "wasm32"))]
-            _runtime: runtime,
         }
     }
 }
 
 impl CantusApp {
-    /// Initializes the renderer for the first configured surface.
-    ///
-    /// # Panics
-    /// Panics if initialized twice or GPU setup fails.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn initialize_renderer(
-        &mut self,
-        surface: &(impl HasDisplayHandle + HasWindowHandle),
-        width: u32,
-        height: u32,
-    ) {
-        assert!(self.gpu.is_none(), "GPU initialized twice");
-        let (gpu, bar_surface) = Renderer::new(
-            program(),
-            surface,
-            [width, height],
-            include_bytes!("../../../assets/NotoSans-Variable.ttf"),
-            TEXT_COLOR,
-        )
-        .expect("failed to initialize renderer");
-        tracing::info!("Using GPU device: {}", gpu.device_name());
-        self.gpu = Some(gpu);
-        self.bar_surface = Some(bar_surface);
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn initialize_web_renderer(
-        &mut self,
-        canvas: web_sys::HtmlCanvasElement,
-        size: [u32; 2],
-    ) -> Result<(), isthmus::SetupError> {
-        assert!(self.gpu.is_none(), "GPU initialized twice");
-        let (gpu, bar_surface) =
-            Renderer::new(program(), canvas, size, include_bytes!("../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR)
-                .await?;
-        tracing::info!("Using GPU device: {}", gpu.device_name());
-        self.gpu = Some(gpu);
-        self.bar_surface = Some(bar_surface);
-        Ok(())
-    }
-
     pub(crate) fn apply_pending_updates(&mut self) {
         while let Ok(update) = self.app_updates.try_recv() {
             update(self);
         }
-    }
-
-    pub(crate) fn render(&mut self, screen_size: [f32; 2], launcher: Option<(SurfaceHandle, [f32; 2])>) {
-        let Some(gpu) = &mut self.gpu else {
-            return;
-        };
-        let Some(bar_surface) = self.bar_surface else {
-            return;
-        };
-        let result = gpu.render(|render| {
-            let bar_interaction =
-                if launcher.is_some() { &mut self.occluded_interaction } else { &mut self.interaction };
-            render.surface(bar_surface, vec2(screen_size[0], screen_size[1]), |gpu| {
-                let mut context = UiContext::new(gpu, &self.config, bar_interaction);
-                self.bar.show(&mut context, &mut self.music);
-                context.finish();
-            });
-
-            if let Some((launcher_surface, [width, height])) = launcher {
-                render.surface(launcher_surface, vec2(width, height), |gpu| {
-                    let mut context = UiContext::new(gpu, &self.config, &mut self.interaction);
-                    self.launcher.show(&mut context);
-                    context.finish();
-                });
-            }
-        });
-        if let Err(error) = result {
-            tracing::error!(%error, "Could not render frame");
+        if Instant::now() >= self.next_enrichment {
+            self.next_enrichment = Instant::now() + Duration::from_secs(1);
+            self.refresh_enrichment(true);
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn render_web(&mut self, screen_size: [f32; 2]) {
-        self.launcher.open = true;
-        let (Some(gpu), Some(surface)) = (&mut self.gpu, self.bar_surface) else {
-            return;
-        };
-        let result = gpu.render(|render| {
-            render.surface(surface, vec2(screen_size[0], screen_size[1]), |frame| {
-                let mut context = UiContext::new(frame, &self.config, &mut self.interaction);
-                self.bar.show(&mut context, &mut self.music);
-                self.launcher.show(&mut context);
-                context.finish();
-            });
-        });
-        if let Err(error) = result {
-            tracing::error!(%error, "Could not render web frame");
+    pub(crate) fn draw(&mut self, frame: Frame<'_>, bar: bool, launcher: bool) {
+        let interaction =
+            if self.launcher.open && !launcher { &mut self.occluded_interaction } else { &mut self.interaction };
+        let mut context = UiContext::new(frame, &self.config, interaction);
+        if bar {
+            self.bar.show(&mut context, &mut self.music);
         }
+        if launcher {
+            self.launcher.show(&mut context, !bar);
+        }
+        context.finish();
     }
 }
 

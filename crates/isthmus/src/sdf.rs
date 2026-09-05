@@ -1,5 +1,5 @@
 use crate::{
-    glam::{FloatExt, Vec4},
+    glam::{FloatExt, Vec2, Vec4, vec2},
     spirv_std::arch::Derivative,
 };
 use core::ops::{Add, Neg, Sub};
@@ -12,6 +12,53 @@ pub struct Sdf {
 }
 
 impl Sdf {
+    pub fn rounded_box(point: Vec2, half_size: Vec2, radius: f32) -> Self {
+        let corner = point.abs() - half_size + radius;
+        Self::new(corner.max(Vec2::ZERO).length() + corner.x.max(corner.y).min(0.0) - radius)
+    }
+
+    pub fn capsule(point: Vec2, half_span: f32, radius: f32) -> Self {
+        Self::new((point - vec2(point.x.clamp(-half_span, half_span), 0.0)).length() - radius)
+    }
+
+    pub fn star(point: Vec2, radius: f32, indent: f32) -> Self {
+        let k1 = vec2(0.809_017, -0.587_785_25);
+        let k2 = vec2(-k1.x, k1.y);
+        let mut point = vec2(point.x.abs(), -point.y);
+        point -= 2.0 * k1.dot(point).max(0.0) * k1;
+        point -= 2.0 * k2.dot(point).max(0.0) * k2;
+        point.x = point.x.abs();
+        point.y -= radius;
+        let edge = indent * vec2(-k1.y, k1.x) - vec2(0.0, radius);
+        let edge_t = (point.dot(edge) / edge.length_squared()).saturate();
+        let cross = point.y * edge.x - point.x * edge.y;
+        Self::new((point - edge * edge_t).length() * if cross < 0.0 { -1.0 } else { 1.0 })
+    }
+
+    pub fn rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> Self {
+        let k = 1.732_050_8;
+        let mut point = vec2(point.x.abs(), point.y);
+        let h = (point.x + k * point.y).max(0.0);
+        point -= 0.5 * vec2(h, h * k);
+        point -= vec2(
+            point.x.clamp(-0.5 * (side_len - radius) * k, 0.5 * (side_len - radius) * k),
+            -0.5 * (side_len - radius),
+        );
+        Self::new(point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius)
+    }
+
+    /// Shortest distance from `point` to the line segment between `start` and `end`.
+    pub fn segment(point: Vec2, start: Vec2, end: Vec2) -> Self {
+        let segment = end - start;
+        let along = ((point - start).dot(segment) / segment.length_squared().max(0.001)).saturate();
+        Self::new((point - start - segment * along).length())
+    }
+
+    /// "‹" chevron with its tip at the origin, spanning to `extent` and its mirror; negate `extent.x` for a "›".
+    pub fn chevron(point: Vec2, extent: Vec2) -> Self {
+        Self::segment(point, Vec2::ZERO, extent).union(Self::segment(point, Vec2::ZERO, vec2(extent.x, -extent.y)))
+    }
+
     pub const fn new(distance: f32) -> Self {
         Self { distance }
     }

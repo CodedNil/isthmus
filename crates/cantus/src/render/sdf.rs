@@ -1,9 +1,7 @@
-use crate::render::Globals;
-#[cfg(target_arch = "spirv")]
-use isthmus::Float as _;
+use crate::render::{Globals, TextFragment};
 use isthmus::{
-    Quad, Sdf,
-    glam::{FloatExt, UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
+    Float as _, Quad, Sdf,
+    glam::{UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
 };
 
 /// Where the drop shadow fades below the fragment kill threshold, plus an AA pixel.
@@ -14,7 +12,7 @@ pub const VISIBLE_ALPHA: f32 = 1.0 / 1024.0;
 pub fn sample_pill(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
     let size = quad.size;
     cantus_surface(quad, pixel, globals, time, |point| {
-        sd_capsule_box(quad.local(point), (size.x - size.y) * 0.5, size.y * 0.5)
+        Sdf::capsule(quad.local(point), (size.x - size.y) * 0.5, size.y * 0.5)
     })
 }
 
@@ -96,6 +94,10 @@ impl SurfaceSample {
     /// Moves content with interaction while avoiding edge distortion of text baselines.
     pub fn content_point(self, pixel: Vec2) -> Vec2 {
         pixel - self.refraction
+    }
+
+    pub fn text(self, text: &TextFragment) -> Vec4 {
+        text.color(text.alpha_at(self.content_point(text.pixel)) * self.mask)
     }
 
     pub fn displacement(self) -> Vec2 {
@@ -216,50 +218,4 @@ fn interaction(pixel: Vec2, globals: Globals, time: f32, mouse_mask: f32) -> Int
         ripple,
         flash: ripple_flash,
     }
-}
-
-pub fn sd_rounded_box(point: Vec2, half_size: Vec2, radius: f32) -> Sdf {
-    let corner = point.abs() - half_size + radius;
-    Sdf::new(corner.max(Vec2::ZERO).length() + corner.x.max(corner.y).min(0.0) - radius)
-}
-
-pub fn sd_capsule_box(point: Vec2, half_span: f32, radius: f32) -> Sdf {
-    let offset = point.abs() - vec2(half_span, 0.0);
-    Sdf::new(offset.max(Vec2::ZERO).length() + offset.x.max(offset.y).min(0.0) - radius)
-}
-
-pub fn sd_star(point: Vec2, radius: f32, indent: f32) -> Sdf {
-    let k1 = vec2(0.809_017, -0.587_785_25);
-    let k2 = vec2(-k1.x, k1.y);
-    let mut point = vec2(point.x.abs(), -point.y);
-    point -= 2.0 * k1.dot(point).max(0.0) * k1;
-    point -= 2.0 * k2.dot(point).max(0.0) * k2;
-    point.x = point.x.abs();
-    point.y -= radius;
-    let edge = indent * vec2(-k1.y, k1.x) - vec2(0.0, radius);
-    let edge_t = (point.dot(edge) / edge.length_squared()).saturate();
-    let cross = point.y * edge.x - point.x * edge.y;
-    Sdf::new((point - edge * edge_t).length() * if cross < 0.0 { -1.0 } else { 1.0 })
-}
-
-pub fn sd_rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> Sdf {
-    let k = 1.732_050_8;
-    let mut point = vec2(point.x.abs(), point.y);
-    let h = (point.x + k * point.y).max(0.0);
-    point -= 0.5 * vec2(h, h * k);
-    point -=
-        vec2(point.x.clamp(-0.5 * (side_len - radius) * k, 0.5 * (side_len - radius) * k), -0.5 * (side_len - radius));
-    Sdf::new(point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius)
-}
-
-/// Shortest distance from `point` to the line segment between `start` and `end`.
-pub fn segment_distance(point: Vec2, start: Vec2, end: Vec2) -> Sdf {
-    let segment = end - start;
-    let along = ((point - start).dot(segment) / segment.length_squared().max(0.001)).saturate();
-    Sdf::new((point - start - segment * along).length())
-}
-
-/// "‹" chevron with its tip at the origin, spanning to `extent` and its mirror; negate `extent.x` for a "›".
-pub fn sd_chevron(point: Vec2, extent: Vec2) -> Sdf {
-    segment_distance(point, Vec2::ZERO, extent).union(segment_distance(point, Vec2::ZERO, vec2(extent.x, -extent.y)))
 }

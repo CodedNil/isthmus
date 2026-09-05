@@ -2,20 +2,8 @@
 pub mod bamboo;
 
 pub use bamboo::Bamboo;
-#[cfg(target_arch = "spirv")]
-use isthmus::Float as _;
-use isthmus::{
-    Sdf, ShaderData,
-    glam::{FloatExt, Vec2},
-};
+use isthmus::{Float as _, Sdf, glam::Vec2};
 
-#[repr(C)]
-#[derive(Clone, Copy, Default, ShaderData)]
-pub struct Globals {
-    _padding: u32,
-}
-
-pub type Fragment = isthmus::Fragment<Globals>;
 isthmus::program!();
 
 /// Signed distance to a line segment with a variable radius at each end.

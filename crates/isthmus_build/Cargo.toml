@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+syn = { version = "3", features = ["full", "visit", "visit-mut"] }
 naga = { version = "=30.0.1", features = ["spv-in", "wgsl-out"] }
 spirv-builder.workspace = true
 
