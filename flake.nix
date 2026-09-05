@@ -22,29 +22,17 @@ rec {
         overlays = [ rust-overlay.overlays.default ];
       };
       pname = "cantus";
-      runtimeLibraries =
-        pkgs: with pkgs; [
-          wayland
-          vulkan-loader
-          libxkbcommon
-        ];
-      runtimeTools =
-        pkgs: with pkgs; [
-          pipewire
-          wireplumber
-        ];
+      runtimeLibraries = with pkgs; [
+        wayland
+        vulkan-loader
+        libxkbcommon
+      ];
+      runtimeTools = with pkgs; [
+        pipewire
+        wireplumber
+      ];
       rustToolchain = pkgs.rust-bin.nightly."2026-05-22";
-      appRust = rustToolchain.minimal.override {
-        extensions = [ "rustc-dev" ];
-      };
-      shaderRust = rustToolchain.minimal.override {
-        extensions = [
-          "rust-src"
-          "rustc-dev"
-          "llvm-tools"
-        ];
-      };
-      devRust = rustToolchain.default.override {
+      rust = rustToolchain.default.override {
         extensions = [
           "clippy"
           "rustfmt"
@@ -53,13 +41,9 @@ rec {
           "llvm-tools"
         ];
       };
-      appRustPlatform = pkgs.makeRustPlatform {
-        rustc = appRust;
-        cargo = appRust;
-      };
-      shaderRustPlatform = pkgs.makeRustPlatform {
-        rustc = shaderRust;
-        cargo = shaderRust;
+      rustPlatform = pkgs.makeRustPlatform {
+        rustc = rust;
+        cargo = rust;
       };
     in
     {
@@ -72,19 +56,28 @@ rec {
               "sysinfo-0.39.6" = "sha256-HgD13E5L5Gtwj1I1mD+vU3ln0dfj61Zeet8LHyUIdkk=";
             };
           };
-          src = lib.cleanSource ./.;
+          version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
+          src = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./rustfmt.toml
+              ./crates
+              ./assets/NotoSans-Variable.ttf
+            ];
+          };
           sysrootVendorPatch = ''
-            for crate in ${shaderRust}/lib/rustlib/src/rust/library/vendor/*; do
-              name="$(basename "$crate")"
+            for crate in ${rust}/lib/rustlib/src/rust/library/vendor/*; do
+              name="''${crate##*/}"
               if [ ! -e "$cargoDepsCopy/$name" ]; then
                 cp -r "$crate" "$cargoDepsCopy/"
               fi
             done
           '';
-          cantusShader = shaderRustPlatform.buildRustPackage {
+          cantusShader = rustPlatform.buildRustPackage {
             pname = "cantus-shader";
-            version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
-            inherit src cargoLock;
+            inherit src cargoLock version;
             postPatch = sysrootVendorPatch;
             doCheck = false;
             dontCargoInstall = true;
@@ -102,6 +95,7 @@ rec {
             '';
             installPhase = ''
               install -Dm644 isthmus.spv "$out/isthmus.spv"
+              install -Dm644 isthmus.manifest.rs "$out/isthmus.manifest.rs"
             '';
             nativeBuildInputs = with pkgs; [
               pkg-config
@@ -112,9 +106,13 @@ rec {
         rec {
           default = cantus;
           "cantus-shader" = cantusShader;
-          cantus = appRustPlatform.buildRustPackage {
-            inherit pname src cargoLock;
-            version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
+          cantus = rustPlatform.buildRustPackage {
+            inherit
+              pname
+              src
+              cargoLock
+              version
+              ;
             buildAndTestSubdir = "crates/cantus";
             CANTUS_SHADER_SPV = "${cantusShader}/isthmus.spv";
             nativeBuildInputs = with pkgs; [
@@ -122,11 +120,11 @@ rec {
               makeWrapper
               mold
             ];
-            buildInputs = runtimeLibraries pkgs;
+            buildInputs = runtimeLibraries;
             postInstall = ''
               wrapProgram "$out/bin/${pname}" \
-                --set LD_LIBRARY_PATH "${lib.makeLibraryPath (runtimeLibraries pkgs)}" \
-                --prefix PATH : "${lib.makeBinPath (runtimeTools pkgs)}"
+                --set LD_LIBRARY_PATH "${lib.makeLibraryPath (runtimeLibraries)}" \
+                --prefix PATH : "${lib.makeBinPath (runtimeTools)}"
             '';
             meta = {
               inherit description;
@@ -142,7 +140,7 @@ rec {
       devShells.${system}.default = pkgs.mkShell {
         name = pname;
         packages = with pkgs; [
-          devRust
+          rust
           mold
           pkg-config
           just
@@ -150,8 +148,8 @@ rec {
           pipewire
           wireplumber
         ];
-        buildInputs = runtimeLibraries pkgs;
-        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries pkgs);
+        buildInputs = runtimeLibraries;
+        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries);
       };
 
       formatter.${system} = pkgs.nixfmt;
@@ -166,64 +164,53 @@ rec {
             ...
           }:
           let
-            inherit (lib)
-              literalExpression
-              mkEnableOption
-              mkIf
-              mkOption
-              optional
-              optionalAttrs
-              types
-              ;
-
             cfg = config.programs.cantus;
             settingsFormat = pkgs.formats.toml { };
             settingsOptions = import ./generated-options.nix { inherit lib; };
-            settingsDefaults = lib.mapAttrs (_: option: option.default) settingsOptions;
           in
           {
             options.programs.cantus = {
-              enable = mkEnableOption description;
+              enable = lib.mkEnableOption description;
 
-              package = mkOption {
-                type = types.package;
+              package = lib.mkOption {
+                type = lib.types.package;
                 default = self.packages.${system}.cantus;
-                defaultText = literalExpression "inputs.${pname}.packages.${system}.${pname}";
+                defaultText = lib.literalExpression "inputs.${pname}.packages.${system}.${pname}";
                 description = "Cantus package to install.";
               };
 
-              autoStart = mkOption {
-                type = types.bool;
+              autoStart = lib.mkOption {
+                type = lib.types.bool;
                 default = true;
                 description = "Whether to start the Cantus widget automatically.";
               };
 
-              settings = mkOption {
-                type = types.nullOr (
-                  types.submodule {
+              settings = lib.mkOption {
+                type = lib.types.nullOr (
+                  lib.types.submodule {
                     options = settingsOptions;
                   }
                 );
                 default = null;
                 description = "Settings written as TOML to `~/.config/cantus/cantus.toml`.";
-                example = settingsDefaults;
+                example = lib.mapAttrs (_: option: option.default) settingsOptions;
               };
             };
 
-            config = mkIf cfg.enable {
+            config = lib.mkIf cfg.enable {
               home.packages = [ cfg.package ];
 
-              xdg.configFile = optionalAttrs (cfg.settings != null) {
+              xdg.configFile = lib.optionalAttrs (cfg.settings != null) {
                 "cantus/cantus.toml".source = settingsFormat.generate "cantus.toml" (
                   lib.filterAttrs (_: value: value != null) cfg.settings
                 );
               };
 
-              systemd.user.services.cantus = mkIf cfg.autoStart {
+              systemd.user.services.cantus = lib.mkIf cfg.autoStart {
                 Unit = {
                   Description = description;
                   After = [ config.wayland.systemd.target ];
-                  X-Restart-Triggers = optional (
+                  X-Restart-Triggers = lib.optional (
                     cfg.settings != null
                   ) config.xdg.configFile."cantus/cantus.toml".source;
                 };

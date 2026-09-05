@@ -48,7 +48,8 @@ To build Cantus from source, ensure the following dependencies are installed:
 * libxkbcommon
 * wayland
 * vulkan-loader
-* PipeWire and WirePlumber command-line tools (`pw-record` and `wpctl`)
+* PipeWire and WirePlumber command-line tools (`pw-record`, `pw-dump`, and `wpctl`)
+* A systemd user session for launching applications (`systemd-run`)
 
 Then, from the root of the repository, run:
 

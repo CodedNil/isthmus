@@ -4,10 +4,14 @@ use serde_json::Value;
 use std::{collections::HashMap, path::PathBuf};
 
 #[cfg(target_os = "linux")]
-pub mod linux;
+#[path = "linux.rs"]
+mod backend;
 
 #[cfg(target_arch = "wasm32")]
-pub mod web;
+#[path = "web.rs"]
+mod backend;
+
+pub use backend::Task;
 
 /// One launchable application entry exposed to the launcher.
 pub struct DesktopApp {

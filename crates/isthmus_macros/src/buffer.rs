@@ -1,6 +1,6 @@
 use crate::isthmus_path;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, parse_quote};
+use syn::{Data, DeriveInput, Fields};
 
 pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     if !input.attrs.iter().any(
@@ -16,17 +16,31 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     let Fields::Named(fields) = &data.fields else {
         return syn::Error::new_spanned(input, "ShaderData requires named fields").to_compile_error();
     };
-    let types = fields.named.iter().map(|field| &field.ty).collect::<Vec<_>>();
-    let mut generics = input.generics.clone();
-    for ty in &types {
-        generics.make_where_clause().predicates.push(parse_quote!(#ty: #isthmus::ShaderData));
+    if let Some(field) = fields
+        .named
+        .iter()
+        .find(|field| field.attrs.iter().any(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr")))
+    {
+        return syn::Error::new_spanned(
+            field,
+            "ShaderData fields must have the same layout on every target; conditional fields are not supported",
+        )
+        .to_compile_error();
     }
-    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
+    let types = fields.named.iter().map(|field| &field.ty).collect::<Vec<_>>();
+    if !input.generics.params.is_empty() {
+        return syn::Error::new_spanned(&input.generics, "ShaderData requires a concrete struct").to_compile_error();
+    }
     quote! {
+        const _: () = {
+            assert!(core::mem::size_of::<#name>() == 0 #(+ core::mem::size_of::<#types>())*, "ShaderData cannot contain padding");
+            assert!(core::mem::align_of::<#name>() <= 4, "ShaderData alignment cannot exceed four bytes");
+            assert!(core::mem::size_of::<#name>().is_multiple_of(4), "ShaderData size must be a multiple of four bytes");
+        };
         #[cfg(not(target_arch = "spirv"))]
-        unsafe impl #impl_generics #isthmus::__private::bytemuck::Zeroable for #name #type_generics #where_clause {}
+        unsafe impl #isthmus::__private::bytemuck::Zeroable for #name where #(#types: #isthmus::ShaderData,)* {}
         #[cfg(not(target_arch = "spirv"))]
-        unsafe impl #impl_generics #isthmus::__private::bytemuck::Pod for #name #type_generics #where_clause {}
-        unsafe impl #impl_generics #isthmus::ShaderData for #name #type_generics #where_clause {}
+        unsafe impl #isthmus::__private::bytemuck::Pod for #name where #(#types: #isthmus::ShaderData,)* {}
+        unsafe impl #isthmus::ShaderData for #name where #(#types: #isthmus::ShaderData,)* {}
     }
 }

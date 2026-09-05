@@ -1,9 +1,13 @@
-use crate::{ShaderData, data::ImageHandle};
+use crate::ShaderData;
+#[cfg(not(target_arch = "spirv"))]
+use crate::{TextFragment, text::Line};
 use spirv_std::{Sampler, image::Image2d};
 
 /// Loads a generated shader value from its recorded byte-addressed buffer offset.
 #[doc(hidden)]
-pub fn load<T>(buffer: &[u32], byte_index: u32) -> T {
+/// # Safety
+/// The offset must address a complete, correctly aligned value of T in the buffer.
+pub unsafe fn load<T: ShaderData>(buffer: &[u32], byte_index: u32) -> T {
     // SAFETY: Generated shaders only request recorded, correctly aligned values of T.
     unsafe { spirv_std::ByteAddressableBuffer::from_slice(buffer).load(byte_index) }
 }
@@ -12,12 +16,11 @@ pub fn load<T>(buffer: &[u32], byte_index: u32) -> T {
 pub struct ShaderImage<'a> {
     image: &'a Image2d,
     sampler: Sampler,
-    _handle: ImageHandle,
 }
 
 impl<'a> ShaderImage<'a> {
-    pub const fn new(image: &'a Image2d, sampler: Sampler, handle: ImageHandle) -> Self {
-        Self { image, sampler, _handle: handle }
+    pub const fn new(image: &'a Image2d, sampler: Sampler) -> Self {
+        Self { image, sampler }
     }
 
     pub fn sample(&self, uv: glam::Vec2) -> glam::Vec4 {
@@ -27,82 +30,106 @@ impl<'a> ShaderImage<'a> {
 
 #[doc(hidden)]
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, crate::ShaderData)]
 pub struct PushBlock {
     pub screen_size: glam::Vec2,
     pub time: f32,
-    _padding: f32,
+    pub(crate) _padding: f32,
 }
 
-// SAFETY: repr(C) gives PushBlock the scalar-layout-compatible field order and padding.
-unsafe impl ShaderData for PushBlock {}
-#[cfg(not(target_arch = "spirv"))]
-// SAFETY: PushBlock contains only Pod fields and has no invalid bit patterns.
-unsafe impl bytemuck::Zeroable for PushBlock {}
-#[cfg(not(target_arch = "spirv"))]
-// SAFETY: PushBlock is repr(C), contains only Pod fields, and has no uninitialized padding.
-unsafe impl bytemuck::Pod for PushBlock {}
+/// A nominal shader program whose interfaces are generated together.
+///
+/// # Safety
+/// Metadata and code must come from the same validated program and match its globals layout.
+pub unsafe trait Program: Copy + 'static {
+    type Globals: ShaderData + Default;
+    #[cfg(not(target_arch = "spirv"))]
+    const CODE: &'static [u8];
+    #[cfg(not(target_arch = "spirv"))]
+    const SHADERS: &'static [ShaderEntry];
+}
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum Blend {
+    #[default]
+    Over,
+    Add,
+    Replace,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg(not(target_arch = "spirv"))]
-#[derive(Clone, Copy)]
-pub struct Program {
-    pub(crate) bytes: &'static [u8],
+pub enum Primitive {
+    Quad,
+    Triangle,
 }
 
 #[cfg(not(target_arch = "spirv"))]
-impl Program {
-    pub const fn new(bytes: &'static [u8]) -> Self {
-        Self { bytes }
+pub struct ShaderEntry {
+    pub name: &'static str,
+    pub blend: Blend,
+    pub primitive: Primitive,
+}
+
+#[cfg(not(target_arch = "spirv"))]
+/// # Panics
+/// Fails constant evaluation when a shader is absent from its generated program.
+pub const fn shader_index(entries: &[ShaderEntry], name: &str) -> usize {
+    let mut index = 0;
+    while index < entries.len() {
+        let a = entries[index].name.as_bytes();
+        let b = name.as_bytes();
+        let mut byte = 0;
+        if a.len() == b.len() {
+            while byte < a.len() && a[byte] == b[byte] {
+                byte += 1;
+            }
+            if byte == a.len() {
+                return index;
+            }
+        }
+        index += 1;
     }
+    panic!("shader was not extracted into this program");
 }
 
-#[cfg(not(target_arch = "spirv"))]
-#[derive(Clone, Copy)]
-pub struct PaintPipeline {
-    pub(crate) entry: &'static str,
+/// Straight-alpha color operations; shader output conversion belongs to Isthmus.
+pub trait ColorExt {
+    #[must_use]
+    fn opacity(self, opacity: f32) -> Self;
 }
 
-#[cfg(not(target_arch = "spirv"))]
-impl PaintPipeline {
-    pub const fn new(native: &'static str, web: &'static str) -> Self {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = native;
-            return Self { entry: web };
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = web;
-            Self { entry: native }
-        }
+impl ColorExt for glam::Vec4 {
+    fn opacity(self, opacity: f32) -> Self {
+        self.truncate().extend(self.w * opacity)
     }
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
-#[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
+#[derive(Clone, Copy, crate::ShaderData)]
 pub struct Quad {
     pub center: glam::Vec2,
     pub size: glam::Vec2,
     pub axis: glam::Vec2,
 }
 
-// SAFETY: repr(C) Quad consists entirely of scalar-layout-compatible Vec2 fields.
-unsafe impl ShaderData for Quad {}
-
 #[repr(C)]
-#[derive(Clone, Copy)]
-#[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
+#[derive(Clone, Copy, crate::ShaderData)]
 pub struct DrawRecord {
-    pub quad: Quad,
+    pub geometry: [glam::Vec2; 3],
     pub payload: u32,
     pub(crate) _padding: u32,
 }
 
-// SAFETY: repr(C) DrawRecord consists of a valid Quad followed by one u32.
-unsafe impl ShaderData for DrawRecord {}
-
 impl Quad {
+    pub const fn data(self) -> [glam::Vec2; 3] {
+        [self.center, self.size, self.axis]
+    }
+
+    pub const fn from_data([center, size, axis]: [glam::Vec2; 3]) -> Self {
+        Self { center, size, axis }
+    }
+
     pub const fn new(center: glam::Vec2, size: glam::Vec2, axis: glam::Vec2) -> Self {
         Self { center, size, axis }
     }
@@ -116,10 +143,9 @@ impl Quad {
         Self::new(min.midpoint(max), max - min, glam::Vec2::X)
     }
 
-    pub fn sample(self, vertex: u32, screen_size: glam::Vec2) -> RasterSample {
-        let local = (quad_coord(vertex) - 0.5) * self.size;
-        let pixel = self.center + self.axis * local.x + self.axis.perp() * local.y;
-        RasterSample { position: pixel_to_ndc(pixel, screen_size), pixel }
+    pub fn vertex(self, vertex: u32) -> glam::Vec2 {
+        let local = (glam::vec2((vertex & 1) as f32, (vertex >> 1) as f32) - 0.5) * self.size;
+        self.center + self.axis * local.x + self.axis.perp() * local.y
     }
 
     pub fn local(self, pixel: glam::Vec2) -> glam::Vec2 {
@@ -129,68 +155,115 @@ impl Quad {
 
     #[must_use]
     pub fn expanded(mut self, amount: f32) -> Self {
-        let expansion = glam::Vec2::splat(amount);
-        self.size += expansion * 2.0;
+        self.size += amount * 2.0;
         self
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, crate::ShaderData)]
+pub struct Triangle {
+    pub a: glam::Vec2,
+    pub b: glam::Vec2,
+    pub c: glam::Vec2,
+}
+
+impl Triangle {
+    pub fn oriented(center: glam::Vec2, size: glam::Vec2, direction: glam::Vec2) -> Self {
+        let axis = direction.normalize_or(glam::Vec2::X);
+        let along = axis * size.x * 0.5;
+        let across = axis.perp() * size.y * 0.5;
+        Self::new(center + along, center - along + across, center - along - across)
+    }
+
+    pub const fn new(a: glam::Vec2, b: glam::Vec2, c: glam::Vec2) -> Self {
+        Self { a, b, c }
+    }
+
+    pub const fn data(self) -> [glam::Vec2; 3] {
+        [self.a, self.b, self.c]
+    }
+
+    pub const fn from_data([a, b, c]: [glam::Vec2; 3]) -> Self {
+        Self { a, b, c }
+    }
+
+    pub fn barycentric(self, pixel: glam::Vec2) -> glam::Vec3 {
+        let ab = self.b - self.a;
+        let ac = self.c - self.a;
+        let ap = pixel - self.a;
+        let area = ab.perp_dot(ac);
+        let b = ap.perp_dot(ac) / area;
+        let c = ab.perp_dot(ap) / area;
+        glam::vec3(1.0 - b - c, b, c)
+    }
+}
+
 #[derive(Clone, Copy)]
-pub struct Fragment<Globals = ()> {
+pub struct TriangleFragment<P: Program> {
+    pub pixel: glam::Vec2,
+    pub uv: glam::Vec2,
+    pub barycentric: glam::Vec3,
+    pub time: f32,
+    pub globals: P::Globals,
+}
+
+impl<P: Program> TriangleFragment<P> {
+    pub fn new(pixel: glam::Vec2, triangle: Triangle, time: f32, globals: P::Globals) -> Self {
+        let barycentric = triangle.barycentric(pixel);
+        Self { pixel, uv: glam::vec2(barycentric.y, barycentric.z), barycentric, time, globals }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Fragment<P: Program> {
     pub pixel: glam::Vec2,
     pub local: glam::Vec2,
     pub uv: glam::Vec2,
     pub time: f32,
-    pub globals: Globals,
+    pub globals: P::Globals,
 }
 
-impl<Globals> Fragment<Globals> {
-    pub fn new(pixel: glam::Vec2, local: glam::Vec2, size: glam::Vec2, time: f32, globals: Globals) -> Self {
+impl<P: Program> Fragment<P> {
+    pub fn new(pixel: glam::Vec2, local: glam::Vec2, size: glam::Vec2, time: f32, globals: P::Globals) -> Self {
         Self { pixel, local, uv: local / size + 0.5, time, globals }
     }
 }
 
-pub struct RasterSample {
-    pub position: glam::Vec4,
-    pub pixel: glam::Vec2,
-}
-
-/// Coordinates for a two-triangle unit quad from its vertex index.
-const fn quad_coord(vertex: u32) -> glam::Vec2 {
-    glam::vec2((vertex & 1) as f32, (vertex >> 1) as f32)
-}
-
-/// Converts the renderer's top-left pixel coordinates to wgpu clip space.
-fn pixel_to_ndc(pixel: glam::Vec2, screen_size: glam::Vec2) -> glam::Vec4 {
-    let ndc = pixel / screen_size * 2.0 - 1.0;
-    glam::vec4(ndc.x, -ndc.y, 0.0, 1.0)
-}
-
 #[cfg(not(target_arch = "spirv"))]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SurfaceHandle {
-    index: u32,
-    generation: u32,
-}
-
-#[cfg(not(target_arch = "spirv"))]
-impl SurfaceHandle {
-    pub(crate) const fn new(index: usize, generation: u32) -> Self {
-        Self { index: index as u32, generation }
-    }
-
-    pub(crate) const fn index(self) -> usize {
-        self.index as usize
-    }
-
-    pub(crate) const fn generation(self) -> u32 {
-        self.generation
-    }
-}
+slotmap::new_key_type! { pub struct SurfaceHandle; }
 
 /// Describes the host-visible interface and fixed state of one shader.
+///
+/// # Safety
+/// The entry must use this payload layout, globals type and geometry in the generated program.
 #[cfg(not(target_arch = "spirv"))]
-pub trait ShaderSpec {
-    type Instance: ShaderData;
-    const PIPELINE: PaintPipeline;
+pub unsafe trait ShaderSpec: ShaderData {
+    type Program: Program;
+    type Geometry;
+    const INDEX: usize;
+}
+
+#[cfg(not(target_arch = "spirv"))]
+pub trait ShaderInput {
+    type Program: Program;
+    type Geometry;
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl<P: Program> ShaderInput for Fragment<P> {
+    type Geometry = Quad;
+    type Program = P;
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl<P: Program> ShaderInput for TextFragment<'_, P> {
+    type Geometry = Line;
+    type Program = P;
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl<P: Program> ShaderInput for TriangleFragment<P> {
+    type Geometry = Triangle;
+    type Program = P;
 }

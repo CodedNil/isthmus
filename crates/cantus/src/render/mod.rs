@@ -1,23 +1,20 @@
-pub mod launcher;
-pub mod lyrics;
-pub mod music;
-pub mod sdf;
-pub mod status;
-pub mod weathertime;
-
-#[cfg(not(target_arch = "spirv"))]
 use crate::{
     app::Background,
     config::Config,
     interaction::Interaction,
     music::{Enrichment, Music},
 };
-#[cfg(not(target_arch = "spirv"))]
-use isthmus::Frame;
 use isthmus::{
     ShaderData,
     glam::{Vec2, Vec3},
 };
+
+pub mod launcher;
+pub mod lyrics;
+pub mod music;
+pub mod sdf;
+pub mod status;
+pub mod weathertime;
 
 pub const TEXT_COLOR: Vec3 = Vec3::splat(0.94);
 /// Gap between the top of the surface and the top of the bar.
@@ -38,10 +35,7 @@ pub struct Globals {
     pub ripples: [RipplePulse; 4],
 }
 
-pub type Fragment = isthmus::Fragment<Globals>;
-pub type TextFragment<'a> = isthmus::TextFragment<'a, Globals>;
-
-isthmus::program!();
+isthmus::program!(Globals);
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, ShaderData)]
@@ -50,46 +44,41 @@ pub struct RipplePulse {
     pub start_time: f32,
 }
 
-#[cfg(not(target_arch = "spirv"))]
 pub struct UiContext<'a> {
     pub frame: Frame<'a>,
     pub config: &'a Config,
     pub interaction: &'a mut Interaction,
 }
 
-#[cfg(not(target_arch = "spirv"))]
 #[derive(Clone, Copy)]
 pub struct BarLayout {
     pub playhead_x: f32,
     pub px_per_ms: f32,
 }
 
-#[cfg(not(target_arch = "spirv"))]
 impl<'a> UiContext<'a> {
     pub fn new(frame: Frame<'a>, config: &'a Config, interaction: &'a mut Interaction) -> Self {
         interaction.begin_frame(frame.delta_time, frame.time);
         Self { frame, config, interaction }
     }
 
-    pub fn finish(mut self) {
-        self.frame.set_globals(Globals {
+    pub const fn finish(self) {
+        *self.frame.globals = Globals {
             pointer: self.interaction.mouse_pos(),
             pressure: self.interaction.mouse_pressure(),
             bar_height: self.config.height,
             ripples: self.interaction.mouse_ripples(),
-        });
+        };
         self.interaction.end_frame();
     }
 }
 
-#[cfg(not(target_arch = "spirv"))]
 pub struct Bar {
     pub(crate) weather: Option<weathertime::WeatherPanel>,
     pub(crate) status: Option<status::StatusPanel>,
     music_view: music::MusicView,
 }
 
-#[cfg(not(target_arch = "spirv"))]
 impl Bar {
     pub fn new(config: &Config, background: &Background, enrichment: &Enrichment) -> Self {
         Self {

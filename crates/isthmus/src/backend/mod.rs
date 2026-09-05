@@ -1,9 +1,6 @@
-mod canvas;
-mod context;
-mod image;
-mod renderer;
+pub mod buffer;
+pub mod gpu;
+pub mod image;
+pub mod renderer;
+pub mod setup;
 mod surface;
-
-pub use canvas::Canvas;
-pub use context::{BufferRange, Context, SetupError};
-pub use renderer::{Render, RenderError, Renderer};

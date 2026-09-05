@@ -8,10 +8,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
     mem,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 use tracing::{info, warn};
 use web_time::Instant;
@@ -21,21 +18,18 @@ mod lyrics;
 #[cfg(not(target_arch = "wasm32"))]
 mod spotify;
 #[cfg(target_arch = "wasm32")]
-mod web;
+#[path = "web.rs"]
+mod spotify;
 
 pub use enrichment::{ArtState, Enrichment, Fetch};
 pub use lyrics::Lyrics;
-#[cfg(target_arch = "wasm32")]
-use web as spotify;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
 pub type MusicResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 pub const ART_SIZE: u32 = 128;
 pub const TRACK_SPACING_MS: f32 = 4000.0;
-pub const MAX_PLAYLIST_TARGETS: usize = 8;
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
-type PlaylistTracks = Arc<HashSet<TrackId>>;
 
 pub use lyrics::LyricSegment;
 
@@ -248,7 +242,7 @@ pub struct CondensedPlaylist {
     pub(crate) name: String,
     pub image_url: Option<String>,
     pub art: ArtState,
-    pub tracks: PlaylistTracks,
+    pub tracks: HashSet<TrackId>,
     pub rating_index: Option<u8>,
 }
 

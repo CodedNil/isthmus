@@ -1,25 +1,22 @@
-use super::{Fragment, fbm, hash, noise, tapered_segment};
+use super::{Fragment, Frame, fbm, hash, noise, tapered_segment};
 use core::f32::consts::{PI, TAU};
-#[cfg(target_arch = "spirv")]
-use isthmus::Float as _;
-#[cfg(not(target_arch = "spirv"))]
-use isthmus::Frame;
 use isthmus::{
-    Quad,
-    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
+    Blend, Float as _, Quad,
+    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    shader,
 };
 
 pub struct Bamboo;
 
-#[isthmus::paint]
 impl Bamboo {
-    #[cfg(not(target_arch = "spirv"))]
     pub fn show(&mut self, frame: &mut Frame<'_>) {
         let size = frame.screen_size;
-        frame.set_globals(super::Globals::default());
-        frame.paint(Quad::new(size * 0.5, size, Vec2::X), |fragment: Fragment, size: Vec2| {
-            wallpaper(fragment.pixel, size, fragment.time)
-        });
+        frame.paint(
+            Quad::new(size * 0.5, size, Vec2::X),
+            shader!(Blend::Replace, |fragment: Fragment, size: Vec2| {
+                wallpaper(fragment.pixel, size, fragment.time)
+            }),
+        );
     }
 }
 

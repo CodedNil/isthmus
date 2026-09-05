@@ -1,10 +1,10 @@
 use super::{
-    ART_SIZE, ArtState, AudioFeatures, CondensedPlaylist, LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult,
-    PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime,
+    ART_SIZE, ArtState, AudioFeatures, CondensedPlaylist, LyricSegment, MusicResult, PlaybackCommand, PlaylistId,
+    Track, TrackId, TrackRuntime,
 };
 use crate::{
     app::{AppUpdater, Background, send_update},
-    config::{self, Config},
+    config::{self, Config, MAX_PLAYLIST_TARGETS},
 };
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
@@ -37,7 +37,7 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::json;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
     io::{self, Write},
     path::PathBuf,
@@ -278,13 +278,6 @@ struct QueueSnapshot {
     playback: PlaybackUpdate,
 }
 
-#[derive(Clone, Copy)]
-enum PlayerCommand {
-    Playing(bool),
-    Seek(u32),
-    Skip(bool),
-}
-
 impl SpotifyWorker {
     async fn event(&mut self, event: WorkerEvent) {
         match event {
@@ -302,11 +295,13 @@ impl SpotifyWorker {
 
     async fn command(&mut self, command: PlaybackCommand) {
         match command {
-            PlaybackCommand::SetPlaying(playing) => self.player_command(PlayerCommand::Playing(playing)).await,
-            PlaybackCommand::Seek(position_ms) => self.player_command(PlayerCommand::Seek(position_ms)).await,
+            PlaybackCommand::SetPlaying(playing) => {
+                self.player_command(if playing { "resume" } else { "pause" }, None).await;
+            }
+            PlaybackCommand::Seek(position_ms) => self.player_command("seek_to", Some(position_ms)).await,
             PlaybackCommand::Skip(count) => {
                 for _ in 0..count.unsigned_abs() {
-                    self.player_command(PlayerCommand::Skip(count > 0)).await;
+                    self.player_command(if count > 0 { "skip_next" } else { "skip_prev" }, None).await;
                 }
             }
             PlaybackCommand::UpdateLibrary { track_id, playlists, liked } => {
@@ -359,10 +354,10 @@ impl SpotifyWorker {
             warn!("Spotify cluster update contained no player state");
             return;
         };
-        self.active_device = (!cluster.active_device_id.is_empty()).then(|| cluster.active_device_id.clone());
+        self.active_device = (!cluster.active_device_id.is_empty()).then_some(cluster.active_device_id);
         let playing = player.is_playing && !player.is_paused;
         let observed_at = Instant::now();
-        let rate = player.playback_speed.max(0.0) as f32;
+        let rate = if playing { player.playback_speed.max(0.0) as f32 } else { 0.0 };
         let current_position = player.prev_tracks.len();
         let position = player_position(&player, rate);
         let mut provided = player.prev_tracks;
@@ -410,18 +405,16 @@ impl SpotifyWorker {
         });
         let playback = snapshot.playback;
         send_update(&self.updater, move |app| {
-            let queue_changed = if let Some(queue) = queue {
+            if let Some(queue) = queue {
                 app.music.replace_queue(queue, index, playback.position_ms, playback.rate, playback.observed_at);
-                true
             } else {
                 app.music.observe(index, playback.position_ms, playback.rate, playback.observed_at);
-                false
-            };
+            }
             if playback.playing && !app.music.playing {
                 app.music.last_toggle = Instant::now();
             }
             app.music.playing = playback.playing;
-            if queue_changed {
+            if rebuild_queue {
                 app.refresh_enrichment(true);
             }
         });
@@ -453,15 +446,8 @@ impl SpotifyWorker {
         });
     }
 
-    async fn player_command(&self, command: PlayerCommand) {
+    async fn player_command(&self, endpoint: &str, value: Option<u32>) {
         let Some(target) = &self.active_device else { return };
-        let (endpoint, value) = match command {
-            PlayerCommand::Playing(true) => ("resume", None),
-            PlayerCommand::Playing(false) => ("pause", None),
-            PlayerCommand::Seek(position) => ("seek_to", Some(position)),
-            PlayerCommand::Skip(true) => ("skip_next", None),
-            PlayerCommand::Skip(false) => ("skip_prev", None),
-        };
         let mut command = json!({
             "endpoint": endpoint,
             "options": {
@@ -657,18 +643,16 @@ struct PlaylistRequest {
     rating_index: Option<u8>,
 }
 
-async fn fetch_playlist_tracks(session: &Session, id: PlaylistId) -> ClientResult<PlaylistTracks> {
+async fn fetch_playlist_tracks(session: &Session, id: PlaylistId) -> ClientResult<HashSet<TrackId>> {
     let spotify_id = SpotifyId::from_base62(&id)?;
     let playlist = SelectedListContent::parse_from_bytes(&session.spclient().get_playlist(&spotify_id).await?)?;
-    Ok(Arc::new(
-        playlist
-            .contents
-            .get_or_default()
-            .items
-            .iter()
-            .filter_map(|item| item.uri().strip_prefix("spotify:track:")?.parse().ok())
-            .collect(),
-    ))
+    Ok(playlist
+        .contents
+        .get_or_default()
+        .items
+        .iter()
+        .filter_map(|item| item.uri().strip_prefix("spotify:track:")?.parse().ok())
+        .collect())
 }
 
 fn playlist_image(attributes: &ListAttributes) -> Option<String> {
@@ -698,7 +682,7 @@ fn playlist_image(attributes: &ListAttributes) -> Option<String> {
 fn player_position(player: &PlayerState, rate: f32) -> f32 {
     let position = player.position_as_of_timestamp.max(0) as f64;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-    let age_ms = now.saturating_sub(player.timestamp);
+    let age_ms = now.saturating_sub(player.timestamp).max(0);
     (position + age_ms as f64 * f64::from(rate)) as f32
 }
 
@@ -802,7 +786,6 @@ fn track_image_url(track: &metadata::Track) -> Option<String> {
         .into_iter()
         .flat_map(|group| &group.image)
         .chain(&album.cover)
-        .min_by_key(|image| image.width().abs_diff(ART_SIZE_PX));
-    let image = image?;
+        .min_by_key(|image| image.width().abs_diff(ART_SIZE_PX))?;
     (!image.file_id().is_empty()).then(|| format!("https://i.scdn.co/image/{}", FileId::from(image)))
 }

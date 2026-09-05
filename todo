@@ -11,13 +11,12 @@ other command such as timer cancel
 
 mouse gestures generic across programs
 
-web demo
-
-nix options as part of build
+web demo:
+spotify demo
 
 
 do a MASSIVE refactor pass throughout, do every audit you can imagine for code quality
-performance, deduplication, inlining single use small functions/variables in ways that doesnt hurt readability, consistency, reduce unnecessary wrapper functions, reduced reexports, correctness, idiomatic rust pass, reduce overengineering/complexity, simplify away boilerplate code, increase usage of immediate mode, find areas lightweight helper crates can reduce our codebase complexity, reduce struct redestructuring or variable redefinitions that aren't necessary, specified lifetimes and drop() etc can be examples of where improvement is possible (though not for certain a problem), feature gates are considered as discouraged as much as possible, clean up/simplify comments to one line max with no comments that read as changelogs
+performance, deduplication, inlining single use small functions/variables in ways that doesnt hurt readability, consistency, reduce unnecessary wrapper functions, reduced reexports, correctness, idiomatic rust pass, reduce overengineering/complexity, simplify away boilerplate code, increase usage of immediate mode, find areas lightweight helper crates can reduce our codebase complexity, reduce struct redestructuring or variable redefinitions that aren't necessary, specified lifetimes and drop() etc can be examples of where improvement is possible (though not for certain a problem), feature gates are considered as discouraged as much as possible, clean up/simplify comments to one line max with no comments that read as changelogs, unify platform code as much as possible and also target code wherever we dont truly need branching or feature gates, compile time errors not runtime
 major focus on LOC reduction, remove legacy cruft, we exclusively target modern systems and features with no legacy support
 genuine simplifications, radical suggestions including deep refactors
 reevaluate it all from first principles always, greenfield treat it as a fresh project where nothing is off limits, keep it simple and elegant

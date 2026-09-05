@@ -1,4 +1,4 @@
-use super::{ART_SIZE, AudioFeatures, Music, MusicResult, TrackId, spotify::Spotify};
+use super::{ART_SIZE, AudioFeatures, Music, MusicResult, Track, TrackId, lyrics::LyricsRequest, spotify::Spotify};
 use crate::{
     app::{Background, CantusApp, update},
     render::music::PALETTE_COLORS,
@@ -130,30 +130,35 @@ fn art_slots(music: &mut Music) -> impl Iterator<Item = (&str, &mut ArtState)> {
     )
 }
 
+fn pending_lyrics(queue: &mut [Track], current: usize, now: Instant) -> Vec<LyricsRequest> {
+    let mut lyric_uris: HashSet<_> = queue
+        .iter()
+        .filter(|track| matches!(track.runtime.lyrics, Fetch::Fetching))
+        .map(|track| track.uri.clone())
+        .collect();
+    let current = current.min(queue.len().saturating_sub(1));
+    let nearby = current.saturating_sub(1)..current.saturating_add(3).min(queue.len());
+    queue[nearby]
+        .iter_mut()
+        .filter_map(|track| {
+            if track.name.trim().is_empty()
+                || !track.runtime.lyrics.request(now)
+                || !lyric_uris.insert(track.uri.clone())
+            {
+                return None;
+            }
+            Some((&*track).into())
+        })
+        .collect()
+}
+
 impl CantusApp {
     pub(crate) fn refresh_enrichment(&mut self, include_audio: bool) {
         let now = Instant::now();
-        let mut lyric_uris = HashSet::new();
-        let current = self.music.timeline.index.min(self.music.queue.len().saturating_sub(1));
-        let nearby = current.saturating_sub(3)..current.saturating_add(4).min(self.music.queue.len());
-        let lyrics = self
-            .music
-            .queue
-            .get_mut(nearby)
-            .into_iter()
-            .flatten()
-            .filter_map(|track| {
-                if track.name.trim().is_empty()
-                    || !track.runtime.lyrics.request(now)
-                    || !lyric_uris.insert(track.uri.clone())
-                {
-                    return None;
-                }
-                Some((&*track).into())
-            })
-            .collect::<Vec<_>>();
-        for request in lyrics {
-            self.enrichment.request_lyrics(request, self.music.spotify.clone());
+        if self.config.lyrics_enabled {
+            for request in pending_lyrics(&mut self.music.queue, self.music.timeline.index, now) {
+                self.enrichment.request_lyrics(request, self.music.spotify.clone());
+            }
         }
 
         let mut audio = if include_audio {
@@ -177,7 +182,7 @@ impl CantusApp {
                         let Some(features) = track.id.and_then(|id| features.get(&id)) else {
                             continue;
                         };
-                        track.runtime.audio_features = features.map_or_else(Fetch::default, Fetch::Ready);
+                        track.runtime.audio_features = features.map_or_else(Fetch::retry, Fetch::Ready);
                     }
                 }))
             });
@@ -192,16 +197,14 @@ impl CantusApp {
             let http = self.enrichment.http.clone();
             self.enrichment.background.spawn_update(async move {
                 let state = fetch_art(&http, &url).await;
-                Some(update(move |app| app.set_art_state(&url, &state)))
+                Some(update(move |app| {
+                    for (slot_url, slot) in art_slots(&mut app.music) {
+                        if slot_url == url {
+                            *slot = state.clone();
+                        }
+                    }
+                }))
             });
-        }
-    }
-
-    fn set_art_state(&mut self, url: &str, state: &ArtState) {
-        for (slot_url, slot) in art_slots(&mut self.music) {
-            if slot_url == url {
-                *slot = state.clone();
-            }
         }
     }
 }
@@ -291,7 +294,8 @@ fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_
         };
 
         let range = buckets.swap_remove(bucket_index);
-        pixels[range.clone()].sort_unstable_by(|a, b| component(a, channel).total_cmp(&component(b, channel)));
+        pixels[range.clone()]
+            .select_nth_unstable_by(range.len() / 2, |a, b| component(a, channel).total_cmp(&component(b, channel)));
         let middle = range.start + range.len() / 2;
         buckets.push(range.start..middle);
         buckets.push(middle..range.end);

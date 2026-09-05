@@ -1,67 +1,80 @@
 use crate::{
-    Image,
-    backend::Canvas,
-    contract::{PushBlock, Quad, ShaderSpec, SurfaceHandle},
-    data::ImageHandle,
-    text::{Line, Text, TextScope},
+    Image, Program, Triangle,
+    backend::gpu::{Gpu, SurfacePaints},
+    contract::{PushBlock, Quad, ShaderSpec},
+    text::{Line, Text},
 };
+use core::iter::once;
 
-pub struct Frame<'a> {
+pub struct Frame<'a, P: Program> {
     pub time: f32,
     pub screen_size: glam::Vec2,
     pub delta_time: f32,
+    pub globals: &'a mut P::Globals,
     text: &'a mut Text,
-    canvas: &'a mut Canvas,
-    surface: SurfaceHandle,
+    gpu: &'a mut Gpu,
+    surface: &'a mut SurfacePaints,
 }
 
-impl<'a> Frame<'a> {
+impl<'a, P: Program> Frame<'a, P> {
     pub(crate) const fn new(
-        push: &'a PushBlock,
-        time: f32,
+        push: &PushBlock,
         delta_time: f32,
+        globals: &'a mut P::Globals,
         text: &'a mut Text,
-        canvas: &'a mut Canvas,
-        surface: SurfaceHandle,
+        gpu: &'a mut Gpu,
+        surface: &'a mut SurfacePaints,
     ) -> Self {
-        Self { time, screen_size: push.screen_size, delta_time, text, canvas, surface }
-    }
-
-    /// Sets app-defined shader data shared by every paint on this surface frame.
-    pub fn set_globals<T: crate::ShaderData>(&mut self, globals: T) {
-        self.canvas.set_globals(self.surface, globals);
+        Self { time: push.time, screen_size: push.screen_size, delta_time, globals, text, gpu, surface }
     }
 
     #[doc(hidden)]
-    pub fn __image(&mut self, image: &Image) -> ImageHandle {
-        self.canvas.image(image.size, &image.pixels)
+    pub fn __image(&mut self, image: &Image) -> wgpu::BindGroup {
+        self.gpu.image(image)
     }
 
-    pub const fn text(&mut self) -> TextScope<'_> {
-        TextScope::new(self.text)
+    pub const fn text(&mut self) -> &mut Text {
+        self.text
     }
 
     /// Paints geometry with an inline shader receiving a fragment and typed captures.
-    pub fn paint<S, Geometry, Payload>(&mut self, geometry: Geometry, payload: Payload)
+    pub fn paint<S, G, Payload>(&mut self, geometry: G, payload: Payload)
     where
-        S: ShaderSpec,
-        Geometry: Copy + Into<Quad>,
-        Payload: FnOnce(&mut Self, Geometry) -> S::Instance,
+        S: ShaderSpec<Program = P, Geometry = G::Kind>,
+        G: Geometry,
+        Payload: FnOnce(&mut Self, G) -> (S, Option<wgpu::BindGroup>),
     {
-        self.canvas.begin_payload(S::PIPELINE);
-        let value = payload(self, geometry);
-        self.canvas.emit::<S>(self.surface, geometry.into(), value);
+        let (value, image) = payload(self, geometry);
+        self.gpu.emit::<S>(self.surface, geometry.primitives(self.text), value, image);
     }
+}
 
-    /// Paints text with a shader receiving [`crate::TextFragment`] and typed captures.
-    pub fn paint_text<S, Payload>(&mut self, line: Line, payload: Payload)
-    where
-        S: ShaderSpec,
-        Payload: FnOnce(&mut Self, Line) -> S::Instance,
-    {
-        self.canvas.begin_payload(S::PIPELINE);
-        let value = payload(self, line);
-        let quads = self.text.quads(line);
-        self.canvas.emit_text::<S>(self.surface, quads, value);
+/// Geometry accepted by paint, with a statically matched shader input kind.
+pub trait Geometry: Copy {
+    type Kind;
+    fn primitives(self, text: &Text) -> impl Iterator<Item = [glam::Vec2; 3]>;
+}
+
+impl<T: Copy + Into<Quad>> Geometry for T {
+    type Kind = Quad;
+
+    fn primitives(self, _: &Text) -> impl Iterator<Item = [glam::Vec2; 3]> {
+        once(self.into().data())
+    }
+}
+
+impl Geometry for Line {
+    type Kind = Self;
+
+    fn primitives(self, text: &Text) -> impl Iterator<Item = [glam::Vec2; 3]> {
+        text.quads(self).map(Quad::data)
+    }
+}
+
+impl Geometry for Triangle {
+    type Kind = Self;
+
+    fn primitives(self, _: &Text) -> impl Iterator<Item = [glam::Vec2; 3]> {
+        once(self.data())
     }
 }

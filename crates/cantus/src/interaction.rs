@@ -41,12 +41,6 @@ enum Pointer {
     Held { position: Vec2, origin: Vec2, dragging: bool },
 }
 
-impl Default for Pointer {
-    fn default() -> Self {
-        Self::Outside(Vec2::ZERO)
-    }
-}
-
 #[derive(Clone, Copy)]
 enum ButtonEvent {
     Press,
@@ -61,7 +55,7 @@ enum Active {
 
 #[derive(Default)]
 pub struct Interaction {
-    pointer: Pointer,
+    pointer: Pointer = Pointer::Outside(Vec2::ZERO),
     pressure: f32,
     ripples: [RipplePulse; 4],
     event: Option<ButtonEvent>,
@@ -138,6 +132,10 @@ impl Interaction {
             return;
         }
         self.launcher_active = active;
+        self.event = None;
+        self.scroll = 0;
+        self.held_seconds = 0.0;
+        self.previous_held_seconds = 0.0;
         self.hot = None;
         self.active = None;
         self.pointer = Pointer::Outside(self.mouse_pos());
@@ -147,6 +145,7 @@ impl Interaction {
     }
 
     pub fn begin_frame(&mut self, delta_time: f32, time: f32) {
+        self.regions.clear();
         self.hot = self.pointer().and_then(|pointer| self.hit_test(pointer));
         self.widgets.clear();
         self.previous_held_seconds = self.held_seconds;
@@ -170,12 +169,11 @@ impl Interaction {
         }
     }
 
-    pub fn end_frame(&mut self) {
+    pub const fn end_frame(&mut self) {
         if !self.down() {
             self.active = None;
         }
-        self.previous_widgets.clear();
-        self.previous_widgets.append(&mut self.widgets);
+        mem::swap(&mut self.previous_widgets, &mut self.widgets);
         self.event = None;
         self.scroll = 0;
     }

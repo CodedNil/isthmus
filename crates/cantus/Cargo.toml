@@ -11,14 +11,16 @@ path = "src/main.rs"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[features]
-generate-nix = ["dep:schemars"]
-
 [dependencies]
 isthmus = { path = "../isthmus" }
-
-[target.'cfg(any(target_os = "linux", target_arch = "wasm32"))'.dependencies]
+bytemuck.workspace = true
+reqwest = { version = "0.12.28", default-features = false, features = [
+    "json",
+    "rustls-tls-webpki-roots",
+] }
+tokio = { version = "1.53.1", features = ["rt", "sync", "time"] }
 arrayvec = { version = "0.7.8", features = ["serde"] }
+smallvec.workspace = true
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = [
     "fmt",
@@ -34,13 +36,9 @@ image = { version = "0.25.10", default-features = false, features = [
 ] }
 palette = { version = "0.7.7", default-features = false, features = ["std"] }
 raw-window-handle.workspace = true
-serde = { workspace = true, features = ["rc"] }
+serde.workspace = true
 serde_json = "1.0.151"
 toml = "1.1.5"
-schemars = { version = "1.2.2", features = [
-    "arrayvec07",
-    "preserve_order",
-], optional = true }
 form_urlencoded = "1.2.2"
 futures-util = "0.3.34"
 fastrand = "2.5.0"
@@ -53,11 +51,11 @@ jiff = { version = "0.2.35", default-features = false, features = [
 web-time = "1.1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+schemars = { version = "1.2.2", features = ["arrayvec07", "preserve_order"] }
 resvg = { version = "0.48.1", default-features = false, features = [
     "raster-images",
 ] }
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
-bytemuck.workspace = true
 librespot-protocol = "0.8.0"
 librespot-core = { version = "0.8.0", default-features = false, features = [
     "rustls-tls-webpki-roots",
@@ -78,16 +76,7 @@ xkbcommon = { version = "0.9.0", default-features = false, features = [
     "wayland",
 ] }
 parking_lot = "0.12.5"
-reqwest = { version = "0.12.28", default-features = false, features = [
-    "json",
-    "rustls-tls-webpki-roots",
-] }
-tokio = { version = "1.53.1", features = [
-    "net",
-    "rt-multi-thread",
-    "sync",
-    "time",
-] }
+tokio = { version = "1.53.1", features = ["net", "rt-multi-thread"] }
 flate2 = "1.1.10"
 freedesktop-desktop-entry = { version = "0.8.2", default-features = false }
 freedesktop-icons = "0.4.0"
@@ -100,15 +89,13 @@ sysinfo = { git = "https://github.com/CodedNil/sysinfo", branch = "gpu_temp", de
     "system",
     "gpu",
 ] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-bytemuck.workspace = true
-reqwest = { version = "0.12.28", default-features = false, features = ["json"] }
-tokio = { version = "1.53.1", features = ["rt", "sync", "time"] }
-wasm-bindgen-futures = "0.4.77"
+wasm-bindgen-futures = "0.4.78"
 gloo-timers = { version = "0.4.0", features = ["futures"] }
-js-sys = "0.3.104"
-wasm-bindgen = "0.2.127"
-web-sys = { version = "0.3.104", features = [
+js-sys = "0.3.105"
+wasm-bindgen = "0.2.128"
+web-sys = { version = "0.3.105", features = [
     "console",
     "Clipboard",
     "Coordinates",
@@ -124,12 +111,7 @@ web-sys = { version = "0.3.104", features = [
     "Window",
     "WheelEvent",
 ] }
-jiff = { version = "0.2.35", default-features = false, features = [
-    "js",
-    "serde",
-    "std",
-    "tz-system",
-] }
+jiff = { version = "0.2.35", default-features = false, features = ["js"] }
 
 [build-dependencies]
 # librespot-core 0.8's vergen-gitcl build dependency is incompatible with vergen 9.1.
