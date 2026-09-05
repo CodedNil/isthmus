@@ -79,14 +79,6 @@ impl Sdf {
         Self::new(self.distance.min(other.distance))
     }
 
-    pub const fn intersection(self, other: Self) -> Self {
-        Self::new(self.distance.max(other.distance))
-    }
-
-    pub fn difference(self, other: Self) -> Self {
-        self.intersection(-other)
-    }
-
     pub fn lerp(self, other: Self, amount: f32) -> Self {
         Self::new(self.distance.lerp(other.distance, amount))
     }

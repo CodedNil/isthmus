@@ -63,3 +63,33 @@ unsafe impl<T: ShaderData, const N: usize> ShaderData for [T; N] {}
 #[cfg(not(target_arch = "spirv"))]
 // SAFETY: The Pod bound verifies that the host array has no invalid padding or bit patterns.
 unsafe impl<T: ShaderData, const N: usize> ShaderData for [T; N] where [T; N]: bytemuck::Pod {}
+
+/// Loads a generated shader value from its recorded byte-addressed buffer offset.
+#[doc(hidden)]
+/// # Safety
+/// The offset must address a complete, correctly aligned value of T in the buffer.
+pub unsafe fn load<T: ShaderData>(buffer: &[u32], byte_index: u32) -> T {
+    // SAFETY: Generated shaders only request recorded, correctly aligned values of T.
+    unsafe { spirv_std::ByteAddressableBuffer::from_slice(buffer).load_unchecked(byte_index) }
+}
+
+#[doc(hidden)]
+#[repr(C)]
+#[derive(Clone, Copy, Default, crate::ShaderData)]
+pub struct PushBlock {
+    pub screen_size: Vec2,
+    pub time: f32,
+    pub(crate) _padding: f32,
+}
+
+/// Straight-alpha color operations; shader output conversion belongs to Isthmus.
+pub trait ColorExt {
+    #[must_use]
+    fn opacity(self, opacity: f32) -> Self;
+}
+
+impl ColorExt for Vec4 {
+    fn opacity(self, opacity: f32) -> Self {
+        self.truncate().extend(self.w * opacity)
+    }
+}

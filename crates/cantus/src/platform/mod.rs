@@ -1,7 +1,11 @@
-use crate::app::Background;
+use image::imageops::FilterType;
+use isthmus::Image;
 use reqwest::Client;
-use serde_json::Value;
-use std::{collections::HashMap, path::PathBuf};
+use resvg::{
+    render,
+    tiny_skia::{Pixmap, Transform},
+    usvg::{self, Tree},
+};
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
@@ -18,27 +22,34 @@ pub struct DesktopApp {
     pub name: String,
     pub exec: Vec<String>,
     pub comment: String,
-    pub icon_path: Option<PathBuf>,
     pub action: Option<(String, Vec<String>)>,
-    pub icon: Option<isthmus::Image>,
+    pub icon: Option<Image>,
 }
 
 /// Platform-specific services used by the shared Cantus UI.
 pub struct Platform;
 
 impl Platform {
-    pub fn start_exchange_rates(background: &Background, http: Client, update: fn(HashMap<String, f64>)) {
-        background.spawn(async move {
-            if let Ok(response) = http
-                .get("https://open.er-api.com/v6/latest/USD")
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-                && let Ok(body) = response.json::<Value>().await
-                && let Some(rates) = body.get("rates").and_then(Value::as_object)
-            {
-                update(rates.iter().filter_map(|(currency, rate)| Some((currency.clone(), rate.as_f64()?))).collect());
-            }
-        });
+    pub fn decode_icon(bytes: &[u8]) -> Option<Image> {
+        const SIZE: u32 = 48;
+        let pixels = if let Ok(image) = image::load_from_memory(bytes) {
+            image.resize_to_fill(SIZE, SIZE, FilterType::Triangle).into_rgba8().into_raw()
+        } else {
+            let tree = Tree::from_data(bytes, &usvg::Options::default()).ok()?;
+            let mut pixmap = Pixmap::new(SIZE, SIZE)?;
+            let source = tree.size();
+            render(
+                &tree,
+                Transform::from_scale(SIZE as f32 / source.width(), SIZE as f32 / source.height()),
+                &mut pixmap.as_mut(),
+            );
+            pixmap.take_demultiplied()
+        };
+        Some(Image::rgba8([SIZE; 2], pixels))
+    }
+
+    pub async fn provider_icon(http: Client, url: String) -> Option<Image> {
+        let bytes = http.get(url).send().await.ok()?.error_for_status().ok()?.bytes().await.ok()?;
+        Self::decode_icon(&bytes)
     }
 }

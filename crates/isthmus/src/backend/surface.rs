@@ -1,9 +1,7 @@
 use super::{
     gpu::{Gpu, SurfacePaints},
     renderer::RenderError,
-    setup::{SetupError, configure_surface, create_surface},
 };
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 pub(super) struct SurfaceTarget {
     pub(super) surface: wgpu::Surface<'static>,
@@ -13,17 +11,6 @@ pub(super) struct SurfaceTarget {
 }
 
 impl SurfaceTarget {
-    pub(crate) fn new(
-        gpu: &Gpu,
-        source: &(impl HasDisplayHandle + HasWindowHandle),
-        width: u32,
-        height: u32,
-    ) -> Result<Self, SetupError> {
-        let surface = create_surface(&gpu.instance, source)?;
-        let config = configure_surface(&gpu.adapter, &surface, width, height)?;
-        Ok(Self::from_raw(&gpu.device, surface, config))
-    }
-
     pub(super) fn from_raw(
         device: &wgpu::Device,
         surface: wgpu::Surface<'static>,
@@ -71,3 +58,5 @@ impl SurfaceTarget {
         }
     }
 }
+
+slotmap::new_key_type! { pub struct SurfaceHandle; }

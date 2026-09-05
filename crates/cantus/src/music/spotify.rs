@@ -37,8 +37,7 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::json;
 use std::{
-    collections::{HashMap, HashSet},
-    error::Error,
+    collections::{HashMap, HashSet, hash_map::Entry},
     io::{self, Write},
     path::PathBuf,
     str,
@@ -53,13 +52,9 @@ use tokio::{
 use tracing::{error, info, warn};
 use web_time::Instant;
 
-const ART_SIZE_PX: i32 = ART_SIZE as i32;
-
 const CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 const REDIRECT_URI: &str = "http://127.0.0.1:8898/login";
 const RATING_PLAYLISTS: [&str; 10] = ["0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0"];
-
-type ClientResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[derive(Clone)]
 pub struct Spotify {
@@ -69,7 +64,7 @@ pub struct Spotify {
 
 enum WorkerEvent {
     Command(PlaybackCommand),
-    Metadata { generation: u64, values: HashMap<String, TrackDetails> },
+    Metadata { generation: u64, requested: Vec<String>, values: HashMap<String, TrackDetails> },
 }
 
 impl Spotify {
@@ -166,7 +161,7 @@ impl Spotify {
     }
 }
 
-async fn connect() -> ClientResult<Session> {
+async fn connect() -> MusicResult<Session> {
     let (cache, cached_credentials) = spawn_blocking(|| {
         let cache = Cache::new(Some(config::directory()), None::<PathBuf>, None::<PathBuf>, None)?;
         let credentials = cache.credentials();
@@ -198,7 +193,7 @@ async fn run_spotify(
     playlist_targets: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
     ratings_enabled: bool,
     generation: u64,
-) -> ClientResult<()> {
+) -> MusicResult<()> {
     let dealer = session.dealer();
     let mut connections = dealer.listen_for("hm://pusher/v1/connections", Ok)?;
     let mut clusters = dealer.listen_for("hm://connect-state/v1/cluster", DealerMessage::from_raw::<ClusterUpdate>)?;
@@ -282,10 +277,19 @@ impl SpotifyWorker {
     async fn event(&mut self, event: WorkerEvent) {
         match event {
             WorkerEvent::Command(command) => self.command(command).await,
-            WorkerEvent::Metadata { generation, values } if generation == self.generation => {
-                self.track_metadata.retain(|_, metadata| metadata.is_some());
-                if !values.is_empty() {
-                    self.track_metadata.extend(values.into_iter().map(|(uri, metadata)| (uri, Some(metadata))));
+            WorkerEvent::Metadata { generation, requested, mut values } if generation == self.generation => {
+                let mut changed = false;
+                for uri in requested {
+                    if let Entry::Occupied(mut slot) = self.track_metadata.entry(uri.clone()) {
+                        if let Some(value) = values.remove(&uri) {
+                            slot.insert(Some(value));
+                            changed = true;
+                        } else if slot.get().is_none() {
+                            slot.remove();
+                        }
+                    }
+                }
+                if changed {
                     self.publish_snapshot(true);
                 }
             }
@@ -310,7 +314,7 @@ impl SpotifyWorker {
         }
     }
 
-    async fn register(&self) -> ClientResult<Cluster> {
+    async fn register(&self) -> MusicResult<Cluster> {
         let request = PutStateRequest {
             device: MessageField::some(ConnectDevice {
                 device_info: MessageField::some(DeviceInfo {
@@ -415,7 +419,7 @@ impl SpotifyWorker {
             }
             app.music.playing = playback.playing;
             if rebuild_queue {
-                app.refresh_enrichment(true);
+                app.refresh_enrichment();
             }
         });
     }
@@ -432,7 +436,7 @@ impl SpotifyWorker {
                         true
                     }
             })
-            .cloned()
+            .map(|track| track.uri.clone())
             .collect::<Vec<_>>();
         if requested.is_empty() {
             return;
@@ -442,7 +446,7 @@ impl SpotifyWorker {
         let generation = self.generation;
         tokio::spawn(async move {
             let metadata = fetch_track_metadata(&session, &requested).await;
-            let _ = sender.send(WorkerEvent::Metadata { generation, values: metadata });
+            let _ = sender.send(WorkerEvent::Metadata { generation, requested, values: metadata });
         });
     }
 
@@ -466,7 +470,7 @@ impl SpotifyWorker {
         }))
         .unwrap_or_default();
         let mut compressed = GzEncoder::new(Vec::new(), Compression::fast());
-        let result: ClientResult<_> = async {
+        let result: MusicResult<_> = async {
             compressed.write_all(&body)?;
             let body = compressed.finish()?;
             let mut headers = HeaderMap::new();
@@ -482,7 +486,7 @@ impl SpotifyWorker {
         }
     }
 
-    async fn request_connected_json(&self, path: &str, body: serde_json::Value) -> ClientResult<Vec<u8>> {
+    async fn request_connected_json(&self, path: &str, body: serde_json::Value) -> MusicResult<Vec<u8>> {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, "application/json".parse()?);
         headers.insert("x-spotify-connection-id", self.session.connection_id().parse()?);
@@ -495,7 +499,7 @@ impl SpotifyWorker {
         method: &Method,
         path: &str,
         message: &T,
-    ) -> ClientResult<Vec<u8>> {
+    ) -> MusicResult<Vec<u8>> {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, "application/x-protobuf".parse()?);
         headers.insert("x-spotify-connection-id", self.session.connection_id().parse()?);
@@ -573,50 +577,46 @@ impl SpotifyWorker {
         }
     }
 
-    async fn load_playlists(&mut self) -> ClientResult<()> {
+    async fn load_playlists(&mut self) -> MusicResult<()> {
         let root =
             SelectedListContent::parse_from_bytes(&self.session.spclient().get_rootlist(0, Some(10_000)).await?)?;
-        let requests = root
-            .contents
-            .get_or_default()
-            .items
-            .iter()
-            .zip(&root.contents.get_or_default().meta_items)
-            .filter_map(|(item, metadata)| {
-                let id = item.uri().strip_prefix("spotify:playlist:").and_then(|id| id.parse::<PlaylistId>().ok())?;
-                let attributes = metadata.attributes.get_or_default();
-                let name = attributes.name();
-                let rating_index = RATING_PLAYLISTS
-                    .iter()
-                    .position(|rating| *rating == name)
-                    .filter(|_| self.ratings_enabled)
-                    .map(|index| index as u8);
-                if !self.playlist_targets.iter().any(|target| target == name) && rating_index.is_none() {
-                    return None;
-                }
-                Some(PlaylistRequest {
-                    id,
-                    revision: metadata.revision().to_vec(),
-                    name: name.to_owned(),
-                    image_url: playlist_image(attributes),
-                    rating_index,
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let tracks =
-            try_join_all(requests.iter().map(|request| fetch_playlist_tracks(&self.session, request.id))).await?;
-        let mut updates = Vec::with_capacity(requests.len());
-        for (request, tracks) in requests.into_iter().zip(tracks) {
-            self.playlist_revisions.insert(request.id, request.revision);
-            updates.push(CondensedPlaylist {
-                id: request.id,
-                name: request.name,
-                image_url: request.image_url,
-                art: ArtState::default(),
-                tracks,
-                rating_index: request.rating_index,
-            });
+        let requests =
+            root.contents.get_or_default().items.iter().zip(&root.contents.get_or_default().meta_items).filter_map(
+                |(item, metadata)| {
+                    let id =
+                        item.uri().strip_prefix("spotify:playlist:").and_then(|id| id.parse::<PlaylistId>().ok())?;
+                    let attributes = metadata.attributes.get_or_default();
+                    let name = attributes.name();
+                    let rating_index = RATING_PLAYLISTS
+                        .iter()
+                        .position(|rating| *rating == name)
+                        .filter(|_| self.ratings_enabled)
+                        .map(|index| index as u8);
+                    if !self.playlist_targets.iter().any(|target| target == name) && rating_index.is_none() {
+                        return None;
+                    }
+                    let session = &self.session;
+                    Some(async move {
+                        MusicResult::Ok((
+                            CondensedPlaylist {
+                                id,
+                                name: name.to_owned(),
+                                image_url: playlist_image(attributes),
+                                art: ArtState::default(),
+                                tracks: fetch_playlist_tracks(session, id).await?,
+                                rating_index,
+                            },
+                            metadata.revision().to_vec(),
+                        ))
+                    })
+                },
+            );
+        let mut updates = Vec::new();
+        let playlists = try_join_all(requests).await?;
+        self.playlist_revisions.clear();
+        for (playlist, revision) in playlists {
+            self.playlist_revisions.insert(playlist.id, revision);
+            updates.push(playlist);
         }
 
         send_update(&self.updater, move |app| {
@@ -629,21 +629,13 @@ impl SpotifyWorker {
             }
             updates.sort_unstable_by(|a, b| a.name.cmp(&b.name));
             app.music.playlists = updates;
-            app.refresh_enrichment(false);
+            app.refresh_enrichment();
         });
         Ok(())
     }
 }
 
-struct PlaylistRequest {
-    id: PlaylistId,
-    revision: Vec<u8>,
-    name: String,
-    image_url: Option<String>,
-    rating_index: Option<u8>,
-}
-
-async fn fetch_playlist_tracks(session: &Session, id: PlaylistId) -> ClientResult<HashSet<TrackId>> {
+async fn fetch_playlist_tracks(session: &Session, id: PlaylistId) -> MusicResult<HashSet<TrackId>> {
     let spotify_id = SpotifyId::from_base62(&id)?;
     let playlist = SelectedListContent::parse_from_bytes(&session.spclient().get_playlist(&spotify_id).await?)?;
     Ok(playlist
@@ -686,12 +678,11 @@ fn player_position(player: &PlayerState, rate: f32) -> f32 {
     (position + age_ms as f64 * f64::from(rate)) as f32
 }
 
-async fn fetch_track_metadata(session: &Session, tracks: &[ProvidedTrack]) -> HashMap<String, TrackDetails> {
+async fn fetch_track_metadata(session: &Session, tracks: &[String]) -> HashMap<String, TrackDetails> {
     let entity_request = tracks
         .iter()
-        .filter(|track| track.uri.starts_with("spotify:track:") && !track.metadata.contains_key("duration"))
-        .map(|track| EntityRequest {
-            entity_uri: track.uri.clone(),
+        .map(|uri| EntityRequest {
+            entity_uri: uri.clone(),
             query: vec![ExtensionQuery {
                 extension_kind: EnumOrUnknown::new(ExtensionKind::TRACK_V4),
                 ..Default::default()
@@ -699,9 +690,6 @@ async fn fetch_track_metadata(session: &Session, tracks: &[ProvidedTrack]) -> Ha
             ..Default::default()
         })
         .collect::<Vec<_>>();
-    if entity_request.is_empty() {
-        return HashMap::new();
-    }
     let request = BatchedEntityRequest { entity_request, ..Default::default() };
     let Ok(response) = session.spclient().get_extended_metadata(request).await else {
         warn!("Failed to fetch Spotify track metadata");
@@ -786,6 +774,6 @@ fn track_image_url(track: &metadata::Track) -> Option<String> {
         .into_iter()
         .flat_map(|group| &group.image)
         .chain(&album.cover)
-        .min_by_key(|image| image.width().abs_diff(ART_SIZE_PX))?;
+        .min_by_key(|image| image.width().abs_diff(ART_SIZE as i32))?;
     (!image.file_id().is_empty()).then(|| format!("https://i.scdn.co/image/{}", FileId::from(image)))
 }

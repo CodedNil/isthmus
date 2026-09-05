@@ -56,23 +56,6 @@ pub struct BarLayout {
     pub px_per_ms: f32,
 }
 
-impl<'a> UiContext<'a> {
-    pub fn new(frame: Frame<'a>, config: &'a Config, interaction: &'a mut Interaction) -> Self {
-        interaction.begin_frame(frame.delta_time, frame.time);
-        Self { frame, config, interaction }
-    }
-
-    pub const fn finish(self) {
-        *self.frame.globals = Globals {
-            pointer: self.interaction.mouse_pos(),
-            pressure: self.interaction.mouse_pressure(),
-            bar_height: self.config.height,
-            ripples: self.interaction.mouse_ripples(),
-        };
-        self.interaction.end_frame();
-    }
-}
-
 pub struct Bar {
     pub(crate) weather: Option<weathertime::WeatherPanel>,
     pub(crate) status: Option<status::StatusPanel>,

@@ -78,7 +78,7 @@ impl Timeline {
     }
 
     pub fn track_at_playhead(&self, queue: &[Track]) -> Option<(usize, f32)> {
-        self.span_at_playhead(queue).filter(|(index, elapsed)| *elapsed <= queue[*index].duration_ms as f32)
+        self.span_at_playhead(queue).filter(|(index, elapsed)| *elapsed < queue[*index].duration_ms as f32)
     }
 
     /// Returns the queue item covering the playhead, including its trailing spacing.
@@ -86,7 +86,7 @@ impl Timeline {
         let mut start_ms = self.queue_start_ms;
         queue.iter().enumerate().find_map(|(index, track)| {
             let elapsed = -start_ms;
-            let current = (elapsed >= 0.0 && elapsed <= track.queue_span_ms()).then_some((index, elapsed));
+            let current = (elapsed >= 0.0 && elapsed < track.queue_span_ms()).then_some((index, elapsed));
             start_ms += track.queue_span_ms();
             current
         })
@@ -125,6 +125,9 @@ impl Music {
             if let Some(previous) = old.get_mut(&track.uri).and_then(VecDeque::pop_front) {
                 track.interaction_id = previous.interaction_id;
                 track.runtime = previous.runtime;
+                if track.image != previous.image {
+                    track.runtime.art = ArtState::default();
+                }
             }
         }
 

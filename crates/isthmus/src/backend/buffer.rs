@@ -1,6 +1,6 @@
 use crate::ShaderData;
 
-pub struct UploadBuffer(wgpu::Buffer);
+pub struct UploadBuffer(pub wgpu::Buffer);
 
 impl UploadBuffer {
     pub fn new(device: &wgpu::Device) -> Self {
@@ -27,9 +27,5 @@ impl UploadBuffer {
         if !bytes.is_empty() {
             queue.write_buffer(&self.0, 0, bytes);
         }
-    }
-
-    pub fn binding(&self) -> wgpu::BindingResource<'_> {
-        self.0.as_entire_binding()
     }
 }

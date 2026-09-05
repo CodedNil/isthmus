@@ -108,15 +108,14 @@ fn reveal_progress(expansion: f32, y: f32) -> f32 {
 
 /// Sun phase (0 at sunrise, 1 at sunset) and height (-1 to 1) for the given hour.
 fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
-    let height = |phase: f32| (phase * PI).sin();
     let daylight = sunset - sunrise;
     if hour >= sunrise && hour <= sunset {
         let phase = (hour - sunrise) / daylight;
-        [phase, height(phase)]
+        [phase, (phase * PI).sin()]
     } else {
         let night = 24.0 - daylight;
         let phase = if hour < sunrise { (hour + 24.0 - sunset) / night } else { (hour - sunset) / night };
-        [if hour >= sunset { 1.0 } else { 0.0 }, -height(phase)]
+        [if hour >= sunset { 1.0 } else { 0.0 }, -(phase * PI).sin()]
     }
 }
 
@@ -266,7 +265,7 @@ mod monitor {
     };
     use reqwest::Client;
     use serde::{Deserialize, de::DeserializeOwned};
-    use std::{array::from_fn, time::Duration};
+    use std::{array::from_fn, iter::once, time::Duration};
     use tokio::sync::mpsc;
     use tracing::warn;
 
@@ -367,45 +366,31 @@ mod monitor {
     pub(super) async fn run(http: Client, timezones: Vec<String>, background: Background) {
         let (location_tx, mut locations_rx) = mpsc::unbounded_channel();
         Platform::start_location_monitor(&background, location_tx);
-        let http = &http;
-        let mut locations = vec![None; timezones.len() + 1];
-        if let Some(timezone) = TimeZone::system().iana_name() {
-            match geocode(http, timezone).await {
-                Ok(location) => locations[0] = Some(location),
-                Err(error) => warn!(%error, timezone, "Failed to locate system timezone"),
-            }
-        } else {
-            warn!("System timezone has no IANA name; waiting for the location portal");
-        }
+        let timezones: Vec<_> =
+            once(TimeZone::system().iana_name().map(str::to_owned)).chain(timezones.into_iter().map(Some)).collect();
+        let mut locations = vec![None; timezones.len()];
         loop {
             while let Ok(location) = locations_rx.try_recv() {
                 locations[0] = Some(location);
             }
-            let mut retry =
-                join_all(timezones.iter().zip(&mut locations[1..]).filter(|(_, location)| location.is_none()).map(
-                    |(timezone, slot)| async move {
-                        match geocode(http, timezone).await {
-                            Ok(location) => {
-                                *slot = Some(location);
-                                false
-                            }
-                            Err(error) => {
-                                warn!(%error, timezone, "Failed to locate timezone");
-                                true
-                            }
-                        }
-                    },
-                ))
-                .await
-                .into_iter()
-                .any(|failed| failed);
+            join_all(timezones.iter().zip(&mut locations).filter_map(|(timezone, slot)| {
+                let timezone = timezone.as_ref().filter(|_| slot.is_none())?;
+                let http = &http;
+                Some(async move {
+                    *slot = geocode(http, timezone)
+                        .await
+                        .inspect_err(|error| warn!(%error, timezone, "Failed to locate timezone"))
+                        .ok();
+                })
+            }))
+            .await;
             let ready = locations
                 .iter()
                 .enumerate()
                 .filter_map(|(index, &location)| location.map(|point| (index, point)))
                 .collect::<Vec<_>>();
-            retry |= ready.len() != locations.len();
-            let forecasts: Vec<_> = match fetch(http, &ready).await {
+            let mut retry = ready.len() != locations.len();
+            let forecasts: Vec<_> = match fetch(&http, &ready).await {
                 Ok(results) => ready.into_iter().zip(results).map(|((index, _), forecast)| (index, forecast)).collect(),
                 Err(error) => {
                     retry = true;
@@ -425,7 +410,10 @@ mod monitor {
                 break;
             }
             let interval = if retry { RETRY_INTERVAL } else { REFRESH_INTERVAL };
-            Platform::sleep(interval).await;
+            tokio::select! {
+                () = Platform::sleep(interval) => {}
+                Some(location) = locations_rx.recv() => locations[0] = Some(location),
+            }
         }
     }
 
@@ -627,7 +615,7 @@ impl WeatherPanel {
         pill: Quad,
     ) {
         let expansion = self.expansion.smoothstep(0.0, 1.0);
-        let line = ui.frame.text().line(content, size, weight).centered(center).with_color(color.extend(alpha));
+        let line = ui.frame.text.line(content, size, weight).centered(center).with_color(color.extend(alpha));
         ui.frame.paint(
             line.expanded(20.0),
             shader!(|text: TextFragment, pill: Quad, expansion: f32| {
@@ -694,7 +682,7 @@ impl WeatherPanel {
         if title.clicked() {
             self.month_offset = 0;
         }
-        self.month_hover = self.month_hover.move_towards(f32::from(title.hovered()), context.frame.delta_time / 0.12);
+        self.month_hover = self.month_hover.move_towards(f32::from(title.hovered), context.frame.delta_time / 0.12);
 
         let today = Zoned::now().date();
         let month = today.first_of_month().saturating_add(Span::new().months(self.month_offset));
@@ -719,7 +707,7 @@ impl WeatherPanel {
                 self.month_offset = (self.month_offset + side as i32).clamp(-1200, 1200);
             }
             let hover = if index == 0 { &mut self.previous_month_hover } else { &mut self.next_month_hover };
-            *hover = hover.move_towards(f32::from(response.hovered()), context.frame.delta_time / 0.12);
+            *hover = hover.move_towards(f32::from(response.hovered), context.frame.delta_time / 0.12);
             let hover = *hover;
             self.label(
                 context,

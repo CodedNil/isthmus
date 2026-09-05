@@ -146,8 +146,7 @@ impl Shader {
     pub fn metadata(&self, web: bool) -> TokenStream {
         let name = if web { format!("{}_", self.entry.value()) } else { self.entry.value() };
         let blend = &self.blend;
-        let primitive =
-            if self.kind == InputKind::Triangle { format_ident!("Triangle") } else { format_ident!("Quad") };
+        let primitive = if self.is_triangle() { format_ident!("Triangle") } else { format_ident!("Quad") };
         quote!(ShaderEntry {
             name: #name,
             blend: Blend::#blend,
@@ -159,8 +158,12 @@ impl Shader {
         self.entry.value()
     }
 
+    pub fn is_triangle(&self) -> bool {
+        self.kind == InputKind::Triangle
+    }
+
     fn payload(&self, isthmus: &TokenStream) -> TokenStream {
-        let line = (self.kind == InputKind::Text).then(|| quote!(__isthmus_line: #isthmus::text::Line,));
+        let line = (self.kind == InputKind::Text).then(|| quote!(__isthmus_line: #isthmus::geometry::text::Line,));
         let fields = self.captures.iter().filter(|capture| !capture.is_image()).map(|capture| {
             let name = &capture.name;
             let storage = capture.storage();
@@ -197,11 +200,12 @@ impl Shader {
         let geometry = quote!(<#interface_type as #isthmus::__private::ShaderInput>::Geometry);
         let entry = &self.entry;
         let web_entry = syn::LitStr::new(&format!("{}_", entry.value()), entry.span());
-        let bindings = self.captures.iter().map(|capture| {
-            let name = &capture.name;
-            let ty = &capture.source;
-            if capture.is_image() { quote!(let #name: &#ty = &#name;) } else { quote!(let #name: #ty = #name;) }
-        });
+        let bindings =
+            self.captures.iter().filter(|capture| !matches!(capture.kind, CaptureKind::Plain)).map(|capture| {
+                let name = &capture.name;
+                let ty = &capture.source;
+                if capture.is_image() { quote!(let #name: &#ty = &#name;) } else { quote!(let #name: #ty = #name;) }
+            });
         let fields = self.captures.iter().filter(|capture| !capture.is_image()).map(|capture| {
             let name = &capture.name;
             let value = capture.encode(&quote!(#name));

@@ -86,11 +86,9 @@ impl ShaderBuild {
 
         let build = SpirvBuilder::new(&source_crate, SHADER_TARGET)
             .deny_warnings(true)
-            .shader_crate_default_features(false)
             .target_dir_path(target)
             .spirv_metadata(SpirvMetadata::None)
             .scalar_block_layout(true)
-            .release(true)
             .build()
             .map_err(|error| format!("Rust-GPU shader build failed: {error}"))?;
         let web = env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32");
@@ -104,7 +102,7 @@ impl ShaderBuild {
             quote::quote!(&[])
         } else {
             quote::quote!({
-                use ::isthmus::{Blend, __private::{Primitive, ShaderEntry}};
+                use ::isthmus::{Blend, geometry::Primitive, __private::ShaderEntry};
                 &[#(#metadata),*]
             })
         }
@@ -122,9 +120,11 @@ impl ShaderBuild {
                 Options { adjust_coordinate_space: false, strict_capabilities: true, block_ctx_dump_prefix: None };
             let module = parse_u8_slice(&bytes, &options)
                 .map_err(|error| format!("failed to parse generated SPIR-V: {error}"))?;
-            let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+            // Packed half floats use core WGSL operations without requiring the f16 extension.
+            let capabilities = Capabilities::default() | Capabilities::SHADER_FLOAT16_IN_FLOAT32;
+            let info = Validator::new(ValidationFlags::all(), capabilities)
                 .validate(&module)
-                .map_err(|error| format!("failed to validate generated SPIR-V: {error}"))?;
+                .map_err(|error| format!("failed to validate generated SPIR-V: {error:?}"))?;
             let wgsl = write_string(&module, &info, WriterFlags::empty())
                 .map_err(|error| format!("failed to generate WGSL: {error}"))?;
             fs::write(self.output.with_extension("wgsl"), wgsl).map_err(io_error("write generated WGSL"))

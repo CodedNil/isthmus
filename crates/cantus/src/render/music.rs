@@ -117,10 +117,10 @@ impl MusicView {
         // Track render and interaction
         let mut drag_response = None;
         let mouse_pos = context.interaction.mouse_pos();
-        let mouse_pressure = context.interaction.mouse_pressure();
+        let mouse_pressure = context.interaction.pressure();
         let mut seek_action = None;
-        let mut ratings = Vec::new();
-        let mut playlist_toggles = Vec::new();
+        let mut rated_track = None;
+        let mut playlist_toggle = None;
 
         let mut visible = SmallVec::<[_; 16]>::new();
         start_ms = music.timeline.queue_start_ms;
@@ -172,7 +172,7 @@ impl MusicView {
                 } else {
                     format!("{}s\u{2004}•\u{2004}{}", seconds.round(), track.artist)
                 };
-                let shaper = context.frame.text().shaper();
+                let shaper = context.frame.text.shaper();
                 (shaper.shape(title, 16.0, 700.0), shaper.shape(&details, 14.0, 700.0))
             });
             if expansion > 0.0
@@ -232,7 +232,7 @@ impl MusicView {
             let audio = track.runtime.audio_features.ready().copied().unwrap_or_default();
             // Pill interaction
             let body = context.interaction.drag(track.interaction_id, pill_rect);
-            let mut hovered = body.hovered();
+            let mut hovered = body.hovered;
             if body.clicked() && track.id.is_some() {
                 let pointer_x = mouse_pos.x;
                 let near_visible_start = pointer_x <= pill_rect.min.x.lerp(pill_rect.max.x, 0.05);
@@ -371,7 +371,7 @@ impl MusicView {
                 && let Some((title, details)) = track_text
             {
                 for (line, y) in [(title, 0.26), (details, 0.57)] {
-                    let line = context.frame.text().fit(&line, (panel_height * y).floor(), left..right);
+                    let line = context.frame.text.fit(&line, (panel_height * y).floor(), left..right);
                     context.frame.paint(
                         line.expanded(20.0).translated(pill.center - pill.size * 0.5),
                         shader!(|text: TextFragment, pill: Quad, alpha: f32| {
@@ -409,7 +409,7 @@ impl MusicView {
                     );
                     let response =
                         context.interaction.interact(Rect::from_center(center, Vec2::splat(ICON_WIDTH * 0.5)));
-                    hovered |= response.hovered();
+                    hovered |= response.hovered;
                     let mouse_distance = center.distance(mouse_pos);
                     let proximity = mouse_distance.smoothstep(ICON_REACTION_RADIUS, ICON_WIDTH * 0.25)
                         * mouse_pressure.clamp(0.0, 1.0);
@@ -445,11 +445,11 @@ impl MusicView {
                         }
                     } else if let Some(rating) = rating.as_mut() {
                         let right_half = mouse_pos.x >= center.x;
-                        if response.hovered() {
+                        if response.hovered {
                             *rating = slot as i32 * 2 + 1 + i32::from(right_half);
                         }
                         if response.clicked() {
-                            ratings.push((track_id, slot as u8 * 2 + u8::from(right_half)));
+                            rated_track = Some((track_id, slot as u8 * 2 + u8::from(right_half)));
                             burst = true;
                         }
                         let fill = ((*rating as f32 - slot as f32 * 2.0) * 0.5).saturate();
@@ -465,7 +465,7 @@ impl MusicView {
                     }
                 }
                 if let Some(playlist_id) = toggled_playlist {
-                    playlist_toggles.push((track_id, playlist_id));
+                    playlist_toggle = Some((track_id, playlist_id));
                     burst = true;
                 }
             }
@@ -493,10 +493,10 @@ impl MusicView {
         if let Some((index, duration_ms, fraction)) = seek_action {
             music.seek(index, duration_ms, fraction);
         }
-        for (track_id, rating) in ratings {
+        if let Some((track_id, rating)) = rated_track {
             music.rate_track(track_id, rating);
         }
-        for (track_id, playlist_id) in playlist_toggles {
+        if let Some((track_id, playlist_id)) = playlist_toggle {
             music.toggle_playlist(track_id, playlist_id);
         }
 
@@ -565,16 +565,16 @@ impl MusicView {
         ));
         let speed = context.frame.delta_time * 5.5;
         let last_toggle = music.last_toggle.elapsed().as_secs_f32() / 0.7;
-        if !response.hovered() && music.playing && last_toggle < 1.0 {
+        if !response.hovered && music.playing && last_toggle < 1.0 {
             self.bar_split = 1.0 - last_toggle;
             self.icon_presence = 1.0 - last_toggle;
             self.icon_morph = self.icon_morph.move_towards(1.0, speed * 1.5);
         } else {
-            let show_icon = f32::from(response.hovered() || !music.playing);
+            let show_icon = f32::from(response.hovered || !music.playing);
             self.bar_split = self.bar_split.move_towards(show_icon, speed);
             self.icon_presence = self.icon_presence.max(show_icon);
             self.icon_presence = self.icon_presence.move_towards(show_icon, speed);
-            self.icon_morph = self.icon_morph.move_towards(f32::from(response.hovered() && !music.playing), speed);
+            self.icon_morph = self.icon_morph.move_towards(f32::from(response.hovered && !music.playing), speed);
         }
         if response.clicked() {
             music.toggle_playing();

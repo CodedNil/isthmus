@@ -153,7 +153,7 @@ fn pending_lyrics(queue: &mut [Track], current: usize, now: Instant) -> Vec<Lyri
 }
 
 impl CantusApp {
-    pub(crate) fn refresh_enrichment(&mut self, include_audio: bool) {
+    pub(crate) fn refresh_enrichment(&mut self) {
         let now = Instant::now();
         if self.config.lyrics_enabled {
             for request in pending_lyrics(&mut self.music.queue, self.music.timeline.index, now) {
@@ -161,15 +161,12 @@ impl CantusApp {
             }
         }
 
-        let mut audio = if include_audio {
-            self.music
-                .queue
-                .iter_mut()
-                .filter_map(|track| track.id.filter(|_| track.runtime.audio_features.request(now)))
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let mut audio = self
+            .music
+            .queue
+            .iter_mut()
+            .filter_map(|track| track.id.filter(|_| track.runtime.audio_features.request(now)))
+            .collect::<Vec<_>>();
         audio.sort_unstable();
         audio.dedup();
 

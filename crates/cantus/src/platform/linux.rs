@@ -1,7 +1,7 @@
 use crate::{
     app::{AppUpdater, Background, CantusApp, send_update, update},
     config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
-    interaction::InputEvent,
+    interaction::{InputEvent, Interaction},
     render::{
         PANEL_START, Renderer, TEXT_COLOR,
         launcher::{BACKGROUND_RADIUS, LauncherKey},
@@ -12,7 +12,6 @@ use crate::{
 };
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
 use futures_util::StreamExt;
-use image::imageops::FilterType;
 use isthmus::{
     SurfaceHandle,
     glam::{FloatExt, Vec2, vec2},
@@ -21,12 +20,6 @@ use microfft::real::rfft_1024;
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
     WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
-};
-use reqwest::Client;
-use resvg::{
-    render,
-    tiny_skia::{Pixmap, Transform},
-    usvg::{self, Tree},
 };
 use serde_json::Value;
 use std::{
@@ -70,7 +63,7 @@ use wayland_client::{
         wl_region::WlRegion,
         wl_registry::{self, WlRegistry},
         wl_seat::{self, WlSeat},
-        wl_surface::{self, WlSurface},
+        wl_surface::WlSurface,
     },
 };
 use wayland_protocols::{
@@ -104,7 +97,6 @@ const AUDIO_BAND_EDGES: [f32; AUDIO_SPECTRUM_BANDS + 1] =
     [60.0, 120.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 12_000.0];
 const LAUNCHER_SOCKET_NAME: &str = "cantus-launcher.sock";
 const TEXT_MIME: &str = "text/plain;charset=utf-8";
-const ICON_PX: u32 = 48;
 
 pub trait Task = Future + Send + 'static;
 
@@ -140,28 +132,6 @@ impl super::Platform {
         tokio_sleep(duration).await;
     }
 
-    pub fn populate_app_icons(apps: &mut [super::DesktopApp]) {
-        for app in apps {
-            let Some(path) = app.icon_path.take() else {
-                continue;
-            };
-            if let Some(pixels) = fs::read(&path).ok().and_then(|bytes| Self::decode_icon(&bytes)) {
-                app.icon = Some(isthmus::Image::rgba8([ICON_PX; 2], pixels));
-            } else {
-                warn!(?path, "Failed to decode app icon");
-            }
-        }
-    }
-
-    pub fn decode_icon(bytes: &[u8]) -> Option<Vec<u8>> {
-        image::load_from_memory(bytes).map(|image| resize_icon(&image)).ok().or_else(|| rasterize_svg(bytes))
-    }
-
-    pub async fn provider_icon(http: Client, url: String) -> Option<Vec<u8>> {
-        let bytes = http.get(url).send().await.ok()?.error_for_status().ok()?.bytes().await.ok()?;
-        Self::decode_icon(&bytes)
-    }
-
     pub fn set_volume(volume: f32) {
         let volume = format!("{volume:.3}");
         if let Err(error) = Command::new("wpctl").args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume]).spawn() {
@@ -173,7 +143,7 @@ impl super::Platform {
     pub fn run_power_action(background: &Background, action: usize) {
         let method = ["PowerOff", "Reboot"][action];
         background.spawn(async move {
-            let result: Result<(), zbus::Error> = try {
+            let result: Result<(), zbus::Error> = async {
                 DbusConnection::system()
                     .await?
                     .call_method(
@@ -184,7 +154,9 @@ impl super::Platform {
                         &(false,),
                     )
                     .await?;
-            };
+                Ok(())
+            }
+            .await;
             if let Err(error) = result {
                 warn!(%error, method, "Failed to run held power action");
             }
@@ -199,18 +171,20 @@ impl super::Platform {
             .filter(|entry| seen.insert(entry.id().to_owned()))
             .filter(|entry| !entry.no_display() && !entry.hidden() && !entry.terminal())
             .filter_map(|entry| {
-                let action = try {
-                    let action = entry.actions()?.into_iter().find(|action| !action.is_empty())?;
+                let action = entry.actions().and_then(|actions| {
+                    let action = actions.into_iter().find(|action| !action.is_empty())?;
                     let name = entry.action_entry_localized(action, "Name", &locales)?;
-                    (name.into_owned(), entry.parse_exec_action(action).ok()?)
-                };
+                    Some((name.into_owned(), entry.parse_exec_action(action).ok()?))
+                });
                 Some(super::DesktopApp {
                     name: entry.name(&locales)?.into_owned(),
                     exec: entry.parse_exec().ok()?,
                     comment: entry.comment(&locales).unwrap_or_default().into_owned(),
-                    icon_path: entry.icon().and_then(resolve_icon),
                     action,
-                    icon: None,
+                    icon: entry.icon().and_then(resolve_icon).and_then(|path| {
+                        let bytes = fs::read(path).ok()?;
+                        Self::decode_icon(&bytes)
+                    }),
                 })
             })
             .collect()
@@ -294,23 +268,25 @@ impl super::Platform {
         let (globals, mut event_queue) =
             registry_queue_init::<LayerShellApp>(&connection).expect("Failed to read Wayland registry");
         let qhandle = event_queue.handle();
-        let compositor: WlCompositor = globals.bind(&qhandle, 1..=7, ()).expect("Missing wl_compositor");
+        let compositor: WlCompositor = globals.bind(&qhandle, 6..=7, ()).expect("Missing wl_compositor v6");
         let layer_shell: ZwlrLayerShellV1 = globals.bind(&qhandle, 4..=4, ()).expect("Missing zwlr_layer_shell_v1");
-        let seat: WlSeat = globals.bind(&qhandle, 1..=7, ()).expect("Missing wl_seat");
+        let seat: WlSeat = globals.bind(&qhandle, 8..=9, ()).expect("Missing wl_seat v8");
 
         let mut app = LayerShellApp {
             compositor,
             layer_shell,
             display_handle: NonNull::new(connection.backend().display_ptr().cast()).expect("Wayland display pointer"),
-            clipboard: globals.bind::<WlDataDeviceManager, _, _>(&qhandle, 1..=3, ()).ok().map(|manager| {
+            clipboard: {
+                let manager: WlDataDeviceManager =
+                    globals.bind(&qhandle, 3..=3, ()).expect("Missing clipboard manager v3");
                 let device = manager.get_data_device(&seat, &qhandle, ());
                 (manager, device)
-            }),
+            },
             cantus: CantusApp::default(),
-            scaling: globals
-                .bind::<WpViewporter, _, _>(&qhandle, 1..=1, ())
-                .ok()
-                .zip(globals.bind::<WpFractionalScaleManagerV1, _, _>(&qhandle, 1..=1, ()).ok()),
+            scaling: (
+                globals.bind(&qhandle, 1..=1, ()).expect("Missing wp_viewporter"),
+                globals.bind(&qhandle, 1..=1, ()).expect("Missing wp_fractional_scale_manager_v1"),
+            ),
             background_manager: globals.bind(&qhandle, 1..=1, ()).ok(),
             ..
         };
@@ -411,19 +387,6 @@ fn resolve_icon(icon: &str) -> Option<PathBuf> {
         return path.exists().then(|| path.to_owned());
     }
     freedesktop_icons::lookup(icon).with_size(64).find()
-}
-
-fn rasterize_svg(bytes: &[u8]) -> Option<Vec<u8>> {
-    let tree = Tree::from_data(bytes, &usvg::Options::default()).ok()?;
-    let mut pixmap = Pixmap::new(ICON_PX, ICON_PX)?;
-    let source = tree.size();
-    let fit = Transform::from_scale(ICON_PX as f32 / source.width(), ICON_PX as f32 / source.height());
-    render(&tree, fit, &mut pixmap.as_mut());
-    Some(pixmap.take_demultiplied())
-}
-
-fn resize_icon(image: &image::DynamicImage) -> Vec<u8> {
-    image.resize_to_fill(ICON_PX, ICON_PX, FilterType::Triangle).into_rgba8().into_raw()
 }
 
 fn monitor_status(updates: &AppUpdater) {
@@ -544,61 +507,67 @@ fn monitor_volume(volume: &AtomicU32) {
     }
 }
 
-fn piped(command: &mut Command) -> io::Result<(process::Child, process::ChildStdout)> {
+fn with_output(command: &mut Command, read: impl FnOnce(process::ChildStdout) -> io::Result<()>) -> io::Result<()> {
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
-    let output = child.stdout.take().ok_or_else(|| io::Error::other("command stdout was not piped"))?;
-    Ok((child, output))
+    let result = read(child.stdout.take().expect("stdout was piped"));
+    let _ = child.kill();
+    child.wait()?;
+    result
 }
 
 fn capture_volume(volume: &AtomicU32) -> io::Result<()> {
-    let (mut child, output) = piped(Command::new("pw-dump").args(["--monitor", "--no-colors", "--indent", "0"]))?;
-    let mut state = PipeWireState::default();
-    for batch in serde_json::Deserializer::from_reader(output).into_iter::<Vec<Value>>() {
-        for object in batch.map_err(io::Error::other)? {
-            if let Some(level) = state.update(&object) {
-                volume.store(level.to_bits(), Ordering::Relaxed);
+    with_output(Command::new("pw-dump").args(["--monitor", "--no-colors", "--indent", "0"]), |output| {
+        let mut state = PipeWireState::default();
+        for batch in serde_json::Deserializer::from_reader(output).into_iter::<Vec<Value>>() {
+            for object in batch.map_err(io::Error::other)? {
+                if let Some(level) = state.update(&object) {
+                    volume.store(level.to_bits(), Ordering::Relaxed);
+                }
             }
         }
-    }
-    child.wait()?;
-    Ok(())
+        Ok(())
+    })
 }
 
 fn capture_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) -> io::Result<()> {
-    let (mut child, mut output) = piped(Command::new("pw-record").args([
-        "--properties",
-        "stream.capture.sink=true",
-        "--rate",
-        &AUDIO_SAMPLE_RATE.to_string(),
-        "--channels",
-        "1",
-        "--format",
-        "f32",
-        "--raw",
-        "-",
-    ]))?;
-    let mut window = [0.0; AUDIO_WINDOW_SIZE];
-    loop {
-        match output.read_exact(bytemuck::cast_slice_mut(&mut window)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(error) => return Err(error),
-        }
-        let spectrum = rfft_1024(&mut window);
-        for (band, level) in levels.iter().enumerate() {
-            let bin =
-                |frequency: f32| (frequency * AUDIO_WINDOW_SIZE as f32 / AUDIO_SAMPLE_RATE as f32).ceil() as usize;
-            let bins = &spectrum[bin(AUDIO_BAND_EDGES[band])..bin(AUDIO_BAND_EDGES[band + 1])];
-            let rms = (bins.iter().map(microfft::Complex32::norm_sqr).sum::<f32>()
-                / bins.len() as f32
-                / AUDIO_WINDOW_SIZE as f32)
-                .sqrt();
-            let value = ((20.0 * rms.log10() + 30.0) / 30.0).saturate();
-            level.store(value.to_bits(), Ordering::Relaxed);
-        }
-    }
-    child.wait()?;
-    Ok(())
+    with_output(
+        Command::new("pw-record").args([
+            "--properties",
+            "stream.capture.sink=true",
+            "--rate",
+            &AUDIO_SAMPLE_RATE.to_string(),
+            "--channels",
+            "1",
+            "--format",
+            "f32",
+            "--raw",
+            "-",
+        ]),
+        |mut output| {
+            let mut window = [0.0; AUDIO_WINDOW_SIZE];
+            loop {
+                match output.read_exact(bytemuck::cast_slice_mut(&mut window)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(error) => return Err(error),
+                }
+                let spectrum = rfft_1024(&mut window);
+                for (band, level) in levels.iter().enumerate() {
+                    let bin = |frequency: f32| {
+                        (frequency * AUDIO_WINDOW_SIZE as f32 / AUDIO_SAMPLE_RATE as f32).ceil() as usize
+                    };
+                    let bins = &spectrum[bin(AUDIO_BAND_EDGES[band])..bin(AUDIO_BAND_EDGES[band + 1])];
+                    let rms = (bins.iter().map(microfft::Complex32::norm_sqr).sum::<f32>()
+                        / bins.len() as f32
+                        / AUDIO_WINDOW_SIZE as f32)
+                        .sqrt();
+                    let value = ((20.0 * rms.log10() + 30.0) / 30.0).saturate();
+                    level.store(value.to_bits(), Ordering::Relaxed);
+                }
+            }
+            Ok(())
+        },
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -642,14 +611,14 @@ struct LayerShellApp {
     repeat: Option<(xkb::Keycode, Instant)> = None,
     /// Latest keyboard serial, which the compositor requires to claim the selection.
     key_serial: u32 = 0,
-    clipboard: Option<(WlDataDeviceManager, WlDataDevice)>,
+    clipboard: (WlDataDeviceManager, WlDataDevice),
     /// The selection offer to read on paste, kept only while it advertises text.
     selection: Option<WlDataOffer> = None,
     output: Option<WlOutput> = None,
     frame_callback: Option<WlCallback> = None,
     display_handle: NonNull<c_void>,
     surfaces: [Option<WaylandSurface>; 2] = [None, None],
-    scaling: Option<(WpViewporter, WpFractionalScaleManagerV1)>,
+    scaling: (WpViewporter, WpFractionalScaleManagerV1),
     background_manager: Option<ExtBackgroundEffectManagerV1>,
 }
 
@@ -662,8 +631,8 @@ enum SurfaceKind {
 struct WaylandSurface {
     wl: WlSurface,
     layer: ZwlrLayerSurfaceV1,
-    viewport: Option<WpViewport>,
-    fractional: Option<WpFractionalScaleV1>,
+    viewport: WpViewport,
+    fractional: WpFractionalScaleV1,
     effect: Option<ExtBackgroundEffectSurfaceV1>,
     size: Vec2,
     scale: f32,
@@ -676,24 +645,13 @@ impl WaylandSurface {
     fn buffer_size(&self) -> [u32; 2] {
         (self.size * self.scale).round().to_array().map(|size| size as u32)
     }
-
-    fn update_viewport(&self) {
-        self.wl.set_buffer_scale(if self.viewport.is_some() { 1 } else { self.scale.ceil() as i32 });
-        if let Some(viewport) = &self.viewport {
-            viewport.set_destination(self.size.x as i32, self.size.y as i32);
-        }
-    }
 }
 
 impl Drop for WaylandSurface {
     fn drop(&mut self) {
         self.layer.destroy();
-        if let Some(viewport) = &self.viewport {
-            viewport.destroy();
-        }
-        if let Some(fractional) = &self.fractional {
-            fractional.destroy();
-        }
+        self.viewport.destroy();
+        self.fractional.destroy();
         if let Some(effect) = &self.effect {
             effect.destroy();
         }
@@ -781,8 +739,8 @@ impl LayerShellApp {
             KeyboardInteractivity::None
         });
         let surface = WaylandSurface {
-            viewport: self.scaling.as_ref().map(|(manager, _)| manager.get_viewport(&wl, qhandle, ())),
-            fractional: self.scaling.as_ref().map(|(_, manager)| manager.get_fractional_scale(&wl, qhandle, kind)),
+            viewport: self.scaling.0.get_viewport(&wl, qhandle, ()),
+            fractional: self.scaling.1.get_fractional_scale(&wl, qhandle, kind),
             effect: self.background_manager.as_ref().map(|manager| manager.get_background_effect(&wl, qhandle, ())),
             wl,
             layer,
@@ -810,9 +768,7 @@ impl LayerShellApp {
 
     /// Claims the clipboard selection, serving `text` to whoever pastes next.
     fn set_clipboard(&self, text: &str, qhandle: &QueueHandle<Self>) {
-        let Some((manager, device)) = &self.clipboard else {
-            return;
-        };
+        let (manager, device) = &self.clipboard;
         let source = manager.create_data_source(qhandle, Arc::<str>::from(text));
         source.offer(TEXT_MIME.to_owned());
         device.set_selection(Some(&source), self.key_serial);
@@ -852,10 +808,10 @@ impl LayerShellApp {
 
     fn sync_launcher_surface(&mut self, qhandle: &QueueHandle<Self>) {
         let open = self.cantus.launcher.open;
-        self.cantus.interaction.set_launcher_active(open);
         if open == self.surfaces[1].is_some() {
             return;
         }
+        self.cantus.interaction = Interaction::default();
         self.repeat = None;
         self.frame_callback = None;
         if open {
@@ -880,7 +836,7 @@ impl LayerShellApp {
                 window: NonNull::new(surface.wl.id().as_ptr().cast()).expect("Wayland surface pointer"),
             };
             let size = surface.buffer_size();
-            surface.update_viewport();
+            surface.viewport.set_destination(surface.size.x as i32, surface.size.y as i32);
             if self.gpu.is_none() {
                 // SAFETY: The renderer is dropped before the owned Wayland surfaces.
                 let (gpu, handle) = unsafe {
@@ -924,7 +880,7 @@ impl LayerShellApp {
         let region = compositor.create_region(qhandle, ());
         if self.gpu.is_some() {
             let interaction = &mut self.cantus.interaction;
-            for rect in interaction.take_regions() {
+            for rect in interaction.regions.drain(..) {
                 let [x, y, width, height] = [rect.min.x, rect.min.y, rect.max.x - rect.min.x, rect.max.y - rect.min.y]
                     .map(|value| value.round() as i32);
                 region.add(x, y, width, height);
@@ -990,17 +946,6 @@ dispatch!(ZwlrLayerSurfaceV1, SurfaceKind, kind, |state, proxy, event, qhandle| 
     state.try_render_frame(qhandle);
 });
 
-dispatch!(WlSurface, SurfaceKind, kind, |state, proxy, event, qhandle| {
-    if let wl_surface::Event::PreferredBufferScale { factor } = event
-        && let Some(surface) = state.surfaces[*kind as usize].as_mut()
-        && surface.wl == *proxy
-        && surface.fractional.is_none()
-    {
-        surface.scale = factor as f32;
-        state.try_render_frame(qhandle);
-    }
-});
-
 dispatch!(WlCallback, |state, proxy, event, qhandle| {
     if matches!(event, wl_callback::Event::Done { .. })
         && state.frame_callback.as_ref().is_some_and(|callback| callback.id() == proxy.id())
@@ -1013,7 +958,7 @@ dispatch!(WlCallback, |state, proxy, event, qhandle| {
 dispatch!(WpFractionalScaleV1, SurfaceKind, kind, |state, proxy, event, qhandle| {
     if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event
         && let Some(surface) = state.surfaces[*kind as usize].as_mut()
-        && surface.fractional.as_ref() == Some(proxy)
+        && surface.fractional == *proxy
     {
         surface.scale = scale as f32 / 120.0;
         state.try_render_frame(qhandle);
@@ -1234,8 +1179,7 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
             }
             _ => {}
         },
-        wl_pointer::Event::AxisDiscrete { axis: WEnum::Value(wl_pointer::Axis::VerticalScroll), discrete, .. }
-        | wl_pointer::Event::AxisValue120 {
+        wl_pointer::Event::AxisValue120 {
             axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
             value120: discrete,
             ..
@@ -1267,3 +1211,5 @@ delegate_noop!(LayerShellApp: ignore WlRegion);
 delegate_noop!(LayerShellApp: ignore WlDataDeviceManager);
 delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectManagerV1);
 delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectSurfaceV1);
+
+dispatch!(WlSurface, SurfaceKind, _kind, |_state, _proxy, _event, _qhandle| {});

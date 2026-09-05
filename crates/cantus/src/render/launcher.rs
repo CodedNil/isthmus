@@ -11,10 +11,10 @@ use crate::{
 use fend_core::Context;
 use isthmus::{
     ColorExt as _, Float as _, Image, Quad, Sdf,
+    geometry::text,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     shader,
     spirv_std::arch::kill,
-    text,
 };
 use reqwest::Client;
 use std::{collections::HashMap, error::Error, ops::Range, sync::OnceLock};
@@ -34,7 +34,6 @@ const ICON_COLOR: Vec3 = Vec3::splat(0.58);
 const ACCENT_COLOR: Vec3 = vec3(0.44, 0.40, 0.80);
 const ENTER_BADGE_WIDTH: f32 = 27.0;
 const ALTERNATE_BADGE_WIDTH: f32 = 42.0;
-const ICON_PX: u32 = 48;
 const DETAIL_COLOR: Vec4 = Vec4::new(0.56, 0.63, 0.86, 1.0);
 const MUTED_COLOR: Vec4 = Vec4::new(0.52, 0.55, 0.64, 1.0);
 const CALCULATOR_ICON: u32 = 1;
@@ -144,17 +143,6 @@ impl TextField {
         }
     }
 
-    /// Removes the selected text, reporting whether there was any.
-    pub fn delete_selection(&mut self) -> bool {
-        let range = self.selection();
-        if range.is_empty() {
-            return false;
-        }
-        self.text.replace_range(range.clone(), "");
-        self.set_cursor(range.start, false);
-        true
-    }
-
     pub fn insert(&mut self, insertion: &str) {
         let range = self.selection();
         self.text.replace_range(range.clone(), insertion);
@@ -163,13 +151,10 @@ impl TextField {
 
     /// Deletes the selection, or one character in `forward`'s direction.
     pub fn erase(&mut self, forward: bool) {
-        if self.delete_selection() {
-            return;
+        if self.selection().is_empty() {
+            self.set_cursor(self.step(forward), true);
         }
-        let target = self.step(forward);
-        let (start, end) = (target.min(self.cursor), target.max(self.cursor));
-        self.text.replace_range(start..end, "");
-        self.set_cursor(start, false);
+        self.insert("");
     }
 
     /// Moves the caret, collapsing an existing selection unless `select` extends it.
@@ -276,8 +261,21 @@ impl LauncherState {
         providers: impl IntoIterator<Item = SearchProvider>,
     ) -> Self {
         let mut calc = Context::new();
-        Platform::start_exchange_rates(background, http.clone(), |rates| {
-            let _ = EXCHANGE_RATES.set(rates);
+        let rates_http = http.clone();
+        background.spawn(async move {
+            #[derive(serde::Deserialize)]
+            struct Rates {
+                rates: HashMap<String, f64>,
+            }
+            if let Ok(response) = rates_http
+                .get("https://open.er-api.com/v6/latest/USD")
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+                && let Ok(rates) = response.json::<Rates>().await
+            {
+                let _ = EXCHANGE_RATES.set(rates.rates);
+            }
         });
         calc.set_exchange_rate_handler_v2(ExchangeRates);
         let providers = providers
@@ -287,7 +285,6 @@ impl LauncherState {
         background.spawn_update(async move {
             let mut apps = Platform::desktop_apps();
             apps.sort_by_key(|app| app.name.to_lowercase());
-            Platform::populate_app_icons(&mut apps);
             Some(update(move |app| {
                 app.launcher.apps = apps;
                 app.launcher.refresh_matches();
@@ -297,9 +294,9 @@ impl LauncherState {
             let icon = provider.config.icon.clone();
             let http = http.clone();
             background.spawn_update(async move {
-                let pixels = Platform::provider_icon(http, icon).await?;
+                let icon = Platform::provider_icon(http, icon).await?;
                 Some(update(move |app| {
-                    app.launcher.providers[index].icon = Some(Image::rgba8([ICON_PX; 2], pixels));
+                    app.launcher.providers[index].icon = Some(icon);
                 }))
             });
         }
@@ -347,9 +344,7 @@ impl LauncherState {
             LauncherKey::Copy | LauncherKey::Cut => {
                 self.pending_copy = Some(self.field.selected_text().to_owned());
                 if matches!(key, LauncherKey::Cut) {
-                    self.edit(|field| {
-                        field.delete_selection();
-                    });
+                    self.edit(|field| field.insert(""));
                 }
             }
         }
@@ -430,10 +425,11 @@ impl LauncherState {
         self.providers
             .iter()
             .position(|provider| {
-                query == provider.config.alias
-                    || query
-                        .strip_prefix(provider.config.alias.as_str())
-                        .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+                !provider.config.alias.is_empty()
+                    && (query == provider.config.alias
+                        || query
+                            .strip_prefix(provider.config.alias.as_str())
+                            .is_some_and(|rest| rest.starts_with(char::is_whitespace)))
             })
             .map_or((None, query), |index| (Some(index), query[self.providers[index].config.alias.len()..].trim()))
     }
@@ -469,24 +465,18 @@ impl fend_core::ExchangeRateFnV2 for ExchangeRates {
 
 impl LauncherState {
     /// Draws the panel and its search field, then the rows beneath it.
-    pub fn show(&mut self, context: &mut UiContext, overlay: bool) {
+    pub fn show(&mut self, context: &mut UiContext) {
         if !self.open {
             return;
         }
         let (origin, size) = self.bounds(context.frame.screen_size);
-        if overlay {
-            let screen = Rect::new(0.0, 0.0, context.frame.screen_size.x, context.frame.screen_size.y);
-            let backdrop = context.interaction.interact(screen);
-            context.interaction.input_region(screen);
-            if backdrop.clicked()
-                && !Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y)
-                    .contains(context.interaction.mouse_pos())
-            {
-                self.open = false;
-                return;
-            }
-        } else {
-            context.interaction.interact(Rect::from_center(origin + size * 0.5, size));
+        let screen = Rect::new(0.0, 0.0, context.frame.screen_size.x, context.frame.screen_size.y);
+        let backdrop = context.interaction.interact(screen);
+        if backdrop.clicked()
+            && !Rect::from_center(origin + size * 0.5, size * 0.5).contains(context.interaction.mouse_pos())
+        {
+            self.open = false;
+            return;
         }
 
         self.show_search(context, Quad::from_min_max(origin, origin + size));
@@ -504,14 +494,14 @@ impl LauncherState {
         let empty = self.field.text.is_empty();
         let query = if empty { "Search anything…" } else { &self.field.text };
         let mut line =
-            context.frame.text().line(query, 18.0, 600.0).visible(vec2(left, HEADER_HEIGHT * 0.5), left..right);
+            context.frame.text.line(query, 18.0, 600.0).visible(vec2(left, HEADER_HEIGHT * 0.5), left..right);
         if empty {
             line = line.with_color(MUTED_COLOR);
         }
         let selection_range = self.field.selection();
         let blink = ((context.frame.time - self.field.blink_start) * 1.4).fract();
         let (caret, selection) = {
-            let text = context.frame.text();
+            let text = &context.frame.text;
             // Long queries are clipped rather than scrolled, so every offset maps straight to an x.
             let at = |offset: usize| (left + text.width(&self.field.text[..offset], 18.0, 600.0)).min(right);
             let caret = vec2(at(self.field.cursor), blink.smoothstep(0.62, 0.5));
@@ -574,7 +564,7 @@ impl LauncherState {
             let y = origin.y + HEADER_HEIGHT + PADDING + index as f32 * (ROW_HEIGHT + GAP);
             let pill = Rect::new(x, y, x + width, y + ROW_HEIGHT);
             let response = context.interaction.interact(pill);
-            if response.hovered() {
+            if response.hovered {
                 self.selected = index;
             }
             if response.clicked() {
@@ -592,11 +582,11 @@ impl LauncherState {
                 edge -= width + GAP;
                 let line = context
                     .frame
-                    .text()
+                    .text
                     .line(label, 13.0, 600.0)
                     .right(vec2(edge, ROW_HEIGHT * 0.5))
                     .with_color(MUTED_COLOR);
-                edge -= context.frame.text().width(label, 13.0, 600.0) + GAP * 2.0;
+                edge -= context.frame.text.width(label, 13.0, 600.0) + GAP * 2.0;
                 (badge, line)
             };
             let (enter_badge, action_line) = badge(Some(entry.action), ENTER_BADGE_WIDTH);
@@ -606,13 +596,13 @@ impl LauncherState {
             let (name_y, detail_y) =
                 if entry.detail.is_empty() { (ROW_HEIGHT * 0.5, 0.0) } else { (ROW_HEIGHT * 0.34, ROW_HEIGHT * 0.68) };
             let name_line =
-                context.frame.text().line(entry.name, 16.0, 700.0).visible(vec2(text_left, name_y), clip.clone());
+                context.frame.text.line(entry.name, 16.0, 700.0).visible(vec2(text_left, name_y), clip.clone());
             let detail_line = if entry.detail.is_empty() {
                 text::Line::default()
             } else {
                 context
                     .frame
-                    .text()
+                    .text
                     .line(entry.detail, 13.0, 600.0)
                     .visible(vec2(text_left, detail_y), clip)
                     .with_color(DETAIL_COLOR)

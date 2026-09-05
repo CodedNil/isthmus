@@ -55,24 +55,23 @@ enum Active {
 
 #[derive(Default)]
 pub struct Interaction {
+    pub enabled: bool = true,
     pointer: Pointer = Pointer::Outside(Vec2::ZERO),
     pressure: f32,
-    ripples: [RipplePulse; 4],
+    pub ripples: [RipplePulse; 4],
     event: Option<ButtonEvent>,
     hot: Option<usize>,
     active: Option<Active>,
     scroll: i32,
     held_seconds: f32,
     previous_held_seconds: f32,
-    previous_widgets: Vec<Widget>,
     widgets: Vec<Widget>,
-    regions: Vec<Rect>,
-    launcher_active: bool,
+    pub regions: Vec<Rect>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct Response {
-    hovered: bool,
+    pub hovered: bool,
     gesture: Gesture,
     pub scroll: i32,
     pub held_seconds: f32,
@@ -80,8 +79,9 @@ pub struct Response {
     pub drag_origin: Vec2,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Gesture {
+    #[default]
     Idle,
     Clicked,
     Held,
@@ -101,10 +101,6 @@ pub enum InputEvent {
 }
 
 impl Response {
-    pub const fn hovered(&self) -> bool {
-        self.hovered
-    }
-
     pub const fn clicked(&self) -> bool {
         matches!(self.gesture, Gesture::Clicked)
     }
@@ -127,23 +123,6 @@ impl Response {
 }
 
 impl Interaction {
-    pub fn set_launcher_active(&mut self, active: bool) {
-        if self.launcher_active == active {
-            return;
-        }
-        self.launcher_active = active;
-        self.event = None;
-        self.scroll = 0;
-        self.held_seconds = 0.0;
-        self.previous_held_seconds = 0.0;
-        self.hot = None;
-        self.active = None;
-        self.pointer = Pointer::Outside(self.mouse_pos());
-        self.previous_widgets.clear();
-        self.widgets.clear();
-        self.regions.clear();
-    }
-
     pub fn begin_frame(&mut self, delta_time: f32, time: f32) {
         self.regions.clear();
         self.hot = self.pointer().and_then(|pointer| self.hit_test(pointer));
@@ -173,7 +152,6 @@ impl Interaction {
         if !self.down() {
             self.active = None;
         }
-        mem::swap(&mut self.previous_widgets, &mut self.widgets);
         self.event = None;
         self.scroll = 0;
     }
@@ -187,30 +165,24 @@ impl Interaction {
     }
 
     pub fn pointer_in(&mut self, rect: Rect) -> bool {
-        self.regions.push(rect);
+        self.input_region(rect);
         self.pointer().is_some_and(|pointer| rect.contains(pointer))
     }
 
     pub fn input_region(&mut self, rect: Rect) {
-        self.regions.push(rect);
+        if self.enabled {
+            self.regions.push(rect);
+        }
     }
 
-    pub fn take_regions(&mut self) -> impl Iterator<Item = Rect> + '_ {
-        self.regions.drain(..).chain(self.previous_widgets.iter().map(|widget| widget.rect))
+    pub const fn pressure(&self) -> f32 {
+        if self.enabled { self.pressure } else { 0.0 }
     }
 
     pub const fn mouse_pos(&self) -> Vec2 {
         match self.pointer {
             Pointer::Outside(position) | Pointer::Hovering(position) | Pointer::Held { position, .. } => position,
         }
-    }
-
-    pub const fn mouse_pressure(&self) -> f32 {
-        self.pressure
-    }
-
-    pub const fn mouse_ripples(&self) -> [RipplePulse; 4] {
-        self.ripples
     }
 
     pub const fn dragging(&self) -> bool {
@@ -223,12 +195,47 @@ impl Interaction {
                 self.pointer = Pointer::Hovering(position);
                 self.hot = self.hit_test(position);
             }
-            InputEvent::Motion(position) => self.motion(position),
+            InputEvent::Motion(position) => {
+                self.hot = self.hit_test(position);
+                self.pointer = match self.pointer {
+                    Pointer::Held { origin, dragging, .. } => Pointer::Held {
+                        position,
+                        origin,
+                        dragging: dragging
+                            || matches!(self.active, Some(Active::Drag(_)))
+                                && (position - origin).abs().max_element() >= 2.0,
+                    },
+                    Pointer::Hovering(_) => Pointer::Hovering(position),
+                    Pointer::Outside(_) => Pointer::Outside(position),
+                };
+            }
             InputEvent::Leave => self.pointer = Pointer::Outside(self.mouse_pos()),
-            InputEvent::Press => self.press(),
-            InputEvent::Release => self.release(),
-            InputEvent::CancelDrag => self.pointer = Pointer::Hovering(self.mouse_pos()),
-            InputEvent::Scroll(direction) => self.scroll = direction,
+            InputEvent::Press => {
+                let position = self.mouse_pos();
+                self.pointer = Pointer::Held { position, origin: position, dragging: false };
+                self.hot = self.widgets.iter().rposition(|widget| widget.rect.contains(position));
+                self.active = self.hot.map(|slot| self.widgets[slot].drag.map_or(Active::Widget(slot), Active::Drag));
+                self.event = Some(ButtonEvent::Press);
+                self.held_seconds = 0.0;
+                self.previous_held_seconds = 0.0;
+            }
+            InputEvent::Release => {
+                self.event = match self.pointer {
+                    Pointer::Held { origin, dragging, .. } => {
+                        Some(ButtonEvent::Release { drag_origin: origin, was_dragging: dragging })
+                    }
+                    _ => None,
+                };
+                let position = self.mouse_pos();
+                self.pointer = Pointer::Hovering(position);
+                self.hot = self.hit_test(position);
+            }
+            InputEvent::CancelDrag => {
+                self.pointer = Pointer::Hovering(self.mouse_pos());
+                self.active = None;
+                self.event = None;
+            }
+            InputEvent::Scroll(direction) => self.scroll = self.scroll.saturating_add(direction),
         }
     }
 
@@ -236,20 +243,24 @@ impl Interaction {
         if self.down() {
             match self.active {
                 Some(Active::Widget(slot))
-                    if self.previous_widgets.get(slot).is_some_and(|widget| widget.rect.contains(point)) =>
+                    if self.widgets.get(slot).is_some_and(|widget| widget.rect.contains(point)) =>
                 {
                     Some(slot)
                 }
                 _ => None,
             }
         } else {
-            self.previous_widgets.iter().rposition(|widget| widget.rect.contains(point))
+            self.widgets.iter().rposition(|widget| widget.rect.contains(point))
         }
     }
 
     fn interact_with(&mut self, rect: Rect, drag: Option<u64>) -> Response {
+        if !self.enabled {
+            return Response::default();
+        }
         let slot = self.widgets.len();
         self.widgets.push(Widget { rect, drag });
+        self.regions.push(rect);
         let active = if let Some(key) = drag {
             matches!(self.active, Some(Active::Drag(active)) if active == key)
         } else {
@@ -286,6 +297,9 @@ impl Interaction {
     }
 
     const fn pointer(&self) -> Option<Vec2> {
+        if !self.enabled {
+            return None;
+        }
         match self.pointer {
             Pointer::Outside(_) => None,
             Pointer::Hovering(position) | Pointer::Held { position, .. } => Some(position),
@@ -294,41 +308,5 @@ impl Interaction {
 
     const fn down(&self) -> bool {
         matches!(self.pointer, Pointer::Held { .. })
-    }
-
-    fn press(&mut self) {
-        let position = self.mouse_pos();
-        self.pointer = Pointer::Held { position, origin: position, dragging: false };
-        self.hot = self.previous_widgets.iter().rposition(|widget| widget.rect.contains(position));
-        self.active = self.hot.map(|slot| self.previous_widgets[slot].drag.map_or(Active::Widget(slot), Active::Drag));
-        self.event = Some(ButtonEvent::Press);
-        self.held_seconds = 0.0;
-        self.previous_held_seconds = 0.0;
-    }
-
-    fn release(&mut self) {
-        self.event = match self.pointer {
-            Pointer::Held { origin, dragging, .. } => {
-                Some(ButtonEvent::Release { drag_origin: origin, was_dragging: dragging })
-            }
-            _ => None,
-        };
-        let position = self.mouse_pos();
-        self.pointer = Pointer::Hovering(position);
-        self.hot = self.hit_test(position);
-    }
-
-    fn motion(&mut self, position: Vec2) {
-        self.hot = self.hit_test(position);
-        self.pointer = match self.pointer {
-            Pointer::Held { origin, dragging, .. } => Pointer::Held {
-                position,
-                origin,
-                dragging: dragging
-                    || matches!(self.active, Some(Active::Drag(_))) && (position - origin).abs().max_element() >= 2.0,
-            },
-            Pointer::Hovering(_) => Pointer::Hovering(position),
-            Pointer::Outside(_) => Pointer::Outside(position),
-        };
     }
 }
