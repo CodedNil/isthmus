@@ -1,6 +1,7 @@
-use super::{GeometrySample, Raster, text::TextResources};
+use super::{FragmentGeometry, Raster, text::TextResources};
 #[cfg(not(target_arch = "spirv"))]
 use core::iter::once;
+use core::ops::Deref;
 
 /// An oriented rectangle in logical screen coordinates.
 #[derive(Clone, Copy, crate::ShaderData)]
@@ -40,6 +41,23 @@ impl Quad {
         glam::vec2(offset.dot(self.axis), offset.dot(self.axis.perp()))
     }
 
+    /// Evaluates signed distance to the rectangle, negative inside.
+    pub fn distance_at(self, point: glam::Vec2) -> f32 {
+        let corner = self.local(point).abs() - self.size * 0.5;
+        corner.max(glam::Vec2::ZERO).length() + corner.x.max(corner.y).min(0.0)
+    }
+
+    /// Tests membership, including points on the boundary.
+    pub fn contains(self, point: glam::Vec2) -> bool {
+        self.local(point).abs().cmple(self.size * 0.5).all()
+    }
+
+    /// Returns the minimum and maximum corners of the enclosing axis-aligned rectangle.
+    pub fn extents(self) -> (glam::Vec2, glam::Vec2) {
+        let half_size = (self.axis.abs() * self.size.x + self.axis.perp().abs() * self.size.y) * 0.5;
+        (self.center - half_size, self.center + half_size)
+    }
+
     #[must_use]
     /// Moves each edge outward by `amount` logical pixels.
     pub fn expanded(mut self, amount: f32) -> Self {
@@ -48,23 +66,41 @@ impl Quad {
     }
 }
 
+/// Creates an axis-aligned rectangle centered at the origin from its full size.
+impl From<glam::Vec2> for Quad {
+    fn from(size: glam::Vec2) -> Self {
+        Self::new(glam::Vec2::ZERO, size, glam::Vec2::X)
+    }
+}
+
 /// Local and normalized coordinates within a quad fragment.
 #[derive(Clone, Copy)]
 pub struct QuadSample {
+    /// Original rectangle, available for distance and membership queries.
+    pub quad: Quad,
     /// Position relative to the quad's center and axes, in logical pixels.
     pub local: glam::Vec2,
     /// Coordinates ranging from zero to one across the quad.
     pub uv: glam::Vec2,
 }
 
-impl GeometrySample<'_> for QuadSample {
+impl FragmentGeometry<'_> for Quad {
     type Payload = ();
-    type Raster = Quad;
+    type Raster = Self;
+    type Sample = QuadSample;
 
-    fn sample(pixel: glam::Vec2, raster: [glam::Vec2; 3], (): (), _: TextResources<'_>) -> Self {
-        let quad = Quad::from_data(raster);
+    fn sample(pixel: glam::Vec2, raster: [glam::Vec2; 3], (): (), _: TextResources<'_>) -> QuadSample {
+        let quad = Self::from_data(raster);
         let local = quad.local(pixel);
-        Self { local, uv: local / quad.size + 0.5 }
+        QuadSample { quad, local, uv: local / quad.size + 0.5 }
+    }
+}
+
+impl Deref for QuadSample {
+    type Target = Quad;
+
+    fn deref(&self) -> &Quad {
+        &self.quad
     }
 }
 
@@ -85,7 +121,7 @@ impl Raster for Quad {
 #[cfg(not(target_arch = "spirv"))]
 impl<T: Copy + Into<Quad>> super::Geometry for T {
     type Context = ();
-    type Sample = QuadSample;
+    type Fragment = Quad;
 
     fn payload(self) {}
 

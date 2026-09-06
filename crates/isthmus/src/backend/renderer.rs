@@ -3,7 +3,7 @@ use super::{
     setup::{self, SetupError},
     surface::SurfaceTarget,
 };
-use crate::{Frame, Program, SurfaceHandle, bindings, data::FrameData, geometry::text::Text, glam::Vec2};
+use crate::{Frame, Program, SurfaceHandle, bindings, data::FrameData, geometry::text::TextCache, glam::Vec2};
 use core::marker::PhantomData;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use slotmap::SlotMap;
@@ -15,7 +15,7 @@ pub struct Renderer<P: Program> {
     program: PhantomData<P>,
     surfaces: SlotMap<SurfaceHandle, SurfaceTarget>,
     gpu: Gpu,
-    text: Text,
+    text: TextCache,
     started: Instant,
     last_frame: f32,
 }
@@ -68,7 +68,7 @@ impl<P: Program> Renderer<P> {
     pub unsafe fn new(
         surface: &(impl HasDisplayHandle + HasWindowHandle),
         [width, height]: [u32; 2],
-        text: Text,
+        text: TextCache,
     ) -> Result<(Self, SurfaceHandle), SetupError> {
         // SAFETY: The caller keeps both native handles alive until this surface is removed.
         let (gpu, target) = unsafe { setup::new::<P>(surface, [width, height]) }?;
@@ -80,13 +80,13 @@ impl<P: Program> Renderer<P> {
     pub async fn new(
         canvas: web_sys::HtmlCanvasElement,
         size: [u32; 2],
-        text: Text,
+        text: TextCache,
     ) -> Result<(Self, SurfaceHandle), SetupError> {
         let (gpu, target) = setup::new::<P>(canvas, size).await?;
         Ok(Self::from_surface(gpu, target, text))
     }
 
-    fn from_surface(gpu: Gpu, target: SurfaceTarget, text: Text) -> (Self, SurfaceHandle) {
+    fn from_surface(gpu: Gpu, target: SurfaceTarget, text: TextCache) -> (Self, SurfaceHandle) {
         let mut surfaces = SlotMap::with_key();
         let handle = surfaces.insert(target);
         (Self { surfaces, gpu, text, started: Instant::now(), last_frame: 0.0, program: PhantomData }, handle)

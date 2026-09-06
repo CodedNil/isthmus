@@ -1,23 +1,36 @@
-use super::{GeometrySample, Quad, text::TextResources};
+use super::{FragmentGeometry, Quad, text::TextResources};
 use crate::{
-    glam::{FloatExt, Vec2, Vec4, vec2},
+    glam::{FloatExt, Vec2, vec2},
     spirv_std::arch::Derivative,
 };
-use core::{
-    f32::consts::TAU,
-    ops::{Add, Neg, Sub},
-};
+use core::{f32::consts::TAU, ops::Deref};
 
 /// A bounded distance field; CSG preserves membership but may approximate interior distance.
 pub trait SdfShape: crate::ShaderData {
     /// Encloses every point with distance at most `outset`; `None` means the region is empty.
     fn bounds(self, outset: f32) -> Option<Quad>;
+
     /// Evaluates the signed distance at a logical screen position.
-    fn distance_at(self, point: Vec2) -> Sdf;
+    fn distance_at(self, point: Vec2) -> f32;
+
+    /// Returns antialiased interior coverage in a fragment shader at a logical screen position.
+    fn fill_at(self, point: Vec2) -> f32 {
+        fill(self.distance_at(point))
+    }
+
+    /// Returns an antialiased exterior outline, excluding the original fill.
+    fn outline_at(self, point: Vec2, width: f32) -> f32 {
+        self.fill_outline_at(point, width).1
+    }
+
+    /// Returns disjoint fill and exterior-outline masks, sampling the field and AA width once.
+    fn fill_outline_at(self, point: Vec2, width: f32) -> (f32, f32) {
+        fill_outline(self.distance_at(point), width)
+    }
 
     /// Tests membership, including points on the boundary.
     fn contains(self, point: Vec2) -> bool {
-        self.distance_at(point).distance <= 0.0
+        self.distance_at(point) <= 0.0
     }
 }
 
@@ -36,8 +49,9 @@ impl SdfShape for RoundedRect {
         (quad.size.min_element() >= 0.0).then_some(quad)
     }
 
-    fn distance_at(self, point: Vec2) -> Sdf {
-        Sdf::rounded_box(self.quad.local(point), self.quad.size * 0.5, self.radius)
+    fn distance_at(self, point: Vec2) -> f32 {
+        let corner = self.quad.local(point).abs() - self.quad.size * 0.5 + self.radius;
+        corner.max(Vec2::ZERO).length() + corner.x.max(corner.y).min(0.0) - self.radius
     }
 }
 
@@ -56,20 +70,22 @@ impl SdfShape for Circle {
         (radius >= 0.0).then_some(Quad::new(self.center, Vec2::splat(radius * 2.0), Vec2::X))
     }
 
-    fn distance_at(self, point: Vec2) -> Sdf {
-        Sdf::new((point - self.center).length() - self.radius)
+    fn distance_at(self, point: Vec2) -> f32 {
+        (point - self.center).length() - self.radius
     }
 }
 
-/// Creates a rounded rectangle, clamping the radius to fit its dimensions.
-pub fn rounded_rect(quad: impl Into<Quad>, radius: f32) -> Shape<RoundedRect> {
-    let quad = quad.into();
-    Shape::new(RoundedRect { quad, radius: radius.clamp(0.0, (quad.size.min_element() * 0.5).max(0.0)) })
-}
+impl Shape<RoundedRect> {
+    /// Creates a rounded rectangle, clamping the radius to fit its dimensions.
+    pub fn rounded_rect(quad: impl Into<Quad>, radius: f32) -> Self {
+        let quad = quad.into();
+        Self::new(RoundedRect { quad, radius: radius.clamp(0.0, (quad.size.min_element() * 0.5).max(0.0)) })
+    }
 
-/// Creates a rectangle with sharp corners.
-pub fn rectangle(quad: impl Into<Quad>) -> Shape<RoundedRect> {
-    rounded_rect(quad, 0.0)
+    /// Creates a rectangle with sharp corners.
+    pub fn rectangle(quad: impl Into<Quad>) -> Self {
+        Self::rounded_rect(quad, 0.0)
+    }
 }
 
 /// A round-ended segment fitted to a quad, including vertical pills and circles.
@@ -85,47 +101,53 @@ impl SdfShape for Capsule {
         (quad.size.min_element() >= 0.0).then_some(quad)
     }
 
-    fn distance_at(self, point: Vec2) -> Sdf {
+    fn distance_at(self, point: Vec2) -> f32 {
         let half_size = self.quad.size * 0.5;
         let radius = half_size.min_element();
-        Sdf::new((self.quad.local(point).abs() - half_size + radius).max(Vec2::ZERO).length() - radius)
+        (self.quad.local(point).abs() - half_size + radius).max(Vec2::ZERO).length() - radius
     }
 }
 
-/// Fits a capsule to a rectangle, using its shorter side as the diameter.
-pub fn pill(quad: impl Into<Quad>) -> Shape<Capsule> {
-    Shape::new(Capsule { quad: quad.into() })
+impl Shape<Capsule> {
+    /// Fits a capsule to a rectangle, using its shorter side as the diameter.
+    pub fn pill(quad: impl Into<Quad>) -> Self {
+        Self::new(Capsule { quad: quad.into() })
+    }
+
+    /// Creates a round-ended segment with full stroke width; coincident endpoints produce a circle.
+    pub fn segment(start: Vec2, end: Vec2, width: f32) -> Self {
+        let direction = end - start;
+        let length = direction.length();
+        let diameter = width.max(0.0);
+        Self::pill(Quad::new(
+            start.midpoint(end),
+            vec2(length + diameter, diameter),
+            if length > 0.0 { direction / length } else { Vec2::X },
+        ))
+    }
 }
 
-/// A round-ended stroke between two endpoints; coincident endpoints produce a circle.
-pub fn segment(start: Vec2, end: Vec2, radius: f32) -> Shape<Capsule> {
-    let direction = end - start;
-    let length = direction.length();
-    let diameter = radius.max(0.0) * 2.0;
-    pill(Quad::new(
-        start.midpoint(end),
-        vec2(length + diameter, diameter),
-        if length > 0.0 { direction / length } else { Vec2::X },
-    ))
+impl Shape<Circle> {
+    /// Creates a disk, clamping negative radii to zero.
+    pub const fn circle(center: Vec2, radius: f32) -> Self {
+        Self::new(Circle { center, radius: radius.max(0.0) })
+    }
 }
 
-/// Creates a disk, clamping negative radii to zero.
-pub const fn circle(center: Vec2, radius: f32) -> Shape<Circle> {
-    Shape::new(Circle { center, radius: radius.max(0.0) })
+impl Shape<Arc> {
+    /// A circular centerline swept from `start` through `sweep` radians; use `stroke` for thickness.
+    pub fn arc(center: Vec2, radius: f32, start: f32, sweep: f32) -> Self {
+        let sweep = sweep.clamp(-TAU, TAU);
+        Self::new(Arc {
+            center,
+            radius: radius.max(0.0),
+            axis: Vec2::from_angle(start + sweep * 0.5),
+            edge: Vec2::from_angle(sweep.abs() * 0.5),
+        })
+    }
 }
 
-/// A circular centerline swept from `start` through `sweep` radians; use `stroke` for thickness.
-pub fn arc(center: Vec2, radius: f32, start: f32, sweep: f32) -> Shape<Arc> {
-    let sweep = sweep.clamp(-TAU, TAU);
-    Shape::new(Arc {
-        center,
-        radius: radius.max(0.0),
-        axis: Vec2::from_angle(start + sweep * 0.5),
-        edge: Vec2::from_angle(sweep.abs() * 0.5),
-    })
-}
-
-/// An unsigned circular arc centerline, created with [`arc`].
+/// An unsigned circular arc centerline, created with [`Shape::arc`].
 #[derive(Clone, Copy, crate::ShaderData)]
 pub struct Arc {
     /// Center of the arc's circle in logical pixels.
@@ -149,15 +171,15 @@ impl SdfShape for Arc {
         )
     }
 
-    fn distance_at(self, point: Vec2) -> Sdf {
+    fn distance_at(self, point: Vec2) -> f32 {
         let offset = point - self.center;
         let local = vec2(offset.dot(self.axis), offset.dot(self.axis.perp()).abs());
         let length = local.length();
-        Sdf::new(if local.x >= self.edge.x * length {
+        if local.x >= self.edge.x * length {
             (length - self.radius).abs()
         } else {
             (local - self.edge * self.radius).length()
-        })
+        }
     }
 }
 
@@ -168,6 +190,14 @@ pub struct Shape<S> {
     /// Distance field passed to the shader independently of rasterization margins.
     pub shape: S,
     margin: f32,
+}
+
+impl<S> Deref for Shape<S> {
+    type Target = S;
+
+    fn deref(&self) -> &S {
+        &self.shape
+    }
 }
 
 impl<S: SdfShape> Shape<S> {
@@ -224,16 +254,16 @@ impl<S: SdfShape> Shape<S> {
         Shape { shape: Translated { shape: self.shape, offset }, margin: self.margin }
     }
 
-    /// Reserves an outward effect radius plus one antialiasing pixel.
-    pub fn effects(mut self, radius: f32) -> Self {
-        self.margin = self.margin.max(radius.max(0.0) + 1.0);
+    /// Reserves an effect's outward reach and displacement, including antialiasing.
+    pub fn with_effect(mut self, effect: impl super::effect::Effect) -> Self {
+        self.margin += effect.outset().max(0.0) + effect.displacement().max(0.0);
         self
     }
 }
 
 macro_rules! binary_shape {
-    ($name:ident, $operation:ident, |$this:ident, $outset:ident| $bounds:block) => {
-        #[doc = concat!("A bounded `", stringify!($operation), "` of two distance fields.")]
+    ($name:ident, |$a:ident, $b:ident| $distance:expr, |$this:ident, $outset:ident| $bounds:block) => {
+        #[doc = concat!("A bounded `", stringify!($name), "` of two distance fields.")]
         #[derive(Clone, Copy, crate::ShaderData)]
         pub struct $name<A, B> {
             /// First operand, whose region is retained by difference.
@@ -245,24 +275,26 @@ macro_rules! binary_shape {
         impl<A: SdfShape, B: SdfShape> SdfShape for $name<A, B> {
             fn bounds($this, $outset: f32) -> Option<Quad> $bounds
 
-            fn distance_at(self, point: Vec2) -> Sdf {
-                self.a.distance_at(point).$operation(self.b.distance_at(point))
+            fn distance_at(self, point: Vec2) -> f32 {
+                let $a = self.a.distance_at(point);
+                let $b = self.b.distance_at(point);
+                $distance
             }
         }
     };
 }
 
-binary_shape!(Union, union, |self, outset| { enclosing(self.a.bounds(outset), self.b.bounds(outset)) });
+binary_shape!(Union, |a, b| a.min(b), |self, outset| { enclosing(self.a.bounds(outset), self.b.bounds(outset)) });
 
-binary_shape!(Intersection, intersection, |self, outset| {
-    let (a_min, a_max) = extents(self.a.bounds(outset)?);
-    let (b_min, b_max) = extents(self.b.bounds(outset)?);
+binary_shape!(Intersection, |a, b| a.max(b), |self, outset| {
+    let (a_min, a_max) = self.a.bounds(outset)?.extents();
+    let (b_min, b_max) = self.b.bounds(outset)?.extents();
     let min = a_min.max(b_min);
     let max = a_max.min(b_max);
     min.cmple(max).all().then_some(Quad::from_min_max(min, max))
 });
 
-binary_shape!(Difference, difference, |self, outset| { self.a.bounds(outset) });
+binary_shape!(Difference, |a, b| a.max(-b), |self, outset| { self.a.bounds(outset) });
 
 /// A bounded polynomial smooth union blended from its base shape.
 #[derive(Clone, Copy, crate::ShaderData)]
@@ -287,12 +319,19 @@ impl<A: SdfShape, B: SdfShape> SdfShape for SmoothUnion<A, B> {
         enclosing(self.base.bounds(outset), self.other.bounds(outset))
     }
 
-    fn distance_at(self, point: Vec2) -> Sdf {
+    fn distance_at(self, point: Vec2) -> f32 {
         let base = self.base.distance_at(point);
         if self.amount == 0.0 {
             base
         } else {
-            base.smooth_union(self.other.distance_at(point), self.radius, self.amount)
+            let other = self.other.distance_at(point);
+            let union = if self.radius <= 0.0 {
+                base.min(other)
+            } else {
+                let blend = (0.5 + 0.5 * (other - base) / self.radius).clamp(0.0, 1.0);
+                other.lerp(base, blend) - self.radius * blend * (1.0 - blend)
+            };
+            base.lerp(union, self.amount)
         }
     }
 }
@@ -311,7 +350,7 @@ impl<S: SdfShape> SdfShape for Offset<S> {
         self.shape.bounds(outset + self.amount)
     }
 
-    fn distance_at(self, point: Vec2) -> Sdf {
+    fn distance_at(self, point: Vec2) -> f32 {
         self.shape.distance_at(point) - self.amount
     }
 }
@@ -340,8 +379,8 @@ impl<S: SdfShape> SdfShape for Stroke<S> {
         if reach < 0.0 { None } else { self.shape.bounds(reach) }
     }
 
-    fn distance_at(self, point: Vec2) -> Sdf {
-        Sdf::new(self.shape.distance_at(point).distance.abs() - self.half_width)
+    fn distance_at(self, point: Vec2) -> f32 {
+        self.shape.distance_at(point).abs() - self.half_width
     }
 }
 
@@ -353,30 +392,26 @@ impl<S: SdfShape> SdfShape for Translated<S> {
         })
     }
 
-    fn distance_at(self, point: Vec2) -> Sdf {
+    fn distance_at(self, point: Vec2) -> f32 {
         self.shape.distance_at(point - self.offset)
     }
-}
-
-fn extents(quad: Quad) -> (Vec2, Vec2) {
-    let half_size = (quad.axis.abs() * quad.size.x + quad.axis.perp().abs() * quad.size.y) * 0.5;
-    (quad.center - half_size, quad.center + half_size)
 }
 
 fn enclosing(a: Option<Quad>, b: Option<Quad>) -> Option<Quad> {
     match (a, b) {
         (Some(a), Some(b)) => {
-            let (a_min, a_max) = extents(a);
-            let (b_min, b_max) = extents(b);
+            let (a_min, a_max) = a.extents();
+            let (b_min, b_max) = b.extents();
             Some(Quad::from_min_max(a_min.min(b_min), a_max.max(b_max)))
         }
         (a, b) => a.or(b),
     }
 }
 
-impl<S: SdfShape> GeometrySample<'_> for S {
+impl<S: SdfShape> FragmentGeometry<'_> for S {
     type Payload = Self;
     type Raster = Quad;
+    type Sample = Self;
 
     fn sample(_: Vec2, _: [Vec2; 3], payload: Self, _: TextResources<'_>) -> Self {
         payload
@@ -386,7 +421,7 @@ impl<S: SdfShape> GeometrySample<'_> for S {
 #[cfg(not(target_arch = "spirv"))]
 impl<S: SdfShape> super::Geometry for Shape<S> {
     type Context = ();
-    type Sample = S;
+    type Fragment = S;
 
     fn payload(self) -> S {
         self.shape
@@ -397,28 +432,33 @@ impl<S: SdfShape> super::Geometry for Shape<S> {
     }
 }
 
-/// A signed distance at one point, negative inside the shape.
-#[derive(Clone, Copy)]
-#[must_use]
-pub struct Sdf {
-    /// Signed distance in the shape's coordinate units, negative inside.
-    pub distance: f32,
+/// A five-pointed star centered at the origin.
+#[derive(Clone, Copy, crate::ShaderData)]
+pub struct Star {
+    /// Outer vertex radius.
+    pub radius: f32,
+    /// Inner vertex radius.
+    pub inner_radius: f32,
 }
 
-impl Sdf {
-    /// Evaluates a centered rounded rectangle with a radius no larger than either half-size.
-    pub fn rounded_box(point: Vec2, half_size: Vec2, radius: f32) -> Self {
-        let corner = point.abs() - half_size + radius;
-        Self::new(corner.max(Vec2::ZERO).length() + corner.x.max(corner.y).min(0.0) - radius)
+impl Shape<Star> {
+    /// A five-pointed star centered at the origin.
+    pub const fn star(radius: f32, inner_radius: f32) -> Self {
+        Self::new(Star { radius: radius.max(0.0), inner_radius: inner_radius.clamp(0.0, radius.max(0.0)) })
+    }
+}
+
+impl SdfShape for Star {
+    fn bounds(self, outset: f32) -> Option<Quad> {
+        Some(Quad::new(Vec2::ZERO, Vec2::splat(self.radius * 2.0), Vec2::X).expanded(outset.max(0.0)))
     }
 
-    /// Evaluates a horizontal capsule with endpoints at `±half_span` and the given radius.
-    pub fn capsule(point: Vec2, half_span: f32, radius: f32) -> Self {
-        Self::new((point - vec2(point.x.clamp(-half_span, half_span), 0.0)).length() - radius)
-    }
+    fn distance_at(self, point: Vec2) -> f32 {
+        let Self { radius, inner_radius } = self;
+        if radius == 0.0 {
+            return point.length();
+        }
 
-    /// Evaluates a five-pointed star; `indent` controls the inner vertices relative to the radius.
-    pub fn star(point: Vec2, radius: f32, indent: f32) -> Self {
         let k1 = vec2(0.809_017, -0.587_785_25);
         let k2 = vec2(-k1.x, k1.y);
         let mut point = vec2(point.x.abs(), -point.y);
@@ -426,161 +466,104 @@ impl Sdf {
         point -= 2.0 * k2.dot(point).max(0.0) * k2;
         point.x = point.x.abs();
         point.y -= radius;
-        let edge = indent * vec2(-k1.y, k1.x) - vec2(0.0, radius);
+        let edge = inner_radius * vec2(-k1.y, k1.x) - vec2(0.0, radius);
         let edge_t = (point.dot(edge) / edge.length_squared()).saturate();
         let cross = point.y * edge.x - point.x * edge.y;
-        Self::new((point - edge * edge_t).length() * if cross < 0.0 { -1.0 } else { 1.0 })
+        (point - edge * edge_t).length() * if cross < 0.0 { -1.0 } else { 1.0 }
+    }
+}
+
+/// A rounded equilateral triangle around its construction origin.
+#[derive(Clone, Copy, crate::ShaderData)]
+pub struct RoundedTriangle {
+    /// Construction size before rounding.
+    pub size: f32,
+    /// Corner radius.
+    pub radius: f32,
+}
+
+impl Shape<RoundedTriangle> {
+    /// A rounded equilateral triangle around its construction origin.
+    pub const fn rounded_triangle(size: f32, radius: f32) -> Self {
+        Self::new(RoundedTriangle { size: size.max(0.0), radius: radius.clamp(0.0, size.max(0.0)) })
+    }
+}
+
+impl SdfShape for RoundedTriangle {
+    fn bounds(self, outset: f32) -> Option<Quad> {
+        let extent = self.size - self.radius;
+        Some(
+            Quad::new(vec2(0.0, extent * 0.25), vec2(1.732_050_8 * extent, 1.5 * extent) + self.radius * 2.0, Vec2::X)
+                .expanded(outset.max(0.0)),
+        )
     }
 
-    /// Evaluates a rounded equilateral triangle pointing toward negative y.
-    pub fn rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> Self {
+    fn distance_at(self, point: Vec2) -> f32 {
+        let Self { size, radius } = self;
+
         let k = 1.732_050_8;
         let mut point = vec2(point.x.abs(), point.y);
         let h = (point.x + k * point.y).max(0.0);
         point -= 0.5 * vec2(h, h * k);
-        point -= vec2(
-            point.x.clamp(-0.5 * (side_len - radius) * k, 0.5 * (side_len - radius) * k),
-            -0.5 * (side_len - radius),
-        );
-        Self::new(point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius)
-    }
-
-    /// Shortest distance from `point` to the line segment between `start` and `end`.
-    pub fn segment(point: Vec2, start: Vec2, end: Vec2) -> Self {
-        let segment = end - start;
-        let length_squared = segment.length_squared();
-        let along = if length_squared > 0.0 { ((point - start).dot(segment) / length_squared).saturate() } else { 0.0 };
-        Self::new((point - start - segment * along).length())
-    }
-
-    /// "‹" chevron with its tip at the origin, spanning to `extent` and its mirror; negate `extent.x` for a "›".
-    pub fn chevron(point: Vec2, extent: Vec2) -> Self {
-        Self::segment(point, Vec2::ZERO, extent).union(Self::segment(point, Vec2::ZERO, vec2(extent.x, -extent.y)))
-    }
-
-    /// Wraps a signed distance, negative inside the shape.
-    pub const fn new(distance: f32) -> Self {
-        Self { distance }
-    }
-
-    /// Computes fragment derivatives once for reuse across coverage and outline queries.
-    pub fn sample(self) -> SdfSample {
-        SdfSample::new(self.distance)
-    }
-
-    /// Returns interior coverage from zero to one with derivative-based antialiasing.
-    pub fn fill(self) -> f32 {
-        self.sample().fill()
-    }
-
-    /// Returns antialiased coverage of a band extending `half_width` either side of the contour.
-    pub fn stroke(self, half_width: f32) -> f32 {
-        self.sample().stroke(half_width)
-    }
-
-    /// Takes the minimum distance, preserving union membership but not exact interior distance.
-    pub const fn union(self, other: Self) -> Self {
-        Self::new(self.distance.min(other.distance))
-    }
-
-    /// Takes the maximum distance, keeping only the region inside both fields.
-    pub const fn intersection(self, other: Self) -> Self {
-        Self::new(self.distance.max(other.distance))
-    }
-
-    /// Removes the other field's interior from this field.
-    pub const fn difference(self, other: Self) -> Self {
-        Self::new(self.distance.max(-other.distance))
-    }
-
-    /// Linearly interpolates two distance fields without clamping the blend amount.
-    pub fn lerp(self, other: Self, amount: f32) -> Self {
-        Self::new(self.distance.lerp(other.distance, amount))
-    }
-
-    /// Blends toward a polynomial smooth union; nonpositive radii give an ordinary union.
-    pub fn smooth_union(self, other: Self, radius: f32, amount: f32) -> Self {
-        if radius <= 0.0 {
-            return self.lerp(self.union(other), amount);
-        }
-        let blend = (0.5 + 0.5 * (other.distance - self.distance) / radius).clamp(0.0, 1.0);
-        let union = other.distance.lerp(self.distance, blend) - radius * blend * (1.0 - blend);
-        Self::new(self.distance.lerp(union, amount))
+        point -= vec2(point.x.clamp(-0.5 * (size - radius) * k, 0.5 * (size - radius) * k), -0.5 * (size - radius));
+        point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius
     }
 }
 
-impl Add<f32> for Sdf {
-    type Output = Self;
+/// An open chevron with its tip at the origin; use stroke for thickness.
+#[derive(Clone, Copy, crate::ShaderData)]
+pub struct Chevron {
+    /// One endpoint; the other is mirrored vertically.
+    pub extent: Vec2,
+}
 
-    fn add(self, rhs: f32) -> Self {
-        Self::new(self.distance + rhs)
+impl Shape<Chevron> {
+    /// An open chevron with its tip at the origin; use stroke for thickness.
+    pub const fn chevron(extent: Vec2) -> Self {
+        Self::new(Chevron { extent })
     }
 }
 
-impl Sub<f32> for Sdf {
-    type Output = Self;
+impl SdfShape for Chevron {
+    fn bounds(self, outset: f32) -> Option<Quad> {
+        (outset >= 0.0).then_some(
+            Quad::from_min_max(
+                vec2(self.extent.x.min(0.0), -self.extent.y.abs()),
+                vec2(self.extent.x.max(0.0), self.extent.y.abs()),
+            )
+            .expanded(outset),
+        )
+    }
 
-    fn sub(self, rhs: f32) -> Self {
-        Self::new(self.distance - rhs)
+    fn distance_at(self, point: Vec2) -> f32 {
+        let Self { extent } = self;
+
+        Shape::segment(Vec2::ZERO, vec2(extent.x, extent.y.abs()), 0.0).distance_at(vec2(point.x, point.y.abs()))
     }
 }
 
-impl Neg for Sdf {
-    type Output = Self;
-
-    fn neg(self) -> Self {
-        Self::new(-self.distance)
-    }
+/// Converts a negative-inside distance into antialiased interior coverage in a fragment shader.
+pub fn fill(distance: f32) -> f32 {
+    mask(distance, aa_width(distance))
 }
 
-/// A negative-inside signed distance with derivative-aware antialiasing.
-#[must_use]
-pub struct SdfSample {
-    /// Signed distance at the sampled position.
-    pub distance: f32,
-    /// Antialiasing half-width in the same units as the distance.
-    pub half_width: f32,
+/// Returns antialiased coverage of a band extending `half_width` either side of the contour.
+pub fn stroke(distance: f32, half_width: f32) -> f32 {
+    mask(distance.abs() - half_width.max(0.0), aa_width(distance))
 }
 
-impl SdfSample {
-    /// Samples fragment derivatives and clamps the antialiasing half-width to 0.35..=1.0.
-    pub fn new(distance: f32) -> Self {
-        Self {
-            distance,
-            // Keep antialiasing local because derivatives spike at primitive boundaries.
-            half_width: (distance.fwidth() * 0.5).clamp(0.35, 1.0),
-        }
-    }
+/// Returns disjoint fill and exterior-outline masks using one AA-width calculation.
+pub fn fill_outline(distance: f32, width: f32) -> (f32, f32) {
+    let aa = aa_width(distance);
+    let fill = mask(distance, aa);
+    (fill, (mask(distance - width.max(0.0), aa) - fill).max(0.0))
+}
 
-    /// Returns antialiased interior coverage from zero to one.
-    pub fn fill(&self) -> f32 {
-        self.coverage(self.distance)
-    }
+fn aa_width(distance: f32) -> f32 {
+    // Keep antialiasing local because derivatives spike at primitive boundaries.
+    (distance.fwidth() * 0.5).clamp(0.35, 1.0)
+}
 
-    /// Returns coverage after expanding the field; negative distances erode it.
-    pub fn expanded(&self, pixels: f32) -> f32 {
-        self.coverage(self.distance - pixels)
-    }
-
-    /// Returns coverage of the exterior outline, excluding the original fill.
-    pub fn outline(&self, pixels: f32) -> f32 {
-        (self.expanded(pixels) - self.fill()).max(0.0)
-    }
-
-    /// Returns coverage of a band extending `half_width` either side of the contour.
-    pub fn stroke(&self, half_width: f32) -> f32 {
-        self.coverage(self.distance.abs() - half_width)
-    }
-
-    /// Composites straight-alpha fill and outline colors.
-    pub fn color(&self, fill: Vec4, outline: Vec4, pixels: f32) -> Vec4 {
-        let fill_alpha = self.fill() * fill.w;
-        let outline_alpha = self.outline(pixels) * outline.w;
-        let alpha = fill_alpha + outline_alpha;
-        ((fill.truncate() * fill_alpha + outline.truncate() * outline_alpha) / alpha.max(0.0001)).extend(alpha)
-    }
-
-    fn coverage(&self, distance: f32) -> f32 {
-        distance.smoothstep(self.half_width, -self.half_width)
-    }
+fn mask(distance: f32, half_width: f32) -> f32 {
+    distance.smoothstep(half_width, -half_width)
 }

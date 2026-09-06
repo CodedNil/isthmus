@@ -152,6 +152,8 @@ impl ShaderBuild {
         if web {
             let wgsl = write_string(&reflected, &info, WriterFlags::empty())
                 .map_err(|error| format!("failed to generate WGSL: {error}"))?;
+            // Preserve SPIR-V derivative behavior when WGSL cannot prove control-flow uniformity.
+            let wgsl = format!("diagnostic(warning, derivative_uniformity);\n{wgsl}");
             let translated = parse_str(&wgsl).map_err(|error| format!("failed to parse generated WGSL: {error}"))?;
             validator.validate(&translated).map_err(|error| format!("failed to validate generated WGSL: {error:?}"))?;
             for entry in &reflected.entry_points {

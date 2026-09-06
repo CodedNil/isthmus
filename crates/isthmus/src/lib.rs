@@ -31,11 +31,7 @@ pub use data::{Buffer, ColorExt, F16x2, ShaderData, Unorm8x4, Unorm16x2};
 pub use frame::Frame;
 #[cfg(not(target_arch = "spirv"))]
 pub use geometry::Geometry;
-pub use geometry::{
-    Fragment, Quad, Triangle, TriangleFragment,
-    sdf::{Sdf, SdfSample},
-    text::TextFragment,
-};
+pub use geometry::{Fragment, Quad, Triangle, text::Text};
 pub use glam;
 pub use image::{Image, Sampling};
 pub use isthmus_macros::{ShaderData, program, shader};

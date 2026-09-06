@@ -52,7 +52,7 @@ pub fn program(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Declares GPU code and typed CPU captures for a geometry or text paint.
+/// Declares GPU code with `shader!({ let capture: Type = value; |fragment: Fragment<Geometry>| { ... } })`.
 #[proc_macro]
 pub fn shader(input: TokenStream) -> TokenStream {
     let span = proc_macro2::Span::call_site();

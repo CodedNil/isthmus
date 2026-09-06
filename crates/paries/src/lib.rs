@@ -4,7 +4,7 @@ pub mod render;
 use crate::render::{Bamboo, Renderer};
 use isthmus::{
     SurfaceHandle,
-    geometry::text::Text,
+    geometry::text::TextCache,
     glam::{Vec3, vec2},
 };
 use raw_window_handle::{
@@ -158,7 +158,7 @@ impl Wallpaper {
                     Renderer::new(
                         &native,
                         size,
-                        Text::new(include_bytes!("../../../assets/NotoSans-Variable.ttf"), Vec3::ONE),
+                        TextCache::new(include_bytes!("../../../assets/NotoSans-Variable.ttf"), Vec3::ONE),
                     )
                 }
                 .expect("failed to initialize wallpaper renderer");

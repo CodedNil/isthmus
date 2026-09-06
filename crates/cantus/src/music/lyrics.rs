@@ -83,12 +83,12 @@ impl Lyrics {
         Self { segments: Some(segments), ..Self::default() }
     }
 
-    pub(crate) fn prepare(&mut self, duration_ms: f32, text: &text::Text) {
+    pub(crate) fn prepare(&mut self, duration_ms: f32, text: &text::TextCache) {
         let Some(segments) = self.segments.take() else { return };
         *self = Self::shape(segments, duration_ms, text);
     }
 
-    fn shape(mut segments: Vec<LyricSegment>, duration_ms: f32, text: &text::Text) -> Self {
+    fn shape(mut segments: Vec<LyricSegment>, duration_ms: f32, text: &text::TextCache) -> Self {
         segments.retain(|segment| !segment.text.trim().is_empty());
         segments.sort_by(|left, right| left.start_ms.total_cmp(&right.start_ms));
         if segments.is_empty() {
@@ -140,7 +140,7 @@ impl Lyrics {
         }
     }
 
-    pub(crate) fn visible(&self, text: &text::Text, range: Range<f32>, background: bool) -> text::ShapedLine {
+    pub(crate) fn visible(&self, text: &text::TextCache, range: Range<f32>, background: bool) -> text::ShapedLine {
         text.shape_positioned(
             self.words
                 .iter()

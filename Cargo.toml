@@ -97,6 +97,7 @@ unused_result_ok = "warn"
 verbose_file_reads = "warn"
 
 [profile.release]
+panic = "abort"
 opt-level = 3
 codegen-units = 1
 lto = "fat"

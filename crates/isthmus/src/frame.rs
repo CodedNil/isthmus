@@ -1,7 +1,7 @@
 use crate::{
     Geometry, Program,
     backend::gpu::{Gpu, SurfacePaints},
-    geometry::{GeometrySample, text::Text},
+    geometry::{FragmentGeometry, text::TextCache},
     program::ShaderSpec,
 };
 use core::borrow::Borrow;
@@ -17,7 +17,7 @@ pub struct Frame<'a, P: Program> {
     /// Mutable application data shared by this surface's draws.
     pub globals: &'a mut P::Globals,
     /// Shared font and text layout resources.
-    pub text: &'a mut Text,
+    pub text: &'a mut TextCache,
     pub(crate) gpu: &'a mut Gpu,
     pub(crate) surface: &'a mut SurfacePaints,
 }
@@ -26,12 +26,12 @@ impl<P: Program> Frame<'_, P> {
     /// Paints geometry with an inline shader receiving a fragment and typed captures.
     pub fn paint<S, G, Payload>(&mut self, geometry: G, payload: Payload)
     where
-        S: ShaderSpec<Program = P, Sample = G::Sample>,
+        S: ShaderSpec<Program = P, Geometry = G::Fragment>,
         G: Geometry,
-        Text: Borrow<G::Context>,
-        Payload: FnOnce(&mut Gpu, <G::Sample as GeometrySample<'static>>::Payload) -> (S, Option<wgpu::BindGroup>),
+        TextCache: Borrow<G::Context>,
+        Payload: FnOnce(&mut Gpu, <G::Fragment as FragmentGeometry<'static>>::Payload) -> (S, Option<wgpu::BindGroup>),
     {
-        let mut primitives = geometry.primitives(Text::borrow(self.text)).peekable();
+        let mut primitives = geometry.primitives(TextCache::borrow(self.text)).peekable();
         if primitives.peek().is_none() {
             return;
         }

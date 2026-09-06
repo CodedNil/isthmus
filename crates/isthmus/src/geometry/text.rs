@@ -1,16 +1,15 @@
 //! Vector text geometry and rendering.
 
-use super::{GeometrySample, Quad, QuadSample};
+use super::{FragmentGeometry, Quad, Raster};
 #[cfg(target_arch = "spirv")]
 use crate::Float as _;
 use crate::{
-    F16x2, Fragment, Sdf, ShaderData, Unorm8x4,
+    F16x2, ShaderData, Unorm8x4,
     data::load,
     glam::{Vec2, Vec4, vec2},
 };
-use core::ops::Deref;
 #[cfg(not(target_arch = "spirv"))]
-pub use host::{ShapedLine, Text, TextLayout};
+pub use host::{ShapedLine, TextCache, TextLayout};
 
 #[derive(Clone, Copy, crate::ShaderData)]
 #[doc(hidden)]
@@ -42,7 +41,7 @@ impl Curve {
 
 /// A placed text run and its declared rasterization and distance-query bounds.
 #[derive(Clone, Copy, Default, crate::ShaderData)]
-pub struct Line {
+pub struct Text {
     /// Minimum rasterization corner in logical screen coordinates.
     pub min: Vec2,
     /// Maximum rasterization corner in logical screen coordinates.
@@ -51,9 +50,9 @@ pub struct Line {
     pub origin: Vec2,
     /// Font ascent-to-descent span in logical pixels.
     pub size: f32,
-    /// Requested font weight in the font's weight-axis units.
-    pub weight: f32,
-    weights: [u32; 2],
+    weight: f32,
+    prepared_weight: Weight,
+    weight_count: u32,
     /// Number of placed glyphs in the run.
     pub count: u32,
     /// First glyph in the current frame's placement buffer.
@@ -65,24 +64,10 @@ pub struct Line {
     padding: f32,
 }
 
-impl Line {
-    /// Reserves rasterization space for shader-side coordinate displacement.
-    #[must_use]
-    pub fn displaced(mut self, padding: f32) -> Self {
-        let padding = padding.max(0.0);
-        self.min -= padding;
-        self.max += padding;
-        self.padding += padding;
-        self
-    }
-
-    /// Reserves an effect radius plus one antialiasing pixel in both rasterization and distance queries.
-    #[must_use]
-    pub fn effects(mut self, radius: f32) -> Self {
-        let radius = (radius.max(0.0) + 1.0).max(self.effect_radius);
-        let added = radius - self.effect_radius;
-        self.effect_radius = radius;
-        self.displaced(added)
+impl Text {
+    /// Returns the prepared font weight; use `distance_with_weight` for shader-side variation.
+    pub const fn weight(self) -> f32 {
+        self.weight
     }
 
     #[must_use]
@@ -100,10 +85,19 @@ impl Line {
         self.color = Unorm8x4::from_vec4(color);
         self
     }
-}
 
-/// Fragment context with vector text distance and coverage queries.
-pub type TextFragment<'a, P> = Fragment<P, TextSample<'a>>;
+    /// Reserves an effect's distance-query and displacement reach, including antialiasing.
+    #[must_use]
+    pub fn with_effect(mut self, effect: impl super::effect::Effect) -> Self {
+        let radius = (effect.outset().max(0.0) + 1.0).max(self.effect_radius);
+        let padding = radius - self.effect_radius + effect.displacement().max(0.0);
+        self.effect_radius = radius;
+        self.min -= padding;
+        self.max += padding;
+        self.padding += padding;
+        self
+    }
+}
 
 #[derive(Clone, Copy)]
 #[doc(hidden)]
@@ -112,67 +106,85 @@ pub struct TextResources<'a> {
     pub outlines: &'a [u32],
 }
 
-/// Glyph distance queries and local coordinates for a placed text run.
+/// Glyph distance queries for a placed text run.
 #[derive(Clone, Copy)]
 pub struct TextSample<'a> {
-    quad: QuadSample,
     /// The placed run being rendered.
-    pub line: Line,
+    pub line: Text,
     text: TextResources<'a>,
+    candidates: [u32; 2],
 }
 
-impl Deref for TextSample<'_> {
-    type Target = QuadSample;
-
-    fn deref(&self) -> &QuadSample {
-        &self.quad
-    }
+#[derive(Clone, Copy, Default, crate::ShaderData)]
+struct Weight {
+    masters: [u32; 2],
+    blend: f32,
 }
 
-impl<'a> GeometrySample<'a> for TextSample<'a> {
-    type Payload = Line;
-    type Raster = Quad;
-
-    fn sample(pixel: Vec2, raster: [Vec2; 3], payload: Line, text: TextResources<'a>) -> Self {
-        Self { quad: QuadSample::sample(pixel, raster, (), text), line: payload, text }
-    }
-}
-
-impl TextSample<'_> {
-    /// Approximate pixel distance, saturated to the line's declared effect radius.
-    pub fn distance_with_weight(&self, point: Vec2, weight: f32) -> Sdf {
-        let line = self.line;
-        if line.count == 0 || line.size <= 0.0 {
-            return Sdf::new(f32::MAX);
-        }
-        let inverse_size = 1.0 / line.size;
-        let line_point = (point - line.origin) * inverse_size;
-        let padding = line.effect_radius * inverse_size;
-        let weights = self.text.outlines;
+impl Weight {
+    fn resolve(weights: &[u32], count: u32, weight: f32) -> Self {
         let mut low = 0;
-        let last = line.weights[1].max(1) - 1;
+        let last = count.max(1) - 1;
         let mut high = last;
         while low < high {
             let middle = low + (high - low).div_ceil(2);
-            if f32::read(weights, (line.weights[0] + middle) as usize) <= weight {
+            if f32::read(weights, middle as usize) <= weight {
                 low = middle;
             } else {
                 high = middle - 1;
             }
         }
         let next = (low + 1).min(last);
-        let a = f32::read(weights, (line.weights[0] + low) as usize);
-        let b = f32::read(weights, (line.weights[0] + next) as usize);
+        let a = f32::read(weights, low as usize);
+        let b = f32::read(weights, next as usize);
         let blend = if b > a { ((weight - a) / (b - a)).clamp(0.0, 1.0) } else { 0.0 };
-        let after = glyph_after(self.text.placed_glyphs, line.first, line.count, line_point.x + padding);
+        Self { masters: [low, if blend == 0.0 { low } else { next }], blend }
+    }
+}
+
+/// An axis-aligned text strip carrying its prepared candidate-glyph range.
+#[derive(Clone, Copy)]
+pub struct TextRaster(Quad);
+
+impl Raster for TextRaster {
+    const VERTICES: u32 = 4;
+
+    fn from_data([center, size, _]: [Vec2; 3]) -> Self {
+        Self(Quad::new(center, size, Vec2::X))
+    }
+
+    fn vertex(self, vertex: u32) -> Vec2 {
+        self.0.vertex(vertex)
+    }
+}
+
+impl<'a> FragmentGeometry<'a> for Text {
+    type Payload = Self;
+    type Raster = TextRaster;
+    type Sample = TextSample<'a>;
+
+    fn sample(_: Vec2, raster: [Vec2; 3], payload: Self, text: TextResources<'a>) -> TextSample<'a> {
+        TextSample { line: payload, text, candidates: [raster[2].x.to_bits(), raster[2].y.to_bits()] }
+    }
+}
+
+impl TextSample<'_> {
+    /// Approximate pixel distance, saturated to the line's declared effect radius.
+    pub fn distance_with_weight(&self, point: Vec2, weight: f32) -> f32 {
+        self.distance(point, Weight::resolve(self.text.outlines, self.line.weight_count, weight))
+    }
+
+    fn distance(&self, point: Vec2, weight: Weight) -> f32 {
+        let line = self.line;
+        if line.count == 0 || line.size <= 0.0 {
+            return line.effect_radius.max(1.0);
+        }
+        let inverse_size = 1.0 / line.size;
+        let line_point = (point - line.origin) * inverse_size;
+        let padding = line.effect_radius * inverse_size;
         let mut best = line.effect_radius;
-        let mut glyph_index = after;
-        while glyph_index > 0 {
-            glyph_index -= 1;
-            let placed = load::<PlacedGlyph>(self.text.placed_glyphs, line.first + glyph_index);
-            if line_point.x > placed.right + padding {
-                break;
-            }
+        for glyph_index in self.candidates[0]..self.candidates[1] {
+            let placed = load::<PlacedGlyph>(self.text.placed_glyphs, glyph_index);
             let glyph = Glyph::read(self.text.outlines, placed.glyph as usize);
             let glyph_point = vec2(line_point.x - placed.x, placed.y - line_point.y);
             if glyph_point.x >= glyph.min.x - padding
@@ -184,25 +196,40 @@ impl TextSample<'_> {
                     self.text.outlines,
                     glyph.start,
                     glyph.count,
-                    [low, next],
-                    blend,
+                    weight.masters,
+                    weight.blend,
                     glyph_point,
                     line.size,
                     line.effect_radius,
                 ));
             }
         }
-        Sdf::new(best)
+        best
     }
 
     /// Uses the line's weight with the same local-effect limits as `distance_with_weight`.
-    pub fn distance_at(&self, point: Vec2) -> Sdf {
-        self.distance_with_weight(point, self.line.weight)
+    pub fn distance_at(&self, point: Vec2) -> f32 {
+        self.distance(point, self.line.prepared_weight)
+    }
+
+    /// Tests glyph membership at the line's weight, including points on the boundary.
+    pub fn contains(&self, point: Vec2) -> bool {
+        self.distance_at(point) <= 0.0
     }
 
     /// Returns antialiased glyph coverage at a logical screen position.
-    pub fn alpha_at(&self, point: Vec2) -> f32 {
-        self.distance_at(point).fill()
+    pub fn fill_at(&self, point: Vec2) -> f32 {
+        super::sdf::fill(self.distance_at(point))
+    }
+
+    /// Returns an antialiased exterior outline within the line's declared effect radius.
+    pub fn outline_at(&self, point: Vec2, width: f32) -> f32 {
+        self.fill_outline_at(point, width).1
+    }
+
+    /// Returns disjoint fill and exterior-outline masks within the line's declared effect radius.
+    pub fn fill_outline_at(&self, point: Vec2, width: f32) -> (f32, f32) {
+        super::sdf::fill_outline(self.distance_at(point), width)
     }
 
     /// Applies coverage to the run's straight-alpha color.
@@ -314,8 +341,12 @@ fn glyph_distance(
     // Rust-GPU cannot lower this runtime slice iterator without a pointer-to-integer conversion.
     for index in 0..count {
         let a = Curve::read(curves, start as usize + (masters[0] * count + index) as usize * Curve::WORDS).points();
-        let b = Curve::read(curves, start as usize + (masters[1] * count + index) as usize * Curve::WORDS).points();
-        let points = [a[0].lerp(b[0], weight), a[1].lerp(b[1], weight), a[2].lerp(b[2], weight)];
+        let points = if masters[0] == masters[1] {
+            a
+        } else {
+            let b = Curve::read(curves, start as usize + (masters[1] * count + index) as usize * Curve::WORDS).points();
+            [a[0].lerp(b[0], weight), a[1].lerp(b[1], weight), a[2].lerp(b[2], weight)]
+        };
         let (distance, edge_winding) = curve_distance(points, point, distance_squared);
         distance_squared = distance;
         winding += edge_winding;
@@ -325,23 +356,9 @@ fn glyph_distance(
     distance * if winding == 0 { 1.0 } else { -1.0 }
 }
 
-fn glyph_after(placed_glyphs: &[u32], first: u32, count: u32, x: f32) -> u32 {
-    let mut low = 0;
-    let mut high = count;
-    while low < high {
-        let middle = low + (high - low) / 2;
-        if load::<PlacedGlyph>(placed_glyphs, first + middle).left <= x {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
-    }
-    low
-}
-
 #[cfg(not(target_arch = "spirv"))]
 mod host {
-    use super::{Curve, Glyph, Line, PlacedGlyph};
+    use super::{Curve, Glyph, PlacedGlyph, Text, Weight};
     use crate::{
         Quad, ShaderData, Unorm8x4,
         backend::buffer::UploadBuffer,
@@ -368,22 +385,22 @@ mod host {
 
     const EFFECT_PADDING: f32 = 3.5;
 
-    impl Borrow<()> for Text {
+    impl Borrow<()> for TextCache {
         fn borrow(&self) -> &() {
             &()
         }
     }
 
-    impl Geometry for Line {
-        type Context = Text;
-        type Sample = super::TextSample<'static>;
+    impl Geometry for Text {
+        type Context = TextCache;
+        type Fragment = Self;
 
         fn payload(self) -> Self {
             self
         }
 
-        fn primitives(self, context: &Text) -> impl Iterator<Item = [Vec2; 3]> {
-            context.quads(self).map(Quad::data)
+        fn primitives(self, context: &TextCache) -> impl Iterator<Item = [Vec2; 3]> {
+            context.primitives(self)
         }
     }
 
@@ -438,12 +455,13 @@ mod host {
         baseline: f32,
         size: f32,
         weight: f32,
+        prepared_weight: Weight,
     }
 
     type RunCache = HashMap<(String, u32, u32), (Arc<ShapedLine>, bool)>;
 
     /// Font outlines, cached text runs, and per-frame glyph placements.
-    pub struct Text {
+    pub struct TextCache {
         font: Box<[u8]>,
         weights: Vec<f32>,
         outlines: RefCell<Outlines>,
@@ -456,11 +474,11 @@ mod host {
 
     /// A prepared text run awaiting alignment and placement.
     pub struct TextLayout<'a> {
-        text: &'a mut Text,
+        text: &'a mut TextCache,
         shaped: Arc<ShapedLine>,
     }
 
-    impl Text {
+    impl TextCache {
         pub(crate) fn begin_frame(&mut self) {
             self.placed.clear();
             self.runs.get_mut().retain(|_, (_, used)| mem::replace(used, false));
@@ -474,28 +492,28 @@ mod host {
 
     impl TextLayout<'_> {
         /// Centers the run's advance and font metrics on a logical screen position.
-        pub fn centered(self, center: Vec2) -> Line {
+        pub fn centered(self, center: Vec2) -> Text {
             let origin = vec2(center.x - self.shaped.width * 0.5, center.y + self.shaped.baseline);
             self.text.place(&self.shaped, origin)
         }
 
         /// Aligns the run's right advance edge to x and its vertical center to y.
-        pub fn right(self, position: Vec2) -> Line {
+        pub fn right(self, position: Vec2) -> Text {
             self.text.place(&self.shaped, vec2(position.x - self.shaped.width, position.y + self.shaped.baseline))
         }
 
         /// Centers text within horizontal bounds if it fits, otherwise aligns left without clipping.
-        pub fn fit(self, y: f32, bounds: Range<f32>) -> Line {
+        pub fn fit(self, y: f32, bounds: Range<f32>) -> Text {
             self.text.fit(&self.shaped, y, bounds)
         }
 
         /// Positions the left advance edge and vertical center, clipping to a horizontal range.
-        pub fn visible(self, left: Vec2, clip: Range<f32>) -> Line {
+        pub fn visible(self, left: Vec2, clip: Range<f32>) -> Text {
             self.text.visible(&self.shaped, left, clip)
         }
     }
 
-    impl Text {
+    impl TextCache {
         /// Builds the font's geometry and shaping data independently of the GPU backend.
         ///
         /// # Panics
@@ -530,7 +548,7 @@ mod host {
             buffer.upload_appended(device, queue, &outlines.words);
         }
 
-        pub(crate) fn quads(&self, line: Line) -> impl Iterator<Item = Quad> {
+        pub(crate) fn primitives(&self, line: Text) -> impl Iterator<Item = [Vec2; 3]> {
             let placed = &self.placed[line.first as usize..(line.first + line.count) as usize];
             placed.iter().copied().enumerate().filter_map(move |(index, glyph)| {
                 let left = line.origin.x + glyph.left * line.size - line.padding;
@@ -540,14 +558,25 @@ mod host {
                     });
                 let min = vec2(left.max(line.min.x), line.min.y);
                 let max = vec2(right.min(line.max.x), line.max.y);
-                (min.x < max.x).then(|| Quad::from_min_max(min, max))
+                (min.x < max.x).then(|| {
+                    let reach = line.padding / line.size;
+                    let first =
+                        placed.partition_point(|glyph| glyph.right < (min.x - line.origin.x) / line.size - reach);
+                    let end = placed.partition_point(|glyph| glyph.left <= (max.x - line.origin.x) / line.size + reach);
+                    let quad = Quad::from_min_max(min, max);
+                    [
+                        quad.center,
+                        quad.size,
+                        vec2(f32::from_bits(line.first + first as u32), f32::from_bits(line.first + end as u32)),
+                    ]
+                })
             })
         }
 
         /// Places a cached run at its left edge and vertical center, clipping horizontally.
-        pub fn visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
+        pub fn visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Text {
             if clip.start >= clip.end {
-                return Line::default();
+                return Text::default();
             }
             // Keep contour data available when effects or displacement extend beyond the initial clip.
             let mut line = self.place(shaped, vec2(left.x, left.y + shaped.baseline));
@@ -557,12 +586,12 @@ mod host {
         }
 
         /// Centers a cached run if it fits, otherwise aligns left without clipping.
-        pub fn fit(&mut self, shaped: &ShapedLine, y: f32, Range { start: left, end: right }: Range<f32>) -> Line {
+        pub fn fit(&mut self, shaped: &ShapedLine, y: f32, Range { start: left, end: right }: Range<f32>) -> Text {
             let x = if shaped.width <= right - left + 0.5 { (left + right - shaped.width) * 0.5 } else { left };
             self.place(shaped, vec2(x, y + shaped.baseline))
         }
 
-        fn place(&mut self, shaped: &ShapedLine, origin: Vec2) -> Line {
+        fn place(&mut self, shaped: &ShapedLine, origin: Vec2) -> Text {
             let first = self.placed.len();
             let count = shaped.glyphs.len();
             let (min, max) = if count == 0 {
@@ -571,13 +600,14 @@ mod host {
                 (origin + shaped.min * shaped.size - EFFECT_PADDING, origin + shaped.max * shaped.size + EFFECT_PADDING)
             };
             self.placed.extend_from_slice(&shaped.glyphs);
-            Line {
+            Text {
                 min,
                 max,
                 origin,
                 size: shaped.size,
                 weight: shaped.weight,
-                weights: [0, self.weights.len() as u32],
+                prepared_weight: shaped.prepared_weight,
+                weight_count: self.weights.len() as u32,
                 count: count as u32,
                 first: first as u32,
                 color: self.color,
@@ -587,7 +617,7 @@ mod host {
         }
     }
 
-    impl Text {
+    impl TextCache {
         /// Returns the font's supported weight range, or 400..=400 for a static font.
         pub fn weight_range(&self) -> RangeInclusive<f32> {
             self.weights[0]..=self.weights[self.weights.len() - 1]
@@ -723,6 +753,7 @@ mod host {
                 baseline: self.baseline * size,
                 size,
                 weight,
+                prepared_weight: Weight::resolve(&self.outlines.borrow().words, self.weights.len() as u32, weight),
             }
         }
     }

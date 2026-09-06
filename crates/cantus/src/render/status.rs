@@ -1,21 +1,20 @@
 use crate::{
     app::Background,
-    interaction::Rect,
     platform::Platform,
     render::{
-        Fragment, GAP, Globals, PANEL_START, TEXT_COLOR, TextFragment, UiContext,
-        sdf::{
-            ShapeFragment, SurfaceSample, VISIBLE_ALPHA, hash, pill_geometry, refracted_text, sample_capsule,
-            sample_pill,
-        },
+        Fragment, GAP, PANEL_START, TEXT_COLOR, UiContext,
+        sdf::{Glass, Refraction, SurfaceSample, VISIBLE_ALPHA, hash, sample_pill},
         weathertime::{StatusSky, scene, sky_phase},
     },
 };
 use arrayvec::ArrayString;
 use core::f32::consts::TAU;
 use isthmus::{
-    Float as _, Quad, Sdf, ShaderData, Unorm16x2,
-    geometry::sdf::{Arc as CircularArc, SdfShape as _, arc},
+    Float as _, Quad, ShaderData, Text, Unorm16x2,
+    geometry::{
+        FragmentGeometry,
+        sdf::{self, Capsule, Circle, RoundedRect, SdfShape as _, Shape},
+    },
     glam::{Vec2, Vec3, vec2, vec3},
     shader,
     spirv_std::arch::kill,
@@ -45,10 +44,9 @@ const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
 const STATUS_INSET: f32 = GAP * 2.0;
 const BASE_WIDTH: f32 = GRAPH_WIDTH * 2.0 + DATA_WIDTH + ACTION_WIDTH * 2.0 + GAP * 4.0 + STATUS_INSET * 2.0;
 
-fn sample_graph(outer: Quad, graph: Quad, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
-    let surface = sample_pill(outer, pixel, globals, time);
-    let radius = graph.size.y * 0.5;
-    surface.layer(Sdf::capsule(graph.local(surface.refract(pixel)), graph.size.x * 0.5 - radius, radius))
+fn sample_graph<G: for<'a> FragmentGeometry<'a>>(outer: Quad, graph: Quad, fragment: &Fragment<G>) -> SurfaceSample {
+    let surface = sample_pill(outer, fragment);
+    surface.layer(Shape::pill(graph).distance_at(surface.refract(fragment.pixel)))
 }
 
 #[derive(Clone, Copy, Default, ShaderData)]
@@ -139,31 +137,34 @@ impl StatusPanel {
         let height = context.config.height;
         let width = self.width();
         let x = context.frame.screen_size.x - width - GAP;
-        let pill = Rect::new(x, PANEL_START, x + width, PANEL_START + height);
-        let pill_quad: Quad = pill.into();
+        let pill = Shape::pill(Quad::from_min_max(vec2(x, PANEL_START), vec2(x + width, PANEL_START + height)));
+        let pill_quad = pill.quad;
         let mut cursor = STATUS_INSET;
         let section = |center: f32, section_width: f32| {
-            Rect::from_center(vec2(x + center, PANEL_START + height * 0.5), vec2(section_width * 0.5, height * 0.5))
+            Quad::new(vec2(x + center, PANEL_START + height * 0.5), vec2(section_width, height), Vec2::X)
         };
 
         context.frame.paint(
-            pill_geometry(pill_quad),
-            shader!(|fragment: ShapeFragment, sky: StatusSky| {
-                let sample = sample_capsule(fragment.geometry, fragment.pixel, fragment.globals, fragment.time);
-                if sample.alpha <= VISIBLE_ALPHA {
-                    kill();
-                }
+            pill.with_effect(Glass),
+            shader!({
+                let sky: StatusSky = sky;
+                |fragment: Fragment<Capsule>| {
+                    let sample = sample_pill(fragment.quad, &fragment);
+                    if sample.alpha <= VISIBLE_ALPHA {
+                        kill();
+                    }
 
-                // Weather-reactive glass body and interaction flash.
-                let color = scene(
-                    fragment.time,
-                    fragment.globals.bar_height,
-                    sample.refracted,
-                    sample.size.x,
-                    sky_phase(sky.sun_height),
-                    sky.conditions,
-                );
-                sample.color(color)
+                    // Weather-reactive glass body and interaction flash.
+                    let color = scene(
+                        fragment.time,
+                        fragment.globals.bar_height,
+                        sample.refracted,
+                        sample.size.x,
+                        sky_phase(sky.sun_height),
+                        sky.conditions,
+                    );
+                    sample.color(color)
+                }
             }),
         );
 
@@ -192,59 +193,66 @@ impl StatusPanel {
             let half_width = GRAPH_WIDTH * 0.5 - GAP * 0.5;
             let line =
                 context.frame.text.line(&label, 11.0, 700.0).fit(GAP + 5.0, center - half_width..center + half_width);
-            let history_scroll = self.history_scroll;
-            let history = isthmus::Buffer::new(&processor.history);
-            let temperature = processor.temperature;
             context.frame.paint(
-                pill_geometry(graph_pill),
-                shader!(|fragment: ShapeFragment,
-                         pill_quad: Quad,
-                         history: isthmus::Buffer<'_, Unorm16x2>,
-                         temperature: f32,
-                         history_scroll: f32| {
-                    let graph_pill = fragment.quad;
-                    let surface = sample_graph(pill_quad, graph_pill, fragment.pixel, fragment.globals, fragment.time);
-                    let point = graph_pill.local(surface.refract(fragment.pixel));
-                    let half_width = graph_pill.size.x * 0.5;
-                    let radius = graph_pill.size.y * 0.5;
+                Shape::pill(graph_pill).with_effect(Glass),
+                shader!({
+                    let pill_quad: Quad = pill_quad;
+                    let history: isthmus::Buffer<'_, Unorm16x2> = isthmus::Buffer::new(&processor.history);
+                    let temperature: f32 = processor.temperature;
+                    let history_scroll: f32 = self.history_scroll;
+                    |fragment: Fragment<Capsule>| {
+                        let graph_pill = fragment.quad;
+                        let surface = sample_graph(pill_quad, graph_pill, &fragment);
+                        let point = graph_pill.local(surface.refract(fragment.pixel));
+                        let half_width = graph_pill.size.x * 0.5;
+                        let radius = graph_pill.size.y * 0.5;
 
-                    // Scrolling usage and memory histories.
-                    let history_step = half_width * 2.0 / HISTORY_END as f32;
-                    let sample =
-                        ((point.x + half_width) / history_step + history_scroll).clamp(0.0, HISTORY_END as f32);
-                    let index = sample.floor() as usize;
-                    let graph_height = radius - 2.0;
-                    let start = (1.0 - history.load(index).to_vec2() * 2.0) * graph_height;
-                    let end = (1.0 - history.load((index + 1).min(HISTORY_END)).to_vec2() * 2.0) * graph_height;
-                    let curve = |start: f32, end: f32, color: Vec3, fill_strength: f32| {
-                        let delta = end - start;
-                        let t = sample.fract();
-                        let graph_y = start + delta * t * t * (3.0 - 2.0 * t);
-                        let slope = delta * 6.0 * t * (1.0 - t) / history_step;
-                        let field = Sdf::new((graph_y - point.y) / (1.0 + slope * slope).sqrt()).sample();
-                        color * surface.mask * (field.fill() * fill_strength + field.stroke(CHART_LINE_WIDTH))
-                    };
-                    let graphs = curve(start.x, end.x, USAGE_COLOR, 0.156) + curve(start.y, end.y, MEMORY_COLOR, 0.084);
+                        // Scrolling usage and memory histories.
+                        let history_step = half_width * 2.0 / HISTORY_END as f32;
+                        let sample =
+                            ((point.x + half_width) / history_step + history_scroll).clamp(0.0, HISTORY_END as f32);
+                        let index = sample.floor() as usize;
+                        let graph_height = radius - 2.0;
+                        let start = (1.0 - history.load(index).to_vec2() * 2.0) * graph_height;
+                        let end = (1.0 - history.load((index + 1).min(HISTORY_END)).to_vec2() * 2.0) * graph_height;
+                        let curve = |start: f32, end: f32, color: Vec3, fill_strength: f32| {
+                            let delta = end - start;
+                            let t = sample.fract();
+                            let graph_y = start + delta * t * t * (3.0 - 2.0 * t);
+                            let slope = delta * 6.0 * t * (1.0 - t) / history_step;
+                            let field = (graph_y - point.y) / (1.0 + slope * slope).sqrt();
+                            color
+                                * surface.mask
+                                * (sdf::fill(field) * fill_strength + sdf::stroke(field, CHART_LINE_WIDTH))
+                        };
+                        let graphs =
+                            curve(start.x, end.x, USAGE_COLOR, 0.156) + curve(start.y, end.y, MEMORY_COLOR, 0.084);
 
-                    // Grid and smoothly temperature-tinted package context.
-                    let cell = (((point + vec2(half_width, radius)) / vec2(7.0, 6.1)).fract() - 0.5).abs();
-                    let grid = surface.mask * cell.x.smoothstep(0.49, 0.46).max(cell.y.smoothstep(0.49, 0.45)) * 0.045;
-                    let heat = vec3(0.22, 0.62, 1.0)
-                        .lerp(vec3(1.0, 0.38, 0.08), temperature.smoothstep(60.0, 72.0))
-                        .lerp(vec3(1.0, 0.08, 0.035), temperature.smoothstep(72.0, 88.0));
-                    let frame_color = vec3(0.025, 0.09, 0.15)
-                        .lerp(USAGE_COLOR, 0.18 + history.load(HISTORY_END).to_vec2().x * 0.24)
-                        .lerp(heat, temperature.smoothstep(60.0, 86.0) * 0.9);
-                    let hardware = Sdf::new(surface.distance).stroke(1.45);
-                    let color = vec3(0.004, 0.012, 0.026).lerp(frame_color, hardware) + Vec3::splat(grid) + graphs;
-                    surface.fill_color(color)
+                        // Grid and smoothly temperature-tinted package context.
+                        let cell = (((point + vec2(half_width, radius)) / vec2(7.0, 6.1)).fract() - 0.5).abs();
+                        let grid =
+                            surface.mask * cell.x.smoothstep(0.49, 0.46).max(cell.y.smoothstep(0.49, 0.45)) * 0.045;
+                        let heat = vec3(0.22, 0.62, 1.0)
+                            .lerp(vec3(1.0, 0.38, 0.08), temperature.smoothstep(60.0, 72.0))
+                            .lerp(vec3(1.0, 0.08, 0.035), temperature.smoothstep(72.0, 88.0));
+                        let frame_color = vec3(0.025, 0.09, 0.15)
+                            .lerp(USAGE_COLOR, 0.18 + history.load(HISTORY_END).to_vec2().x * 0.24)
+                            .lerp(heat, temperature.smoothstep(60.0, 86.0) * 0.9);
+                        let hardware = sdf::stroke(surface.distance, 1.45);
+                        let color = vec3(0.004, 0.012, 0.026).lerp(frame_color, hardware) + Vec3::splat(grid) + graphs;
+                        surface.fill_color(color)
+                    }
                 }),
             );
             context.frame.paint(
-                refracted_text(line).translated(vec2(x, PANEL_START)),
-                shader!(|text: TextFragment<'_>, pill_quad: Quad, graph_pill: Quad| {
-                    let surface = sample_graph(pill_quad, graph_pill, text.pixel, text.globals, text.time);
-                    surface.text(&text)
+                line.with_effect(Refraction).translated(vec2(x, PANEL_START)),
+                shader!({
+                    let pill_quad: Quad = pill_quad;
+                    let graph_pill: Quad = graph_pill;
+                    |text: Fragment<Text>| {
+                        let surface = sample_graph(pill_quad, graph_pill, &text);
+                        surface.text(&text)
+                    }
                 }),
             );
             cursor += GRAPH_WIDTH + GAP;
@@ -254,39 +262,43 @@ impl StatusPanel {
             let center = cursor + DATA_WIDTH * 0.5;
             context.frame.paint(
                 section(center, DATA_WIDTH),
-                shader!(|fragment: Fragment, pill_quad: Quad, battery_level: f32| {
-                    let surface = sample_pill(pill_quad, fragment.pixel, fragment.globals, fragment.time);
-                    let point = (fragment.local + surface.displacement()) / 0.8;
+                shader!({
+                    let pill_quad: Quad = pill_quad;
+                    let battery_level: f32 = battery_level;
+                    |fragment: Fragment<Quad>| {
+                        let surface = sample_pill(pill_quad, &fragment);
+                        let point = (fragment.local + surface.displacement()) / 0.8;
 
-                    // Battery shell and fill boundary.
-                    let charging = if battery_level < 0.0 { 1.0 } else { 0.0 };
-                    let level = battery_level.abs();
-                    let body = Sdf::rounded_box(point - vec2(0.0, 1.0), vec2(11.5, 15.0), 3.2);
-                    let terminal = Sdf::rounded_box(point - vec2(0.0, -15.6), vec2(4.0, 1.8), 0.8);
-                    let shell = body.union(terminal).fill();
-                    let inside = Sdf::rounded_box(point - vec2(0.0, 1.0), vec2(8.5, 12.0), 1.7);
-                    let surface = 12.0 - level.saturate() * 24.0;
-                    let wave = (point.x * 0.62 + fragment.time * (1.4 + charging * 1.2)).sin() * 1.15
-                        + (point.x * 0.27 - fragment.time * 0.8).sin() * 0.45;
-                    let liquid = inside.intersection(Sdf::new(surface + wave - (point.y - 1.0))).fill();
+                        // Battery shell and fill boundary.
+                        let charging = if battery_level < 0.0 { 1.0 } else { 0.0 };
+                        let level = battery_level.abs();
+                        let body = Shape::rounded_rect(vec2(23.0, 30.0), 3.2).translated(vec2(0.0, 1.0));
+                        let terminal = Shape::rounded_rect(vec2(8.0, 3.6), 0.8).translated(vec2(0.0, -15.6));
+                        let shell = body.union(terminal).fill_at(point);
+                        let inside = Shape::rounded_rect(vec2(17.0, 24.0), 1.7).distance_at(point - vec2(0.0, 1.0));
+                        let surface = 12.0 - level.saturate() * 24.0;
+                        let wave = (point.x * 0.62 + fragment.time * (1.4 + charging * 1.2)).sin() * 1.15
+                            + (point.x * 0.27 - fragment.time * 0.8).sin() * 0.45;
+                        let liquid = sdf::fill(inside.max(surface + wave - (point.y - 1.0)));
 
-                    // Charge-dependent liquid color.
-                    let liquid_color = vec3(1.0, 0.18, 0.10)
-                        .lerp(vec3(1.0, 0.72, 0.12), level.smoothstep(0.08, 0.28))
-                        .lerp(vec3(0.22, 0.95, 0.55), level.smoothstep(0.18, 0.72));
+                        // Charge-dependent liquid color.
+                        let liquid_color = vec3(1.0, 0.18, 0.10)
+                            .lerp(vec3(1.0, 0.72, 0.12), level.smoothstep(0.08, 0.28))
+                            .lerp(vec3(0.22, 0.95, 0.55), level.smoothstep(0.18, 0.72));
 
-                    // Rising bubbles only while charging.
-                    let column = (point.x / 3.0).floor();
-                    let seed = hash(vec2(column, 0.0));
-                    let cycle = (fragment.time * (0.35 + seed.y * 0.5) + seed.x * 7.0).fract();
-                    let center = vec2((column + 0.2 + seed.x * 0.6) * 3.0, 13.0 - cycle * 24.0);
-                    let distance = (point - center).length() - (0.4 + seed.y * 0.5);
-                    let fade = cycle.smoothstep(0.0, 0.25) * cycle.smoothstep(1.0, 0.7);
-                    let bubble = Sdf::new(distance.abs() - 0.45).intersection(inside).fill() * fade * charging;
-                    let color = TEXT_COLOR.lerp(liquid_color, liquid) * shell
-                        + liquid_color.lerp(Vec3::ONE, 0.72) * bubble * 0.9;
-                    let alpha = shell.max(liquid).max(bubble);
-                    (color / alpha.max(0.0001)).extend(alpha)
+                        // Rising bubbles only while charging.
+                        let column = (point.x / 3.0).floor();
+                        let seed = hash(vec2(column, 0.0));
+                        let cycle = (fragment.time * (0.35 + seed.y * 0.5) + seed.x * 7.0).fract();
+                        let center = vec2((column + 0.2 + seed.x * 0.6) * 3.0, 13.0 - cycle * 24.0);
+                        let distance = (point - center).length() - (0.4 + seed.y * 0.5);
+                        let fade = cycle.smoothstep(0.0, 0.25) * cycle.smoothstep(1.0, 0.7);
+                        let bubble = sdf::fill((distance.abs() - 0.45).max(inside)) * fade * charging;
+                        let color = TEXT_COLOR.lerp(liquid_color, liquid) * shell
+                            + liquid_color.lerp(Vec3::ONE, 0.72) * bubble * 0.9;
+                        let alpha = shell.max(liquid).max(bubble);
+                        (color / alpha.max(0.0001)).extend(alpha)
+                    }
                 }),
             );
             cursor += DATA_WIDTH + GAP;
@@ -298,118 +310,110 @@ impl StatusPanel {
             *damped += (target - *damped) * (1.0 - (-response * context.frame.delta_time).exp());
         }
         let center = cursor + DATA_WIDTH * 0.5;
-        let audio_rect = section(center, DATA_WIDTH);
-        let scroll = context.interaction.interact(audio_rect).scroll;
-        let audio: Quad = audio_rect.into();
+        let audio = Shape::rectangle(section(center, DATA_WIDTH));
+        let scroll = context.interaction.interact(audio).scroll;
         if scroll != 0 {
             let sign = volume.signum();
             volume = (volume.abs() - scroll as f32 * 0.05).saturate() * sign;
             self.audio_monitor.volume.store(volume.to_bits(), Ordering::Relaxed);
             Platform::set_volume(volume.abs());
         }
-        let audio_spectrum = self.audio_spectrum;
         context.frame.paint(
-            pill_geometry(audio),
-            shader!(|fragment: ShapeFragment,
-                     pill_quad: Quad,
-                     audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS],
-                     volume: f32| {
-                let surface = sample_pill(pill_quad, fragment.pixel, fragment.globals, fragment.time);
-                let point = fragment.quad.local(surface.refract(fragment.pixel));
-                // Seven-band spectrum.
-                let muted = if volume < 0.0 { 1.0 } else { 0.0 };
-                let volume = volume.abs();
-                let middle = (AUDIO_SPECTRUM_BANDS - 1) as f32 * 0.5;
-                let bar = (point.x / AUDIO_BAR_SPACING + middle).round().clamp(0.0, AUDIO_SPECTRUM_BANDS as f32 - 1.0);
-                let active = audio_spectrum[bar as usize] * (1.0 - muted);
-                let height = 1.2 + 7.7 * active;
-                let bars = Sdf::rounded_box(
-                    point - vec2((bar - middle) * AUDIO_BAR_SPACING, -1.5),
-                    vec2(AUDIO_BAR_RADIUS, height),
-                    AUDIO_BAR_RADIUS,
-                )
-                .fill();
+            audio.with_effect(Glass).with_effect(Refraction),
+            shader!({
+                let pill_quad: Quad = pill_quad;
+                let audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS] = self.audio_spectrum;
+                let volume: f32 = volume;
+                |fragment: Fragment<RoundedRect>| {
+                    let surface = sample_pill(pill_quad, &fragment);
+                    let point = fragment.quad.local(surface.refract(fragment.pixel));
+                    // Seven-band spectrum.
+                    let muted = if volume < 0.0 { 1.0 } else { 0.0 };
+                    let volume = volume.abs();
+                    let middle = (AUDIO_SPECTRUM_BANDS - 1) as f32 * 0.5;
+                    let bar =
+                        (point.x / AUDIO_BAR_SPACING + middle).round().clamp(0.0, AUDIO_SPECTRUM_BANDS as f32 - 1.0);
+                    let active = audio_spectrum[bar as usize] * (1.0 - muted);
+                    let height = 1.2 + 7.7 * active;
+                    let bars = Shape::pill(vec2(AUDIO_BAR_RADIUS, height) * 2.0)
+                        .fill_at(point - vec2((bar - middle) * AUDIO_BAR_SPACING, -1.5));
 
-                // Volume rail and filled level.
-                let rail_point = point - vec2(0.0, 11.5);
-                let rail =
-                    Sdf::rounded_box(rail_point, vec2(AUDIO_HALF_WIDTH, AUDIO_BAR_RADIUS), AUDIO_BAR_RADIUS).fill();
-                let level_x = AUDIO_HALF_WIDTH * (volume.saturate() * 2.0 - 1.0);
-                let level = rail * rail_point.x.smoothstep(level_x + 0.8, level_x - 0.8);
+                    // Volume rail and filled level.
+                    let rail_point = point - vec2(0.0, 11.5);
+                    let rail = Shape::pill(vec2(AUDIO_HALF_WIDTH, AUDIO_BAR_RADIUS) * 2.0).fill_at(rail_point);
+                    let level_x = AUDIO_HALF_WIDTH * (volume.saturate() * 2.0 - 1.0);
+                    let level = rail * rail_point.x.smoothstep(level_x + 0.8, level_x - 0.8);
 
-                let color = vec3(0.18, 0.96, 1.0);
-                let spectrum_color = color * bars;
-                let level_color = color.lerp(MUTED_COLOR, muted) * level;
-                let alpha = bars.max(level);
-                ((spectrum_color + level_color) / alpha.max(0.0001)).extend(alpha)
+                    let color = vec3(0.18, 0.96, 1.0);
+                    let spectrum_color = color * bars;
+                    let level_color = color.lerp(MUTED_COLOR, muted) * level;
+                    let alpha = bars.max(level);
+                    ((spectrum_color + level_color) / alpha.max(0.0001)).extend(alpha)
+                }
             }),
         );
         cursor += DATA_WIDTH + GAP;
 
         for action in [1usize, 0] {
             let center = cursor + ACTION_WIDTH * 0.5;
-            let response = context.interaction.interact(section(center, ACTION_WIDTH));
+            let shape = Shape::circle(vec2(x + center, PANEL_START + height * 0.5), ACTION_WIDTH.min(height) * 0.5);
+            let response = context.interaction.interact(shape);
             self.action_hover[action] =
                 self.action_hover[action].move_towards(f32::from(response.hovered), context.frame.delta_time / 0.12);
             if response.hovered && response.held_for(1.5) {
                 Platform::run_power_action(&self.background, action);
             }
-            let hover = self.action_hover[action];
-            let selected = f32::from(response.held() && response.hovered);
-            let power_progress = (response.held_seconds / 1.5).saturate();
-            let reboot = action == 1;
-            let charge = power_progress * selected;
-            let progress = 1.0 - selected + charge;
-            let ring = arc(Vec2::ZERO, 7.1, TAU * 0.08, TAU * (progress * 0.82 - 0.045).max(0.0)).shape;
-            let direction = Vec2::from_angle(TAU * (0.08 + 0.82 * progress));
             context.frame.paint(
-                pill_geometry(section(center, ACTION_WIDTH).into()),
-                shader!(|fragment: ShapeFragment,
-                         pill_quad: Quad,
-                         reboot: bool,
-                         hover: f32,
-                         selected: f32,
-                         charge: f32,
-                         ring: CircularArc,
-                         direction: Vec2| {
-                    let surface = sample_pill(pill_quad, fragment.pixel, fragment.globals, fragment.time);
-                    let point = fragment.quad.local(surface.refract(fragment.pixel)) / (1.0 + hover * 0.07);
+                shape.with_effect(Glass),
+                shader!({
+                    let panel: Quad = pill_quad;
+                    let reboot: bool = action == 1;
+                    let hover: f32 = self.action_hover[action];
+                    let selected: f32 = f32::from(response.held && response.hovered);
+                    let charge: f32 = (response.held_seconds / 1.5).saturate() * selected;
+                    let progress = 1.0 - selected + charge;
+                    let ring: sdf::Arc =
+                        Shape::arc(Vec2::ZERO, 7.1, TAU * 0.08, TAU * (progress * 0.82 - 0.045).max(0.0)).shape;
+                    let direction: Vec2 = Vec2::from_angle(TAU * (0.08 + 0.82 * progress));
+                    |fragment: Fragment<Circle>| {
+                        let surface = sample_pill(panel, &fragment);
+                        let point = (surface.refract(fragment.pixel) - fragment.center) / (1.0 + hover * 0.07);
 
-                    // Power icon morphs inward as the hold completes.
-                    let (icon, expanded) = if reboot {
-                        // Reboot icon draws a progressing circular arrow.
-                        let progress = 1.0 - selected + charge;
-                        let tangent = vec2(-direction.y, direction.x);
-                        let arrow = point - direction * 7.1;
-                        let arrow = vec2(arrow.dot(tangent), arrow.dot(direction));
-                        let ring = ring.distance_at(point).sample();
-                        let arrow = (Sdf::chevron(arrow, vec2(-3.2, 2.1)) - 1.0).sample();
-                        let glyph = |expansion: f32| {
-                            (ring.stroke(1.05 + expansion) * progress.smoothstep(0.0, 0.02))
-                                .max(arrow.expanded(expansion))
+                        // Power icon morphs inward as the hold completes.
+                        let (icon, expanded) = if reboot {
+                            // Reboot icon draws a progressing circular arrow.
+                            let progress = 1.0 - selected + charge;
+                            let tangent = vec2(-direction.y, direction.x);
+                            let arrow = point - direction * 7.1;
+                            let arrow = vec2(arrow.dot(tangent), arrow.dot(direction));
+                            let ring = ring.distance_at(point);
+                            let arrow = Shape::chevron(vec2(-3.2, 2.1)).offset(1.0).distance_at(arrow);
+                            let glyph = |expansion: f32| {
+                                (sdf::stroke(ring, 1.05 + expansion) * progress.smoothstep(0.0, 0.02))
+                                    .max(sdf::fill(arrow - expansion))
+                            };
+                            (glyph(0.0), glyph(0.8))
+                        } else {
+                            let ease = charge.smoothstep(0.0, 1.0);
+                            let radius =
+                                7.5 - charge * 4.6 + (fragment.time * 8.0).sin() * charge * (1.0 - charge) * 0.16;
+                            let ring = Shape::circle(Vec2::ZERO, radius).stroke(1.05 + ease * 0.7);
+                            let gap =
+                                Shape::rounded_rect(vec2(6.0 * (1.0 - charge), 6.0), 0.5).translated(vec2(0.0, -7.0));
+                            let stem = Shape::rounded_rect(vec2(2.1 + ease * 0.9, 9.2 - charge * 6.0), 0.7)
+                                .translated(vec2(0.0, -5.0 + charge * 3.5));
+                            let (fill, outline) = ring.difference(gap).union(stem).fill_outline_at(point, 0.8);
+                            (fill, fill + outline)
                         };
-                        (glyph(0.0), glyph(0.8))
-                    } else {
-                        let ease = charge.smoothstep(0.0, 1.0);
-                        let radius = 7.5 - charge * 4.6 + (fragment.time * 8.0).sin() * charge * (1.0 - charge) * 0.16;
-                        let ring = Sdf::new((point.length() - radius).abs() - (1.05 + ease * 0.7));
-                        let gap = Sdf::rounded_box(point - vec2(0.0, -7.0), vec2(3.0 * (1.0 - charge), 3.0), 0.5);
-                        let stem = Sdf::rounded_box(
-                            point - vec2(0.0, -5.0 + charge * 3.5),
-                            vec2(1.05 + ease * 0.45, 4.6 - charge * 3.0),
-                            0.7,
-                        );
-                        let glyph = ring.difference(gap).union(stem).sample();
-                        (glyph.fill(), glyph.expanded(0.8))
-                    };
-                    let color = TEXT_COLOR.lerp(vec3(0.95, 0.42, 0.4), hover.max(selected * (0.5 + charge * 0.5)));
-                    let outline = (expanded - icon).max(0.0) * 0.18;
-                    let alpha = icon + outline;
-                    (color * (1.0 + charge * 0.45) * icon / alpha.max(0.0001)).extend(alpha)
+                        let color = TEXT_COLOR.lerp(vec3(0.95, 0.42, 0.4), hover.max(selected * (0.5 + charge * 0.5)));
+                        let outline = (expanded - icon).max(0.0) * 0.18;
+                        let alpha = icon + outline;
+                        (color * (1.0 + charge * 0.45) * icon / alpha.max(0.0001)).extend(alpha)
+                    }
                 }),
             );
             cursor += ACTION_WIDTH + GAP;
         }
-        context.interaction.input_region(pill);
+        context.interaction.input_region(pill_quad);
     }
 }

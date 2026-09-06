@@ -1,6 +1,6 @@
 use crate::ShaderData;
 #[cfg(not(target_arch = "spirv"))]
-use crate::geometry::GeometrySample;
+use crate::geometry::FragmentGeometry;
 
 /// A nominal shader program whose interfaces are generated together.
 ///
@@ -73,7 +73,7 @@ pub unsafe trait ShaderSpec: ShaderData {
     /// Program containing this shader's generated entry points.
     type Program: Program;
     /// Geometry queries available to the fragment shader.
-    type Sample: GeometrySample<'static>;
+    type Geometry: FragmentGeometry<'static>;
     /// Index into the program's shader metadata.
     const INDEX: usize;
 }

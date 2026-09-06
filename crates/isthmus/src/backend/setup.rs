@@ -23,9 +23,6 @@ pub enum SetupError {
     /// An additional surface requires a different render target format.
     #[error("replacement surface is incompatible")]
     IncompatibleSurface,
-    /// The browser does not expose WebGPU.
-    #[error("WebGPU is unavailable in this browser")]
-    WebGpuUnavailable,
     /// A shader requires more image bindings than the device supports.
     #[error("shader captures {required} images but this device supports {supported}")]
     ImageLimit {
@@ -69,9 +66,6 @@ pub(super) async fn new<P: Program>(
     canvas: web_sys::HtmlCanvasElement,
     size: [u32; 2],
 ) -> Result<(Gpu, SurfaceTarget), SetupError> {
-    if !wgpu::util::is_browser_webgpu_supported().await {
-        return Err(SetupError::WebGpuUnavailable);
-    }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::BROWSER_WEBGPU,
         ..wgpu::InstanceDescriptor::new_without_display_handle()

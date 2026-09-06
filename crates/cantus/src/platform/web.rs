@@ -13,7 +13,7 @@ use crate::{
 use gloo_events::{EventListener, EventListenerOptions};
 use gloo_render::request_animation_frame;
 use gloo_timers::future::TimeoutFuture;
-use isthmus::{geometry::text::Text, glam::vec2};
+use isthmus::{geometry::text::TextCache, glam::vec2};
 use std::{
     cell::RefCell,
     future::Future,
@@ -160,7 +160,6 @@ async fn run_web() -> Result<(), String> {
         .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
         .ok_or("#cantus is not a canvas")?;
     let app = Rc::new(RefCell::new(crate::app::CantusApp::default()));
-    app.borrow_mut().launcher.open = true;
     let logical_size = || {
         [
             window.inner_width().ok().and_then(|value| value.as_f64()).unwrap_or(1.0) as f32,
@@ -172,7 +171,7 @@ async fn run_web() -> Result<(), String> {
     let (mut gpu, surface) = Renderer::new(
         canvas.clone(),
         [(width * scale).round() as u32, (height * scale).round() as u32],
-        Text::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR),
+        TextCache::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR),
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -180,12 +179,14 @@ async fn run_web() -> Result<(), String> {
     let _pointer =
         ["pointerenter", "pointermove", "pointerdown", "pointerup", "pointerleave", "pointercancel"].map(|name| {
             let app = Rc::clone(&app);
+            let pointer_canvas = canvas.clone();
             EventListener::new(&canvas, name, move |event| {
                 let event = event.unchecked_ref::<web_sys::PointerEvent>();
                 let position = vec2(event.client_x() as f32, event.client_y() as f32);
                 let mut app = app.borrow_mut();
                 let input = match name {
                     "pointerdown" if event.button() == 0 => {
+                        let _ = pointer_canvas.set_pointer_capture(event.pointer_id());
                         app.interaction.apply(InputEvent::Enter(position));
                         InputEvent::Press
                     }
@@ -195,7 +196,7 @@ async fn run_web() -> Result<(), String> {
                     }
                     "pointerenter" => InputEvent::Enter(position),
                     "pointerleave" => InputEvent::Leave,
-                    "pointercancel" => InputEvent::CancelDrag,
+                    "pointercancel" => InputEvent::Cancel,
                     "pointermove" => InputEvent::Motion(position),
                     _ => return,
                 };

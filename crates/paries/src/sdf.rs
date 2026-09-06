@@ -2,21 +2,21 @@
 pub mod bamboo;
 
 pub use bamboo::Bamboo;
-use isthmus::{Float as _, Sdf, glam::Vec2};
+use isthmus::{Float as _, glam::Vec2};
 
 isthmus::program!();
 
 /// Signed distance to a line segment with a variable radius at each end.
-pub fn tapered_segment(point: Vec2, start: Vec2, end: Vec2, start_radius: f32, end_radius: f32) -> Sdf {
+pub fn tapered_segment(point: Vec2, start: Vec2, end: Vec2, start_radius: f32, end_radius: f32) -> f32 {
     let line = end - start;
     let t = ((point - start).dot(line) / line.length_squared()).clamp(0.0, 1.0);
-    Sdf::new((point - start - line * t).length() - start_radius.lerp(end_radius, t))
+    (point - start - line * t).length() - start_radius.lerp(end_radius, t)
 }
 
 /// Approximate signed distance to an ellipse with stable antialiasing.
-pub fn ellipse(point: Vec2, radii: Vec2) -> Sdf {
+pub fn ellipse(point: Vec2, radii: Vec2) -> f32 {
     let normalized = point / radii;
-    Sdf::new((normalized.length() - 1.0) * radii.x.min(radii.y))
+    (normalized.length() - 1.0) * radii.x.min(radii.y)
 }
 
 /// Small deterministic hash for procedural placement and texture.

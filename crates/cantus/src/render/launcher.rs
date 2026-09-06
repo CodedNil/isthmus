@@ -1,23 +1,16 @@
 use crate::{
     app::{Background, update},
     config::SearchProvider,
-    interaction::Rect,
     platform::{DesktopApp, Platform},
     render::{
-        Fragment, GAP, Globals, PADDING, TEXT_COLOR, TextFragment, UiContext,
-        sdf::{
-            ShapeFragment, SurfaceSample, VISIBLE_ALPHA, cantus_surface, glass, pill_geometry, presence,
-            refracted_text, sample_capsule, sample_pill,
-        },
+        Fragment, GAP, PADDING, TEXT_COLOR, UiContext,
+        sdf::{Glass, Refraction, VISIBLE_ALPHA, presence, sample_pill},
     },
 };
 use fend_core::Context;
 use isthmus::{
-    ColorExt as _, Float as _, Image, Quad, Sdf,
-    geometry::{
-        sdf::{RoundedRect, rounded_rect},
-        text,
-    },
+    ColorExt as _, Float as _, Image, Quad, Text,
+    geometry::sdf::{self, Capsule, RoundedRect, SdfShape as _, Shape},
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     shader,
     spirv_std::arch::kill,
@@ -50,29 +43,33 @@ static EXCHANGE_RATES: OnceLock<HashMap<String, f64>> = OnceLock::new();
 
 /// Coverage of a magnifying glass centered on the origin.
 fn magnifier_icon(point: Vec2) -> f32 {
-    Sdf::new((point.length() - 6.2).abs()).union(Sdf::segment(point, vec2(4.6, 4.6), vec2(8.8, 8.8))).stroke(1.05)
+    Shape::circle(Vec2::ZERO, 6.2)
+        .stroke(1.05)
+        .union(Shape::segment(vec2(4.6, 4.6), vec2(8.8, 8.8), 2.1))
+        .fill_at(point)
 }
 
 /// Straight color and coverage of the calculator badge shown beside a fend answer.
 fn calculator_icon(point: Vec2) -> Vec4 {
-    let badge = Sdf::rounded_box(point, Vec2::splat(13.0), 9.0).fill();
-    let equals = Sdf::capsule(vec2(point.x, point.y.abs() - 3.1), 4.3, 1.1).fill();
+    let badge = Shape::rounded_rect(Vec2::splat(26.0), 9.0).fill_at(point);
+    let equals = Shape::segment(vec2(-4.3, 0.0), vec2(4.3, 0.0), 2.2).fill_at(vec2(point.x, point.y.abs() - 3.1));
     ACCENT_COLOR.lerp(Vec3::splat(0.96), equals).extend(badge)
 }
 
 /// "↵" or "⇧" glyph coverage, drawn around the origin.
 fn key_glyph(point: Vec2, shift: bool) -> f32 {
-    let distance = if shift {
-        Sdf::segment(point, vec2(0.0, -4.0), vec2(-3.4, 0.2))
-            .union(Sdf::segment(point, vec2(0.0, -4.0), vec2(3.4, 0.2)))
-            .union(Sdf::segment(point, vec2(0.0, -0.6), vec2(0.0, 4.0)))
+    if shift {
+        Shape::segment(vec2(0.0, -4.0), vec2(-3.4, 0.2), 1.6)
+            .union(Shape::segment(vec2(0.0, -4.0), vec2(3.4, 0.2), 1.6))
+            .union(Shape::segment(vec2(0.0, -0.6), vec2(0.0, 4.0), 1.6))
+            .fill_at(point)
     } else {
-        Sdf::segment(point, vec2(3.4, -3.6), vec2(3.4, 1.8))
-            .union(Sdf::segment(point, vec2(3.4, 1.8), vec2(-2.6, 1.8)))
-            .union(Sdf::segment(point, vec2(-2.6, 1.8), vec2(0.2, -0.8)))
-            .union(Sdf::segment(point, vec2(-2.6, 1.8), vec2(0.2, 4.4)))
-    };
-    distance.stroke(0.8)
+        Shape::segment(vec2(3.4, -3.6), vec2(3.4, 1.8), 1.6)
+            .union(Shape::segment(vec2(3.4, 1.8), vec2(-2.6, 1.8), 1.6))
+            .union(Shape::segment(vec2(-2.6, 1.8), vec2(0.2, -0.8), 1.6))
+            .union(Shape::segment(vec2(-2.6, 1.8), vec2(0.2, 4.4), 1.6))
+            .fill_at(point)
+    }
 }
 
 /// Straight color and coverage of one key badge; `half_width` of 0 leaves the slot empty.
@@ -80,8 +77,8 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
     if half_width <= 0.0 {
         return Vec4::ZERO;
     }
-    let outline = Sdf::rounded_box(point, vec2(half_width, BADGE_HEIGHT * 0.5), 6.0).sample();
-    let (body, edge) = (outline.fill(), outline.stroke(0.65));
+    let distance = Shape::rounded_rect(vec2(half_width * 2.0, BADGE_HEIGHT), 6.0).distance_at(point);
+    let (body, edge) = (sdf::fill(distance), sdf::stroke(distance, 0.65));
     let glyph = if shift {
         key_glyph(point + vec2(8.5, 0.0), true).max(key_glyph(point - vec2(7.5, 0.0), false))
     } else {
@@ -89,10 +86,6 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
     };
     let color = Vec3::splat(0.27).lerp(ICON_COLOR, edge).lerp(TEXT_COLOR, glyph);
     color.extend(body.max(edge).max(glyph))
-}
-
-fn sample_launcher(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
-    cantus_surface(quad, pixel, globals, time, rounded_rect(quad, BACKGROUND_RADIUS as f32).shape)
 }
 
 #[derive(Default)]
@@ -256,6 +249,8 @@ impl<'a> LauncherEntry<'a> {
 }
 
 impl LauncherState {
+    const ALWAYS_OPEN: bool = cfg!(target_arch = "wasm32");
+
     pub(crate) fn new(
         background: &Background,
         http: &Client,
@@ -302,7 +297,7 @@ impl LauncherState {
             });
         }
         Self {
-            open: false,
+            open: Self::ALWAYS_OPEN,
             session: 0,
             field: TextField::default(),
             matches: Vec::new(),
@@ -315,10 +310,9 @@ impl LauncherState {
         }
     }
 
-    /// Opens or closes the launcher with a fresh query.
     pub fn toggle(&mut self) {
         self.session = self.session.wrapping_add(1);
-        self.open = !self.open;
+        self.open = Self::ALWAYS_OPEN || !self.open;
         self.field.clear();
         self.refresh_matches();
     }
@@ -331,7 +325,7 @@ impl LauncherState {
 
     pub(crate) fn key(&mut self, key: LauncherKey, shift: bool) {
         match key {
-            LauncherKey::Escape => self.open = false,
+            LauncherKey::Escape => self.open = Self::ALWAYS_OPEN,
             LauncherKey::Activate => self.activate(self.selected, shift),
             LauncherKey::Up => self.move_selection(-1),
             LauncherKey::Down => self.move_selection(1),
@@ -416,7 +410,7 @@ impl LauncherState {
             }
             None => return,
         }
-        self.open = false;
+        self.open = Self::ALWAYS_OPEN;
         self.field.clear();
         self.refresh_matches();
     }
@@ -471,20 +465,21 @@ impl LauncherState {
             return;
         }
         let (origin, size) = self.bounds(context.frame.screen_size);
-        let screen = Rect::new(0.0, 0.0, context.frame.screen_size.x, context.frame.screen_size.y);
-        let backdrop = context.interaction.interact(screen);
-        if backdrop.clicked()
-            && !Rect::from_center(origin + size * 0.5, size * 0.5).contains(context.interaction.mouse_pos())
-        {
+        let panel = Shape::rounded_rect(Quad::from_min_max(origin, origin + size), BACKGROUND_RADIUS as f32);
+        let screen = Quad::from_min_max(Vec2::ZERO, context.frame.screen_size);
+        context.interaction.input_region(screen);
+        let backdrop = context.interaction.interact(Shape::rectangle(screen).difference(panel));
+        if !Self::ALWAYS_OPEN && backdrop.clicked {
             self.open = false;
             return;
         }
 
-        self.show_search(context, Quad::from_min_max(origin, origin + size));
+        self.show_search(context, panel);
         self.show_entries(context, origin);
     }
 
-    fn show_search(&mut self, context: &mut UiContext, quad: Quad) {
+    fn show_search(&mut self, context: &mut UiContext, panel: Shape<RoundedRect>) {
+        let quad = panel.quad;
         let origin = quad.center - quad.size * 0.5;
         let size = quad.size;
         let (left, right) = (PADDING + 34.0, size.x - PADDING);
@@ -514,44 +509,41 @@ impl LauncherState {
             (caret, selection)
         };
         context.frame.paint(
-            glass(rounded_rect(quad, BACKGROUND_RADIUS as f32)),
-            shader!(|fragment: ShapeFragment<RoundedRect>, caret: Vec2, selection: Vec2| {
-                let surface =
-                    cantus_surface(fragment.quad, fragment.pixel, fragment.globals, fragment.time, fragment.geometry);
-                if surface.mask <= 0.0 {
-                    kill();
+            panel.with_effect(Glass),
+            shader!({
+                let caret: Vec2 = caret;
+                let selection: Vec2 = selection;
+                |fragment: Fragment<RoundedRect>| {
+                    let surface = Glass::sample(fragment.quad, fragment.geometry, &fragment);
+                    if surface.mask <= 0.0 {
+                        kill();
+                    }
+                    let point = fragment.quad.local(surface.content_point(fragment.pixel)) + fragment.quad.size * 0.5;
+                    let mut color = Vec3::splat(0.09).lerp(
+                        Vec3::splat(0.17),
+                        Shape::rectangle(vec2(surface.size.x, 1.0))
+                            .fill_at(surface.refracted - vec2(surface.size.x * 0.5, HEADER_HEIGHT - 0.5)),
+                    );
+                    color = color.lerp(ICON_COLOR, magnifier_icon(point - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
+
+                    let selection_width = selection.y - selection.x;
+                    let highlight = Shape::rounded_rect(vec2(selection_width, 26.0), 3.0)
+                        .fill_at(point - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5));
+                    color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
+                    let caret_mask = Shape::pill(vec2(1.8, 24.0)).fill_at(point - vec2(caret.x, HEADER_HEIGHT * 0.5));
+                    color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
+
+                    surface.color(color).opacity(0.82)
                 }
-                let point = fragment.quad.local(surface.content_point(fragment.pixel)) + fragment.quad.size * 0.5;
-                let mut color = Vec3::splat(0.09).lerp(
-                    Vec3::splat(0.17),
-                    Sdf::rounded_box(
-                        surface.refracted - vec2(surface.size.x * 0.5, HEADER_HEIGHT - 0.5),
-                        vec2(surface.size.x * 0.5, 0.5),
-                        0.0,
-                    )
-                    .fill(),
-                );
-                color = color.lerp(ICON_COLOR, magnifier_icon(point - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
-
-                let selection_width = selection.y - selection.x;
-                let highlight = Sdf::rounded_box(
-                    point - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5),
-                    vec2(selection_width * 0.5, 13.0),
-                    3.0,
-                )
-                .fill();
-                color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
-                let caret_mask =
-                    Sdf::rounded_box(point - vec2(caret.x, HEADER_HEIGHT * 0.5), vec2(0.9, 12.0), 0.9).fill();
-                color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
-
-                surface.color(color).opacity(0.82)
             }),
         );
         context.frame.paint(
-            refracted_text(line).translated(origin),
-            shader!(|text: TextFragment<'_>, quad: Quad| {
-                sample_launcher(quad, text.pixel, text.globals, text.time).text(&text)
+            line.with_effect(Refraction).translated(origin),
+            shader!({
+                let quad: Quad = quad;
+                |text: Fragment<Text>| {
+                    Glass::sample(quad, Shape::rounded_rect(quad, BACKGROUND_RADIUS as f32).shape, &text).text(&text)
+                }
             }),
         );
     }
@@ -564,21 +556,21 @@ impl LauncherState {
         let mut activated = None;
         for index in 0..self.entry_count() {
             let y = origin.y + HEADER_HEIGHT + PADDING + index as f32 * (ROW_HEIGHT + GAP);
-            let pill = Rect::new(x, y, x + width, y + ROW_HEIGHT);
-            let response = context.interaction.interact(pill);
+            let shape = Shape::pill(Quad::from_min_max(vec2(x, y), vec2(x + width, y + ROW_HEIGHT)));
+            let response = context.interaction.interact(shape);
             if response.hovered {
                 self.selected = index;
             }
-            if response.clicked() {
+            if response.clicked {
                 activated = Some(index);
             }
-            let pill: Quad = pill.into();
+            let pill = shape.quad;
             let entry = self.entry(index).unwrap().view(self.search_query().1);
 
             let mut edge = width - ROW_HEIGHT * 0.5;
             let mut badge = |label: Option<&str>, width: f32| {
                 let Some(label) = label.filter(|_| self.selected == index) else {
-                    return (Vec2::ZERO, text::Line::default());
+                    return (Vec2::ZERO, Text::default());
                 };
                 let badge = vec2(edge - width * 0.5, width * 0.5);
                 edge -= width + GAP;
@@ -600,7 +592,7 @@ impl LauncherState {
             let name_line =
                 context.frame.text.line(entry.name, 16.0, 700.0).visible(vec2(text_left, name_y), clip.clone());
             let detail_line = if entry.detail.is_empty() {
-                text::Line::default()
+                Text::default()
             } else {
                 context
                     .frame
@@ -616,33 +608,39 @@ impl LauncherState {
                 EntryIcon::Search => (None, SEARCH_ICON),
             };
             context.frame.paint(
-                pill_geometry(pill),
-                shader!(|fragment: ShapeFragment, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
-                    let surface = sample_capsule(fragment.geometry, fragment.pixel, fragment.globals, fragment.time);
-                    if surface.alpha <= VISIBLE_ALPHA {
-                        kill();
+                shape.with_effect(Glass),
+                shader!({
+                    let icon_kind: u32 = icon_kind;
+                    let enter_badge: Vec2 = enter_badge;
+                    let alternate_badge: Vec2 = alternate_badge;
+                    |fragment: Fragment<Capsule>| {
+                        let surface = sample_pill(fragment.quad, &fragment);
+                        if surface.alpha <= VISIBLE_ALPHA {
+                            kill();
+                        }
+                        let mut color = Vec3::splat(0.15)
+                            .lerp(Vec3::splat(0.235), presence(enter_badge.y))
+                            .lerp(Vec3::splat(0.3), (surface.bulge() / 8.0).min(1.0));
+
+                        let icon_point = surface.local - Vec2::splat(surface.size.y * 0.5);
+                        if icon_kind == CALCULATOR_ICON {
+                            let calculator = calculator_icon(icon_point);
+                            color = color.lerp(calculator.truncate(), calculator.w);
+                        } else if icon_kind == SEARCH_ICON {
+                            color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
+                        }
+
+                        let point =
+                            fragment.quad.local(surface.content_point(fragment.pixel)) + fragment.quad.size * 0.5;
+                        let paint_badge = |color: Vec3, badge: Vec2, shift: bool| {
+                            let ink = action_badge(point - vec2(badge.x, ROW_HEIGHT * 0.5), badge.y, shift);
+                            color.lerp(ink.truncate(), ink.w)
+                        };
+                        color = paint_badge(color, enter_badge, false);
+                        color = paint_badge(color, alternate_badge, true);
+
+                        surface.color(color)
                     }
-                    let mut color = Vec3::splat(0.15)
-                        .lerp(Vec3::splat(0.235), presence(enter_badge.y))
-                        .lerp(Vec3::splat(0.3), (surface.bulge() / 8.0).min(1.0));
-
-                    let icon_point = surface.local - Vec2::splat(surface.size.y * 0.5);
-                    if icon_kind == CALCULATOR_ICON {
-                        let calculator = calculator_icon(icon_point);
-                        color = color.lerp(calculator.truncate(), calculator.w);
-                    } else if icon_kind == SEARCH_ICON {
-                        color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
-                    }
-
-                    let point = fragment.quad.local(surface.content_point(fragment.pixel)) + fragment.quad.size * 0.5;
-                    let paint_badge = |color: Vec3, badge: Vec2, shift: bool| {
-                        let ink = action_badge(point - vec2(badge.x, ROW_HEIGHT * 0.5), badge.y, shift);
-                        color.lerp(ink.truncate(), ink.w)
-                    };
-                    color = paint_badge(color, enter_badge, false);
-                    color = paint_badge(color, alternate_badge, true);
-
-                    surface.color(color)
                 }),
             );
             if let Some(image) = image {
@@ -651,15 +649,22 @@ impl LauncherState {
                     Vec2::splat(ICON_SIZE),
                     Vec2::X,
                 );
-                context.frame.paint(icon, shader!(|fragment: Fragment, image: Image| image.sample(fragment.uv)));
+                context.frame.paint(
+                    icon,
+                    shader!({
+                        let image: &Image = image;
+                        |fragment: Fragment<Quad>| image.sample(fragment.uv)
+                    }),
+                );
             }
 
             let origin = vec2(x, y);
             for line in [name_line, detail_line, action_line, alternate_line] {
                 context.frame.paint(
-                    refracted_text(line).translated(origin),
-                    shader!(|text: TextFragment<'_>, pill: Quad| {
-                        sample_pill(pill, text.pixel, text.globals, text.time).text(&text)
+                    line.with_effect(Refraction).translated(origin),
+                    shader!({
+                        let pill: Quad = pill;
+                        |text: Fragment<Text>| sample_pill(pill, &text).text(&text)
                     }),
                 );
             }

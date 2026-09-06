@@ -1,4 +1,4 @@
-use super::{GeometrySample, Raster, text::TextResources};
+use super::{FragmentGeometry, Raster, text::TextResources};
 #[cfg(not(target_arch = "spirv"))]
 use core::iter::once;
 use glam::{Vec2, Vec3, vec2, vec3};
@@ -54,13 +54,14 @@ pub struct TriangleSample {
     pub barycentric: Vec3,
 }
 
-impl GeometrySample<'_> for TriangleSample {
+impl FragmentGeometry<'_> for Triangle {
     type Payload = ();
-    type Raster = Triangle;
+    type Raster = Self;
+    type Sample = TriangleSample;
 
-    fn sample(pixel: Vec2, raster: [Vec2; 3], (): (), _: TextResources<'_>) -> Self {
-        let barycentric = Triangle::from_data(raster).barycentric(pixel);
-        Self { uv: vec2(barycentric.y, barycentric.z), barycentric }
+    fn sample(pixel: Vec2, raster: [Vec2; 3], (): (), _: TextResources<'_>) -> TriangleSample {
+        let barycentric = Self::from_data(raster).barycentric(pixel);
+        TriangleSample { uv: vec2(barycentric.y, barycentric.z), barycentric }
     }
 }
 
@@ -83,7 +84,7 @@ impl Raster for Triangle {
 #[cfg(not(target_arch = "spirv"))]
 impl super::Geometry for Triangle {
     type Context = ();
-    type Sample = TriangleSample;
+    type Fragment = Self;
 
     fn payload(self) {}
 

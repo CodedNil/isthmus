@@ -1,7 +1,13 @@
 use super::{fragment_entry, vertex};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident, quote};
-use syn::{Ident, Pat, PatType, Type, parse::Parser, parse_quote, punctuated::Punctuated, visit_mut::VisitMut};
+use syn::{
+    Ident, Pat, PatType, Type,
+    parse::Parser,
+    parse_quote,
+    punctuated::Punctuated,
+    visit_mut::{self, VisitMut},
+};
 
 pub struct Capture {
     pub name: Ident,
@@ -20,7 +26,8 @@ impl Capture {
             return Err(syn::Error::new_spanned(name, "shader inputs require a plain identifier, optionally mut"));
         }
         let source = input.ty.as_ref().clone();
-        let image = matches!(&source, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "Image"));
+        let resource = if let Type::Reference(reference) = &source { &*reference.elem } else { &source };
+        let image = matches!(resource, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "Image"));
         let buffer = matches!(&source, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "Buffer"));
         Ok(Self { name: name.ident.clone(), source, image, buffer, mutability: name.mutability })
     }
@@ -41,6 +48,7 @@ impl Capture {
 
 pub struct Shader {
     pub declaration: syn::ExprClosure,
+    initializers: Vec<syn::Stmt>,
     input: Capture,
     captures: Vec<Capture>,
     entry: syn::LitStr,
@@ -52,18 +60,19 @@ impl Shader {
     pub fn parse(tokens: TokenStream, file: &str, line: usize, column: usize) -> syn::Result<Self> {
         let args = Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated.parse2(tokens)?;
         let mut args = args.into_iter();
-        let first =
-            args.next().ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "expected a shader closure"))?;
+        let first = args
+            .next()
+            .ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "expected a shader capture block"))?;
         let (options, expression) = if let syn::Expr::Path(path) = first {
             let expression = args
                 .next()
-                .ok_or_else(|| syn::Error::new_spanned(&path, "expected a shader closure after blend mode"))?;
+                .ok_or_else(|| syn::Error::new_spanned(&path, "expected a capture block after blend mode"))?;
             (Some(path.path), expression)
         } else {
             (None, first)
         };
         if args.next().is_some() {
-            return Err(syn::Error::new_spanned(expression, "expected a blend mode and one shader closure"));
+            return Err(syn::Error::new_spanned(expression, "expected an optional blend mode and one capture block"));
         }
         let blend = options
             .as_ref()
@@ -72,7 +81,20 @@ impl Shader {
         if !matches!(blend.to_string().as_str(), "Over" | "Add" | "Replace") {
             return Err(syn::Error::new_spanned(blend, "expected Blend::Over, Blend::Add or Blend::Replace"));
         }
-        let syn::Expr::Closure(closure) = expression else {
+        let syn::Expr::Block(mut block) = expression else {
+            return Err(syn::Error::new_spanned(
+                expression,
+                "expected a capture block: { let name: Type = value; |fragment: Fragment<Geometry>| { ... } }",
+            ));
+        };
+        if block.label.is_some() {
+            return Err(syn::Error::new_spanned(block, "shader capture blocks cannot have labels"));
+        }
+        let Some(syn::Stmt::Expr(expression, None)) = block.block.stmts.pop() else {
+            return Err(syn::Error::new_spanned(block, "expected a shader closure at the end of the capture block"));
+        };
+        let initializers = block.block.stmts;
+        let syn::Expr::Closure(mut closure) = expression else {
             return Err(syn::Error::new_spanned(expression, "expected a shader closure"));
         };
         closure.modifiers.require_empty()?;
@@ -81,6 +103,19 @@ impl Shader {
                 closure,
                 "shader declarations cannot be async, static, or move closures",
             ));
+        }
+        if closure.inputs.len() != 1 {
+            return Err(syn::Error::new_spanned(
+                closure,
+                "expected only the fragment parameter; declare captures with typed let bindings",
+            ));
+        }
+        for statement in &initializers {
+            if let syn::Stmt::Local(local) = statement
+                && let Pat::Type(input) = &local.pat
+            {
+                closure.inputs.push(Pat::Type(input.clone()));
+            }
         }
         let mut inputs = closure.inputs.iter().map(|input| match input {
             Pat::Type(input) if matches!(&*input.pat, Pat::Ident(_)) => Ok(input.clone()),
@@ -97,7 +132,7 @@ impl Shader {
             .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3));
         let entry = syn::LitStr::new(&format!("isthmus_{hash:x}_{line}_{column}_fragment"), input.colon_token.span);
         let input = Capture::new(&input)?;
-        Ok(Self { declaration: closure, input, captures, entry, blend, options })
+        Ok(Self { declaration: closure, initializers, input, captures, entry, blend, options })
     }
 
     pub fn metadata(&self) -> TokenStream {
@@ -136,30 +171,32 @@ impl Shader {
         });
         quote! {
             #[allow(non_camel_case_types)]
-            type #sample = <#interface as #isthmus::__private::ShaderInput<'static>>::Sample;
+            type #sample = <#interface as #isthmus::__private::ShaderInput<'static>>::Geometry;
             #[allow(non_camel_case_types)]
             #[derive(Clone, Copy, #isthmus::ShaderData)]
             struct #payload {
-                __geometry: <#sample as #isthmus::geometry::GeometrySample<'static>>::Payload,
+                __geometry: <#sample as #isthmus::geometry::FragmentGeometry<'static>>::Payload,
                 #(#fields),*
             }
         }
     }
 
     pub fn host(&self, isthmus: &TokenStream) -> TokenStream {
+        let initializers = self.initializers.iter().map(|statement| {
+            if matches!(statement, syn::Stmt::Local(local) if matches!(local.pat, Pat::Type(_))) {
+                quote!(#[allow(clippy::redundant_type_annotations)] #statement)
+            } else {
+                statement.to_token_stream()
+            }
+        });
         let declaration = &self.declaration;
         let input_type = &self.input.source;
         let interface_type = self.interface();
         let types = self.captures.iter().map(|capture| &capture.source);
         let payload = self.payload(isthmus, &format_ident!("__IsthmusPayload"), &format_ident!("__IsthmusSample"));
         let program = quote!(<#interface_type as #isthmus::__private::ShaderInput<'static>>::Program);
-        let sample = quote!(<#interface_type as #isthmus::__private::ShaderInput<'static>>::Sample);
+        let sample = quote!(<#interface_type as #isthmus::__private::ShaderInput<'static>>::Geometry);
         let entry = &self.entry;
-        let bindings = self.captures.iter().filter(|capture| capture.image).map(|capture| {
-            let name = &capture.name;
-            let ty = &capture.source;
-            quote!(let #name: &#ty = &#name;)
-        });
         let fields = self.captures.iter().filter(|capture| !capture.image).map(|capture| {
             let name = &capture.name;
             if capture.buffer { quote!(#name: __isthmus_gpu.capture_buffer(#name)) } else { quote!(#name) }
@@ -170,22 +207,22 @@ impl Shader {
         });
         let images: Vec<_> =
             self.captures.iter().filter(|capture| capture.image).map(|capture| &capture.name).collect();
-        let image = if images.is_empty() { quote!(None) } else { quote!(Some(__isthmus_gpu.images(&[#(#images),*]))) };
+        let image = if images.is_empty() { quote!(None) } else { quote!(Some(__isthmus_gpu.images(&[#(&#images),*]))) };
         quote!({
             #options
+            #(#initializers)*
             let _: fn(#input_type, #(#types),*) -> #isthmus::glam::Vec4 = #declaration;
             #payload
             // SAFETY: Both interfaces are generated from this declaration and its checked entry.
             unsafe impl #isthmus::__private::ShaderSpec for __IsthmusPayload {
                 type Program = #program;
-                type Sample = #sample;
+                type Geometry = #sample;
                 const INDEX: usize = #isthmus::__private::shader_index(
                     <#program as #isthmus::Program>::SHADERS,
                     #entry,
                 );
             }
             const _: usize = <__IsthmusPayload as #isthmus::__private::ShaderSpec>::INDEX;
-            #(#bindings)*
             move |__isthmus_gpu: &mut #isthmus::__private::Gpu, __isthmus_geometry| {
                 (__IsthmusPayload { __geometry: __isthmus_geometry, #(#fields),* }, #image)
             }
@@ -245,7 +282,49 @@ impl Shader {
 struct StaticLifetimes;
 
 impl VisitMut for StaticLifetimes {
+    fn visit_type_path_mut(&mut self, i: &mut syn::TypePath) {
+        if let Some(segment) = i.path.segments.last_mut()
+            && segment.ident == "Fragment"
+            && let syn::PathArguments::AngleBracketed(arguments) = &mut segment.arguments
+            && !arguments.args.iter().any(|arg| matches!(arg, syn::GenericArgument::Lifetime(_)))
+        {
+            arguments.args.insert(0, parse_quote!('static));
+        }
+        visit_mut::visit_type_path_mut(self, i);
+    }
+
     fn visit_lifetime_mut(&mut self, i: &mut syn::Lifetime) {
         *i = parse_quote!('static);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_block_keeps_initializers_on_host() {
+        let shader = Shader::parse(
+            quote!({
+                let opacity: f32 = cpu_only();
+                let image: &Image = &art.image;
+                |fragment: Fragment<Quad>| image.sample(fragment.uv) * opacity
+            }),
+            "src/render.rs",
+            1,
+            0,
+        )
+        .unwrap();
+        let host = shader.host(&quote!(isthmus)).to_string();
+        let gpu = shader.gpu(&quote!(isthmus)).to_string();
+        assert_eq!(host.matches("cpu_only").count(), 1);
+        assert!(!gpu.contains("cpu_only") && !gpu.contains("art"));
+        assert!(shader.captures[1].image);
+        for invalid in [
+            quote!(|fragment: Fragment<Quad>| Vec4::ONE),
+            quote!({ |fragment: Fragment<Quad>, opacity: f32| Vec4::ONE * opacity }),
+        ] {
+            assert!(Shader::parse(invalid, "src/render.rs", 1, 0).is_err());
+        }
     }
 }

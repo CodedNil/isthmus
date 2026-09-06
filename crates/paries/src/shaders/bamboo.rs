@@ -2,6 +2,7 @@ use super::{Fragment, Frame, fbm, hash, noise, tapered_segment};
 use core::f32::consts::{PI, TAU};
 use isthmus::{
     Blend, Float as _, Quad,
+    geometry::sdf,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     shader,
 };
@@ -13,8 +14,9 @@ impl Bamboo {
         let size = frame.screen_size;
         frame.paint(
             Quad::new(size * 0.5, size, Vec2::X),
-            shader!(Blend::Replace, |fragment: Fragment, size: Vec2| {
-                wallpaper(fragment.pixel, size, fragment.time)
+            shader!(Blend::Replace, {
+                let size: Vec2 = size;
+                |fragment: Fragment<Quad>| wallpaper(fragment.pixel, size, fragment.time)
             }),
         );
     }
@@ -36,7 +38,8 @@ fn foliage(mut color: Vec3, point: Vec2, root: Vec2, direction: Vec2, scale: f32
     let axis = direction.normalize();
     let side = axis.perp();
     let tip = root + axis * 88.0 * scale;
-    color = over(color, vec3(0.018, 0.10, 0.03), tapered_segment(point, root, tip, 2.0 * scale, 0.4 * scale).fill());
+    color =
+        over(color, vec3(0.018, 0.10, 0.03), sdf::fill(tapered_segment(point, root, tip, 2.0 * scale, 0.4 * scale)));
     for index in 0..3 {
         let (along, handedness, length, width) = if index == 0 {
             (0.43, -0.48, 29.0, 6.5)

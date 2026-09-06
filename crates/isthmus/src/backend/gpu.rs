@@ -1,7 +1,7 @@
 use super::{buffer::UploadBuffer, image::ImageCache};
 use crate::{
     Blend, Image, Program, ShaderData as _, bindings,
-    geometry::{DrawRecord, GeometrySample, Raster, text::PlacedGlyph},
+    geometry::{DrawRecord, FragmentGeometry, Raster, text::PlacedGlyph},
     program::ShaderSpec,
 };
 use core::array::from_fn;
@@ -159,7 +159,7 @@ impl Gpu {
         } else {
             surface.paints.push(Paint {
                 shader: S::INDEX,
-                vertices: <S::Sample as GeometrySample<'static>>::Raster::VERTICES,
+                vertices: <S::Geometry as FragmentGeometry<'static>>::Raster::VERTICES,
                 draws: start..end,
                 image,
             });

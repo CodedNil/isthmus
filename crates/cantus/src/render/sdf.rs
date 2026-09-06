@@ -1,9 +1,10 @@
-use crate::render::{Globals, Program, TextFragment};
+use crate::render::{Fragment, Globals, HELD_PRESSURE, RIPPLE_COUNT};
 use isthmus::{
-    Float as _, Quad, Sdf,
+    Float as _, Quad, Text,
     geometry::{
-        sdf::{Capsule, SdfShape, Shape, pill},
-        text::Line,
+        FragmentGeometry,
+        effect::Effect,
+        sdf::{self, SdfShape, Shape},
     },
     glam::{UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
 };
@@ -13,45 +14,55 @@ const SHADOW_DECAY: f32 = 0.3;
 const POINTER_REACH: f32 = 150.0;
 const POINTER_REFRACTION: f32 = 0.035;
 const RIPPLE_REFRACTION: f32 = 3.0;
+const POINTER_BULGE: f32 = 8.0;
+const RIPPLE_BULGE: f32 = 22.0;
 /// Smallest coverage worth shading; analytic shadows never reach exact zero.
 pub const VISIBLE_ALPHA: f32 = 1.0 / 1024.0;
 
-/// Reserves the same held-pointer and ripple displacement used by surface optics.
-pub fn refracted_text(line: Line) -> Line {
-    // The radial falloff bounds u * (1 - smoothstep(0, 1, u)) below 0.26.
-    line.displaced(POINTER_REACH * 0.26 * 2.0 * POINTER_REFRACTION + 4.0 * 0.5 * RIPPLE_REFRACTION)
-}
+#[derive(Clone, Copy)]
+pub struct Refraction;
 
-pub type ShapeFragment<S = Capsule> = isthmus::Fragment<Program, S>;
-
-pub fn pill_geometry(quad: Quad) -> Shape<Capsule> {
-    glass(pill(quad))
-}
-
-/// Fits the material's shadow and maximum interaction bulge around any bounded shape.
-pub fn glass<S: SdfShape>(shape: Shape<S>) -> Shape<S> {
-    let shadow = (SHADOW_OPACITY / VISIBLE_ALPHA).ln() / SHADOW_DECAY;
-    shape.effects(shadow + (2.0 * 8.0 + 4.0 * 11.0) * 0.5)
-}
-
-pub fn sample_pill(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
-    sample_capsule(pill(quad).shape, pixel, globals, time)
-}
-
-pub fn sample_capsule(shape: Capsule, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
-    cantus_surface(shape.quad, pixel, globals, time, shape)
-}
-
-/// Samples arbitrary Cantus SDF geometry with interaction, refraction and shadowing.
-pub fn cantus_surface(quad: Quad, pixel: Vec2, globals: Globals, time: f32, shape: impl SdfShape) -> SurfaceSample {
-    let distance = shape.distance_at(pixel).distance;
-    let mouse_distance = if globals.pressure > 0.0 { shape.distance_at(globals.pointer).distance } else { 1.0 };
-    let mouse_mask = mouse_distance.smoothstep(0.5, -0.5);
-    let interaction = interaction(pixel, globals, time, mouse_mask);
-    SurfaceSample::new(quad.local(pixel) + quad.size * 0.5, quad.size, Sdf::new(distance), interaction)
+impl Effect for Refraction {
+    fn displacement(self) -> f32 {
+        // The radial falloff bounds u * (1 - smoothstep(0, 1, u)) below 0.26.
+        POINTER_REACH * 0.26 * HELD_PRESSURE * POINTER_REFRACTION + RIPPLE_COUNT as f32 * 0.5 * RIPPLE_REFRACTION
+    }
 }
 
 #[derive(Clone, Copy)]
+pub struct Glass;
+
+impl Effect for Glass {
+    fn outset(self) -> f32 {
+        let shadow = (SHADOW_OPACITY / VISIBLE_ALPHA).ln() / SHADOW_DECAY;
+        shadow + (HELD_PRESSURE * POINTER_BULGE + RIPPLE_COUNT as f32 * 0.5 * RIPPLE_BULGE) * 0.5
+    }
+}
+
+pub fn sample_pill<G: for<'a> FragmentGeometry<'a>>(quad: Quad, fragment: &Fragment<G>) -> SurfaceSample {
+    Glass::sample(quad, Shape::pill(quad).shape, fragment)
+}
+
+impl Glass {
+    /// Samples arbitrary Cantus SDF geometry with interaction, refraction and shadowing.
+    pub fn sample<G: for<'a> FragmentGeometry<'a>>(
+        quad: Quad,
+        shape: impl SdfShape,
+        fragment: &Fragment<G>,
+    ) -> SurfaceSample {
+        let globals = fragment.globals;
+        let mouse_distance = if globals.pressure > 0.0 { shape.distance_at(globals.pointer) } else { 1.0 };
+        let mouse_mask = mouse_distance.smoothstep(0.5, -0.5);
+        SurfaceSample {
+            local: quad.local(fragment.pixel) + quad.size * 0.5,
+            size: quad.size,
+            ..interaction(fragment.pixel, globals, fragment.time, mouse_mask)
+        }
+        .layer(shape.distance_at(fragment.pixel))
+    }
+}
+
+#[derive(Clone, Copy, Default)]
 pub struct SurfaceSample {
     bulge: f32,
     refraction: Vec2,
@@ -68,37 +79,16 @@ pub struct SurfaceSample {
 }
 
 impl SurfaceSample {
-    fn new(local: Vec2, size: Vec2, shape: Sdf, interaction: Interaction) -> Self {
-        let mut surface = Self {
-            bulge: interaction.bulge,
-            refraction: interaction.refraction,
-            local,
-            refracted: local,
-            size,
-            distance: shape.distance,
-            mask: 0.0,
-            alpha: 0.0,
-            ripple: interaction.ripple,
-            flash: interaction.flash,
-        };
-        surface.resolve(shape);
-        surface
-    }
-
-    fn resolve(&mut self, shape: Sdf) {
-        self.distance = shape.distance - self.bulge * 0.5;
-        self.mask = Sdf::new(self.distance).fill();
+    /// Resolves a contour with this surface's existing interaction and material coordinates.
+    pub fn layer(mut self, distance: f32) -> Self {
+        self.distance = distance - self.bulge * 0.5;
+        self.mask = sdf::fill(self.distance);
         let shadow = (-self.distance.max(0.0) * SHADOW_DECAY).exp() * SHADOW_OPACITY;
         self.alpha = self.mask.max(shadow);
         let uv = self.local / self.size;
         let edge_lens =
             (uv.clamp(Vec2::ZERO, Vec2::ONE) - 0.5) * (1.0 + self.distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08;
         self.refracted = (uv - edge_lens) * self.size - self.refraction;
-    }
-
-    /// Resolves child geometry with this surface's existing interaction and optics.
-    pub fn layer(mut self, shape: Sdf) -> Self {
-        self.resolve(shape);
         self
     }
 
@@ -116,8 +106,8 @@ impl SurfaceSample {
         pixel - self.refraction
     }
 
-    pub fn text(self, text: &TextFragment) -> Vec4 {
-        text.color(text.alpha_at(self.content_point(text.pixel)) * self.mask)
+    pub fn text(self, text: &Fragment<Text>) -> Vec4 {
+        text.color(text.fill_at(self.content_point(text.pixel)) * self.mask)
     }
 
     pub fn displacement(self) -> Vec2 {
@@ -199,15 +189,7 @@ pub fn presence(value: f32) -> f32 {
     if value > 0.0 { 1.0 } else { 0.0 }
 }
 
-#[derive(Clone, Copy)]
-struct Interaction {
-    bulge: f32,
-    refraction: Vec2,
-    ripple: Vec2,
-    flash: f32,
-}
-
-fn interaction(pixel: Vec2, globals: Globals, time: f32, mouse_mask: f32) -> Interaction {
+fn interaction(pixel: Vec2, globals: Globals, time: f32, mouse_mask: f32) -> SurfaceSample {
     let mut ripple = Vec2::ZERO;
     let mut ripple_flash = 0.0;
     // Rust-GPU cannot lower this slice iterator without a pointer-to-integer conversion.
@@ -232,10 +214,11 @@ fn interaction(pixel: Vec2, globals: Globals, time: f32, mouse_mask: f32) -> Int
     } else {
         0.0
     };
-    Interaction {
-        bulge: mouse_lift * mouse_mask * 8.0 + ripple.length() * 22.0,
+    SurfaceSample {
+        bulge: mouse_lift * mouse_mask * POINTER_BULGE + ripple.length() * RIPPLE_BULGE,
         refraction: pointer_offset * mouse_lift * mouse_mask * POINTER_REFRACTION + ripple * RIPPLE_REFRACTION,
         ripple,
         flash: ripple_flash,
+        ..Default::default()
     }
 }

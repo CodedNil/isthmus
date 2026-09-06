@@ -13,6 +13,15 @@ mouse gestures generic across programs
 
 web demo:
 spotify demo
+paries as wallpaper in the demo
+
+bring back the edge sheen
+
+https://iquilezles.org/articles/distfunctions2d/
+no more RoundedTriangle or RoundedRect shape, use simple sdf function to round
+maybe shapes shouldnt be individual structs? but Shape itself is more generic and holds the boolean operations in order to compute bounds etc? So you construct the shape from an original shape then apply operations to it
+perhaps auto compute bounds with quadtree or find interior point and iterate out to find extremes?
+perhaps view where we need bounds for sdfs see if we actually need that at all?
 
 
 do a MASSIVE refactor pass throughout, do every audit you can imagine for code quality
@@ -20,5 +29,6 @@ performance, deduplication, inlining single use small functions/variables in way
 major focus on LOC reduction, remove legacy cruft, we exclusively target modern systems and features with no legacy support
 genuine simplifications, radical suggestions including deep refactors
 reevaluate it all from first principles always, greenfield treat it as a fresh project where nothing is off limits, keep it simple and elegant
+research heavily, find similar projects to aspects of our codebase to learn from their strengths
 
 for cantus + isthmus

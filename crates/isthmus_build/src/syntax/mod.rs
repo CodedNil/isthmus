@@ -11,12 +11,8 @@ pub fn program(isthmus: &TokenStream2) -> TokenStream2 {
         /// Shader program declared by this module.
         #[derive(Clone, Copy)]
         pub struct Program;
-        /// Fragment context for quad shaders in this program.
-        pub type Fragment = #isthmus::Fragment<Program>;
-        /// Fragment context for vector text shaders in this program.
-        pub type TextFragment<'a> = #isthmus::TextFragment<'a, Program>;
-        /// Fragment context for triangle shaders in this program.
-        pub type TriangleFragment = #isthmus::TriangleFragment<Program>;
+        /// Fragment coordinates and queries for the specified geometry in this program.
+        pub type Fragment<'a, G> = #isthmus::Fragment<'a, Program, G>;
     }
 }
 
@@ -121,7 +117,7 @@ pub fn vertex(isthmus: &TokenStream2, entry: &syn::LitStr, sample: &syn::Ident) 
                  #isthmus::__private::load_unchecked::<#isthmus::__private::FrameData>(frame, 0))
             };
             use #isthmus::geometry::Raster as _;
-            type Raster = <#sample as #isthmus::geometry::GeometrySample<'static>>::Raster;
+            type Raster = <#sample as #isthmus::geometry::FragmentGeometry<'static>>::Raster;
             let pixel = Raster::from_data(draw.geometry).vertex(vertex);
             let ndc = pixel / frame.screen_size * 2.0 - 1.0;
             *out_position = #isthmus::glam::vec4(ndc.x, -ndc.y, 0.0, 1.0);

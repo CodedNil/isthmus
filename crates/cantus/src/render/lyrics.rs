@@ -1,9 +1,10 @@
 use crate::{
     music::{Lyrics, Music, Track},
-    render::{BarLayout, PANEL_START, TEXT_COLOR, TextFragment, UiContext},
+    render::{BarLayout, Fragment, PANEL_START, TEXT_COLOR, UiContext},
 };
 use isthmus::{
-    ColorExt as _, Float as _,
+    ColorExt as _, Float as _, Text,
+    geometry::effect::Outline,
     glam::{Vec4, vec2},
     shader,
 };
@@ -70,18 +71,23 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                 continue;
             }
             let placed = context.frame.text.visible(&line, vec2(track_x, y), 0.0..screen_width).with_color(color);
-            let padding = placed.size * 0.2 + 1.0;
+            let outline = Outline { width: 1.5 };
             context.frame.paint(
-                placed.effects(1.5).displaced(padding),
-                shader!(|text: TextFragment<'_>, playhead_x: f32, screen_width: f32| {
-                    let edge_fade =
-                        text.pixel.x.smoothstep(0.0, 32.0) * text.pixel.x.smoothstep(screen_width, screen_width - 32.0);
-                    let emphasis = (text.pixel.x - playhead_x).abs().smoothstep(110.0, 0.0);
-                    let weight = text.line.weight + emphasis * 45.0;
-                    let sample = text.distance_with_weight(text.pixel, weight).sample();
-                    let sung = text.pixel.x.smoothstep(playhead_x + 4.0, playhead_x - 4.0);
-                    let fade = edge_fade * (1.0 - sung * 0.5);
-                    sample.color(text.line.color.to_vec4(), Vec4::new(0.0, 0.0, 0.0, 0.4), 1.5).opacity(fade)
+                placed.with_effect(outline),
+                shader!({
+                    let playhead_x: f32 = playhead_x;
+                    let screen_width: f32 = screen_width;
+                    let outline: Outline = outline;
+                    |text: Fragment<Text>| {
+                        let edge_fade = text.pixel.x.smoothstep(0.0, 32.0)
+                            * text.pixel.x.smoothstep(screen_width, screen_width - 32.0);
+                        let emphasis = (text.pixel.x - playhead_x).abs().smoothstep(110.0, 0.0);
+                        let weight = text.line.weight() + emphasis * 45.0;
+                        let distance = text.distance_with_weight(text.pixel, weight);
+                        let sung = text.pixel.x.smoothstep(playhead_x + 4.0, playhead_x - 4.0);
+                        let fade = edge_fade * (1.0 - sung * 0.5);
+                        outline.color(distance, text.line.color.to_vec4(), Vec4::new(0.0, 0.0, 0.0, 0.4)).opacity(fade)
+                    }
                 }),
             );
         }

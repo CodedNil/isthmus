@@ -1,20 +1,20 @@
 use crate::{
     app::{AppUpdater, Background, CantusApp, send_update, update},
-    config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
+    config,
     interaction::{InputEvent, Interaction},
     render::{
         PANEL_START, Renderer, TEXT_COLOR,
         launcher::{BACKGROUND_RADIUS, LauncherKey},
-        lyrics::EXTENSION as LYRICS_EXTENSION,
+        lyrics,
         status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
-        weathertime::EXTENSION as WEATHER_EXTENSION,
+        weathertime,
     },
 };
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
 use futures_util::StreamExt;
 use isthmus::{
     SurfaceHandle,
-    geometry::text::Text,
+    geometry::text::TextCache,
     glam::{FloatExt, Vec2, vec2},
 };
 use microfft::real::rfft_1024;
@@ -32,7 +32,7 @@ use std::{
     fs::{self, File},
     future::Future,
     io::{self, Read, Write},
-    os::{fd::AsFd, unix::net::UnixDatagram as BlockingUnixDatagram},
+    os::{fd::AsFd, unix::net::UnixDatagram},
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     ptr::NonNull,
@@ -43,10 +43,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tokio::{
-    net::UnixDatagram, runtime::Builder as RuntimeBuilder, sync::mpsc::UnboundedSender, task::spawn_blocking,
-    time::sleep as tokio_sleep,
-};
+use tokio::{net, runtime, sync::mpsc::UnboundedSender, task::spawn_blocking, time::sleep};
 use tracing::warn;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop, event_created_child,
@@ -81,14 +78,13 @@ use wayland_protocols::{
     },
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
-    zwlr_layer_shell_v1::{Layer as LayerStyle, ZwlrLayerShellV1},
-    zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
+    zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
+    zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 use xkbcommon::xkb;
 use zbus::{
-    Connection as DbusConnection, Proxy as DbusProxy,
-    proxy::{Builder as ProxyBuilder, CacheProperties},
-    zvariant::{OwnedObjectPath, OwnedValue, Value as DbusValue},
+    proxy::{self, CacheProperties},
+    zvariant::{self, OwnedObjectPath, OwnedValue},
 };
 
 const PANEL_OVERFLOW: f32 = 16.0;
@@ -130,7 +126,7 @@ impl super::Platform {
     }
 
     pub async fn sleep(duration: Duration) {
-        tokio_sleep(duration).await;
+        sleep(duration).await;
     }
 
     pub fn set_volume(volume: f32) {
@@ -145,7 +141,7 @@ impl super::Platform {
         let method = ["PowerOff", "Reboot"][action];
         background.spawn(async move {
             let result: Result<(), zbus::Error> = async {
-                DbusConnection::system()
+                zbus::Connection::system()
                     .await?
                     .call_method(
                         Some("org.freedesktop.login1"),
@@ -226,14 +222,14 @@ impl super::Platform {
 
     pub fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
         let path = launcher_socket_path();
-        if BlockingUnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)).is_ok() {
+        if UnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)).is_ok() {
             warn!(?path, "Another Cantus instance owns the launcher socket");
             return;
         }
         let _ = fs::remove_file(&path);
         let updater = updater.clone();
         background.spawn(async move {
-            let socket = match UnixDatagram::bind(&path) {
+            let socket = match net::UnixDatagram::bind(&path) {
                 Ok(socket) => socket,
                 Err(error) => {
                     warn!(%error, ?path, "Failed to bind launcher toggle socket");
@@ -252,7 +248,7 @@ impl super::Platform {
 
     pub fn trigger_launcher() -> ! {
         let path = launcher_socket_path();
-        if let Err(error) = BlockingUnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)) {
+        if let Err(error) = UnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)) {
             eprintln!("Failed to reach a running Cantus instance at {}: {error}", path.display());
             process::exit(1);
         }
@@ -265,7 +261,7 @@ impl super::Platform {
     ///
     /// Panics when required Wayland globals or rendering resources cannot be initialized.
     pub fn run() {
-        let runtime = RuntimeBuilder::new_multi_thread()
+        let runtime = runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .max_blocking_threads(8)
             .thread_keep_alive(Duration::from_secs(10))
@@ -327,8 +323,8 @@ impl super::Platform {
 
 async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), Box<dyn Error + Send + Sync>> {
     const DESTINATION: &str = "org.freedesktop.portal.Desktop";
-    let connection = DbusConnection::session().await?;
-    let location = ProxyBuilder::<DbusProxy>::new(&connection)
+    let connection = zbus::Connection::session().await?;
+    let location = proxy::Builder::<zbus::Proxy>::new(&connection)
         .destination(DESTINATION)?
         .path("/org/freedesktop/portal/desktop")?
         .interface("org.freedesktop.portal.Location")?
@@ -340,8 +336,8 @@ async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), Box<d
         .call(
             "CreateSession",
             &HashMap::from([
-                ("session_handle_token", DbusValue::from(session_token)),
-                ("accuracy", DbusValue::from(2u32)),
+                ("session_handle_token", zvariant::Value::from(session_token)),
+                ("accuracy", zvariant::Value::from(2u32)),
             ]),
         )
         .await?;
@@ -349,7 +345,7 @@ async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), Box<d
 
     let request_token = format!("cantus_{:x}", fastrand::u64(..));
     let sender_name = connection.unique_name().unwrap().trim_start_matches(':').replace('.', "_");
-    let request = ProxyBuilder::<DbusProxy>::new(&connection)
+    let request = proxy::Builder::<zbus::Proxy>::new(&connection)
         .destination(DESTINATION)?
         .path(format!("/org/freedesktop/portal/desktop/request/{sender_name}/{request_token}"))?
         .interface("org.freedesktop.portal.Request")?
@@ -358,7 +354,7 @@ async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), Box<d
         .await?;
     let mut response = request.receive_signal("Response").await?;
     let _: OwnedObjectPath = location
-        .call("Start", &(&session, "", HashMap::from([("handle_token", DbusValue::from(request_token))])))
+        .call("Start", &(&session, "", HashMap::from([("handle_token", zvariant::Value::from(request_token))])))
         .await?;
     let (status, _): (u32, HashMap<String, OwnedValue>) =
         response.next().await.ok_or("Location portal returned no response")?.body().deserialize()?;
@@ -733,9 +729,9 @@ macro_rules! dispatch {
 impl LayerShellApp {
     fn bar_surface_height(&self) -> f32 {
         let extension = if self.cantus.config.weathertime_enabled {
-            WEATHER_EXTENSION
+            weathertime::EXTENSION
         } else if self.cantus.config.lyrics_enabled {
-            LYRICS_EXTENSION
+            lyrics::EXTENSION
         } else {
             0.0
         } + PANEL_OVERFLOW;
@@ -750,13 +746,13 @@ impl LayerShellApp {
             &wl,
             if launcher { None } else { self.output.as_ref() },
             if launcher {
-                LayerStyle::Overlay
+                Layer::Overlay
             } else {
                 match config.layer {
-                    ConfigLayer::Background => LayerStyle::Background,
-                    ConfigLayer::Bottom => LayerStyle::Bottom,
-                    ConfigLayer::Top => LayerStyle::Top,
-                    ConfigLayer::Overlay => LayerStyle::Overlay,
+                    config::Layer::Background => Layer::Background,
+                    config::Layer::Bottom => Layer::Bottom,
+                    config::Layer::Top => Layer::Top,
+                    config::Layer::Overlay => Layer::Overlay,
                 }
             },
             if launcher { "cantus-launcher" } else { "cantus" }.into(),
@@ -764,14 +760,14 @@ impl LayerShellApp {
             kind,
         );
         layer.set_anchor(
-            LayerAnchor::Left
-                | LayerAnchor::Right
+            Anchor::Left
+                | Anchor::Right
                 | if launcher {
-                    LayerAnchor::Top | LayerAnchor::Bottom
+                    Anchor::Top | Anchor::Bottom
                 } else {
                     match config.layer_anchor {
-                        ConfigLayerAnchor::Top => LayerAnchor::Top,
-                        ConfigLayerAnchor::Bottom => LayerAnchor::Bottom,
+                        config::LayerAnchor::Top => Anchor::Top,
+                        config::LayerAnchor::Bottom => Anchor::Bottom,
                     }
                 },
         );
@@ -780,7 +776,7 @@ impl LayerShellApp {
         layer.set_exclusive_zone(if launcher {
             0
         } else {
-            (PANEL_START + config.height + f32::from(config.lyrics_enabled) * LYRICS_EXTENSION) as i32
+            (PANEL_START + config.height + f32::from(config.lyrics_enabled) * lyrics::EXTENSION) as i32
         });
         layer.set_keyboard_interactivity(if launcher {
             KeyboardInteractivity::Exclusive
@@ -887,7 +883,7 @@ impl LayerShellApp {
                     Renderer::new(
                         &native,
                         size,
-                        Text::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR),
+                        TextCache::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR),
                     )
                 }
                 .expect("failed to initialize renderer");
@@ -927,10 +923,11 @@ impl LayerShellApp {
     fn update_input_region(&mut self, qhandle: &QueueHandle<Self>) {
         let wl_surface = self.active_surface().wl.clone();
         let region = self.compositor.create_region(qhandle, ());
-        for rect in self.cantus.interaction.regions.drain(..) {
-            let [x, y, width, height] = [rect.min.x, rect.min.y, rect.max.x - rect.min.x, rect.max.y - rect.min.y]
-                .map(|value| value.round() as i32);
-            region.add(x, y, width, height);
+        for quad in self.cantus.interaction.input_regions.drain(..) {
+            let (min, max) = quad.extents();
+            let min = min.floor();
+            let size = max.ceil() - min;
+            region.add(min.x as i32, min.y as i32, size.x as i32, size.y as i32);
         }
         wl_surface.set_input_region(Some(&region));
         region.destroy();
@@ -1211,7 +1208,7 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
                 interaction.apply(InputEvent::Release);
             }
             (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging() => {
-                interaction.apply(InputEvent::CancelDrag);
+                interaction.apply(InputEvent::Cancel);
             }
             _ => {}
         },
