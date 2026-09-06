@@ -1,6 +1,12 @@
+//! Extracts Rust shader code and compiles validated SPIR-V and WGSL modules.
+#![warn(missing_docs)]
+
 use naga::{
     back::wgsl::{WriterFlags, write_string},
-    front::spv::{Options, parse_u8_slice},
+    front::{
+        spv::{Options, parse_u8_slice},
+        wgsl::parse_str,
+    },
     valid::{Capabilities, ValidationFlags, Validator},
 };
 use spirv_builder::{ModuleResult, SpirvBuilder, SpirvMetadata};
@@ -28,6 +34,11 @@ pub fn build(source: &str) -> Result<(), String> {
         .ok_or("Isthmus workspace root was not found")?
         .to_path_buf();
     let output = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is missing")?).join("isthmus.spv");
+    let web = env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32");
+    println!(
+        "cargo:rustc-env=ISTHMUS_SHADER_PATH={}",
+        output.with_extension(if web { "wgsl" } else { "spv" }).display()
+    );
     let source = manifest.join(source);
     println!("cargo:rerun-if-changed={}", manifest.join("src").display());
     println!("cargo:rerun-if-changed={}", manifest.join("Cargo.toml").display());
@@ -35,7 +46,7 @@ pub fn build(source: &str) -> Result<(), String> {
     let variable = format!("{}_SHADER_SPV", name.replace('-', "_").to_uppercase());
     println!("cargo:rerun-if-env-changed={variable}");
     if let Some(shader) = env::var_os(variable)
-        && env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("wasm32")
+        && !web
     {
         let shader = PathBuf::from(shader);
         for extension in ["spv", "manifest.rs"] {
@@ -50,10 +61,15 @@ pub fn build(source: &str) -> Result<(), String> {
 
 /// Describes a Rust-GPU shader compiled as part of a host package's build script.
 pub struct ShaderBuild {
+    /// Unique shader package name used for its build cache.
     pub name: String,
+    /// Root Rust module containing the program and shader declarations.
     pub source: PathBuf,
+    /// Path to the Isthmus runtime crate.
     pub isthmus: PathBuf,
+    /// Workspace root containing the shared shader build cache.
     pub workspace: PathBuf,
+    /// Output SPIR-V path, with WGSL and manifest files written alongside it.
     pub output: PathBuf,
 }
 
@@ -78,7 +94,16 @@ impl ShaderBuild {
             ),
         )?;
         let generated = source::generate(&self.source)?;
-        write_if_changed(&source_crate.join("lib.rs"), &generated.source)?;
+        for (path, source) in &generated.files {
+            let path = source_crate.join(path);
+            let parent = path.parent().ok_or("generated source has no parent directory")?;
+            fs::create_dir_all(parent).map_err(io_error("create generated module directory"))?;
+            let alternative = parent.with_extension("rs");
+            if path.ends_with("mod.rs") && alternative.is_file() {
+                fs::remove_file(alternative).map_err(io_error("remove superseded generated module"))?;
+            }
+            write_if_changed(&path, source)?;
+        }
 
         println!("cargo:rerun-if-changed={}", self.workspace.join("Cargo.lock").display());
         fs::copy(self.workspace.join("Cargo.lock"), source_crate.join("Cargo.lock"))
@@ -88,7 +113,6 @@ impl ShaderBuild {
             .deny_warnings(true)
             .target_dir_path(target)
             .spirv_metadata(SpirvMetadata::None)
-            .scalar_block_layout(true)
             .build()
             .map_err(|error| format!("Rust-GPU shader build failed: {error}"))?;
         let web = env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32");
@@ -97,12 +121,12 @@ impl ShaderBuild {
                 return Err(format!("shader entry {} was not exported", shader.entry()));
             }
         }
-        let metadata = generated.shaders.iter().map(|shader| shader.metadata(web));
+        let metadata = generated.shaders.iter().map(syntax::Shader::metadata);
         let manifest = if generated.shaders.is_empty() {
             quote::quote!(&[])
         } else {
             quote::quote!({
-                use ::isthmus::{Blend, geometry::Primitive, __private::ShaderEntry};
+                use ::isthmus::{Blend, __private::ShaderEntry};
                 &[#(#metadata),*]
             })
         }
@@ -114,19 +138,27 @@ impl ShaderBuild {
                 return Err(String::from("Rust-GPU unexpectedly produced multiple shader modules"));
             }
         };
+        let bytes = fs::read(&module).map_err(io_error("read generated SPIR-V module"))?;
+        let options =
+            Options { adjust_coordinate_space: false, strict_capabilities: true, block_ctx_dump_prefix: None };
+        let reflected =
+            parse_u8_slice(&bytes, &options).map_err(|error| format!("failed to parse generated SPIR-V: {error}"))?;
+        // Packed half floats use core WGSL operations without requiring the f16 extension.
+        let capabilities = Capabilities::default() | Capabilities::SHADER_FLOAT16_IN_FLOAT32;
+        let mut validator = Validator::new(ValidationFlags::all(), capabilities);
+        let info = validator
+            .validate(&reflected)
+            .map_err(|error| format!("failed to validate generated SPIR-V: {error:?}"))?;
         if web {
-            let bytes = fs::read(module).map_err(io_error("read generated SPIR-V module"))?;
-            let options =
-                Options { adjust_coordinate_space: false, strict_capabilities: true, block_ctx_dump_prefix: None };
-            let module = parse_u8_slice(&bytes, &options)
-                .map_err(|error| format!("failed to parse generated SPIR-V: {error}"))?;
-            // Packed half floats use core WGSL operations without requiring the f16 extension.
-            let capabilities = Capabilities::default() | Capabilities::SHADER_FLOAT16_IN_FLOAT32;
-            let info = Validator::new(ValidationFlags::all(), capabilities)
-                .validate(&module)
-                .map_err(|error| format!("failed to validate generated SPIR-V: {error:?}"))?;
-            let wgsl = write_string(&module, &info, WriterFlags::empty())
+            let wgsl = write_string(&reflected, &info, WriterFlags::empty())
                 .map_err(|error| format!("failed to generate WGSL: {error}"))?;
+            let translated = parse_str(&wgsl).map_err(|error| format!("failed to parse generated WGSL: {error}"))?;
+            validator.validate(&translated).map_err(|error| format!("failed to validate generated WGSL: {error:?}"))?;
+            for entry in &reflected.entry_points {
+                if !translated.entry_points.iter().any(|other| other.name == entry.name && other.stage == entry.stage) {
+                    return Err(format!("WGSL translation changed shader entry {}", entry.name));
+                }
+            }
             fs::write(self.output.with_extension("wgsl"), wgsl).map_err(io_error("write generated WGSL"))
         } else {
             fs::copy(module, self.output).map(|_| ()).map_err(io_error("copy generated SPIR-V module"))

@@ -4,6 +4,7 @@ pub mod render;
 use crate::render::{Bamboo, Renderer};
 use isthmus::{
     SurfaceHandle,
+    geometry::text::Text,
     glam::{Vec3, vec2},
 };
 use raw_window_handle::{
@@ -154,7 +155,11 @@ impl Wallpaper {
             } else {
                 // SAFETY: Wallpaper retains the Wayland connection and output surface until the renderer is dropped.
                 let (renderer, surface) = unsafe {
-                    Renderer::new(&native, size, include_bytes!("../../../assets/NotoSans-Variable.ttf"), Vec3::ONE)
+                    Renderer::new(
+                        &native,
+                        size,
+                        Text::new(include_bytes!("../../../assets/NotoSans-Variable.ttf"), Vec3::ONE),
+                    )
                 }
                 .expect("failed to initialize wallpaper renderer");
                 eprintln!("Paries is rendering with {}", renderer.device_name());

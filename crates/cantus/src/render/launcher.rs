@@ -5,13 +5,19 @@ use crate::{
     platform::{DesktopApp, Platform},
     render::{
         Fragment, GAP, Globals, PADDING, TEXT_COLOR, TextFragment, UiContext,
-        sdf::{PILL_MARGIN, SurfaceSample, VISIBLE_ALPHA, cantus_surface, presence, sample_pill},
+        sdf::{
+            ShapeFragment, SurfaceSample, VISIBLE_ALPHA, cantus_surface, glass, pill_geometry, presence,
+            refracted_text, sample_capsule, sample_pill,
+        },
     },
 };
 use fend_core::Context;
 use isthmus::{
     ColorExt as _, Float as _, Image, Quad, Sdf,
-    geometry::text,
+    geometry::{
+        sdf::{RoundedRect, rounded_rect},
+        text,
+    },
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     shader,
     spirv_std::arch::kill,
@@ -44,16 +50,13 @@ static EXCHANGE_RATES: OnceLock<HashMap<String, f64>> = OnceLock::new();
 
 /// Coverage of a magnifying glass centered on the origin.
 fn magnifier_icon(point: Vec2) -> f32 {
-    let ring = Sdf::new(point.length() - 6.2).stroke(1.05);
-    let handle = Sdf::segment(point, vec2(4.6, 4.6), vec2(8.8, 8.8)).stroke(1.05);
-    ring.max(handle)
+    Sdf::new((point.length() - 6.2).abs()).union(Sdf::segment(point, vec2(4.6, 4.6), vec2(8.8, 8.8))).stroke(1.05)
 }
 
 /// Straight color and coverage of the calculator badge shown beside a fend answer.
 fn calculator_icon(point: Vec2) -> Vec4 {
     let badge = Sdf::rounded_box(point, Vec2::splat(13.0), 9.0).fill();
-    let bar = |offset: f32| Sdf::rounded_box(point - vec2(0.0, offset), vec2(5.4, 1.1), 1.1).fill();
-    let equals = bar(-3.1).max(bar(3.1));
+    let equals = Sdf::capsule(vec2(point.x, point.y.abs() - 3.1), 4.3, 1.1).fill();
     ACCENT_COLOR.lerp(Vec3::splat(0.96), equals).extend(badge)
 }
 
@@ -77,7 +80,7 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
     if half_width <= 0.0 {
         return Vec4::ZERO;
     }
-    let outline = Sdf::rounded_box(point, vec2(half_width, BADGE_HEIGHT * 0.5), 6.0);
+    let outline = Sdf::rounded_box(point, vec2(half_width, BADGE_HEIGHT * 0.5), 6.0).sample();
     let (body, edge) = (outline.fill(), outline.stroke(0.65));
     let glyph = if shift {
         key_glyph(point + vec2(8.5, 0.0), true).max(key_glyph(point - vec2(7.5, 0.0), false))
@@ -89,9 +92,7 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
 }
 
 fn sample_launcher(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
-    cantus_surface(quad, pixel, globals, time, |point| {
-        Sdf::rounded_box(quad.local(point), quad.size * 0.5, BACKGROUND_RADIUS as f32)
-    })
+    cantus_surface(quad, pixel, globals, time, rounded_rect(quad, BACKGROUND_RADIUS as f32).shape)
 }
 
 #[derive(Default)]
@@ -513,18 +514,19 @@ impl LauncherState {
             (caret, selection)
         };
         context.frame.paint(
-            quad.expanded(PILL_MARGIN),
-            shader!(|fragment: Fragment, quad: Quad, size: Vec2, caret: Vec2, selection: Vec2| {
-                let surface = sample_launcher(quad, fragment.pixel, fragment.globals, fragment.time);
+            glass(rounded_rect(quad, BACKGROUND_RADIUS as f32)),
+            shader!(|fragment: ShapeFragment<RoundedRect>, caret: Vec2, selection: Vec2| {
+                let surface =
+                    cantus_surface(fragment.quad, fragment.pixel, fragment.globals, fragment.time, fragment.geometry);
                 if surface.mask <= 0.0 {
                     kill();
                 }
-                let point = quad.local(surface.content_point(fragment.pixel)) + quad.size * 0.5;
+                let point = fragment.quad.local(surface.content_point(fragment.pixel)) + fragment.quad.size * 0.5;
                 let mut color = Vec3::splat(0.09).lerp(
                     Vec3::splat(0.17),
                     Sdf::rounded_box(
-                        surface.refracted - vec2(size.x * 0.5, HEADER_HEIGHT - 0.5),
-                        vec2(size.x * 0.5, 0.5),
+                        surface.refracted - vec2(surface.size.x * 0.5, HEADER_HEIGHT - 0.5),
+                        vec2(surface.size.x * 0.5, 0.5),
                         0.0,
                     )
                     .fill(),
@@ -547,8 +549,8 @@ impl LauncherState {
             }),
         );
         context.frame.paint(
-            line.expanded(line.size * 0.5 + 2.0).translated(origin),
-            shader!(|text: TextFragment, quad: Quad| {
+            refracted_text(line).translated(origin),
+            shader!(|text: TextFragment<'_>, quad: Quad| {
                 sample_launcher(quad, text.pixel, text.globals, text.time).text(&text)
             }),
         );
@@ -614,9 +616,9 @@ impl LauncherState {
                 EntryIcon::Search => (None, SEARCH_ICON),
             };
             context.frame.paint(
-                pill.expanded(PILL_MARGIN),
-                shader!(|fragment: Fragment, pill: Quad, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
-                    let surface = sample_pill(pill, fragment.pixel, fragment.globals, fragment.time);
+                pill_geometry(pill),
+                shader!(|fragment: ShapeFragment, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
+                    let surface = sample_capsule(fragment.geometry, fragment.pixel, fragment.globals, fragment.time);
                     if surface.alpha <= VISIBLE_ALPHA {
                         kill();
                     }
@@ -632,7 +634,7 @@ impl LauncherState {
                         color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
                     }
 
-                    let point = pill.local(surface.content_point(fragment.pixel)) + pill.size * 0.5;
+                    let point = fragment.quad.local(surface.content_point(fragment.pixel)) + fragment.quad.size * 0.5;
                     let paint_badge = |color: Vec3, badge: Vec2, shift: bool| {
                         let ink = action_badge(point - vec2(badge.x, ROW_HEIGHT * 0.5), badge.y, shift);
                         color.lerp(ink.truncate(), ink.w)
@@ -655,8 +657,8 @@ impl LauncherState {
             let origin = vec2(x, y);
             for line in [name_line, detail_line, action_line, alternate_line] {
                 context.frame.paint(
-                    line.expanded(20.0).translated(origin),
-                    shader!(|text: TextFragment, pill: Quad| {
+                    refracted_text(line).translated(origin),
+                    shader!(|text: TextFragment<'_>, pill: Quad| {
                         sample_pill(pill, text.pixel, text.globals, text.time).text(&text)
                     }),
                 );

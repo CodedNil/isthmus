@@ -1,31 +1,51 @@
-use crate::render::{Globals, TextFragment};
+use crate::render::{Globals, Program, TextFragment};
 use isthmus::{
     Float as _, Quad, Sdf,
+    geometry::{
+        sdf::{Capsule, SdfShape, Shape, pill},
+        text::Line,
+    },
     glam::{UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
 };
 
-/// Where the drop shadow fades below the fragment kill threshold, plus an AA pixel.
-const SHADOW_REACH: f32 = 18.0;
+const SHADOW_OPACITY: f32 = 0.16;
+const SHADOW_DECAY: f32 = 0.3;
+const POINTER_REACH: f32 = 150.0;
+const POINTER_REFRACTION: f32 = 0.035;
+const RIPPLE_REFRACTION: f32 = 3.0;
 /// Smallest coverage worth shading; analytic shadows never reach exact zero.
 pub const VISIBLE_ALPHA: f32 = 1.0 / 1024.0;
 
+/// Reserves the same held-pointer and ripple displacement used by surface optics.
+pub fn refracted_text(line: Line) -> Line {
+    // The radial falloff bounds u * (1 - smoothstep(0, 1, u)) below 0.26.
+    line.displaced(POINTER_REACH * 0.26 * 2.0 * POINTER_REFRACTION + 4.0 * 0.5 * RIPPLE_REFRACTION)
+}
+
+pub type ShapeFragment<S = Capsule> = isthmus::Fragment<Program, S>;
+
+pub fn pill_geometry(quad: Quad) -> Shape<Capsule> {
+    glass(pill(quad))
+}
+
+/// Fits the material's shadow and maximum interaction bulge around any bounded shape.
+pub fn glass<S: SdfShape>(shape: Shape<S>) -> Shape<S> {
+    let shadow = (SHADOW_OPACITY / VISIBLE_ALPHA).ln() / SHADOW_DECAY;
+    shape.effects(shadow + (2.0 * 8.0 + 4.0 * 11.0) * 0.5)
+}
+
 pub fn sample_pill(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
-    let size = quad.size;
-    cantus_surface(quad, pixel, globals, time, |point| {
-        Sdf::capsule(quad.local(point), (size.x - size.y) * 0.5, size.y * 0.5)
-    })
+    sample_capsule(pill(quad).shape, pixel, globals, time)
+}
+
+pub fn sample_capsule(shape: Capsule, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
+    cantus_surface(shape.quad, pixel, globals, time, shape)
 }
 
 /// Samples arbitrary Cantus SDF geometry with interaction, refraction and shadowing.
-pub fn cantus_surface(
-    quad: Quad,
-    pixel: Vec2,
-    globals: Globals,
-    time: f32,
-    shape: impl Fn(Vec2) -> Sdf,
-) -> SurfaceSample {
-    let distance = shape(pixel).distance;
-    let mouse_distance = if globals.pressure > 0.0 { shape(globals.pointer).distance } else { 1.0 };
+pub fn cantus_surface(quad: Quad, pixel: Vec2, globals: Globals, time: f32, shape: impl SdfShape) -> SurfaceSample {
+    let distance = shape.distance_at(pixel).distance;
+    let mouse_distance = if globals.pressure > 0.0 { shape.distance_at(globals.pointer).distance } else { 1.0 };
     let mouse_mask = mouse_distance.smoothstep(0.5, -0.5);
     let interaction = interaction(pixel, globals, time, mouse_mask);
     SurfaceSample::new(quad.local(pixel) + quad.size * 0.5, quad.size, Sdf::new(distance), interaction)
@@ -68,7 +88,7 @@ impl SurfaceSample {
     fn resolve(&mut self, shape: Sdf) {
         self.distance = shape.distance - self.bulge * 0.5;
         self.mask = Sdf::new(self.distance).fill();
-        let shadow = (-self.distance.max(0.0) * 0.3).exp() * 0.16;
+        let shadow = (-self.distance.max(0.0) * SHADOW_DECAY).exp() * SHADOW_OPACITY;
         self.alpha = self.mask.max(shadow);
         let uv = self.local / self.size;
         let edge_lens =
@@ -174,9 +194,6 @@ pub fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
     fbm(p / scale * 0.14 + vec2(time * 0.012, 6.1))
 }
 
-/// Maximum pixels a pill can cover beyond its bounds: shadow plus held-pointer and four ripples.
-pub const PILL_MARGIN: f32 = SHADOW_REACH + (2.0 * 8.0 + 4.0 * 11.0) * 0.5;
-
 /// 1.0 when positive, else 0.0; core lowers `f32::from(bool)` through `u8`, which costs an extra conversion.
 pub fn presence(value: f32) -> f32 {
     if value > 0.0 { 1.0 } else { 0.0 }
@@ -210,11 +227,14 @@ fn interaction(pixel: Vec2, globals: Globals, time: f32, mouse_mask: f32) -> Int
     }
 
     let pointer_offset = pixel - globals.pointer;
-    let mouse_lift =
-        if globals.pressure > 0.0 { pointer_offset.length().smoothstep(150.0, 0.0) * globals.pressure } else { 0.0 };
+    let mouse_lift = if globals.pressure > 0.0 {
+        pointer_offset.length().smoothstep(POINTER_REACH, 0.0) * globals.pressure
+    } else {
+        0.0
+    };
     Interaction {
         bulge: mouse_lift * mouse_mask * 8.0 + ripple.length() * 22.0,
-        refraction: pointer_offset * mouse_lift * mouse_mask * 0.035 + ripple * 3.0,
+        refraction: pointer_offset * mouse_lift * mouse_mask * POINTER_REFRACTION + ripple * RIPPLE_REFRACTION,
         ripple,
         flash: ripple_flash,
     }

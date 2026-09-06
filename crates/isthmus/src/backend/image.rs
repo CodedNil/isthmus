@@ -1,5 +1,6 @@
-use crate::{Image, bindings};
+use crate::Image;
 use core::array::from_fn;
+use smallvec::SmallVec;
 use std::{
     collections::HashMap,
     sync::{Arc, Weak},
@@ -8,39 +9,50 @@ use std::{
 struct CachedImage {
     source: Weak<[u8]>,
     view: wgpu::TextureView,
-    bindings: [Option<wgpu::BindGroup>; 4],
 }
 
+type ImageKey = (usize, [u32; 2]);
+type ImageBindings = SmallVec<[(ImageKey, usize); 2]>;
+
 pub(super) struct ImageCache {
-    images: HashMap<(usize, [u32; 2]), CachedImage>,
-    pub layout: wgpu::BindGroupLayout,
+    images: HashMap<ImageKey, CachedImage>,
+    groups: HashMap<ImageBindings, wgpu::BindGroup>,
+    pub layouts: Vec<wgpu::BindGroupLayout>,
     samplers: [wgpu::Sampler; 4],
     pub fallback: wgpu::BindGroup,
 }
 
 impl ImageCache {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("image"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: bindings::IMAGE,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: bindings::SAMPLER,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+    pub fn new(device: &wgpu::Device, count: usize) -> Self {
+        let layouts: Vec<_> = (0..=count)
+            .map(|count| {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("image"),
+                    entries: &(0..count)
+                        .flat_map(|index| {
+                            [
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: index as u32 * 2,
+                                    visibility: wgpu::ShaderStages::FRAGMENT,
+                                    ty: wgpu::BindingType::Texture {
+                                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                        view_dimension: wgpu::TextureViewDimension::D2,
+                                        multisampled: false,
+                                    },
+                                    count: None,
+                                },
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: index as u32 * 2 + 1,
+                                    visibility: wgpu::ShaderStages::FRAGMENT,
+                                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                                    count: None,
+                                },
+                            ]
+                        })
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
         let samplers = from_fn(|index| {
             let filter = if index % 2 == 0 { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest };
             let address = if index < 2 { wgpu::AddressMode::ClampToEdge } else { wgpu::AddressMode::Repeat };
@@ -53,42 +65,57 @@ impl ImageCache {
                 ..Default::default()
             })
         });
-        let fallback = bind(device, &layout, &upload(device, queue, [1, 1], &[255; 4]), &samplers[0]);
-        Self { images: HashMap::new(), layout, samplers, fallback }
+        let fallback = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("no images"),
+            layout: &layouts[0],
+            entries: &[],
+        });
+        Self { images: HashMap::new(), groups: HashMap::new(), layouts, samplers, fallback }
     }
 
     pub fn retain_live(&mut self) {
         self.images.retain(|_, image| image.source.strong_count() != 0);
+        self.groups.retain(|key, _| key.iter().all(|(image, _)| self.images.contains_key(image)));
     }
 
-    pub fn image(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &Image) -> wgpu::BindGroup {
-        let key = (image.pixels.as_ptr() as usize, image.size);
-        let cached = self.images.entry(key).or_insert_with(|| CachedImage {
-            source: Arc::downgrade(&image.pixels),
-            view: upload(device, queue, image.size, &image.pixels),
-            bindings: from_fn(|_| None),
+    pub fn images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, images: &[&Image]) -> wgpu::BindGroup {
+        let key: ImageBindings = images
+            .iter()
+            .map(|image| ((image.pixels.as_ptr() as usize, image.size), image.sampling as usize))
+            .collect();
+        if let Some(group) = self.groups.get(&key) {
+            return group.clone();
+        }
+        for (&(key, _), image) in key.iter().zip(images) {
+            self.images.entry(key).or_insert_with(|| CachedImage {
+                source: Arc::downgrade(&image.pixels),
+                view: upload(device, queue, image.size, &image.pixels),
+            });
+        }
+        let entries: Vec<_> = key
+            .iter()
+            .enumerate()
+            .flat_map(|(index, (key, sampling))| {
+                [
+                    wgpu::BindGroupEntry {
+                        binding: index as u32 * 2,
+                        resource: wgpu::BindingResource::TextureView(&self.images[key].view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: index as u32 * 2 + 1,
+                        resource: wgpu::BindingResource::Sampler(&self.samplers[*sampling]),
+                    },
+                ]
+            })
+            .collect();
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("images"),
+            layout: &self.layouts[images.len()],
+            entries: &entries,
         });
-        let sampling = image.sampling as usize;
-        cached.bindings[sampling]
-            .get_or_insert_with(|| bind(device, &self.layout, &cached.view, &self.samplers[sampling]))
-            .clone()
+        self.groups.insert(key, group.clone());
+        group
     }
-}
-
-fn bind(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    view: &wgpu::TextureView,
-    sampler: &wgpu::Sampler,
-) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("image"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry { binding: bindings::IMAGE, resource: wgpu::BindingResource::TextureView(view) },
-            wgpu::BindGroupEntry { binding: bindings::SAMPLER, resource: wgpu::BindingResource::Sampler(sampler) },
-        ],
-    })
 }
 
 fn upload(device: &wgpu::Device, queue: &wgpu::Queue, size: [u32; 2], pixels: &[u8]) -> wgpu::TextureView {

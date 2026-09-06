@@ -1,3 +1,6 @@
+//! Macros for declaring typed shader programs, captures, and word codecs.
+#![warn(missing_docs)]
+
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
@@ -18,7 +21,8 @@ fn isthmus_path() -> TokenStream2 {
     }
 }
 
-#[proc_macro_derive(ShaderData)]
+/// `#[shader_data(unorm16)]` packs f32 fields in pairs, clamping to 0..=1 and rounding to 16-bit precision.
+#[proc_macro_derive(ShaderData, attributes(shader_data))]
 pub fn derive_shader_data(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     data::derive(&input).into()
@@ -38,14 +42,11 @@ pub fn program(input: TokenStream) -> TokenStream {
             type Globals = #globals;
             const SHADERS: &'static [#isthmus::__private::ShaderEntry] =
                 include!(concat!(env!("OUT_DIR"), "/isthmus.manifest.rs"));
-            const CODE: &'static [u8] = {
-                #[cfg(target_arch = "wasm32")]
-                { include_bytes!(concat!(env!("OUT_DIR"), "/isthmus.wgsl")) }
-                #[cfg(not(target_arch = "wasm32"))]
-                { include_bytes!(concat!(env!("OUT_DIR"), "/isthmus.spv")) }
-            };
+            const CODE: &'static [u8] = include_bytes!(env!("ISTHMUS_SHADER_PATH"));
         }
+        /// Drawing context for this shader program.
         pub type Frame<'a> = #isthmus::Frame<'a, Program>;
+        /// Renderer for this shader program.
         pub type Renderer = #isthmus::Renderer<Program>;
     }
     .into()

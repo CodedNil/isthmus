@@ -14,10 +14,11 @@ glam = { workspace = true, features = ["libm"] }
 bytemuck.workspace = true
 glam = { workspace = true, features = ["std"] }
 half = { version = "2.7.1", default-features = false }
+kurbo = "0.13.1"
 raw-window-handle.workspace = true
 smallvec.workspace = true
 slotmap = "1.1.1"
-ttf-parser.workspace = true
+skrifa = { version = "0.46.2", default-features = false, features = ["std"] }
 thiserror = "2.0.20"
 web-time = "1.1.0"
 

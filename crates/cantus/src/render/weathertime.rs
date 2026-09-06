@@ -3,14 +3,18 @@ use crate::{
     config::MAX_WORLD_CLOCKS,
     interaction::Rect,
     render::{
-        Fragment, GAP, Globals, PANEL_START, TEXT_COLOR, TextFragment, UNIT, UiContext,
-        sdf::{PILL_MARGIN, SurfaceSample, VISIBLE_ALPHA, cantus_surface, cloud_mass, fbm, hash, sample_pill},
+        GAP, Globals, PANEL_START, TEXT_COLOR, TextFragment, UNIT, UiContext,
+        sdf::{
+            ShapeFragment, SurfaceSample, VISIBLE_ALPHA, cantus_surface, cloud_mass, fbm, glass, hash, pill_geometry,
+            refracted_text, sample_capsule,
+        },
     },
 };
 use arrayvec::{ArrayString, ArrayVec};
 use core::f32::consts::PI;
 use isthmus::{
     ColorExt as _, Float as _, Quad, Sdf, ShaderData,
+    geometry::sdf::{Capsule, RoundedRect, Shape, SmoothUnion, pill as sdf_pill, rounded_rect},
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     shader,
     spirv_std::arch::kill,
@@ -42,8 +46,8 @@ const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
 const WEEKDAYS: [&str; WEEKDAY_COUNT] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const ORDINALS: [&str; 10] = ["th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"];
 
-#[repr(C)]
 #[derive(Clone, Copy, Default, ShaderData)]
+#[shader_data(unorm16)]
 pub struct WeatherCondition {
     pub fog: f32,
     pub cloud: f32,
@@ -53,7 +57,6 @@ pub struct WeatherCondition {
     pub hail: f32,
 }
 
-#[repr(C)]
 #[derive(Clone, Copy, Default, ShaderData)]
 pub struct StatusSky {
     pub sun_height: f32,
@@ -85,16 +88,18 @@ fn expanded_x(x: f32, expansion: f32) -> f32 {
     x - FORECAST_X * expansion * 0.5
 }
 
-fn sample_weather_panel(pill: Quad, expansion: f32, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
+type WeatherShape = SmoothUnion<Capsule, RoundedRect>;
+
+fn weather_panel(pill: Quad, expansion: f32) -> Shape<WeatherShape> {
     let pill_min = pill.center - pill.size * 0.5;
     let popup_size = vec2(WIDTH + FORECAST_X * expansion, ((EXTENSION - GAP) * expansion).max(0.001));
     let popup_center =
         vec2(expanded_x(pill_min.x, expansion), pill_min.y + pill.size.y + GAP * expansion) + popup_size * 0.5;
-    let radius = (popup_size.y * 0.5).min(18.0);
-    cantus_surface(pill, pixel, globals, time, |point| {
-        let body = Sdf::capsule(pill.local(point), (pill.size.x - pill.size.y) * 0.5, pill.size.y * 0.5);
-        body.smooth_union(Sdf::rounded_box(point - popup_center, popup_size * 0.5, radius), 56.0, expansion)
-    })
+    sdf_pill(pill).smooth_union(rounded_rect(Quad::new(popup_center, popup_size, Vec2::X), 18.0), 56.0, expansion)
+}
+
+fn sample_weather_panel(panel: WeatherShape, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
+    cantus_surface(panel.base.quad, pixel, globals, time, panel)
 }
 
 fn forecast_center(height: f32, row: f32) -> f32 {
@@ -134,11 +139,7 @@ fn precipitation(p: Vec2, time: f32, kind: i32, strength: f32) -> Vec4 {
     let cell = (q / cell_size).floor();
     let random = hash(cell + kind as f32 * 31.7);
     let center = (cell + 0.15 + random * 0.7) * cell_size;
-    let direction = vec2(0.2, 1.0);
-    let segment = direction * trail;
-    let offset = q - center;
-    let along = (offset.dot(segment) / segment.length_squared()).clamp(0.0, 1.0);
-    let distance = (offset - segment * along).length();
+    let distance = Sdf::segment(q - center, Vec2::ZERO, vec2(0.2, 1.0) * trail).distance;
     let particle =
         distance.smoothstep(radius + 0.45, radius - 0.15) * hash(cell + 19.3).x.smoothstep(1.0 - density, 1.0);
     let color = if rain {
@@ -552,20 +553,14 @@ impl WeatherPanel {
         let sun = Vec2::from(sun_position(hour, self.sun_hours));
         let pill = Quad::from_min_max(vec2(x, PANEL_START), vec2(x + WIDTH, PANEL_START + height));
         let expansion = self.expansion.smoothstep(0.0, 1.0);
-        let render_min = vec2(expanded_x(x, expansion) - PILL_MARGIN, PANEL_START - PILL_MARGIN);
-        let render_max = vec2(
-            expanded_x(x, expansion) + WIDTH + FORECAST_X * expansion + PILL_MARGIN,
-            PANEL_START + height + EXTENSION * expansion + PILL_MARGIN,
-        );
         context.frame.paint(
-            Quad::from_min_max(render_min, render_max),
-            shader!(|fragment: Fragment,
-                     pill: Quad,
+            glass(weather_panel(pill, expansion)),
+            shader!(|fragment: ShapeFragment<WeatherShape>,
                      current: WeatherCondition,
                      next: WeatherCondition,
-                     sun: Vec2,
-                     expansion: f32| {
-                let surface = sample_weather_panel(pill, expansion, fragment.pixel, fragment.globals, fragment.time);
+                     sun: Vec2| {
+                let surface = sample_weather_panel(fragment.geometry, fragment.pixel, fragment.globals, fragment.time);
+                let pill = fragment.base.quad;
                 let pill_min = pill.center - pill.size * 0.5;
                 if surface.alpha <= VISIBLE_ALPHA {
                     kill();
@@ -573,7 +568,7 @@ impl WeatherPanel {
                 let body_local = pill.local(fragment.pixel) + pill.size * 0.5;
                 let edge = ((body_local.x / pill.size.x).clamp(0.0, 1.0) - 0.5).abs();
                 let body_conditions = current.lerp(next, edge.smoothstep(0.05, 0.25));
-                let conditions = body_conditions.lerp(current, expansion);
+                let conditions = body_conditions.lerp(current, fragment.amount);
                 let in_body = fragment.pixel.y <= pill_min.y + pill.size.y;
                 let mut color = scene(
                     fragment.time,
@@ -605,8 +600,8 @@ impl WeatherPanel {
 
     fn label(
         &self,
-        ui: &mut UiContext,
-        content: &str,
+        context: &mut UiContext,
+        label: &str,
         size: f32,
         weight: f32,
         center: Vec2,
@@ -614,13 +609,13 @@ impl WeatherPanel {
         alpha: f32,
         pill: Quad,
     ) {
-        let expansion = self.expansion.smoothstep(0.0, 1.0);
-        let line = ui.frame.text.line(content, size, weight).centered(center).with_color(color.extend(alpha));
-        ui.frame.paint(
-            line.expanded(20.0),
-            shader!(|text: TextFragment, pill: Quad, expansion: f32| {
-                let panel = sample_weather_panel(pill, expansion, text.pixel, text.globals, text.time);
-                let sample = text.sample_with_weight(panel.content_point(text.pixel), text.line.weight);
+        let panel = weather_panel(pill, self.expansion.smoothstep(0.0, 1.0)).shape;
+        let line = context.frame.text.line(label, size, weight).centered(center).with_color(color.extend(alpha));
+        context.frame.paint(
+            refracted_text(line.effects(0.8)),
+            shader!(|text: TextFragment<'_>, panel: WeatherShape| {
+                let panel = sample_weather_panel(panel, text.pixel, text.globals, text.time);
+                let sample = text.distance_at(panel.content_point(text.pixel)).sample();
                 sample.color(text.line.color.to_vec4(), Vec4::new(0.0, 0.0, 0.0, 0.18), 0.8).opacity(panel.mask)
             }),
         );
@@ -628,8 +623,8 @@ impl WeatherPanel {
 
     fn pair(
         &self,
-        ui: &mut UiContext,
-        content: [&str; 2],
+        context: &mut UiContext,
+        labels: [&str; 2],
         size: f32,
         weight: f32,
         center: Vec2,
@@ -638,10 +633,10 @@ impl WeatherPanel {
         alpha: f32,
         pill: Quad,
     ) {
-        for (index, content) in content.into_iter().enumerate() {
+        for (index, label) in labels.into_iter().enumerate() {
             self.label(
-                ui,
-                content,
+                context,
+                label,
                 size,
                 weight,
                 center + vec2(0.0, (index as f32 * 2.0 - 1.0) * spacing),
@@ -732,19 +727,18 @@ impl WeatherPanel {
             let alpha = reveal_progress(expansion, row_origin.y + size.y * 0.5);
             let forecast_pill = Quad::from_min_max(origin + row_origin, origin + row_origin + size);
             let sun_hours = self.sun_hours;
+            let panel = weather_panel(pill, expansion).shape;
             context.frame.paint(
-                forecast_pill.expanded(PILL_MARGIN),
-                shader!(|fragment: Fragment,
-                         forecast_pill: Quad,
-                         pill: Quad,
+                pill_geometry(forecast_pill),
+                shader!(|fragment: ShapeFragment,
+                         panel: WeatherShape,
                          conditions: [WeatherCondition; HOURLY_FORECASTS],
                          count: u32,
                          start_hour: f32,
                          sun_hours: [f32; 2],
-                         alpha: f32,
-                         expansion: f32| {
-                    let surface = sample_pill(forecast_pill, fragment.pixel, fragment.globals, fragment.time);
-                    let panel = sample_weather_panel(pill, expansion, fragment.pixel, fragment.globals, fragment.time);
+                         alpha: f32| {
+                    let surface = sample_capsule(fragment.geometry, fragment.pixel, fragment.globals, fragment.time);
+                    let panel = sample_weather_panel(panel, fragment.pixel, fragment.globals, fragment.time);
                     let position = (surface.uv().x * count as f32 - 0.5).clamp(0.0, count as f32 - 1.0);
                     let index = position.floor() as usize;
                     let conditions = conditions[index]

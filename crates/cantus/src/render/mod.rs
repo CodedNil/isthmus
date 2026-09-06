@@ -26,7 +26,6 @@ pub const GAP: f32 = UNIT * 2.0;
 /// The standard inset between a container edge and its contents.
 pub const PADDING: f32 = UNIT * 3.0;
 
-#[repr(C)]
 #[derive(Clone, Copy, Default, ShaderData)]
 pub struct Globals {
     pub pointer: Vec2,
@@ -37,7 +36,6 @@ pub struct Globals {
 
 isthmus::program!(Globals);
 
-#[repr(C)]
 #[derive(Clone, Copy, Default, ShaderData)]
 pub struct RipplePulse {
     pub origin: Vec2,

@@ -75,7 +75,6 @@ wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 xkbcommon = { version = "0.9.0", default-features = false, features = [
     "wayland",
 ] }
-parking_lot = "0.12.5"
 tokio = { version = "1.53.1", features = ["net", "rt-multi-thread"] }
 flate2 = "1.1.10"
 freedesktop-desktop-entry = { version = "0.8.2", default-features = false }
@@ -84,11 +83,7 @@ microfft = { version = "0.6.0", default-features = false, features = [
     "size-1024",
     "std",
 ] }
-sysinfo = { git = "https://github.com/CodedNil/sysinfo", branch = "gpu_temp", default-features = false, features = [
-    "component",
-    "system",
-    "gpu",
-] }
+nvml-wrapper = "0.13.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4.78"

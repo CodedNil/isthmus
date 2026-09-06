@@ -7,13 +7,18 @@ use std::sync::Arc;
 #[repr(usize)]
 pub enum Sampling {
     #[default]
+    /// Linear filtering with coordinates clamped to the image edges.
     Linear,
+    /// Nearest-pixel filtering with coordinates clamped to the image edges.
     Nearest,
+    /// Linear filtering with repeated image coordinates.
     LinearRepeat,
+    /// Nearest-pixel filtering with repeated image coordinates.
     NearestRepeat,
 }
 
 #[cfg(not(target_arch = "spirv"))]
+/// Shared RGBA8 pixels and sampling settings captured by a shader.
 #[derive(Clone)]
 pub struct Image {
     pub(crate) size: [u32; 2],
@@ -22,10 +27,12 @@ pub struct Image {
 }
 
 #[cfg(target_arch = "spirv")]
+/// Image capture marker replaced with a texture and sampler by shader generation.
 pub struct Image;
 
 #[cfg(not(target_arch = "spirv"))]
 impl Image {
+    /// Creates a straight-alpha RGBA8 image with default linear sampling.
     /// # Panics
     /// Panics when either dimension is zero or `pixels` does not contain exactly four bytes per pixel.
     pub fn rgba8(size: [u32; 2], pixels: impl Into<Arc<[u8]>>) -> Self {
@@ -40,10 +47,12 @@ impl Image {
     }
 
     #[must_use]
+    /// Changes sampling settings while sharing the original pixel storage.
     pub fn sampled(&self, sampling: Sampling) -> Self {
         Self { sampling, ..self.clone() }
     }
 
+    /// Samples normalized coordinates using this image's filtering and addressing settings.
     pub fn sample(&self, uv: glam::Vec2) -> glam::Vec4 {
         let size = glam::IVec2::from_array(self.size.map(|value| value as i32));
         let repeat = matches!(self.sampling, Sampling::LinearRepeat | Sampling::NearestRepeat);
