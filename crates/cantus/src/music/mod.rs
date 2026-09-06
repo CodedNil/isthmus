@@ -125,8 +125,10 @@ impl Music {
             if let Some(previous) = old.get_mut(&track.uri).and_then(VecDeque::pop_front) {
                 track.interaction_id = previous.interaction_id;
                 track.runtime = previous.runtime;
-                if track.image != previous.image {
-                    track.runtime.art = ArtState::default();
+                if track.image.is_none() {
+                    track.image = previous.image;
+                } else if track.image != previous.image {
+                    track.runtime.art.refresh();
                 }
             }
         }
@@ -228,6 +230,8 @@ pub struct TrackRuntime {
     pub audio_features: Fetch<AudioFeatures>,
     pub(crate) lyrics: Fetch<Lyrics>,
     pub(crate) track_expansion: f32,
+    /// Animated visibility of rating stars and primary playlist icons, respectively.
+    pub(crate) icon_visibility: [f32; 2],
 }
 
 impl Track {

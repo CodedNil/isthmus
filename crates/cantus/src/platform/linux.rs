@@ -14,9 +14,11 @@ use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
 use futures_util::StreamExt;
 use isthmus::{
     SurfaceHandle,
+    geometry::text::Text,
     glam::{FloatExt, Vec2, vec2},
 };
 use microfft::real::rfft_1024;
+use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
     WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
@@ -41,7 +43,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use sysinfo::{Gpus, System};
 use tokio::{
     net::UnixDatagram, runtime::Builder as RuntimeBuilder, sync::mpsc::UnboundedSender, task::spawn_blocking,
     time::sleep as tokio_sleep,
@@ -61,7 +62,7 @@ use wayland_client::{
         wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
         wl_region::WlRegion,
-        wl_registry::{self, WlRegistry},
+        wl_registry::WlRegistry,
         wl_seat::{self, WlSeat},
         wl_surface::WlSurface,
     },
@@ -181,10 +182,20 @@ impl super::Platform {
                     exec: entry.parse_exec().ok()?,
                     comment: entry.comment(&locales).unwrap_or_default().into_owned(),
                     action,
-                    icon: entry.icon().and_then(resolve_icon).and_then(|path| {
-                        let bytes = fs::read(path).ok()?;
-                        Self::decode_icon(&bytes)
-                    }),
+                    icon: entry
+                        .icon()
+                        .and_then(|icon| {
+                            let path = Path::new(icon);
+                            if path.is_absolute() {
+                                Some(path.to_owned())
+                            } else {
+                                freedesktop_icons::lookup(icon).with_size(64).find()
+                            }
+                        })
+                        .and_then(|path| {
+                            let bytes = fs::read(path).ok()?;
+                            Self::decode_icon(&bytes)
+                        }),
                 })
             })
             .collect()
@@ -295,8 +306,8 @@ impl super::Platform {
         let registry = globals.registry();
         for global in globals.contents().clone_list() {
             if global.interface == "wl_output" {
-                let version = global.version.min(4);
-                let output = registry.bind::<WlOutput, (), LayerShellApp>(global.name, version, &qhandle, ());
+                assert!(global.version >= 4, "Missing wl_output v4");
+                let output = registry.bind::<WlOutput, (), LayerShellApp>(global.name, 4, &qhandle, ());
                 app.output.get_or_insert(output);
             }
         }
@@ -364,51 +375,93 @@ async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), Box<d
             break;
         }
     }
-    ProxyBuilder::<DbusProxy>::new(&connection)
-        .destination(DESTINATION)?
-        .path(session)?
-        .interface("org.freedesktop.portal.Session")?
-        .cache_properties(CacheProperties::No)
-        .build()
-        .await?
-        .call::<_, _, ()>("Close", &())
-        .await?;
+    connection.call_method(Some(DESTINATION), session, Some("org.freedesktop.portal.Session"), "Close", &()).await?;
     Ok(())
 }
 
 fn launcher_socket_path() -> PathBuf {
-    let runtime_dir = env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| "/tmp".into());
-    PathBuf::from(runtime_dir).join(LAUNCHER_SOCKET_NAME)
-}
-
-fn resolve_icon(icon: &str) -> Option<PathBuf> {
-    let path = Path::new(icon);
-    if path.is_absolute() {
-        return path.exists().then(|| path.to_owned());
-    }
-    freedesktop_icons::lookup(icon).with_size(64).find()
+    PathBuf::from(env::var_os("XDG_RUNTIME_DIR").expect("Wayland session requires XDG_RUNTIME_DIR"))
+        .join(LAUNCHER_SOCKET_NAME)
 }
 
 fn monitor_status(updates: &AppUpdater) {
-    let Ok(mut system) = System::new() else {
-        warn!("sysinfo unavailable; system status monitor disabled");
-        return;
-    };
-    let mut gpus = Gpus::new_with_refreshed_list().ok();
-    let battery = find_battery();
+    let temperatures: Vec<_> = directory_paths("/sys/class/hwmon")
+        .filter(|path| {
+            fs::read_to_string(path.join("name"))
+                .is_ok_and(|name| matches!(name.trim(), "coretemp" | "k10temp" | "zenpower" | "cpu_thermal"))
+        })
+        .flat_map(directory_paths)
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                let name = name.as_encoded_bytes();
+                name.starts_with(b"temp") && name.ends_with(b"_input")
+            })
+        })
+        .collect();
+    let amd: Vec<_> = directory_paths("/sys/class/drm")
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                name.as_encoded_bytes()
+                    .strip_prefix(b"card")
+                    .is_some_and(|index| !index.is_empty() && index.iter().all(u8::is_ascii_digit))
+            })
+        })
+        .map(|path| path.join("device"))
+        .filter(|path| path.join("mem_info_vram_total").exists())
+        .map(|path| {
+            let temperature = directory_paths(path.join("hwmon")).next().map(|path| path.join("temp1_input"));
+            (path, temperature)
+        })
+        .collect();
+    let nvml = Nvml::init().ok();
+    let nvidia: Vec<_> = nvml
+        .as_ref()
+        .into_iter()
+        .flat_map(|nvml| (0..nvml.device_count().unwrap_or(0)).filter_map(|index| nvml.device_by_index(index).ok()))
+        .collect();
+    let battery = directory_paths("/sys/class/power_supply")
+        .find(|path| fs::read_to_string(path.join("type")).is_ok_and(|kind| kind.trim() == "Battery"));
+    let counters = || fs::read_to_string("/proc/stat").ok().and_then(|stat| cpu_counters(&stat));
+    let mut previous = counters();
     loop {
-        system.refresh_cpu_usage();
-        system.refresh_cpu_temperature();
-        system.refresh_memory();
-        if let Some(gpus) = &mut gpus {
-            gpus.refresh(false);
-        }
-        let cpu = ProcessorSample {
-            temperature: system.cpus().first().map_or(0.0, sysinfo::Cpu::temperature),
-            usage: system.global_cpu_usage() / 100.0,
-            memory: system.used_memory() as f32 / system.total_memory().max(1) as f32,
+        let current = counters();
+        let usage = previous.zip(current).map_or(0.0, |((busy, total), (next_busy, next_total))| {
+            (next_busy.saturating_sub(busy) as f32 / next_total.saturating_sub(total).max(1) as f32).clamp(0.0, 1.0)
+        });
+        previous = current;
+        let memory = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let memory_value = |name| {
+            memory
+                .lines()
+                .find_map(|line| line.strip_prefix(name)?.split_ascii_whitespace().next()?.parse::<f32>().ok())
+                .unwrap_or_default()
         };
-        let gpu = gpus.as_ref().and_then(gpu_sample);
+        let total = memory_value("MemTotal:");
+        let cpu = ProcessorSample {
+            temperature: temperatures.iter().filter_map(read_number).fold(0.0, f32::max) / 1000.0,
+            usage,
+            memory: ((total - memory_value("MemAvailable:")) / total.max(1.0)).clamp(0.0, 1.0),
+        };
+        let gpu = nvidia
+            .iter()
+            .filter_map(|device| {
+                let memory = device.memory_info().ok()?;
+                Some((memory.total as f32, ProcessorSample {
+                    temperature: device.temperature(TemperatureSensor::Gpu).unwrap_or_default() as f32,
+                    usage: device.utilization_rates().map_or(0.0, |rates| rates.gpu as f32 / 100.0),
+                    memory: memory.used as f32 / memory.total.max(1) as f32,
+                }))
+            })
+            .chain(amd.iter().filter_map(|(path, temperature)| {
+                let total = read_number(path.join("mem_info_vram_total"))?;
+                Some((total, ProcessorSample {
+                    temperature: temperature.as_ref().and_then(read_number).unwrap_or_default() / 1000.0,
+                    usage: read_number(path.join("gpu_busy_percent")).unwrap_or_default() / 100.0,
+                    memory: read_number(path.join("mem_info_vram_used")).unwrap_or_default() / total.max(1.0),
+                }))
+            }))
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, sample)| sample);
         let battery_level = battery_sample(battery.as_deref());
         if !send_update(updates, move |app| {
             if let Some(status) = &mut app.bar.status {
@@ -421,20 +474,26 @@ fn monitor_status(updates: &AppUpdater) {
     }
 }
 
-fn gpu_sample(gpus: &Gpus) -> Option<ProcessorSample> {
-    let device = gpus.iter().max_by_key(|gpu| gpu.total_memory().unwrap_or_default())?;
-    Some(ProcessorSample {
-        temperature: device.temperature().unwrap_or_default(),
-        usage: device.usage().unwrap_or_default() / 100.0,
-        memory: device.used_memory().unwrap_or_default() as f32
-            / device.total_memory().unwrap_or_default().max(1) as f32,
-    })
+fn directory_paths(path: impl AsRef<Path>) -> impl Iterator<Item = PathBuf> {
+    fs::read_dir(path).into_iter().flatten().flatten().map(|entry| entry.path())
 }
 
-fn find_battery() -> Option<PathBuf> {
-    fs::read_dir("/sys/class/power_supply").ok()?.flatten().map(|entry| entry.path()).find(|path| {
-        fs::read_to_string(path.join("type")).is_ok_and(|kind| kind.trim().eq_ignore_ascii_case("battery"))
-    })
+fn read_number(path: impl AsRef<Path>) -> Option<f32> {
+    fs::read_to_string(path).ok()?.trim().parse::<f32>().ok().filter(|value| value.is_finite())
+}
+
+fn cpu_counters(stat: &str) -> Option<(u64, u64)> {
+    let mut fields = stat.lines().next()?.split_ascii_whitespace();
+    if fields.next()? != "cpu" {
+        return None;
+    }
+    let mut values = [0u64; 8];
+    for value in &mut values {
+        *value = fields.next()?.parse().ok()?;
+    }
+    // Guest time is already included in user/nice; idle and iowait are not busy time.
+    let total = values.iter().sum::<u64>();
+    Some((total - values[3] - values[4], total))
 }
 
 /// Charge level, negated while charging, or absent with no battery or idle at full.
@@ -641,12 +700,6 @@ struct WaylandSurface {
     blur_bounds: Option<(Vec2, Vec2)>,
 }
 
-impl WaylandSurface {
-    fn buffer_size(&self) -> [u32; 2] {
-        (self.size * self.scale).round().to_array().map(|size| size as u32)
-    }
-}
-
 impl Drop for WaylandSurface {
     fn drop(&mut self) {
         self.layer.destroy();
@@ -687,10 +740,6 @@ impl LayerShellApp {
             0.0
         } + PANEL_OVERFLOW;
         self.cantus.config.height + PANEL_START + extension
-    }
-
-    fn surfaces_ready(&self) -> bool {
-        self.surfaces[0].is_some() && self.surfaces.iter().flatten().all(|surface| surface.configured)
     }
 
     fn create_surface(&self, kind: SurfaceKind, qhandle: &QueueHandle<Self>) -> WaylandSurface {
@@ -766,14 +815,6 @@ impl LayerShellApp {
         }
     }
 
-    /// Claims the clipboard selection, serving `text` to whoever pastes next.
-    fn set_clipboard(&self, text: &str, qhandle: &QueueHandle<Self>) {
-        let (manager, device) = &self.clipboard;
-        let source = manager.create_data_source(qhandle, Arc::<str>::from(text));
-        source.offer(TEXT_MIME.to_owned());
-        device.set_selection(Some(&source), self.key_serial);
-    }
-
     /// Reads clipboard data off the event loop so this client can also serve its own selection.
     fn paste(&self) -> Option<()> {
         let offer = self
@@ -827,7 +868,10 @@ impl LayerShellApp {
         self.pump_key_repeat();
         self.cantus.apply_pending_updates();
         self.sync_launcher_surface(qhandle);
-        if !self.surfaces_ready() || self.frame_callback.is_some() {
+        if self.frame_callback.is_some()
+            || self.surfaces[0].is_none()
+            || self.surfaces.iter().flatten().any(|surface| !surface.configured)
+        {
             return;
         }
         for surface in self.surfaces.iter_mut().flatten() {
@@ -835,12 +879,16 @@ impl LayerShellApp {
                 display: self.display_handle,
                 window: NonNull::new(surface.wl.id().as_ptr().cast()).expect("Wayland surface pointer"),
             };
-            let size = surface.buffer_size();
+            let size = (surface.size * surface.scale).round().to_array().map(|size| size as u32);
             surface.viewport.set_destination(surface.size.x as i32, surface.size.y as i32);
             if self.gpu.is_none() {
                 // SAFETY: The renderer is dropped before the owned Wayland surfaces.
                 let (gpu, handle) = unsafe {
-                    Renderer::new(&native, size, include_bytes!("../../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR)
+                    Renderer::new(
+                        &native,
+                        size,
+                        Text::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR),
+                    )
                 }
                 .expect("failed to initialize renderer");
                 tracing::info!("Using GPU device: {}", gpu.device_name());
@@ -870,21 +918,19 @@ impl LayerShellApp {
         self.frame_callback = Some(self.active_surface().wl.frame(qhandle, ()));
         self.active_surface().wl.commit();
         if let Some(text) = self.cantus.launcher.pending_copy.take() {
-            self.set_clipboard(&text, qhandle);
+            let source = self.clipboard.0.create_data_source(qhandle, Arc::<str>::from(text));
+            source.offer(TEXT_MIME.to_owned());
+            self.clipboard.1.set_selection(Some(&source), self.key_serial);
         }
     }
 
     fn update_input_region(&mut self, qhandle: &QueueHandle<Self>) {
         let wl_surface = self.active_surface().wl.clone();
-        let compositor = &self.compositor;
-        let region = compositor.create_region(qhandle, ());
-        if self.gpu.is_some() {
-            let interaction = &mut self.cantus.interaction;
-            for rect in interaction.regions.drain(..) {
-                let [x, y, width, height] = [rect.min.x, rect.min.y, rect.max.x - rect.min.x, rect.max.y - rect.min.y]
-                    .map(|value| value.round() as i32);
-                region.add(x, y, width, height);
-            }
+        let region = self.compositor.create_region(qhandle, ());
+        for rect in self.cantus.interaction.regions.drain(..) {
+            let [x, y, width, height] = [rect.min.x, rect.min.y, rect.max.x - rect.min.x, rect.max.y - rect.min.y]
+                .map(|value| value.round() as i32);
+            region.add(x, y, width, height);
         }
         wl_surface.set_input_region(Some(&region));
         region.destroy();
@@ -897,8 +943,7 @@ impl LayerShellApp {
         if surface.blur_bounds == Some((origin, size)) {
             return;
         }
-        let compositor = &self.compositor;
-        let region = compositor.create_region(qhandle, ());
+        let region = self.compositor.create_region(qhandle, ());
         // The blur region sits one pixel inside the antialiased panel edge.
         let x = origin.x.ceil() as i32 + 1;
         let y = origin.y.ceil() as i32 + 1;
@@ -965,26 +1010,17 @@ dispatch!(WpFractionalScaleV1, SurfaceKind, kind, |state, proxy, event, qhandle|
     }
 });
 
-impl Dispatch<WlOutput, ()> for LayerShellApp {
-    fn event(
-        state: &mut Self,
-        proxy: &WlOutput,
-        event: <WlOutput as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        let monitor = state.cantus.config.monitor.as_deref().unwrap_or_default().to_ascii_lowercase();
-        match event {
-            wl_output::Event::Name { name } | wl_output::Event::Description { description: name }
-                if name.to_ascii_lowercase().contains(&monitor) =>
-            {
-                state.output = Some(proxy.clone());
-            }
-            _ => {}
+dispatch!(WlOutput, |state, proxy, event, _qhandle| {
+    let Some(monitor) = &state.cantus.config.monitor else { return };
+    match event {
+        wl_output::Event::Name { name } | wl_output::Event::Description { description: name }
+            if name.to_ascii_lowercase().contains(&monitor.to_ascii_lowercase()) =>
+        {
+            state.output = Some(proxy.clone());
         }
+        _ => {}
     }
-}
+});
 
 dispatch!(WlSeat, |state, proxy, event, qhandle| {
     if let wl_seat::Event::Capabilities { capabilities } = event
@@ -1190,17 +1226,7 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
     }
 });
 
-impl Dispatch<WlRegistry, GlobalListContents> for LayerShellApp {
-    fn event(
-        _: &mut Self,
-        _: &WlRegistry,
-        _: wl_registry::Event,
-        _: &GlobalListContents,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
+dispatch!(WlRegistry, GlobalListContents, _globals, |_state, _proxy, _event, _qhandle| {});
 
 delegate_noop!(LayerShellApp: ignore ZwlrLayerShellV1);
 delegate_noop!(LayerShellApp: ignore WpFractionalScaleManagerV1);

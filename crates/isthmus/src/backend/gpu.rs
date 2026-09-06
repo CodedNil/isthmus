@@ -1,7 +1,7 @@
 use super::{buffer::UploadBuffer, image::ImageCache};
 use crate::{
-    Blend, Image, Program, bindings,
-    geometry::{DrawRecord, Primitive, text::PlacedGlyph},
+    Blend, Image, Program, ShaderData as _, bindings,
+    geometry::{DrawRecord, GeometrySample, Raster, text::PlacedGlyph},
     program::ShaderSpec,
 };
 use core::array::from_fn;
@@ -9,6 +9,7 @@ use std::ops::Range;
 #[cfg(not(target_arch = "wasm32"))]
 use wgpu::util::make_spirv;
 
+#[doc(hidden)]
 pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -16,11 +17,9 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     pub device_name: String,
     pub format: wgpu::TextureFormat,
-    pipelines: Vec<(wgpu::RenderPipeline, u32)>,
+    pipelines: Vec<wgpu::RenderPipeline>,
     bind_layout: wgpu::BindGroupLayout,
-    draws: Vec<DrawRecord>,
-    payload: Vec<u8>,
-    pub buffers: [UploadBuffer; 5],
+    pub buffers: [UploadBuffer; 4],
     images: ImageCache,
 }
 
@@ -53,19 +52,21 @@ impl Gpu {
         });
         let bind_layout = device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("frame"), entries: &entries });
-        let images = ImageCache::new(&device, &queue);
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("isthmus"),
-            bind_group_layouts: &[Some(&bind_layout), Some(&images.layout)],
-            immediate_size: 0,
-        });
+        let images = ImageCache::new(&device, P::SHADERS.iter().map(|entry| entry.images).max().unwrap_or(0));
+        let layouts: Vec<_> = images
+            .layouts
+            .iter()
+            .map(|layout| {
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("isthmus"),
+                    bind_group_layouts: &[Some(&bind_layout), Some(layout)],
+                    immediate_size: 0,
+                })
+            })
+            .collect();
         let pipelines = P::SHADERS
             .iter()
             .map(|entry| {
-                let (vertex, topology, vertices) = match entry.primitive {
-                    Primitive::Quad => ("isthmus_quad", wgpu::PrimitiveTopology::TriangleStrip, 4),
-                    Primitive::Triangle => ("isthmus_triangle", wgpu::PrimitiveTopology::TriangleList, 3),
-                };
                 let blend = match entry.blend {
                     Blend::Over => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     Blend::Replace => None,
@@ -78,12 +79,12 @@ impl Gpu {
                         alpha: wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING.alpha,
                     }),
                 };
-                let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(entry.name),
-                    layout: Some(&layout),
+                    layout: Some(&layouts[entry.images]),
                     vertex: wgpu::VertexState {
                         module: &shader,
-                        entry_point: Some(vertex),
+                        entry_point: Some(entry.vertex),
                         buffers: &[],
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
                     },
@@ -93,40 +94,42 @@ impl Gpu {
                         targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
                     }),
-                    primitive: wgpu::PrimitiveState { topology, ..Default::default() },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        ..Default::default()
+                    },
                     depth_stencil: None,
                     multisample: wgpu::MultisampleState::default(),
                     multiview_mask: None,
                     cache: None,
-                });
-                (pipeline, vertices)
+                })
             })
             .collect();
         let buffers = from_fn(|_| UploadBuffer::new(&device));
         let device_name = adapter.get_info().name;
-        Self {
-            instance,
-            adapter,
-            device,
-            queue,
-            device_name,
-            format,
-            pipelines,
-            bind_layout,
-            draws: Vec::new(),
-            payload: Vec::new(),
-            buffers,
-            images,
-        }
+        Self { instance, adapter, device, queue, device_name, format, pipelines, bind_layout, buffers, images }
     }
 
-    pub fn image(&mut self, image: &Image) -> wgpu::BindGroup {
-        self.images.image(&self.device, &self.queue, image)
+    pub fn images(&mut self, images: &[&Image]) -> wgpu::BindGroup {
+        self.images.images(&self.device, &self.queue, images)
+    }
+
+    #[doc(hidden)]
+    pub fn capture_buffer<T: crate::ShaderData>(&mut self, buffer: crate::Buffer<'_, T>) -> [u32; 2] {
+        let payload = &mut self.buffers[bindings::PAYLOAD as usize];
+        let range = [
+            u32::try_from(payload.words.len()).expect("payload exceeds u32"),
+            u32::try_from(buffer.values.len()).expect("buffer exceeds u32"),
+        ];
+        for &value in buffer.values {
+            payload.push(value);
+        }
+        range
     }
 
     pub fn begin_frame(&mut self) {
-        self.draws.clear();
-        self.payload.clear();
+        self.buffers[bindings::DRAWS as usize].words.clear();
+        self.buffers[bindings::PAYLOAD as usize].words.clear();
         self.images.retain_live();
     }
 
@@ -137,17 +140,16 @@ impl Gpu {
         value: S,
         image: Option<wgpu::BindGroup>,
     ) {
-        const {
-            assert!(size_of::<S>().is_multiple_of(4), "shader payload must use whole words");
+        let payload = self.buffers[bindings::PAYLOAD as usize].words.len() as u32;
+        let draws = &mut self.buffers[bindings::DRAWS as usize];
+        let start = (draws.words.len() / DrawRecord::WORDS) as u32;
+        let geometry = geometry.into_iter();
+        draws.words.reserve(geometry.size_hint().0 * DrawRecord::WORDS);
+        for geometry in geometry {
+            draws.push(DrawRecord { geometry, payload });
         }
-        let start = self.draws.len() as u32;
-        let payload = self.payload.len() as u32;
-        self.draws.extend(geometry.into_iter().map(|geometry| DrawRecord { geometry, payload, _padding: 0 }));
-        let end = self.draws.len() as u32;
-        if start == end {
-            return;
-        }
-        self.payload.extend_from_slice(bytemuck::bytes_of(&value));
+        let end = (draws.words.len() / DrawRecord::WORDS) as u32;
+        self.buffers[bindings::PAYLOAD as usize].push(value);
         if let Some(previous) = surface.paints.last_mut()
             && previous.shader == S::INDEX
             && previous.image == image
@@ -155,54 +157,61 @@ impl Gpu {
         {
             previous.draws.end = end;
         } else {
-            surface.paints.push(Paint { shader: S::INDEX, draws: start..end, image });
+            surface.paints.push(Paint {
+                shader: S::INDEX,
+                vertices: <S::Sample as GeometrySample<'static>>::Raster::VERTICES,
+                draws: start..end,
+                image,
+            });
         }
     }
 
     pub fn prepare(&mut self, placed: &[PlacedGlyph]) {
-        self.buffers[bindings::DRAWS as usize].upload(&self.device, &self.queue, &self.draws);
-        self.buffers[bindings::PAYLOAD as usize].bytes(&self.device, &self.queue, &self.payload);
-        self.buffers[bindings::PLACED_GLYPHS as usize].upload(&self.device, &self.queue, placed);
+        self.buffers[bindings::DRAWS as usize].flush(&self.device, &self.queue);
+        self.buffers[bindings::PAYLOAD as usize].flush(&self.device, &self.queue);
+        self.buffers[bindings::PLACED_GLYPHS as usize].upload_if_changed(&self.device, &self.queue, placed);
     }
 
-    pub fn draw_surface(&self, pass: &mut wgpu::RenderPass<'_>, surface: &mut SurfacePaints) {
+    pub(crate) fn draw_surface(&self, pass: &mut wgpu::RenderPass<'_>, surface: &mut SurfacePaints) {
         let buffers = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|index| match index as u32 {
             bindings::GLOBALS => &surface.globals,
             bindings::FRAMES => &surface.frame,
             _ => &self.buffers[index],
         });
-        // Upload buffers are replaced only when they grow, so capacities identify the bound allocations.
-        let sizes = buffers.map(|buffer| buffer.0.size());
-        if surface.binding.as_ref().is_none_or(|(previous, _)| *previous != sizes) {
+        if surface
+            .binding
+            .as_ref()
+            .is_none_or(|(previous, _)| buffers.iter().zip(previous).any(|(buffer, old)| buffer.buffer != *old))
+        {
             let entries = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|index| wgpu::BindGroupEntry {
                 binding: index as u32,
-                resource: buffers[index].0.as_entire_binding(),
+                resource: buffers[index].buffer.as_entire_binding(),
             });
             let frame = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("frame"),
                 layout: &self.bind_layout,
                 entries: &entries,
             });
-            surface.binding = Some((sizes, frame));
+            surface.binding = Some((buffers.map(|buffer| buffer.buffer.clone()), frame));
         }
         pass.set_bind_group(0, &surface.binding.as_ref().unwrap().1, &[]);
         for paint in &surface.paints {
-            let (pipeline, vertices) = &self.pipelines[paint.shader];
-            pass.set_pipeline(pipeline);
+            pass.set_pipeline(&self.pipelines[paint.shader]);
             pass.set_bind_group(1, paint.image.as_ref().unwrap_or(&self.images.fallback), &[]);
-            pass.draw(0..*vertices, paint.draws.clone());
+            pass.draw(0..paint.vertices, paint.draws.clone());
         }
     }
 }
 
 pub(super) struct Paint {
     shader: usize,
+    vertices: u32,
     draws: Range<u32>,
     image: Option<wgpu::BindGroup>,
 }
 
 pub struct SurfacePaints {
-    binding: Option<([u64; bindings::BUFFER_COUNT], wgpu::BindGroup)>,
+    binding: Option<([wgpu::Buffer; bindings::BUFFER_COUNT], wgpu::BindGroup)>,
     pub(super) recorded: bool,
     pub(super) paints: Vec<Paint>,
     pub(super) globals: UploadBuffer,

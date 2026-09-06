@@ -1,5 +1,5 @@
 mod references;
-use crate::syntax::{Shader, program, vertex};
+use crate::syntax::{Shader, program};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, quote};
 use references::{DefaultFields, References};
@@ -13,7 +13,7 @@ use std::{
 use syn::{Item, UseTree, punctuated::Punctuated, visit::Visit};
 
 pub struct Generated {
-    pub source: String,
+    pub files: BTreeMap<PathBuf, String>,
     pub shaders: Vec<Shader>,
 }
 
@@ -69,15 +69,8 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
                 if !graph.modules[scope].selected.contains(target) {
                     continue;
                 }
-                let needed =
-                    item.trait_.as_ref().is_some_and(|(path, _)| {
-                        path.segments.last().is_some_and(|segment| segment.ident == "Program")
-                    }) || item
-                        .items
-                        .iter()
-                        .any(|member| member_name(member).is_some_and(|name| graph.methods.contains(&name)));
                 for (member, declaration) in item.items.iter().enumerate() {
-                    if (item.trait_.is_some() && needed
+                    if (item.trait_.is_some()
                         || member_name(declaration).is_some_and(|name| graph.methods.contains(&name)))
                         && !graph.modules[scope].impl_members.contains(&(index, member))
                     {
@@ -100,22 +93,30 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
             graph.follow(scope, refs);
         }
     }
-    let items = graph.emit(0);
-    let vertices = [false, true]
-        .into_iter()
-        .filter(|&triangle| entries.iter().any(|shader| shader.is_triangle() == triangle))
-        .map(|triangle| vertex(&quote!(::isthmus), triangle));
+    let mut files = BTreeMap::new();
+    let items = graph.emit(0, Path::new("render"), &mut files);
+    files.insert(PathBuf::from("render/mod.rs"), items);
     let mut defaults = DefaultFields(false);
-    defaults.visit_file(&syn::parse2(items.clone()).map_err(|error| error.to_string())?);
+    for items in files.values() {
+        defaults.visit_file(&syn::parse2(items.clone()).map_err(|error| error.to_string())?);
+    }
     let feature = defaults.0.then(|| quote!(#![feature(default_field_values)]));
-    let generated = quote! {
+    files.insert(PathBuf::from("lib.rs"), quote! {
         #![no_std]
         #feature
         #![allow(dead_code, unused_imports, reason = "shader extraction conservatively retains shared methods and trait imports")]
-        pub mod render { #items #(#vertices)* }
-    }.to_string();
+        pub mod render;
+    });
+    let files = files
+        .into_iter()
+        .map(|(path, source)| Ok((path, format(&source.to_string())?)))
+        .collect::<Result<_, String>>()?;
+    Ok(Generated { files, shaders: entries })
+}
+
+pub fn format(source: &str) -> Result<String, String> {
     let mut formatter = Command::new("rustfmt")
-        .args(["--edition", "2024", "--emit", "stdout"])
+        .args(["--edition", "2024", "--emit", "stdout", "--config", "skip_children=true"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -125,14 +126,14 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
         .stdin
         .take()
         .ok_or("rustfmt stdin is unavailable")?
-        .write_all(generated.as_bytes())
+        .write_all(source.as_bytes())
         .map_err(|error| format!("failed to send generated shaders to rustfmt: {error}"))?;
     let output =
         formatter.wait_with_output().map_err(|error| format!("failed to format generated shaders: {error}"))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
-    Ok(Generated { source: String::from_utf8(output.stdout).map_err(|error| error.to_string())?, shaders: entries })
+    String::from_utf8(output.stdout).map_err(|error| error.to_string())
 }
 
 #[derive(Default)]
@@ -300,15 +301,17 @@ impl Graph {
         None
     }
 
-    fn emit(&self, scope: usize) -> TokenStream {
+    fn emit(&self, scope: usize, directory: &Path, files: &mut BTreeMap<PathBuf, TokenStream>) -> TokenStream {
         let module = &self.modules[scope];
         let mut output = TokenStream::new();
         for (name, child) in &module.children {
-            let content = self.emit(*child);
+            let path = directory.join(name.trim_start_matches("r#"));
+            let content = self.emit(*child, &path, files);
             if !content.is_empty() {
+                files.insert(path.join("mod.rs"), content);
                 let name = syn::Ident::new(name, proc_macro2::Span::call_site());
-                let origin = self.modules[*child].file.to_string_lossy();
-                output.extend(quote!(#[doc = #origin] pub mod #name { #content }));
+                let origin = format!("Source: {}", self.modules[*child].file.display());
+                output.extend(quote!(#[doc = #origin] pub mod #name;));
             }
         }
         for &index in &module.selected {

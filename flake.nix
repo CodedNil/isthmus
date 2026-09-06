@@ -31,6 +31,7 @@ rec {
         pipewire
         wireplumber
       ];
+      runtimeLibraryPath = "${lib.makeLibraryPath runtimeLibraries}:/run/opengl-driver/lib";
       rustToolchain = pkgs.rust-bin.nightly."2026-05-22";
       rust = rustToolchain.default.override {
         extensions = [
@@ -53,7 +54,6 @@ rec {
             lockFile = ./Cargo.lock;
             outputHashes = {
               "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-M3/puV8CnGDp4I4C/F4lrH/Dfbs6Lj4T4j4vwdBMzrU=";
-              "sysinfo-0.39.6" = "sha256-HgD13E5L5Gtwj1I1mD+vU3ln0dfj61Zeet8LHyUIdkk=";
             };
           };
           version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
@@ -123,7 +123,7 @@ rec {
             buildInputs = runtimeLibraries;
             postInstall = ''
               wrapProgram "$out/bin/${pname}" \
-                --set LD_LIBRARY_PATH "${lib.makeLibraryPath (runtimeLibraries)}" \
+                --set LD_LIBRARY_PATH "${runtimeLibraryPath}" \
                 --prefix PATH : "${lib.makeBinPath (runtimeTools)}"
             '';
             meta = {
@@ -150,7 +150,7 @@ rec {
           wireplumber
         ];
         buildInputs = runtimeLibraries;
-        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries);
+        LD_LIBRARY_PATH = runtimeLibraryPath;
       };
 
       formatter.${system} = pkgs.nixfmt;

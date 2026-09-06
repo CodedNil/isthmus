@@ -10,9 +10,8 @@ members = [
 ]
 
 [workspace.dependencies]
-bytemuck = { version = "1.25.2", features = ["derive", "min_const_generics"] }
+bytemuck = "1.25.2"
 glam = { version = "0.33.6", default-features = false, features = [
-    "bytemuck",
     "u32",
 ] }
 spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
@@ -22,7 +21,6 @@ smallvec = "1.16.0"
 raw-window-handle = "0.6.2"
 pollster = "1.0.1"
 wgpu = { version = "30.0.1", default-features = false }
-ttf-parser = "0.25.1"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = [

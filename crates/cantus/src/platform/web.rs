@@ -13,7 +13,7 @@ use crate::{
 use gloo_events::{EventListener, EventListenerOptions};
 use gloo_render::request_animation_frame;
 use gloo_timers::future::TimeoutFuture;
-use isthmus::glam::vec2;
+use isthmus::{geometry::text::Text, glam::vec2};
 use std::{
     cell::RefCell,
     future::Future,
@@ -172,8 +172,7 @@ async fn run_web() -> Result<(), String> {
     let (mut gpu, surface) = Renderer::new(
         canvas.clone(),
         [(width * scale).round() as u32, (height * scale).round() as u32],
-        include_bytes!("../../../../assets/NotoSans-Variable.ttf"),
-        TEXT_COLOR,
+        Text::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR),
     )
     .await
     .map_err(|error| error.to_string())?;

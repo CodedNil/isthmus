@@ -17,10 +17,9 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         return;
     };
     let screen_width = context.frame.screen_size.x;
-    let shaper = context.frame.text.shaper();
     let prepare = |track: &mut Track| {
         if let Some(lyrics) = track.runtime.lyrics.ready_mut() {
-            lyrics.prepare(track.duration_ms as f32, shaper);
+            lyrics.prepare(track.duration_ms as f32, context.frame.text);
         }
     };
     let span = |track: &Track| {
@@ -54,7 +53,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
             break;
         }
         if let Some(lyrics) = track.runtime.lyrics.ready_mut() {
-            lyrics.prepare(track.duration_ms as f32, context.frame.text.shaper());
+            lyrics.prepare(track.duration_ms as f32, context.frame.text);
         }
         let track_x = x;
         x += span(track);
@@ -63,7 +62,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         };
         for (background, color) in [(false, TEXT_COLOR.extend(1.0)), (true, Vec4::new(0.72, 0.86, 1.0, 1.0))] {
             let line = lyrics.visible(
-                context.frame.text.shaper(),
+                context.frame.text,
                 -track_x - CLIP_PADDING..screen_width - track_x + CLIP_PADDING,
                 background,
             );
@@ -73,13 +72,13 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
             let placed = context.frame.text.visible(&line, vec2(track_x, y), 0.0..screen_width).with_color(color);
             let padding = placed.size * 0.2 + 1.0;
             context.frame.paint(
-                placed.expanded(padding),
-                shader!(|text: TextFragment, playhead_x: f32, screen_width: f32| {
+                placed.effects(1.5).displaced(padding),
+                shader!(|text: TextFragment<'_>, playhead_x: f32, screen_width: f32| {
                     let edge_fade =
                         text.pixel.x.smoothstep(0.0, 32.0) * text.pixel.x.smoothstep(screen_width, screen_width - 32.0);
                     let emphasis = (text.pixel.x - playhead_x).abs().smoothstep(110.0, 0.0);
-                    let weight = (text.line.weight + emphasis * 0.15).min(1.0);
-                    let sample = text.sample_with_weight(text.pixel, weight);
+                    let weight = text.line.weight + emphasis * 45.0;
+                    let sample = text.distance_with_weight(text.pixel, weight).sample();
                     let sung = text.pixel.x.smoothstep(playhead_x + 4.0, playhead_x - 4.0);
                     let fade = edge_fade * (1.0 - sung * 0.5);
                     sample.color(text.line.color.to_vec4(), Vec4::new(0.0, 0.0, 0.0, 0.4), 1.5).opacity(fade)

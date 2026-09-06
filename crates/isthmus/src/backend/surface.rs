@@ -59,4 +59,7 @@ impl SurfaceTarget {
     }
 }
 
-slotmap::new_key_type! { pub struct SurfaceHandle; }
+slotmap::new_key_type! {
+    /// Identifies a presentation surface owned by its renderer.
+    pub struct SurfaceHandle;
+}

@@ -28,7 +28,6 @@ use librespot_protocol::{
     player::{ContextPlayerOptions, PlayerState, ProvidedTrack, Suppressions},
     playlist4_external::{Add, Delta, Item, ListAttributes, ListChanges, Op, Rem, SelectedListContent, op},
 };
-use parking_lot::Mutex;
 use protobuf::{EnumOrUnknown, Message as _, MessageField};
 use reqwest::{
     Method,
@@ -41,11 +40,13 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     str,
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::{
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        watch,
+    },
     task::spawn_blocking,
     time::sleep,
 };
@@ -59,7 +60,7 @@ const RATING_PLAYLISTS: [&str; 10] = ["0.5", "1.0", "1.5", "2.0", "2.5", "3.0", 
 #[derive(Clone)]
 pub struct Spotify {
     events: UnboundedSender<WorkerEvent>,
-    session: Arc<Mutex<Option<Session>>>,
+    session: watch::Receiver<Option<Session>>,
 }
 
 enum WorkerEvent {
@@ -70,8 +71,7 @@ enum WorkerEvent {
 impl Spotify {
     pub(super) fn new(config: &Config, updater: &AppUpdater, background: &Background) -> Self {
         let (events, receiver) = mpsc::unbounded_channel();
-        let session = Arc::new(Mutex::new(None));
-        let connected_session = Arc::clone(&session);
+        let (connected_session, session) = watch::channel(None);
         let worker_events = events.clone();
         let updater = updater.clone();
         let playlist_targets = config.playlists.clone();
@@ -83,7 +83,7 @@ impl Spotify {
                 generation += 1;
                 match connect().await {
                     Ok(spotify) => {
-                        *connected_session.lock() = Some(spotify.clone());
+                        connected_session.send_replace(Some(spotify.clone()));
                         if let Err(error) = run_spotify(
                             spotify,
                             &mut receiver,
@@ -97,7 +97,7 @@ impl Spotify {
                         {
                             error!(%error, "Spotify worker stopped");
                         }
-                        *connected_session.lock() = None;
+                        connected_session.send_replace(None);
                     }
                     Err(error) => {
                         warn!(%error, "Spotify unavailable; retrying");
@@ -116,7 +116,7 @@ impl Spotify {
     }
 
     pub(super) async fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
-        let session = self.session.lock().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
+        let session = self.session.borrow().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
         let id = SpotifyId::from_base62(&track_id)?;
         let lines = match Lyrics::get(&session, &id).await {
             Ok(lyrics) if lyrics.lyrics.sync_type == SyncType::LineSynced => lyrics.lyrics.lines,
@@ -146,7 +146,7 @@ impl Spotify {
             instrumentalness: f32,
         }
 
-        let session = self.session.lock().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
+        let session = self.session.borrow().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
         let path = format!("/audio-attributes/v1/audio-features/{track_id}?format=json");
         let features: Features =
             serde_json::from_slice(&session.spclient().request_as_json(&Method::GET, &path, None, None).await?)?;
@@ -749,7 +749,7 @@ fn track_from_provided(
         album: text("album_title", |details| &details.album),
         image: ["image_url", "image_large_url", "image_xlarge_url"]
             .into_iter()
-            .find_map(|key| metadata.get(key))
+            .find_map(|key| metadata.get(key).filter(|url| !url.is_empty()))
             .map(|url| {
                 url.strip_prefix("spotify:image:")
                     .map_or_else(|| url.clone(), |id| format!("https://i.scdn.co/image/{id}"))

@@ -39,42 +39,50 @@ impl Enrichment {
 
 #[derive(Clone)]
 pub enum Fetch<T> {
-    Missing(Instant),
-    Fetching,
+    Missing(Instant, Option<T>),
+    Fetching(Option<T>),
     Ready(T),
 }
 
 impl<T> Default for Fetch<T> {
     fn default() -> Self {
-        Self::Missing(Instant::now())
+        Self::Missing(Instant::now(), None)
     }
 }
 
 impl<T> Fetch<T> {
     pub fn retry() -> Self {
-        Self::Missing(Instant::now() + RETRY_DELAY)
+        Self::Missing(Instant::now() + RETRY_DELAY, None)
     }
 
     pub fn request(&mut self, now: Instant) -> bool {
-        if !matches!(self, Self::Missing(retry_at) if *retry_at <= now) {
+        let Self::Missing(retry_at, value) = self else { return false };
+        if *retry_at > now {
             return false;
         }
-        *self = Self::Fetching;
+        *self = Self::Fetching(value.take());
         true
     }
 
     pub const fn ready(&self) -> Option<&T> {
         match self {
             Self::Ready(value) => Some(value),
-            _ => None,
+            Self::Missing(_, value) | Self::Fetching(value) => value.as_ref(),
         }
     }
 
     pub const fn ready_mut(&mut self) -> Option<&mut T> {
         match self {
             Self::Ready(value) => Some(value),
-            _ => None,
+            Self::Missing(_, value) | Self::Fetching(value) => value.as_mut(),
         }
+    }
+
+    pub fn refresh(&mut self)
+    where
+        T: Clone,
+    {
+        *self = Self::Missing(Instant::now(), self.ready().cloned());
     }
 }
 
@@ -86,7 +94,8 @@ pub struct AlbumArt {
 
 impl Fetch<AlbumArt> {
     pub fn palette(&self) -> [Unorm8x4; PALETTE_COLORS] {
-        self.ready().map_or_else(|| [Unorm8x4::default(); PALETTE_COLORS], |art| art.palette)
+        self.ready()
+            .map_or_else(|| [Unorm8x4::from_vec3(Vec3::new(0.24, 0.32, 0.44)); PALETTE_COLORS], |art| art.palette)
     }
 }
 
@@ -133,7 +142,7 @@ fn art_slots(music: &mut Music) -> impl Iterator<Item = (&str, &mut ArtState)> {
 fn pending_lyrics(queue: &mut [Track], current: usize, now: Instant) -> Vec<LyricsRequest> {
     let mut lyric_uris: HashSet<_> = queue
         .iter()
-        .filter(|track| matches!(track.runtime.lyrics, Fetch::Fetching))
+        .filter(|track| matches!(track.runtime.lyrics, Fetch::Fetching(_)))
         .map(|track| track.uri.clone())
         .collect();
     let current = current.min(queue.len().saturating_sub(1));
@@ -185,6 +194,19 @@ impl CantusApp {
             });
         }
 
+        let loaded = art_slots(&mut self.music)
+            .filter_map(|(url, state)| match state {
+                Fetch::Ready(art) => Some((url.to_owned(), art.clone())),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        for (url, state) in art_slots(&mut self.music) {
+            if !matches!(state, Fetch::Ready(_))
+                && let Some(art) = loaded.get(url)
+            {
+                *state = Fetch::Ready(art.clone());
+            }
+        }
         let mut art = art_slots(&mut self.music)
             .filter_map(|(url, state)| state.request(now).then(|| url.to_owned()))
             .collect::<Vec<_>>();
@@ -197,7 +219,10 @@ impl CantusApp {
                 Some(update(move |app| {
                     for (slot_url, slot) in art_slots(&mut app.music) {
                         if slot_url == url {
-                            *slot = state.clone();
+                            *slot = match &state {
+                                Fetch::Missing(retry_at, _) => Fetch::Missing(*retry_at, slot.ready().cloned()),
+                                _ => state.clone(),
+                            };
                         }
                     }
                 }))

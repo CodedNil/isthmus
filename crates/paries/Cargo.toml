@@ -7,7 +7,6 @@ edition = "2024"
 isthmus = { path = "../isthmus" }
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
-bytemuck.workspace = true
 raw-window-handle.workspace = true
 wayland-client = { version = "0.31.15", default-features = false, features = [
     "system",

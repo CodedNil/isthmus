@@ -1,4 +1,6 @@
+//! Typed Rust shaders, geometry, and rendering shared between CPU and GPU.
 #![cfg_attr(target_arch = "spirv", no_std)]
+#![warn(missing_docs)]
 #![feature(trait_alias)]
 
 extern crate self as isthmus;
@@ -10,6 +12,7 @@ mod bindings;
 mod data;
 #[cfg(not(target_arch = "spirv"))]
 mod frame;
+/// Raster geometry, composable distance fields, and vector text.
 pub mod geometry;
 mod image;
 mod program;
@@ -23,7 +26,7 @@ pub use backend::{
     setup::SetupError,
     surface::SurfaceHandle,
 };
-pub use data::{ColorExt, ShaderData, Unorm8x4};
+pub use data::{Buffer, ColorExt, F16x2, ShaderData, Unorm8x4, Unorm16x2};
 #[cfg(not(target_arch = "spirv"))]
 pub use frame::Frame;
 #[cfg(not(target_arch = "spirv"))]
@@ -44,16 +47,13 @@ pub trait Float = glam::FloatExt + num_traits::Float;
 
 #[doc(hidden)]
 pub mod __private {
+    #[cfg(not(target_arch = "spirv"))]
+    pub use crate::backend::gpu::Gpu;
+    #[cfg(not(target_arch = "spirv"))]
+    pub use crate::program::{ShaderEntry, ShaderSpec, shader_index};
     pub use crate::{
-        data::{PushBlock, load},
-        geometry::DrawRecord,
+        data::{FrameData, load_unchecked},
+        geometry::{DrawRecord, ShaderInput},
         image::ShaderImage,
     };
-    #[cfg(not(target_arch = "spirv"))]
-    pub use crate::{
-        geometry::ShaderInput,
-        program::{ShaderEntry, ShaderSpec, shader_index},
-    };
-    #[cfg(not(target_arch = "spirv"))]
-    pub use bytemuck;
 }

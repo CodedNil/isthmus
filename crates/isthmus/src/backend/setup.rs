@@ -2,22 +2,38 @@ use super::{gpu::Gpu, surface::SurfaceTarget};
 use crate::Program;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+/// A failure while selecting a GPU or creating a presentation surface.
 #[derive(Debug, thiserror::Error)]
 pub enum SetupError {
+    /// Native display or window handles could not be obtained.
     #[error(transparent)]
     Handle(#[from] raw_window_handle::HandleError),
+    /// No suitable GPU adapter could be selected.
     #[error("GPU adapter error: {0}")]
     Adapter(#[from] wgpu::RequestAdapterError),
+    /// The GPU device could not be created with the required capabilities.
     #[error("GPU device error: {0}")]
     Device(#[from] wgpu::RequestDeviceError),
+    /// The presentation surface could not be created.
     #[error("surface error: {0}")]
     Surface(#[from] wgpu::CreateSurfaceError),
+    /// The surface has no supported presentation configuration.
     #[error("surface is unsupported")]
     UnsupportedSurface,
+    /// An additional surface requires a different render target format.
     #[error("replacement surface is incompatible")]
     IncompatibleSurface,
+    /// The browser does not expose WebGPU.
     #[error("WebGPU is unavailable in this browser")]
     WebGpuUnavailable,
+    /// A shader requires more image bindings than the device supports.
+    #[error("shader captures {required} images but this device supports {supported}")]
+    ImageLimit {
+        /// Largest image capture count among the program's shaders.
+        required: usize,
+        /// Maximum image bindings supported by the device.
+        supported: u32,
+    },
 }
 
 pub(super) unsafe fn create_surface(
@@ -86,6 +102,15 @@ async fn finish<P: Program>(
             ..Default::default()
         })
         .await?;
+    let limits = device.limits();
+    let required = P::SHADERS.iter().map(|entry| entry.images).max().unwrap_or(0);
+    let supported = limits
+        .max_sampled_textures_per_shader_stage
+        .min(limits.max_samplers_per_shader_stage)
+        .min(limits.max_bindings_per_bind_group / 2);
+    if required > supported as usize {
+        return Err(SetupError::ImageLimit { required, supported });
+    }
     let config = configure_surface(&adapter, &surface, width, height)?;
     let gpu = Gpu::new::<P>(instance, adapter, device, queue, config.format);
     let target = SurfaceTarget::from_raw(&gpu.device, surface, config);

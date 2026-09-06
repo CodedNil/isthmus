@@ -83,12 +83,12 @@ impl Lyrics {
         Self { segments: Some(segments), ..Self::default() }
     }
 
-    pub(crate) fn prepare(&mut self, duration_ms: f32, shaper: &text::Shaper) {
+    pub(crate) fn prepare(&mut self, duration_ms: f32, text: &text::Text) {
         let Some(segments) = self.segments.take() else { return };
-        *self = Self::shape(segments, duration_ms, shaper);
+        *self = Self::shape(segments, duration_ms, text);
     }
 
-    fn shape(mut segments: Vec<LyricSegment>, duration_ms: f32, shaper: &text::Shaper) -> Self {
+    fn shape(mut segments: Vec<LyricSegment>, duration_ms: f32, text: &text::Text) -> Self {
         segments.retain(|segment| !segment.text.trim().is_empty());
         segments.sort_by(|left, right| left.start_ms.total_cmp(&right.start_ms));
         if segments.is_empty() {
@@ -99,12 +99,12 @@ impl Lyrics {
         let mut timeline = vec![(0.0, 0.0)];
         let mut cursor = 0.0;
         let mut vocal_end = 0.0;
-        let space = shaper.width(" ", 15.0, 700.0);
+        let space = text.width(" ", 15.0, 700.0);
         for segment in &segments {
             let silence = (segment.start_ms - vocal_end).max(0.0);
             cursor += silence * Self::SILENCE_SPEED;
             let value = segment.text.trim_start();
-            let width = shaper.width(value, 15.0, 700.0);
+            let width = text.width(value, 15.0, 700.0);
             let position = cursor;
             words.push(PositionedLyric { text: value.into(), background: segment.background, position, width });
             cursor += width + space * f32::from(segment.break_after);
@@ -140,8 +140,8 @@ impl Lyrics {
         }
     }
 
-    pub(crate) fn visible(&self, shaper: &text::Shaper, range: Range<f32>, background: bool) -> text::ShapedLine {
-        shaper.shape_positioned(
+    pub(crate) fn visible(&self, text: &text::Text, range: Range<f32>, background: bool) -> text::ShapedLine {
+        text.shape_positioned(
             self.words
                 .iter()
                 .filter(|word| {
@@ -167,7 +167,7 @@ impl Enrichment {
                     .music
                     .queue
                     .iter_mut()
-                    .filter(|track| track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching))
+                    .filter(|track| track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching(_)))
                 {
                     track.runtime.lyrics = match &result {
                         Ok(segments) => Fetch::Ready(Lyrics::new(segments.clone())),
