@@ -1,22 +1,22 @@
 use crate::{
-    interaction::Rect,
-    music::{Music, TRACK_SPACING_MS, Track},
+    music::{Music, TRACK_SPACING_MS},
     render::{
-        BarLayout, Fragment, GAP, PANEL_START, TextFragment, UiContext,
-        sdf::{ShapeFragment, VISIBLE_ALPHA, cantus_surface, glass, hash, refracted_text, sample_pill, simplex_noise},
+        BarLayout, GAP, PANEL_START, Program, TEXT_COLOR, UiContext,
+        sdf::{deform, hash, lens, refract, simplex_noise},
     },
 };
 use core::{
     f32::consts::{FRAC_PI_2, TAU},
-    f64::consts::TAU as TAU_F64,
+    f64,
 };
 use isthmus::{
-    Blend, ColorExt as _, Float as _, Image, Quad, Sdf, Unorm8x4,
-    geometry::sdf::{Capsule, Circle, Shape, SmoothUnion, circle, pill as sdf_pill},
+    Blend, ColorExt as _, Float as _, Image, Quad, ShaderData, Unorm8x4,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     shader,
     spirv_std::arch::{Derivative as _, kill},
 };
+use isthmus_sdf::{Shape, Text};
+use serde::Deserialize;
 use smallvec::SmallVec;
 
 /// Number of colors extracted from album artwork.
@@ -29,18 +29,16 @@ const ICON_REACTION_RADIUS: f32 = ICON_WIDTH * 2.5;
 const PRIMARY_SUPPORT_DEPTH: f32 = 7.0;
 const SECONDARY_SUPPORT_DEPTH: f32 = 18.0;
 
-type MusicShape = SmoothUnion<SmoothUnion<Capsule, Capsule>, Capsule>;
-
-fn music_shape(pill: Quad, supports: [Vec2; 2]) -> Shape<MusicShape> {
+fn music_shape(pill: Quad, supports: [Vec2; 2]) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
     let bottom = pill.center.y + pill.size.y * 0.5;
     let support = |index: usize| {
-        sdf_pill(Quad::new(
+        Shape::pill(Quad::new(
             vec2(pill.center.x, bottom - 6.0 + index as f32 * 7.0 + supports[index].y * 0.5),
             supports[index],
             Vec2::X,
         ))
     };
-    sdf_pill(pill).smooth_union(support(0), 9.0, supports[0].y / PRIMARY_SUPPORT_DEPTH).smooth_union(
+    Shape::pill(pill).smooth_union(support(0), 9.0, supports[0].y / PRIMARY_SUPPORT_DEPTH).smooth_union(
         support(1),
         9.0,
         supports[1].y / SECONDARY_SUPPORT_DEPTH,
@@ -48,7 +46,7 @@ fn music_shape(pill: Quad, supports: [Vec2; 2]) -> Shape<MusicShape> {
 }
 
 /// Spotify audio characteristics normalized for shader and UI use.
-#[derive(Clone, Copy, Default, isthmus::ShaderData, serde::Deserialize)]
+#[derive(Clone, Copy, Default, ShaderData, Deserialize)]
 #[shader_data(unorm16)]
 pub struct AudioFeatures {
     pub energy: f32,
@@ -75,7 +73,6 @@ struct Particle {
     spawned_at: f32 = 0.0,
     expires_at: f32 = 0.0,
     color: Vec3 = Vec3::ZERO,
-    sway: f32 = 0.0,
     size: Vec2 = Vec2::new(10.0, 5.0),
 }
 
@@ -83,12 +80,12 @@ fn particle_color(color: Vec3) -> Vec3 {
     Vec3::splat(color.dot(vec3(0.299, 0.587, 0.114))).lerp(color, 2.0).lerp(Vec3::ONE, 0.2) * 2.0
 }
 
-fn icon_color(color: Vec3, shape: Sdf, alpha: f32) -> Vec4 {
-    let mask = shape.fill();
-    let shadow = (-shape.distance.max(0.0) * 0.5).exp();
-    let bevel = shape.distance.smoothstep(-5.0, 0.0);
-    let coverage = mask.max(shadow * shadow * 0.2) * alpha;
-    ((color + bevel * bevel * 0.045) * mask * alpha / coverage.max(0.0001)).extend(coverage)
+fn shade_icon(color: Vec3, shape: Shape<impl Fn(Vec2) -> f32 + Copy>, point: Vec2) -> Vec4 {
+    let sample = shape.sample_at(point);
+    let mask = sample.fill();
+    let bevel = sample.distance.smoothstep(-5.0, 0.0);
+    let coverage = mask.max((-sample.distance.max(0.0)).exp() * 0.2);
+    ((color + bevel * bevel * 0.045) * (mask / coverage.max(0.0001))).extend(coverage)
 }
 
 /// Twinkling points for acoustic tracks.
@@ -125,21 +122,24 @@ impl MusicView {
         let future_start_ms =
             (context.config.timeline_future_minutes - context.config.timeline_past_minutes) * 60_000.0;
         let future_end = history_width + context.config.timeline_future_minutes * 60_000.0 * bar.px_per_ms + width_trim;
+        context
+            .interaction
+            .input_region(Quad::from_min_max(vec2(0.0, PANEL_START), vec2(future_end, PANEL_START + panel_height)));
         let mut compact_tracks = 0;
         let mut transition = 0.0;
-        let mut start_ms = music.timeline.queue_start_ms + music.queue.iter().map(Track::queue_span_ms).sum::<f32>();
-        for track in music.queue.iter().rev() {
-            start_ms -= track.queue_span_ms();
+        let mut start_ms = music.timeline.queue_start_ms;
+        for track in &music.queue {
             let natural_end = bar.playhead_x + (start_ms + track.duration_ms as f32) * bar.px_per_ms;
             if (history_width..history_width + panel_height).contains(&natural_end) {
                 transition = (history_width + panel_height - natural_end) / panel_height;
             } else if natural_end < history_width {
                 compact_tracks += 1;
             }
+            start_ms += track.queue_span_ms();
         }
 
         // Track render and interaction
-        let mut drag_response = None;
+        let drag = context.interaction.drag_motion();
         let mouse_pos = context.interaction.mouse_pos();
         let mouse_pressure = context.interaction.pressure();
         let mut seek_action = None;
@@ -169,8 +169,11 @@ impl MusicView {
             if width <= 0.0 || x + width <= 0.0 {
                 continue;
             }
-            let hovered =
-                Rect::new(x, PANEL_START, x + width.max(panel_height), PANEL_START + panel_height).contains(mouse_pos);
+            let hovered = Shape::pill(Quad::from_min_max(
+                vec2(x, PANEL_START),
+                vec2(x + width.max(panel_height), PANEL_START + panel_height),
+            ))
+            .contains(mouse_pos);
             visible.push((hovered, queue_index, track_start_ms, natural_start, x, width));
         }
         visible.sort_by_key(|&(hovered, ..)| hovered);
@@ -196,12 +199,15 @@ impl MusicView {
                 } else {
                     format!("{}s\u{2004}•\u{2004}{}", seconds.round(), track.artist)
                 };
-                (context.frame.text.shape(title, 16.0, 700.0), context.frame.text.shape(&details, 14.0, 700.0))
+                (
+                    context.frame.resources.shape(title, 16.0, 700.0),
+                    context.frame.resources.shape(&details, 14.0, 700.0),
+                )
             });
             if expansion > 0.0
                 && let Some((title, details)) = &track_text
             {
-                let target = title.width.max(details.width) + panel_height + 20.0;
+                let target = title.text.width.max(details.text.width) + panel_height + 20.0;
                 let extra_width = (target - width).max(0.0) * expansion;
                 x -= extra_width * 0.5;
                 width += extra_width;
@@ -242,129 +248,115 @@ impl MusicView {
             let primary_icons = stars as f32 * star_alpha + primary_count as f32 * playlist_alpha;
             let primary_alpha = star_alpha.max(playlist_alpha);
             let secondary_alpha = expansion * secondary_count.min(1) as f32;
-            let icon_supports = [
+            let icon_supports: [Vec2; 2] = [
                 vec2(row_width(primary_icons) * primary_alpha, primary_alpha * PRIMARY_SUPPORT_DEPTH),
                 vec2(row_width(secondary_count as f32) * secondary_alpha, secondary_alpha * SECONDARY_SUPPORT_DEPTH),
             ];
-            let pill_rect = Rect::new(x, PANEL_START, x + width.max(panel_height), PANEL_START + panel_height);
-            let colors = track.runtime.art.palette();
-            let art = track.runtime.art.ready();
+            let pill =
+                Quad::from_min_max(vec2(x, PANEL_START), vec2(x + width.max(panel_height), PANEL_START + panel_height));
             let alpha = width.smoothstep(panel_height, panel_height + 26.0).max(f32::from(track_start_ms <= 0.0));
-            let seed =
-                track.uri.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-                    (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-                }) as u32 as f32
-                    * 2.328_306_4e-10;
-            let audio = track.runtime.audio_features.ready().copied().unwrap_or_default();
-            let pulse = ((f64::from(context.frame.time) * f64::from(audio.tempo) * 5.0).fract() * TAU_F64).sin() as f32
-                * 0.5
-                + 0.5;
-            // Pill interaction
-            let body = context.interaction.drag(track.interaction_id, pill_rect);
+            let shape = music_shape(pill, icon_supports);
+            if let Some(bounds) = shape.bounds(0.0) {
+                context.interaction.input_region(bounds);
+            }
+            let body = context.interaction.drag(track.interaction_id, shape);
             let mut hovered = body.hovered;
-            if body.clicked() && track.id.is_some() {
-                let pointer_x = mouse_pos.x;
-                let near_visible_start = pointer_x <= pill_rect.min.x.lerp(pill_rect.max.x, 0.05);
-                let fraction = if queue_index == music.timeline.index && near_visible_start {
+            if body.clicked && track.id.is_some() {
+                let fraction = if queue_index == music.timeline.index && mouse_pos.x <= x + pill.size.x * 0.05 {
                     0.0
                 } else {
-                    ((pointer_x - natural_start) / (track.duration_ms as f32 * bar.px_per_ms)).clamp(0.0, 1.0)
+                    ((mouse_pos.x - natural_start) / (track.duration_ms as f32 * bar.px_per_ms)).saturate()
                 };
                 seek_action = Some((queue_index, track.duration_ms, fraction));
             }
-            // Pill render
-            let pill: Quad = pill_rect.into();
-            context.frame.paint(
-                glass(music_shape(pill, icon_supports)),
-                shader!(|fragment: ShapeFragment<MusicShape>,
-                         alpha: f32,
-                         seed: f32,
-                         colors: [Unorm8x4; PALETTE_COLORS],
-                         audio: AudioFeatures,
-                         pulse: f32| {
-                    let surface = cantus_surface(
-                        fragment.base.base.quad,
-                        fragment.pixel,
-                        fragment.globals,
-                        fragment.time,
-                        fragment.geometry,
-                    );
 
-                    if surface.alpha * alpha <= VISIBLE_ALPHA {
-                        kill();
-                    }
-
-                    let uv = surface.uv();
-                    let pace = ((audio.tempo - 0.2) * 2.5).saturate();
-                    let flow_time = fragment.time * 0.2 + seed + (fragment.time * 0.17).sin() * (audio.energy + pace);
-                    let beat = pulse * pulse * audio.danceability * (0.025 + audio.energy * 0.055);
-                    let turbulence = audio.energy * 0.65 + audio.danceability * 0.35;
-
-                    // Distort pill-local coordinates into a slow, overlapping plasma field.
-                    let lens = (1.0 + surface.distance.min(0.0) / 120.0).saturate();
-                    let deformation = (uv - 0.5) * lens * lens * 0.6 + surface.ripple;
-                    let frequency =
-                        (surface.size.x / surface.size.y * (0.5 + seed.fract() * 0.12 + turbulence * 0.18)).max(1.7);
-                    let field = (uv.clamp(Vec2::ZERO, Vec2::ONE) - deformation * 0.08) * vec2(frequency, 1.6);
-                    let warped = field
-                        + vec2(
-                            (field.y * 2.7 + flow_time).sin() + (field.x * 1.3 - flow_time * 0.7).cos(),
-                            (field.x * 2.3 - flow_time * 0.8).cos() + (field.y * 1.7 + flow_time * 0.6).sin(),
-                        ) * (0.14 + turbulence * 0.2 + beat);
-
-                    // Weight each wave by its palette colour's prevalence.
-                    let directions = [vec2(2.1, 0.7), vec2(0.6, -2.4), vec2(-1.5, 1.9), vec2(2.4, 1.6)];
-                    let phases = [
-                        flow_time,
-                        seed + FRAC_PI_2 - flow_time * 0.8,
-                        flow_time * 0.65 + 2.0,
-                        seed + FRAC_PI_2 - flow_time * 0.55,
-                    ];
-                    let mut plasma = Vec4::ZERO;
-                    for index in 0..PALETTE_COLORS {
-                        let swatch = colors[index].to_vec4();
-                        let wave = (warped.dot(directions[index]) + phases[index]).sin() * 0.5 + 0.5;
-                        let weight = (0.12 + wave * wave) * (0.25 + swatch.w * 3.0);
-                        plasma += (swatch.truncate() * weight).extend(weight);
-                    }
-                    let mut color = plasma.truncate() / plasma.w.max(0.001);
-
-                    // Normalize brightness before applying track character and playback state.
-                    let luma = color.dot(vec3(0.2126, 0.7152, 0.0722));
-                    color = Vec3::splat(luma)
-                        .lerp(color, 1.55 + audio.valence * 0.4)
-                        .clamp(Vec3::splat(0.035), Vec3::splat(0.92))
-                        * (0.52 / luma.max(0.001)).min(1.0)
-                        * (0.96 + audio.valence * 0.06 + beat * 0.5)
-                        * (0.84 + (surface.refracted / surface.size).y.smoothstep(0.45, 1.0) * 0.1);
-
-                    // Material details sit above the plasma but below refraction/ripple response.
-                    color +=
-                        colors[3].to_vec3().lerp(Vec3::ONE, 0.25) * speckle(surface.local, fragment.time, seed, audio);
-                    color *= 1.0 + caustics(surface.local / surface.size.y, fragment.time, seed, audio);
-                    surface.color(color).opacity(alpha)
-                }),
+            shader!(
+                context
+                    .frame
+                    .upload({
+                        let alpha: f32;
+                        let seed: f32 = track.uri.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+                            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                        }) as u32 as f32
+                            * 2.328_306_4e-10;
+                        let colors: [Unorm8x4; PALETTE_COLORS] = music.resources.palette(track.image.as_deref());
+                        let audio: AudioFeatures = music.resources.audio(track.id);
+                        let pill: Quad;
+                        let icon_supports: [Vec2; 2];
+                        let flow_time: f32 = {
+                            let pace = ((audio.tempo - 0.2) * 2.5).saturate();
+                            context.frame.time * 0.2 + seed + (context.frame.time * 0.17).sin() * (audio.energy + pace)
+                        };
+                        let beat: f32 = {
+                            let pulse = ((f64::from(context.frame.time) * f64::from(audio.tempo) * 5.0).fract()
+                                * f64::consts::TAU)
+                                .sin() as f32
+                                * 0.5
+                                + 0.5;
+                            pulse * pulse * audio.danceability * (0.025 + audio.energy * 0.055)
+                        };
+                        let turbulence: f32 = audio.energy * 0.65 + audio.danceability * 0.35;
+                        let frequency: f32 =
+                            (pill.size.x / pill.size.y * (0.5 + seed.fract() * 0.12 + turbulence * 0.18)).max(1.7);
+                    })
+                    .vertex(|frame| deform(music_shape(pill, icon_supports), frame))
+                    .fragment(|frame, surface| {
+                        let uv = pill.uv(surface.pixel);
+                        let lens = (1.0 + surface.sdf.distance.min(0.0) / 120.0).saturate();
+                        let deformation = (uv - 0.5) * lens * lens * 0.6 + surface.ripple;
+                        let field = (uv.clamp(Vec2::ZERO, Vec2::ONE) - deformation * 0.08) * vec2(frequency, 1.6);
+                        let warped = field
+                            + vec2(
+                                (field.y * 2.7 + flow_time).sin() + (field.x * 1.3 - flow_time * 0.7).cos(),
+                                (field.x * 2.3 - flow_time * 0.8).cos() + (field.y * 1.7 + flow_time * 0.6).sin(),
+                            ) * (0.14 + turbulence * 0.2 + beat);
+                        let directions = [vec2(2.1, 0.7), vec2(0.6, -2.4), vec2(-1.5, 1.9), vec2(2.4, 1.6)];
+                        let phases = [
+                            flow_time,
+                            seed + FRAC_PI_2 - flow_time * 0.8,
+                            flow_time * 0.65 + 2.0,
+                            seed + FRAC_PI_2 - flow_time * 0.55,
+                        ];
+                        let mut plasma = Vec4::ZERO;
+                        for index in 0..PALETTE_COLORS {
+                            let swatch = colors[index].to_vec4();
+                            let wave = (warped.dot(directions[index]) + phases[index]).sin() * 0.5 + 0.5;
+                            let weight = (0.12 + wave * wave) * (0.25 + swatch.w * 3.0);
+                            plasma += (swatch.truncate() * weight).extend(weight);
+                        }
+                        let mut color = plasma.truncate() / plasma.w.max(0.001);
+                        let luma = color.dot(vec3(0.2126, 0.7152, 0.0722));
+                        color = Vec3::splat(luma)
+                            .lerp(color, 1.55 + audio.valence * 0.4)
+                            .clamp(Vec3::splat(0.035), Vec3::splat(0.92))
+                            * (0.52 / luma.max(0.001)).min(1.0)
+                            * (0.96 + audio.valence * 0.06 + beat * 0.5)
+                            * (0.84 + pill.uv(surface.refracted).y.smoothstep(0.45, 1.0) * 0.1);
+                        color += colors[3].to_vec3().lerp(Vec3::ONE, 0.25)
+                            * speckle(uv * pill.size, frame.time, seed, audio);
+                        color *= 1.0 + caustics(uv * pill.size / pill.size.y, frame.time, seed, audio);
+                        surface.glass(color).opacity(alpha)
+                    })
             );
 
             // Artwork render
-            if let Some(art) = art {
-                let image = &art.image;
-                let center = pill.center + vec2((pill.size.x - pill.size.y) * 0.5, 0.0);
-                context.frame.paint(
-                    glass(circle(center, pill.size.y * 0.5)),
-                    shader!(|fragment: ShapeFragment<Circle>, pill: Quad, image: Image, alpha: f32| {
-                        let surface = sample_pill(pill, fragment.pixel, fragment.globals, fragment.time);
-                        let image_center =
-                            vec2(surface.size.x - surface.size.y, 0.0) + Vec2::splat(surface.size.y * 0.5);
-                        let offset = surface.local - image_center;
-                        let radius = surface.size.y * 0.5 + surface.bulge() * 0.5;
-                        let texture = image.sample(offset / (radius * 2.0) + 0.5);
-                        let alpha = texture.w
-                            * (offset.length() - radius).smoothstep(0.0, -4.0)
-                            * surface.distance.smoothstep(0.5, -0.5)
-                            * alpha;
-                        texture.truncate().extend(alpha)
-                    }),
+            if let Some(art) = music.resources.art(track.image.as_deref()) {
+                shader!(
+                    context
+                        .frame
+                        .upload({
+                            let pill: Quad;
+                            let image: &Image = &art.image;
+                            let alpha: f32;
+                            let center: Vec2 = pill.center + vec2((pill.size.x - pill.size.y) * 0.5, 0.0);
+                        })
+                        .vertex(|frame| lens(Shape::pill(pill), frame, Shape::circle(center, pill.size.y * 0.5)))
+                        .fragment(|_, surface| {
+                            let offset = surface.refracted - center;
+                            let radius = pill.size.y * 0.5 + surface.bulge * 0.5;
+                            let texture = image.sample(offset / (radius * 2.0) + 0.5);
+                            texture.opacity(surface.sdf.distance.smoothstep(0.0, -4.0) * alpha)
+                        })
                 );
             }
 
@@ -374,24 +366,33 @@ impl MusicView {
                 && let Some((title, details)) = track_text
             {
                 for (line, y) in [(title, 0.26), (details, 0.57)] {
-                    let line = context.frame.text.fit(&line, (panel_height * y).floor(), left..right);
-                    context.frame.paint(
-                        refracted_text(line).translated(pill.center - pill.size * 0.5),
-                        shader!(|text: TextFragment<'_>, pill: Quad, alpha: f32| {
-                            let surface = sample_pill(pill, text.pixel, text.globals, text.time);
-                            let image_center =
-                                vec2(surface.size.x - surface.size.y, 0.0) + Vec2::splat(surface.size.y * 0.5);
-                            let alpha = Sdf::capsule(surface.refracted - image_center, 0.0, surface.size.y * 0.5)
-                                .distance
-                                .smoothstep(2.0, 18.0)
-                                * alpha;
-                            surface.text(&text).opacity(alpha)
-                        }),
+                    shader!(
+                        context
+                            .frame
+                            .upload({
+                                let pill: Quad;
+                                let alpha: f32;
+                                let line: Text = context
+                                    .frame
+                                    .resources
+                                    .place(&line, pill.center - pill.size * 0.5)
+                                    .fit((panel_height * y).floor(), left..right);
+                            })
+                            .vertex(|frame| refract(Shape::pill(pill), frame, line.bounds()))
+                            .fragment(|_, surface| {
+                                let image_center = pill.center + vec2((pill.size.x - pill.size.y) * 0.5, 0.0);
+                                if surface.refracted.x >= image_center.x {
+                                    kill();
+                                }
+                                let alpha = (surface.refracted.distance(image_center) - pill.size.y * 0.5)
+                                    .smoothstep(2.0, 18.0)
+                                    * alpha;
+                                TEXT_COLOR.extend(alpha * line.sample_at(surface.content).fill())
+                            })
                     );
                 }
             }
             // Icon interaction and render
-            let mut toggled_playlist = None;
             let mut burst = false;
             if let Some(track_id) = track.id {
                 for slot in 0..stars + primary_count + secondary_count {
@@ -417,8 +418,15 @@ impl MusicView {
                         pill.center.x + (icon - (count - 1.0).max(0.0) * 0.5) * ICON_SPACING * expansion,
                         PANEL_START + panel_height * 0.975 - 1.0 + f32::from(secondary) * ICON_SPACING * expansion,
                     );
-                    let response =
-                        context.interaction.interact(Rect::from_center(center, Vec2::splat(ICON_WIDTH * 0.5)));
+                    let response = context.interaction.interact(
+                        (
+                            "music-icon",
+                            track.interaction_id,
+                            is_star.then_some(slot),
+                            if is_star { None } else { Some(music.playlists[playlist_icons[playlist_slot]].id) },
+                        ),
+                        Shape::circle(center, ICON_WIDTH * 0.5),
+                    );
                     hovered |= response.hovered;
                     let mouse_distance = center.distance(mouse_pos);
                     let proximity = mouse_distance.smoothstep(ICON_REACTION_RADIUS, ICON_WIDTH * 0.25)
@@ -432,25 +440,34 @@ impl MusicView {
                     );
 
                     if !is_star {
-                        let playlist_index = playlist_icons[playlist_slot];
-                        let playlist = &music.playlists[playlist_index];
-                        if response.clicked() {
-                            toggled_playlist = Some(playlist.id);
+                        let playlist = &music.playlists[playlist_icons[playlist_slot]];
+                        if response.clicked {
+                            playlist_toggle = Some((track_id, playlist.id));
+                            burst = true;
                         }
-                        if let Some(art) = playlist.art.ready() {
-                            let image = &art.image;
-                            let desaturation = 0.2
-                                * f32::from(secondary && (mouse_pressure <= 0.0 || mouse_distance > ICON_WIDTH * 0.5));
-                            context.frame.paint(
-                                quad,
-                                shader!(|fragment: Fragment, image: Image, alpha: f32, desaturation: f32| {
-                                    let texture = image.sample(fragment.uv);
-                                    icon_color(
-                                        texture.truncate().lerp(Vec3::splat(0.24), desaturation),
-                                        Sdf::capsule((fragment.uv * 2.0 - 1.0) * 18.0, 0.0, 6.7),
-                                        alpha,
-                                    )
-                                }),
+                        if let Some(art) = music.resources.art(playlist.image_url.as_deref()) {
+                            shader!(
+                                context
+                                    .frame
+                                    .upload({
+                                        let image: &Image = &art.image;
+                                        let alpha: f32;
+                                        let desaturation: f32 = 0.2
+                                            * f32::from(
+                                                secondary
+                                                    && (mouse_pressure <= 0.0 || mouse_distance > ICON_WIDTH * 0.5),
+                                            );
+                                        let quad: Quad;
+                                    })
+                                    .vertex(quad)
+                                    .fragment(|_, surface| {
+                                        shade_icon(
+                                            image.sample(surface.uv).truncate().lerp(Vec3::splat(0.24), desaturation),
+                                            Shape::circle(Vec2::ZERO, 6.7),
+                                            (surface.uv * 2.0 - 1.0) * 18.0,
+                                        )
+                                        .opacity(alpha)
+                                    })
                             );
                         }
                     } else if let Some(rating) = rating.as_mut() {
@@ -458,25 +475,31 @@ impl MusicView {
                         if response.hovered {
                             *rating = slot as i32 * 2 + 1 + i32::from(right_half);
                         }
-                        if response.clicked() {
+                        if response.clicked {
                             rated_track = Some((track_id, slot as u8 * 2 + u8::from(right_half)));
                             burst = true;
                         }
-                        let fill = ((*rating as f32 - slot as f32 * 2.0) * 0.5).saturate();
-                        context.frame.paint(
-                            quad,
-                            shader!(|fragment: Fragment, fill: f32, alpha: f32| {
-                                let split = fragment.uv.x - fill;
-                                let unselected = (split / split.fwidth() + 0.5).saturate();
-                                let star = Sdf::star((fragment.uv * 2.0 - 1.0) * 18.0, 5.6, 3.58) - 1.12;
-                                icon_color(vec3(1.0, 0.85, 0.2).lerp(Vec3::splat(0.33), unselected), star, alpha)
-                            }),
+                        shader!(
+                            context
+                                .frame
+                                .upload({
+                                    let fill: f32 = (*rating as f32 * 0.5 - slot as f32).saturate();
+                                    let alpha: f32;
+                                    let quad: Quad;
+                                })
+                                .vertex(quad)
+                                .fragment(|_, surface| {
+                                    let split = surface.uv.x - fill;
+                                    let unselected = (split / split.fwidth() + 0.5).saturate();
+                                    shade_icon(
+                                        vec3(1.0, 0.85, 0.2).lerp(Vec3::splat(0.33), unselected),
+                                        Shape::star(5.6, 3.58).offset(1.12),
+                                        (surface.uv * 2.0 - 1.0) * 18.0,
+                                    )
+                                    .opacity(alpha)
+                                })
                         );
                     }
-                }
-                if let Some(playlist_id) = toggled_playlist {
-                    playlist_toggle = Some((track_id, playlist_id));
-                    burst = true;
                 }
             }
             if burst {
@@ -497,9 +520,6 @@ impl MusicView {
                 f32::from(hovered && width > panel_height && alpha >= 1.0),
                 context.frame.delta_time.min(0.1) / 0.16,
             );
-            if body.dragging() {
-                drag_response = Some(body);
-            }
         }
         if let Some((index, duration_ms, fraction)) = seek_action {
             music.seek(index, duration_ms, fraction);
@@ -512,11 +532,10 @@ impl MusicView {
         }
 
         // Track dragging
-        let drag_offset_ms =
-            drag_response.map_or(0.0, |response| (mouse_pos.x - response.drag_origin.x) / bar.px_per_ms);
-        music.update_timeline(drag_offset_ms, drag_response.is_some(), context.frame.delta_time);
+        let drag_offset_ms = drag.map_or(0.0, |(offset, _)| offset.x / bar.px_per_ms);
+        music.update_timeline(drag_offset_ms, drag.is_some(), context.frame.delta_time);
         let playhead_track = music.timeline.track_at_playhead(&music.queue);
-        if drag_response.is_some_and(|response| response.released())
+        if drag.is_some_and(|(_, released)| released)
             && let Some((index, position_ms)) = playhead_track
         {
             let track = &music.queue[index];
@@ -529,14 +548,14 @@ impl MusicView {
         let time = context.frame.time;
         if let Some((index, _)) = playhead_track {
             let track = &music.queue[index];
-            let audio = track.runtime.audio_features.ready().copied().unwrap_or_default();
+            let audio = music.resources.audio(track.id);
             self.particles_debt = (self.particles_debt + context.frame.delta_time * (20.0 + audio.energy * 35.0))
                 * f32::from(music.timeline.movement.abs() > 0.00001);
             let emit_count = self.particles_debt.floor() as usize;
             self.particles_debt -= emit_count as f32;
             let horizontal_bias =
                 (music.timeline.movement.abs().powf(0.2) * music.timeline.movement.signum()).clamp(-3.0, 3.0);
-            let palette = track.runtime.art.palette();
+            let palette = music.resources.palette(track.image.as_deref());
             for particle in self.particles.iter_mut().filter(|particle| particle.expires_at <= time).take(emit_count) {
                 let y = fastrand::f32();
                 *particle = Particle {
@@ -548,7 +567,6 @@ impl MusicView {
                     spawned_at: time,
                     expires_at: time + 0.8 + audio.acousticness * 0.8 + fastrand::f32() * 0.3,
                     color: particle_color(palette[fastrand::usize(0..palette.len())].to_vec3()),
-                    sway: (fastrand::f32() - 0.5) * (4.0 + audio.danceability * 18.0),
                     size: vec2(7.0 + audio.acousticness * 9.0, 3.0 + audio.energy * 4.0),
                 };
             }
@@ -560,29 +578,29 @@ impl MusicView {
         for particle in self.particles.iter().filter(|particle| particle.expires_at > time) {
             let elapsed = time - particle.spawned_at;
             let age = elapsed / (particle.expires_at - particle.spawned_at);
-            let opacity = (1.0 - age) * elapsed.smoothstep(0.0, 0.15);
-            let color = particle.color;
-            context.frame.paint(
-                Quad::oriented(
-                    particle.origin
-                        + particle.velocity * elapsed
-                        + vec2(0.0, (elapsed * 4.0).sin() * elapsed * particle.sway),
-                    particle.size * (age + 0.5),
-                    particle.velocity,
-                ),
-                shader!(Blend::Add, |fragment: Fragment, color: Vec3, opacity: f32| {
-                    let radius = (fragment.uv * 2.0 - 1.0).length_squared();
-                    let shape = (1.0 - radius).max(0.0).powi(3);
-                    color.extend(opacity * shape)
-                }),
+            shader!(
+                context
+                    .frame
+                    .blend(Blend::Add)
+                    .upload({
+                        let quad: Quad = Quad::oriented(
+                            particle.origin + particle.velocity * elapsed,
+                            particle.size * (age + 0.5),
+                            particle.velocity,
+                        );
+                        let color: Vec4 = particle.color.extend((1.0 - age) * elapsed.smoothstep(0.0, 0.15));
+                    })
+                    .vertex(quad)
+                    .fragment(|_, surface| {
+                        color.opacity((1.0 - (surface.uv * 2.0 - 1.0).length_squared()).max(0.0).powi(3))
+                    })
             );
         }
         // Playhead interaction and render
         let half_width = panel_height * 0.4;
-        let response = context.interaction.interact(Rect::from_center(
-            vec2(bar.playhead_x, PANEL_START + panel_height * 0.5),
-            Vec2::splat(half_width),
-        ));
+        let playhead =
+            Quad::new(vec2(bar.playhead_x, PANEL_START + panel_height * 0.5), Vec2::splat(half_width * 2.0), Vec2::X);
+        let response = context.interaction.interact("playhead", Shape::rectangle(playhead));
         let speed = context.frame.delta_time * 5.5;
         let last_toggle = music.last_toggle.elapsed().as_secs_f32() / 0.7;
         if !response.hovered && music.playing && last_toggle < 1.0 {
@@ -592,48 +610,47 @@ impl MusicView {
         } else {
             let show_icon = f32::from(response.hovered || !music.playing);
             self.bar_split = self.bar_split.move_towards(show_icon, speed);
-            self.icon_presence = self.icon_presence.max(show_icon);
-            self.icon_presence = self.icon_presence.move_towards(show_icon, speed);
+            self.icon_presence = self.icon_presence.max(show_icon).move_towards(show_icon, speed);
             self.icon_morph = self.icon_morph.move_towards(f32::from(response.hovered && !music.playing), speed);
         }
-        if response.clicked() {
+        if response.clicked {
             music.toggle_playing();
         }
-        let bar_split = self.bar_split;
-        let icon_presence = self.icon_presence;
-        let icon_morph = self.icon_morph;
-        context.frame.paint(
-            Quad::from_min_max(
-                vec2(bar.playhead_x - half_width, PANEL_START - 5.0),
-                vec2(bar.playhead_x + half_width, PANEL_START + panel_height + 5.0),
-            ),
-            shader!(|fragment: Fragment, bar_split: f32, icon_presence: f32, icon_morph: f32| {
-                let mirrored = fragment.local.abs();
-                let bar_len = fragment.globals.bar_height * (0.5 - 0.375 * bar_split);
-                let bar_distance = Sdf::capsule(
-                    vec2(mirrored.y - (fragment.globals.bar_height - bar_len) * 0.5, mirrored.x),
-                    bar_len * 0.5,
-                    4.5,
-                );
-                let pause_distance = vec2(
-                    (mirrored.x - 4.0 * bar_split).abs(),
-                    (mirrored.y - fragment.globals.bar_height * 0.1).max(0.0),
-                )
-                .length()
-                    - 3.5;
-                let play_scale = fragment.globals.bar_height * 0.18 * (1.0 + icon_morph * (1.0 - icon_presence));
-                let play_distance = Sdf::rounded_triangle(fragment.local.perp(), play_scale, play_scale * 0.5);
-                let icon_distance = Sdf::new(pause_distance).lerp(play_distance, icon_morph);
-                let bar_mask = bar_distance.fill();
-                let icon_mask = icon_distance.fill() * icon_presence;
-                let alpha = icon_mask.max(bar_mask);
-                if alpha <= 0.0 {
-                    kill();
-                }
-                let color = vec3(1.0, 0.878, 0.824)
-                    .lerp(Vec3::splat(0.15), bar_distance.union(icon_distance).distance.smoothstep(-2.5, -1.0));
-                color.extend(alpha)
-            }),
+        shader!(
+            context
+                .frame
+                .upload({
+                    let bar_split: f32 = self.bar_split;
+                    let icon_presence: f32 = self.icon_presence;
+                    let icon_morph: f32 = self.icon_morph;
+                    let quad: Quad = Quad::from_min_max(
+                        vec2(bar.playhead_x - half_width, PANEL_START - 5.0),
+                        vec2(bar.playhead_x + half_width, PANEL_START + panel_height + 5.0),
+                    );
+                })
+                .vertex(quad)
+                .fragment(|frame, surface| {
+                    let local = quad.local(surface.pixel);
+                    let mirrored = local.abs();
+                    let bar_len = frame.globals.bar_height * (0.5 - 0.375 * bar_split);
+                    let bar = Shape::pill(vec2(bar_len + 9.0, 9.0))
+                        .sample_at(vec2(mirrored.y - (frame.globals.bar_height - bar_len) * 0.5, mirrored.x));
+                    let pause = Shape::pill(vec2(7.0, frame.globals.bar_height * 0.2 + 7.0))
+                        .translated(vec2(4.0 * bar_split, 0.0));
+                    let play_scale = frame.globals.bar_height * 0.18 * (1.0 + icon_morph * (1.0 - icon_presence));
+                    let play = Shape::rounded_triangle(play_scale, play_scale * 0.5);
+                    let icon = Shape::from_fn(quad.size, move |point| {
+                        pause.distance_at(point.abs()).lerp(play.distance_at(point.perp()), icon_morph)
+                    })
+                    .sample_at(local);
+                    let alpha = (icon.fill() * icon_presence).max(bar.fill());
+                    if alpha <= 0.0 {
+                        kill();
+                    }
+                    let color = vec3(1.0, 0.878, 0.824)
+                        .lerp(Vec3::splat(0.15), bar.distance.min(icon.distance).smoothstep(-2.5, -1.0));
+                    color.extend(alpha)
+                })
         );
     }
 }

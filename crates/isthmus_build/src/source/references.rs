@@ -9,17 +9,15 @@ use syn::{
 pub(super) struct References {
     pub(super) paths: Vec<syn::Path>,
     pub(super) methods: HashSet<String>,
-    locals: Vec<HashSet<String>>,
+    locals: Vec<String>,
     pub(super) declarations: Vec<(syn::Macro, proc_macro2::LineColumn, HashSet<String>)>,
 }
 
 impl References {
-    fn bind(&mut self, pattern: &syn::Pat) {
-        if self.locals.is_empty() {
-            self.locals.push(HashSet::new());
-        }
-        let mut names = Bindings(self.locals.last_mut().expect("a local scope was created"));
-        names.visit_pat(pattern);
+    fn scoped(&mut self, visit: impl FnOnce(&mut Self)) {
+        let scope = self.locals.len();
+        visit(self);
+        self.locals.truncate(scope);
     }
 }
 
@@ -32,33 +30,31 @@ impl<'ast> Visit<'ast> for References {
 
     fn visit_macro(&mut self, i: &'ast syn::Macro) {
         if i.path.segments.last().is_some_and(|segment| segment.ident == "shader") {
-            self.declarations.push((i.clone(), i.path.span().start(), self.locals.iter().flatten().cloned().collect()));
+            self.declarations.push((i.clone(), i.path.span().start(), self.locals.iter().cloned().collect()));
         }
     }
 
     fn visit_item_mod(&mut self, _: &'ast syn::ItemMod) {}
 
     fn visit_expr_path(&mut self, i: &'ast syn::ExprPath) {
-        if i.path
-            .get_ident()
-            .is_none_or(|name| !self.locals.iter().rev().any(|scope| scope.contains(&name.to_string())))
-        {
-            self.paths.push(i.path.clone());
+        if i.path.get_ident().is_none_or(|name| !self.locals.contains(&name.to_string())) {
+            self.visit_path(&i.path);
+        } else {
+            for segment in &i.path.segments {
+                self.visit_path_arguments(&segment.arguments);
+            }
         }
         if i.path.segments.len() > 1 {
             self.methods.insert(i.path.segments.last().expect("path has segments").ident.to_string());
         }
-        visit::visit_expr_path(self, i);
+        if let Some(qself) = &i.qself {
+            self.visit_qself(qself);
+        }
     }
 
-    fn visit_type_path(&mut self, i: &'ast syn::TypePath) {
-        self.paths.push(i.path.clone());
-        visit::visit_type_path(self, i);
-    }
-
-    fn visit_expr_struct(&mut self, i: &'ast syn::ExprStruct) {
-        self.paths.push(i.path.clone());
-        visit::visit_expr_struct(self, i);
+    fn visit_path(&mut self, i: &'ast syn::Path) {
+        self.paths.push(i.clone());
+        visit::visit_path(self, i);
     }
 
     fn visit_expr_method_call(&mut self, i: &'ast syn::ExprMethodCall) {
@@ -67,16 +63,16 @@ impl<'ast> Visit<'ast> for References {
     }
 
     fn visit_block(&mut self, i: &'ast syn::Block) {
-        self.locals.push(HashSet::new());
+        let scope = self.locals.len();
         for statement in &i.stmts {
             if let syn::Stmt::Item(item) = statement
                 && let Some(name) = item_name(item)
             {
-                self.locals.last_mut().expect("a block scope was created").insert(name);
+                self.locals.push(name);
             }
         }
         visit::visit_block(self, i);
-        self.locals.pop();
+        self.locals.truncate(scope);
     }
 
     fn visit_item_fn(&mut self, i: &'ast syn::ItemFn) {
@@ -91,72 +87,44 @@ impl<'ast> Visit<'ast> for References {
         self.locals = outer;
     }
 
-    fn visit_trait_bound(&mut self, i: &'ast syn::TraitBound) {
-        self.paths.push(i.path.clone());
-        visit::visit_trait_bound(self, i);
-    }
-
-    fn visit_pat_struct(&mut self, i: &'ast syn::PatStruct) {
-        self.paths.push(i.path.clone());
-        visit::visit_pat_struct(self, i);
-    }
-
-    fn visit_pat_tuple_struct(&mut self, i: &'ast syn::PatTupleStruct) {
-        self.paths.push(i.path.clone());
-        visit::visit_pat_tuple_struct(self, i);
-    }
-
     fn visit_local(&mut self, i: &'ast syn::Local) {
         if let Some(init) = &i.init {
             self.visit_local_init(init);
         }
         self.visit_pat(&i.pat);
-        self.bind(&i.pat);
     }
 
-    fn visit_fn_arg(&mut self, i: &'ast syn::FnArg) {
-        visit::visit_fn_arg(self, i);
-        if let syn::FnArg::Typed(input) = i {
-            self.bind(&input.pat);
-        }
+    fn visit_pat_ident(&mut self, i: &'ast syn::PatIdent) {
+        self.locals.push(i.ident.to_string());
+        visit::visit_pat_ident(self, i);
     }
 
     fn visit_expr_closure(&mut self, i: &'ast syn::ExprClosure) {
-        self.locals.push(HashSet::new());
-        for input in &i.inputs {
-            self.visit_pat(input);
-            self.bind(input);
-        }
-        self.visit_expr(&i.body);
-        self.locals.pop();
+        self.scoped(|this| visit::visit_expr_closure(this, i));
     }
 
     fn visit_expr_for_loop(&mut self, i: &'ast syn::ExprForLoop) {
         self.visit_expr(&i.expr);
-        self.locals.push(HashSet::new());
-        self.bind(&i.pat);
+        let scope = self.locals.len();
+        self.visit_pat(&i.pat);
         self.visit_block(&i.body);
-        self.locals.pop();
+        self.locals.truncate(scope);
     }
 
     fn visit_arm(&mut self, i: &'ast syn::Arm) {
-        self.locals.push(HashSet::new());
-        self.bind(&i.pat);
-        visit::visit_arm(self, i);
-        self.locals.pop();
+        self.scoped(|this| visit::visit_arm(this, i));
     }
 
     fn visit_expr_let(&mut self, i: &'ast syn::ExprLet) {
         self.visit_expr(&i.expr);
         self.visit_pat(&i.pat);
-        self.bind(&i.pat);
     }
 
     fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
-        self.locals.push(HashSet::new());
+        let scope = self.locals.len();
         self.visit_expr(&i.cond);
         self.visit_block(&i.then_branch);
-        self.locals.pop();
+        self.locals.truncate(scope);
         if let Some((_, branch)) = &i.else_branch {
             self.visit_expr(branch);
         }
@@ -169,30 +137,6 @@ impl<'ast> Visit<'ast> for References {
     }
 
     fn visit_expr_while(&mut self, i: &'ast syn::ExprWhile) {
-        self.locals.push(HashSet::new());
-        self.visit_expr(&i.cond);
-        self.visit_block(&i.body);
-        self.locals.pop();
-    }
-}
-
-struct Bindings<'a>(&'a mut HashSet<String>);
-impl<'ast> Visit<'ast> for Bindings<'_> {
-    fn visit_pat_ident(&mut self, i: &'ast syn::PatIdent) {
-        self.0.insert(i.ident.to_string());
-        visit::visit_pat_ident(self, i);
-    }
-}
-
-pub(super) struct DefaultFields(pub bool);
-impl<'ast> Visit<'ast> for DefaultFields {
-    fn visit_field(&mut self, i: &'ast syn::Field) {
-        self.0 |= i.default.is_some();
-        visit::visit_field(self, i);
-    }
-
-    fn visit_expr_struct(&mut self, i: &'ast syn::ExprStruct) {
-        self.0 |= i.dot2_token.is_some() && i.rest.is_none();
-        visit::visit_expr_struct(self, i);
+        self.scoped(|this| visit::visit_expr_while(this, i));
     }
 }

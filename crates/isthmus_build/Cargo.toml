@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+hex = "0.4.3"
+sha2 = "0.11.0"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 syn = { version = "3", features = ["full", "visit", "visit-mut"] }

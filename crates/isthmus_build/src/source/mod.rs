@@ -1,8 +1,8 @@
 mod references;
-use crate::syntax::{Shader, program};
+use crate::syntax::{program, program_types, shader::Shader};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, quote};
-use references::{DefaultFields, References};
+use references::References;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     fs,
@@ -13,7 +13,7 @@ use std::{
 use syn::{Item, UseTree, punctuated::Punctuated, visit::Visit};
 
 pub struct Generated {
-    pub files: BTreeMap<PathBuf, String>,
+    pub source: String,
     pub shaders: Vec<Shader>,
 }
 
@@ -64,8 +64,8 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
             for (index, item) in graph.modules[scope].items.iter().enumerate() {
                 let Item::Impl(item) = item else { continue };
                 let syn::Type::Path(ty) = &*item.self_ty else { continue };
-                let Some(name) = ty.path.get_ident() else { continue };
-                let Some(target) = graph.modules[scope].names.get(&name.to_string()) else { continue };
+                let Some(name) = ty.path.segments.last() else { continue };
+                let Some(target) = graph.modules[scope].names.get(&name.ident.to_string()) else { continue };
                 if !graph.modules[scope].selected.contains(target) {
                     continue;
                 }
@@ -86,6 +86,7 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
             graph.modules[scope].impl_members.insert((index, member));
             let Item::Impl(item) = &graph.modules[scope].items[index] else { continue };
             let mut refs = References::default();
+            refs.visit_generics(&item.generics);
             refs.visit_impl_item(&item.items[member]);
             if let Some((path, _)) = &item.trait_ {
                 refs.paths.push(path.clone());
@@ -93,25 +94,15 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
             graph.follow(scope, refs);
         }
     }
-    let mut files = BTreeMap::new();
-    let items = graph.emit(0, Path::new("render"), &mut files);
-    files.insert(PathBuf::from("render/mod.rs"), items);
-    let mut defaults = DefaultFields(false);
-    for items in files.values() {
-        defaults.visit_file(&syn::parse2(items.clone()).map_err(|error| error.to_string())?);
-    }
-    let feature = defaults.0.then(|| quote!(#![feature(default_field_values)]));
-    files.insert(PathBuf::from("lib.rs"), quote! {
+    let items = graph.emit(0);
+    let module = quote!(pub mod render { #items });
+    let source = quote! {
         #![no_std]
-        #feature
-        #![allow(dead_code, unused_imports, reason = "shader extraction conservatively retains shared methods and trait imports")]
-        pub mod render;
-    });
-    let files = files
-        .into_iter()
-        .map(|(path, source)| Ok((path, format(&source.to_string())?)))
-        .collect::<Result<_, String>>()?;
-    Ok(Generated { files, shaders: entries })
+        #![feature(default_field_values)]
+        #![allow(dead_code, unused_imports, unused_features, reason = "shared shader code may not use every retained method, import, or enabled language feature")]
+        #module
+    };
+    Ok(Generated { source: format(&source.to_string())?, shaders: entries })
 }
 
 pub fn format(source: &str) -> Result<String, String> {
@@ -173,11 +164,7 @@ impl Graph {
             if let Item::Macro(declaration) = &item
                 && declaration.mac.path.segments.last().is_some_and(|segment| segment.ident == "program")
             {
-                let globals: syn::Type = if declaration.mac.tokens.is_empty() {
-                    syn::parse_quote!(())
-                } else {
-                    syn::parse2(declaration.mac.tokens.clone()).map_err(|error| error.to_string())?
-                };
+                let (globals, _) = program_types(declaration.mac.tokens.clone()).map_err(|error| error.to_string())?;
                 let shared = program(&quote!(::isthmus));
                 let file: syn::File = syn::parse2(quote! {
                     #shared
@@ -301,17 +288,15 @@ impl Graph {
         None
     }
 
-    fn emit(&self, scope: usize, directory: &Path, files: &mut BTreeMap<PathBuf, TokenStream>) -> TokenStream {
+    fn emit(&self, scope: usize) -> TokenStream {
         let module = &self.modules[scope];
         let mut output = TokenStream::new();
         for (name, child) in &module.children {
-            let path = directory.join(name.trim_start_matches("r#"));
-            let content = self.emit(*child, &path, files);
+            let content = self.emit(*child);
             if !content.is_empty() {
-                files.insert(path.join("mod.rs"), content);
                 let name = syn::Ident::new(name, proc_macro2::Span::call_site());
                 let origin = format!("Source: {}", self.modules[*child].file.display());
-                output.extend(quote!(#[doc = #origin] pub mod #name;));
+                output.extend(quote!(#[doc = #origin] pub mod #name { #content }));
             }
         }
         for &index in &module.selected {

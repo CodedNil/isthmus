@@ -34,10 +34,15 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     let mut zeros = Vec::new();
     let mut writes = Vec::new();
     let mut normalized = false;
+    let mut view: Option<syn::Type> = None;
     for attribute in input.attrs.iter().filter(|attribute| attribute.path().is_ident("shader_data")) {
         if let Err(error) = attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("view") && view.is_none() {
+                view = Some(meta.value()?.parse()?);
+                return Ok(());
+            }
             if !meta.path.is_ident("unorm16") || normalized {
-                return Err(meta.error("expected one unorm16 storage option"));
+                return Err(meta.error("expected a unique unorm16 or view option"));
             }
             normalized = true;
             Ok(())
@@ -45,6 +50,17 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
             return error.to_compile_error();
         }
     }
+    let resolve = view.as_ref().map_or_else(
+        || quote!(type View<'a> = Self; fn resolve(self, _: #isthmus::ResourceData<'_>) -> Self { self }),
+        |view| {
+            quote! {
+                type View<'a> = #view;
+                fn resolve(self, resources: #isthmus::ResourceData<'_>) -> Self::View<'_> {
+                    Self::View::new(self, resources)
+                }
+            }
+        },
+    );
     let fields = fields.named.iter().collect::<Vec<_>>();
     for group in fields.chunks(if normalized { 2 } else { 1 }) {
         let first = &group[0].ident;
@@ -77,6 +93,7 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     }
     quote! {
         impl #impl_generics #isthmus::ShaderData for #name #type_generics #where_clause {
+            #resolve
             const WORDS: usize = #offset;
             const ZERO: Self = Self { #(#zeros),* };
             unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {

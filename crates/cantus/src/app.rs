@@ -1,10 +1,11 @@
 use crate::{
     config::{self, Config},
     interaction::Interaction,
-    music::{Enrichment, Music},
-    platform::{Platform, Task},
-    render::{Bar, Frame, Globals, UiContext, launcher::LauncherState},
+    music::{Music, enrichment::Enrichment},
+    platform::{self, Task},
+    render::{Bar, Globals, Program, UiContext, launcher::LauncherState},
 };
+use isthmus::{Render, SurfaceHandle, glam::Vec2};
 use std::{
     io,
     sync::mpsc::{self, Sender},
@@ -30,7 +31,7 @@ pub fn run() {
     let filter = Targets::new().with_default(LevelFilter::WARN).with_target("cantus", Level::INFO);
     tracing_subscriber::registry().with(fmt::layer().with_writer(io::stderr).with_filter(filter)).init();
 
-    Platform::run();
+    platform::run();
 }
 
 impl Background {
@@ -42,11 +43,11 @@ impl Background {
         }
     }
 
-    pub(crate) fn spawn_update(&self, task: impl Task<Output = Option<Update>>) {
+    pub(crate) fn spawn_update<F: FnOnce(&mut CantusApp) + Send + 'static>(&self, task: impl Task<Output = Option<F>>) {
         let updater = self.updater.clone();
         self.spawn(async move {
             if let Some(event) = task.await {
-                let _ = updater.send(event);
+                let _ = updater.send(Box::new(event));
             }
         });
     }
@@ -69,7 +70,7 @@ impl Default for CantusApp {
         let background = Background::new(&updater);
         let enrichment = Enrichment::new(background.clone());
         let config = config::load();
-        Platform::start_launcher_listener(&background, &updater);
+        platform::start_launcher_listener(&background, &updater);
         Self {
             launcher: LauncherState::new(&background, &enrichment.http, config.search_providers.iter().cloned()),
             bar: Bar::new(&config, &background, &enrichment),
@@ -94,41 +95,47 @@ impl CantusApp {
         }
     }
 
-    pub(crate) fn draw(&mut self, frame: Frame<'_>, bar: bool, launcher: bool) {
+    pub(crate) fn draw(
+        &mut self,
+        render: &mut Render<'_, Program>,
+        surface: SurfaceHandle,
+        screen_size: Vec2,
+        bar: bool,
+        launcher: bool,
+    ) {
         let launcher_open = self.launcher.open;
         let owns_input = if launcher_open { launcher } else { bar };
         if owns_input {
-            self.interaction.begin_frame(frame.delta_time, frame.time);
+            self.interaction.begin_frame(render.delta_time, render.time);
         }
-        let mut context = UiContext { frame, config: &self.config, interaction: &mut self.interaction };
-        context.interaction.enabled = !self.launcher.open;
-        if bar {
-            self.bar.show(&mut context, &mut self.music);
-        }
-        if launcher {
-            context.interaction.enabled = true;
-            self.launcher.show(&mut context);
-        }
-        *context.frame.globals = Globals {
-            pointer: context.interaction.mouse_pos(),
-            pressure: context.interaction.pressure(),
+        self.interaction.enabled = owns_input;
+        let globals = Globals {
+            pointer: self.interaction.mouse_pos(),
+            pressure: self.interaction.pressure(),
             bar_height: self.config.height,
-            ripples: if owns_input { context.interaction.ripples } else { Default::default() },
+            ripples: if owns_input { self.interaction.ripples } else { Default::default() },
         };
-        context.interaction.enabled = true;
-        if owns_input {
-            context.interaction.end_frame();
-        }
-        if launcher_open != self.launcher.open {
-            *context.interaction = Interaction::default();
-        }
+        render.surface(surface, screen_size, globals, |frame| {
+            let mut context = UiContext { frame, config: &self.config, interaction: &mut self.interaction };
+            context.interaction.enabled = !self.launcher.open;
+            if bar {
+                self.bar.show(&mut context, &mut self.music);
+            }
+            if launcher {
+                context.interaction.enabled = true;
+                self.launcher.show(&mut context);
+            }
+            context.interaction.enabled = true;
+            if owns_input {
+                context.interaction.end_frame();
+            }
+            if launcher_open != self.launcher.open {
+                *context.interaction = Interaction::default();
+            }
+        });
     }
 }
 
-pub fn update(work: impl FnOnce(&mut CantusApp) + Send + 'static) -> Update {
-    Box::new(work)
-}
-
 pub fn send_update(sender: &AppUpdater, work: impl FnOnce(&mut CantusApp) + Send + 'static) -> bool {
-    sender.send(update(work)).is_ok()
+    sender.send(Box::new(work)).is_ok()
 }

@@ -13,16 +13,15 @@ use std::{
 use tracing::{info, warn};
 use web_time::Instant;
 
-mod enrichment;
-mod lyrics;
+pub mod enrichment;
+pub mod lyrics;
 #[cfg(not(target_arch = "wasm32"))]
 mod spotify;
 #[cfg(target_arch = "wasm32")]
-#[path = "web.rs"]
-mod spotify;
-
-pub use enrichment::{ArtState, Enrichment, Fetch};
-pub use lyrics::Lyrics;
+mod web;
+use enrichment::Resources;
+#[cfg(target_arch = "wasm32")]
+use web as spotify;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
@@ -31,9 +30,8 @@ pub const ART_SIZE: u32 = 128;
 pub const TRACK_SPACING_MS: f32 = 4000.0;
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
 
-pub use lyrics::LyricSegment;
-
 pub struct Music {
+    pub resources: Resources,
     pub playing: bool,
     pub queue: Vec<Track>,
     pub playlists: Vec<CondensedPlaylist>,
@@ -45,6 +43,7 @@ pub struct Music {
 impl Music {
     pub(crate) fn spotify(config: &Config, updater: &AppUpdater, background: &Background) -> Self {
         Self {
+            resources: Resources::default(),
             playing: false,
             queue: Vec::new(),
             playlists: Vec::new(),
@@ -127,8 +126,6 @@ impl Music {
                 track.runtime = previous.runtime;
                 if track.image.is_none() {
                     track.image = previous.image;
-                } else if track.image != previous.image {
-                    track.runtime.art.refresh();
                 }
             }
         }
@@ -211,6 +208,7 @@ impl Music {
     }
 }
 
+#[derive(Clone)]
 pub struct Track {
     pub id: Option<TrackId>,
     pub uri: String,
@@ -223,12 +221,8 @@ pub struct Track {
     pub runtime: TrackRuntime,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct TrackRuntime {
-    /// Album art, shared with other slots on the same URL and freed with the track.
-    pub art: ArtState,
-    pub audio_features: Fetch<AudioFeatures>,
-    pub(crate) lyrics: Fetch<Lyrics>,
     pub(crate) track_expansion: f32,
     /// Animated visibility of rating stars and primary playlist icons, respectively.
     pub(crate) icon_visibility: [f32; 2],
@@ -246,9 +240,7 @@ impl Track {
 
 pub struct CondensedPlaylist {
     pub id: PlaylistId,
-    pub(crate) name: String,
     pub image_url: Option<String>,
-    pub art: ArtState,
     pub tracks: HashSet<TrackId>,
     pub rating_index: Option<u8>,
 }

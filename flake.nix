@@ -32,8 +32,7 @@ rec {
         wireplumber
       ];
       runtimeLibraryPath = "${lib.makeLibraryPath runtimeLibraries}:/run/opengl-driver/lib";
-      rustToolchain = pkgs.rust-bin.nightly."2026-05-22";
-      rust = rustToolchain.default.override {
+      rust = pkgs.rust-bin.nightly."2026-05-22".default.override {
         extensions = [
           "clippy"
           "rustfmt"
@@ -48,13 +47,24 @@ rec {
       };
     in
     {
-      packages.${system} =
-        let
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            outputHashes = {
-              "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-M3/puV8CnGDp4I4C/F4lrH/Dfbs6Lj4T4j4vwdBMzrU=";
-            };
+      packages.${system} = rec {
+        default = cantus;
+        cantus = rustPlatform.buildRustPackage {
+          inherit pname;
+          cargoDeps = pkgs.symlinkJoin {
+            name = "cargo-vendor-dir";
+            # build-std also resolves dependencies from the pinned Rust sysroot.
+            paths = [
+              (rustPlatform.importCargoLock {
+                lockFile = ./Cargo.lock;
+                outputHashes = {
+                  "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-M3/puV8CnGDp4I4C/F4lrH/Dfbs6Lj4T4j4vwdBMzrU=";
+                };
+              })
+              (rustPlatform.importCargoLock {
+                lockFile = "${rust}/lib/rustlib/src/rust/library/Cargo.lock";
+              })
+            ];
           };
           version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
           src = lib.fileset.toSource {
@@ -67,75 +77,33 @@ rec {
               ./assets/NotoSans-Variable.ttf
             ];
           };
-          sysrootVendorPatch = ''
-            for crate in ${rust}/lib/rustlib/src/rust/library/vendor/*; do
-              name="''${crate##*/}"
-              if [ ! -e "$cargoDepsCopy/$name" ]; then
-                cp -r "$crate" "$cargoDepsCopy/"
-              fi
-            done
+          buildAndTestSubdir = "crates/cantus";
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+            makeWrapper
+            mold
+          ];
+          buildInputs = runtimeLibraries;
+          disallowedRequisites = [ rust ];
+          # Source paths in panic messages otherwise retain the entire toolchain.
+          postFixup = ''
+            ${pkgs.removeReferencesTo}/bin/remove-references-to -t ${rust} "$out/bin/.${pname}-wrapped"
           '';
-          cantusShader = rustPlatform.buildRustPackage {
-            pname = "cantus-shader";
-            inherit src cargoLock version;
-            postPatch = sysrootVendorPatch;
-            doCheck = false;
-            dontCargoInstall = true;
-            buildPhase = ''
-              runHook preBuild
-              cargo run --release --offline \
-                --manifest-path crates/isthmus_build/Cargo.toml \
-                --bin shader-build -- \
-                cantus \
-                "$PWD/crates/cantus/src/render/mod.rs" \
-                "$PWD/crates/isthmus" \
-                "$PWD" \
-                "$PWD/isthmus.spv"
-              runHook postBuild
-            '';
-            installPhase = ''
-              install -Dm644 isthmus.spv "$out/isthmus.spv"
-              install -Dm644 isthmus.manifest.rs "$out/isthmus.manifest.rs"
-            '';
-            nativeBuildInputs = with pkgs; [
-              pkg-config
-              mold
-            ];
-          };
-        in
-        rec {
-          default = cantus;
-          "cantus-shader" = cantusShader;
-          cantus = rustPlatform.buildRustPackage {
-            inherit
-              pname
-              src
-              cargoLock
-              version
-              ;
-            buildAndTestSubdir = "crates/cantus";
-            CANTUS_SHADER_SPV = "${cantusShader}/isthmus.spv";
-            nativeBuildInputs = with pkgs; [
-              pkg-config
-              makeWrapper
-              mold
-            ];
-            buildInputs = runtimeLibraries;
-            postInstall = ''
-              wrapProgram "$out/bin/${pname}" \
-                --set LD_LIBRARY_PATH "${runtimeLibraryPath}" \
-                --prefix PATH : "${lib.makeBinPath (runtimeTools)}"
-            '';
-            meta = {
-              inherit description;
-              homepage = "https://github.com/CodedNil/cantus";
-              license = lib.licenses.mit;
-              maintainers = with lib.maintainers; [ CodedNil ];
-              platforms = lib.platforms.linux;
-              mainProgram = pname;
-            };
+          postInstall = ''
+            wrapProgram "$out/bin/${pname}" \
+              --set LD_LIBRARY_PATH "${runtimeLibraryPath}" \
+              --prefix PATH : "${lib.makeBinPath runtimeTools}"
+          '';
+          meta = {
+            inherit description;
+            homepage = "https://github.com/CodedNil/cantus";
+            license = lib.licenses.mit;
+            maintainers = with lib.maintainers; [ CodedNil ];
+            platforms = lib.platforms.linux;
+            mainProgram = pname;
           };
         };
+      };
 
       devShells.${system}.default = pkgs.mkShell {
         name = pname;

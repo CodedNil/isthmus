@@ -1,17 +1,14 @@
-use super::{Enrichment, Fetch, TRACK_SPACING_MS, Track, TrackId, spotify::Spotify};
-use crate::app::update;
-use isthmus::{
-    geometry::text,
-    glam::{FloatExt, vec2},
+use super::{
+    TRACK_SPACING_MS, Track,
+    enrichment::{Enrichment, Fetch},
+    spotify::Spotify,
 };
-use quick_xml::{
-    Reader, XmlVersion,
-    escape::unescape,
-    events::{BytesStart, Event},
-};
+use crate::app::CantusApp;
+use isthmus::glam::{FloatExt, vec2};
+use isthmus_sdf::layout::{ShapedLine, TextCache};
 use reqwest::Client;
+use roxmltree::{Document, Node};
 use serde::Deserialize;
-use std::{mem, ops::Range};
 use tracing::warn;
 
 const API: &str = "https://lyrics-api.binimum.org/";
@@ -24,89 +21,39 @@ pub struct LyricSegment {
     pub break_after: bool,
 }
 
-impl LyricSegment {
-    pub(super) fn line(start_ms: f32, next_start_ms: Option<f32>, text: String) -> Self {
-        const CHARACTER_MS: f32 = 100.0;
-        let estimated_end = start_ms + text.chars().count().max(10) as f32 * CHARACTER_MS;
-        Self {
-            start_ms,
-            end_ms: next_start_ms.map_or(estimated_end, |next| estimated_end.min(next)),
-            text,
-            background: false,
-            break_after: true,
-        }
-    }
-}
-
-pub(super) struct LyricsRequest {
-    uri: String,
-    track_id: Option<TrackId>,
-    name: String,
-    artist: String,
-    album: String,
-    duration_ms: u32,
-}
-
-impl From<&Track> for LyricsRequest {
-    fn from(track: &Track) -> Self {
-        Self {
-            uri: track.uri.clone(),
-            track_id: track.id,
-            name: track.name.clone(),
-            artist: track.artist.clone(),
-            album: track.album.clone(),
-            duration_ms: track.duration_ms,
-        }
-    }
-}
-
 #[derive(Default)]
 pub struct Lyrics {
     segments: Option<Vec<LyricSegment>>,
-    words: Vec<PositionedLyric>,
+    pub(crate) lines: [ShapedLine; 2],
     timeline: Vec<(f32, f32)>,
     pub(crate) span: f32,
-}
-
-struct PositionedLyric {
-    text: String,
-    background: bool,
-    position: f32,
-    width: f32,
 }
 
 impl Lyrics {
     pub(crate) const SILENCE_SPEED: f32 = 0.035;
     const SONG_GAP: f32 = 96.0;
 
-    fn new(segments: Vec<LyricSegment>) -> Self {
-        Self { segments: Some(segments), ..Self::default() }
-    }
-
-    pub(crate) fn prepare(&mut self, duration_ms: f32, text: &text::Text) {
-        let Some(segments) = self.segments.take() else { return };
-        *self = Self::shape(segments, duration_ms, text);
-    }
-
-    fn shape(mut segments: Vec<LyricSegment>, duration_ms: f32, text: &text::Text) -> Self {
+    pub(crate) fn prepare(&mut self, duration_ms: f32, text: &mut TextCache) {
+        let Some(mut segments) = self.segments.take() else { return };
         segments.retain(|segment| !segment.text.trim().is_empty());
         segments.sort_by(|left, right| left.start_ms.total_cmp(&right.start_ms));
         if segments.is_empty() {
-            return Self::default();
+            *self = Self::default();
+            return;
         }
 
         let mut words = Vec::with_capacity(segments.len());
         let mut timeline = vec![(0.0, 0.0)];
         let mut cursor = 0.0;
         let mut vocal_end = 0.0;
-        let space = text.width(" ", 15.0, 700.0);
+        let space = text.shape(" ", 15.0, 700.0).text.width;
         for segment in &segments {
             let silence = (segment.start_ms - vocal_end).max(0.0);
             cursor += silence * Self::SILENCE_SPEED;
             let value = segment.text.trim_start();
-            let width = text.width(value, 15.0, 700.0);
+            let width = text.shape(value, 15.0, 700.0).text.width;
             let position = cursor;
-            words.push(PositionedLyric { text: value.into(), background: segment.background, position, width });
+            words.push((segment.background, value, position));
             cursor += width + space * f32::from(segment.break_after);
             let end_ms = segment.end_ms.max(segment.start_ms);
             vocal_end = vocal_end.max(end_ms);
@@ -117,7 +64,14 @@ impl Lyrics {
         let position = cursor + (duration_ms - vocal_end).max(0.0) * Self::SILENCE_SPEED;
         timeline.push((duration_ms.max(vocal_end), position));
         timeline.sort_by(|left, right| left.0.total_cmp(&right.0));
-        Self { segments: None, words, timeline, span: position + Self::SONG_GAP }
+        let lines = [false, true].map(|background| {
+            text.shape_positioned(
+                words.iter().filter(|word| word.0 == background).map(|word| (word.1, vec2(word.2, 0.0))),
+                15.0,
+                700.0,
+            )
+        });
+        *self = Self { segments: None, lines, timeline, span: position + Self::SONG_GAP };
     }
 
     pub(crate) fn position(&self, time: f32, duration_ms: f32) -> f32 {
@@ -139,50 +93,29 @@ impl Lyrics {
             }
         }
     }
-
-    pub(crate) fn visible(&self, text: &text::Text, range: Range<f32>, background: bool) -> text::ShapedLine {
-        text.shape_positioned(
-            self.words
-                .iter()
-                .filter(|word| {
-                    word.background == background
-                        && word.position <= range.end
-                        && word.position + word.width >= range.start
-                })
-                .map(|word| (word.text.as_str(), vec2(word.position, 0.0))),
-            15.0,
-            700.0,
-        )
-    }
 }
 
 impl Enrichment {
-    pub(super) fn request_lyrics(&self, request: LyricsRequest, spotify: Spotify) {
+    pub(super) fn request_lyrics(&self, request: Track, spotify: Spotify) {
         let http = self.http.clone();
         self.background.spawn_update(async move {
             let uri = request.uri.clone();
             let result = fetch(&request, &http, &spotify).await;
-            Some(update(move |app| {
-                for track in app
-                    .music
-                    .queue
-                    .iter_mut()
-                    .filter(|track| track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching(_)))
-                {
-                    track.runtime.lyrics = match &result {
-                        Ok(segments) => Fetch::Ready(Lyrics::new(segments.clone())),
-                        Err(()) => Fetch::retry(),
-                    };
+            Some(move |app: &mut CantusApp| {
+                if let Some(slot @ Fetch::Fetching) = app.music.resources.lyrics.get_mut(&uri) {
+                    *slot = result
+                        .map(|segments| Lyrics { segments: Some(segments), ..Default::default() })
+                        .map_or_else(|()| Fetch::retry(), Fetch::Ready);
                 }
-            }))
+            })
         });
     }
 }
 
-async fn fetch(request: &LyricsRequest, http: &Client, spotify: &Spotify) -> Result<Vec<LyricSegment>, ()> {
+async fn fetch(request: &Track, http: &Client, spotify: &Spotify) -> Result<Vec<LyricSegment>, ()> {
     let result = match fetch_precise(http, request).await {
         Some(segments) => Ok(segments),
-        None => match request.track_id {
+        None => match request.id {
             Some(id) => spotify.lyrics(id).await,
             None => Ok(Vec::new()),
         },
@@ -204,7 +137,7 @@ struct SearchResult {
     timing_type: String,
 }
 
-async fn fetch_precise(http: &Client, query: &LyricsRequest) -> Option<Vec<LyricSegment>> {
+async fn fetch_precise(http: &Client, query: &Track) -> Option<Vec<LyricSegment>> {
     let result = http
         .get(API)
         .query(&[
@@ -238,94 +171,56 @@ fn time(value: &str) -> Option<f32> {
         .map(|seconds| seconds * 1000.0)
 }
 
-fn attribute(tag: &BytesStart<'_>, name: &str) -> Option<String> {
-    tag.attributes()
-        .flatten()
-        .find(|attr| attr.key.local_name().as_ref() == name)?
-        .normalized_value(XmlVersion::Implicit1_0)
-        .ok()
-        .map(std::borrow::Cow::into_owned)
+fn attribute<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
+    node.attributes().find(|attribute| attribute.name() == name).map(|attribute| attribute.value())
 }
 
 fn parse_ttml(source: &str) -> Vec<LyricSegment> {
-    let mut reader = Reader::from_str(source);
-    let (mut segments, mut in_line) = (Vec::new(), false);
-    let mut line_start = 0;
-    let mut line_time = None;
-    let mut line_text = String::new();
-    let mut span_roles = Vec::new();
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(tag)) if tag.local_name().as_ref() == "p" => {
-                span_roles.clear();
-                line_text.clear();
-                line_time = attribute(&tag, "begin")
-                    .as_deref()
-                    .and_then(time)
-                    .zip(attribute(&tag, "end").as_deref().and_then(time));
-                in_line = true;
-                line_start = segments.len();
+    let Ok(document) = Document::parse(source) else { return Vec::new() };
+    let mut segments = Vec::new();
+    for line in document.descendants().filter(|node| node.tag_name().name() == "p") {
+        let first = segments.len();
+        let mut line_text = String::new();
+        for node in line.descendants().skip(1) {
+            let roles = || {
+                node.ancestors().take_while(|ancestor| *ancestor != line).filter_map(|ancestor| {
+                    (ancestor.tag_name().name() == "span").then(|| attribute(ancestor, "role")).flatten()
+                })
+            };
+            if roles().any(|role| matches!(role, "x-translation" | "x-roman")) {
+                continue;
             }
-            Ok(Event::Start(tag)) if in_line && tag.local_name().as_ref() == "span" => {
-                let start = attribute(&tag, "begin").as_deref().and_then(time);
-                let end = attribute(&tag, "end").as_deref().and_then(time);
-                span_roles.push(match attribute(&tag, "role").as_deref() {
-                    Some("x-bg") => (true, false),
-                    Some("x-translation" | "x-roman") => (false, true),
-                    _ => (false, false),
+            if node.tag_name().name() == "span"
+                && let Some(start_ms) = attribute(node, "begin").and_then(time)
+            {
+                segments.push(LyricSegment {
+                    start_ms,
+                    end_ms: attribute(node, "end").and_then(time).unwrap_or(start_ms + 1_000.0),
+                    text: String::new(),
+                    background: roles().any(|role| role == "x-bg"),
+                    break_after: false,
                 });
-                if !span_roles.iter().any(|&(_, ignored)| ignored)
-                    && let Some(start_ms) = start
-                {
-                    segments.push(LyricSegment {
-                        start_ms,
-                        end_ms: end.unwrap_or(start_ms + 1_000.0),
-                        text: String::new(),
-                        background: span_roles.iter().any(|&(background, _)| background),
-                        break_after: false,
-                    });
-                }
-            }
-            Ok(Event::Text(value)) if in_line && !span_roles.iter().any(|&(_, ignored)| ignored) => {
-                let value = value.xml_content(XmlVersion::Implicit1_0);
-                let Ok(value) = unescape(&value) else { return Vec::new() };
-                line_text.push_str(&value);
-                if segments.len() > line_start {
-                    let segment = &mut segments.last_mut().unwrap().text;
-                    if value.chars().all(char::is_whitespace) {
-                        if !segment.ends_with(char::is_whitespace) {
-                            segment.push(' ');
-                        }
-                    } else {
-                        segment.push_str(&value);
+            } else if node.is_text() {
+                let value = node.text().unwrap_or_default();
+                line_text.push_str(value);
+                if let Some(segment) = segments[first..].last_mut() {
+                    if !value.chars().all(char::is_whitespace) {
+                        segment.text.push_str(value);
+                    } else if !segment.text.ends_with(char::is_whitespace) {
+                        segment.text.push(' ');
                     }
                 }
             }
-            Ok(Event::End(tag)) if tag.local_name().as_ref() == "span" => {
-                span_roles.pop();
-            }
-            Ok(Event::End(tag)) if tag.local_name().as_ref() == "p" => {
-                if segments.len() == line_start
-                    && let Some((start_ms, end_ms)) = line_time
-                    && !line_text.trim().is_empty()
-                {
-                    segments.push(LyricSegment {
-                        start_ms,
-                        end_ms,
-                        text: mem::take(&mut line_text),
-                        background: false,
-                        break_after: false,
-                    });
-                }
-                if segments.len() > line_start {
-                    segments.last_mut().unwrap().break_after = true;
-                }
-                in_line = false;
-                span_roles.clear();
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => return Vec::new(),
-            _ => {}
+        }
+        if segments.len() == first
+            && !line_text.trim().is_empty()
+            && let Some((start_ms, end_ms)) =
+                attribute(line, "begin").and_then(time).zip(attribute(line, "end").and_then(time))
+        {
+            segments.push(LyricSegment { start_ms, end_ms, text: line_text, background: false, break_after: false });
+        }
+        if let Some(segment) = segments[first..].last_mut() {
+            segment.break_after = true;
         }
     }
     segments

@@ -91,6 +91,6 @@ impl<'a> ShaderImage<'a> {
     }
 
     pub fn sample(&self, uv: glam::Vec2) -> glam::Vec4 {
-        self.image.sample(self.sampler, uv)
+        self.image.sample_by_lod(self.sampler, uv, 0.0)
     }
 }

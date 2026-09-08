@@ -1,88 +1,91 @@
 use crate::{
-    music::{Lyrics, Music, Track},
-    render::{BarLayout, PANEL_START, TEXT_COLOR, TextFragment, UiContext},
+    music::{
+        Music, Track,
+        enrichment::{Fetch, Resources},
+        lyrics::Lyrics,
+    },
+    render::{BarLayout, PANEL_START, Program, UiContext},
 };
 use isthmus::{
     ColorExt as _, Float as _,
     glam::{Vec4, vec2},
     shader,
 };
+use isthmus_sdf::{Text, layout::TextCache};
 
 pub const EXTENSION: f32 = 10.0;
+const SHADOW_REACH: f32 = 4.0;
+const LYRIC_COLOR: Vec4 = Vec4::new(0.94, 0.94, 0.94, 1.0);
+const BACKGROUND_LYRIC_COLOR: Vec4 = Vec4::new(0.72, 0.86, 1.0, 1.0);
 
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
-    const CLIP_PADDING: f32 = 4.0;
-
     let Some((index, progress_ms)) = music.timeline.span_at_playhead(&music.queue) else {
         return;
     };
-    let screen_width = context.frame.screen_size.x;
-    let prepare = |track: &mut Track| {
-        if let Some(lyrics) = track.runtime.lyrics.ready_mut() {
-            lyrics.prepare(track.duration_ms as f32, context.frame.text);
+    let prepare = |track: &Track, resources: &mut Resources, text: &mut TextCache| {
+        if let Some(Fetch::Ready(lyrics)) = resources.lyrics.get_mut(&track.uri) {
+            lyrics.prepare(track.duration_ms as f32, text);
         }
     };
-    let span = |track: &Track| {
-        track
-            .runtime
+    let span = |track: &Track, resources: &Resources| {
+        resources
             .lyrics
-            .ready()
+            .get(&track.uri)
+            .and_then(Fetch::ready)
             .filter(|lyrics| lyrics.span > 0.0)
             .map_or_else(|| track.queue_span_ms() * Lyrics::SILENCE_SPEED, |lyrics| lyrics.span)
     };
-
-    prepare(&mut music.queue[index]);
+    prepare(&music.queue[index], &mut music.resources, context.frame.resources);
     let current = &music.queue[index];
-    let progress =
-        current.runtime.lyrics.ready().map_or(progress_ms * Lyrics::SILENCE_SPEED, |lyrics| {
-            lyrics.position(progress_ms, current.duration_ms as f32)
-        });
-    let current_x = layout.playhead_x - progress;
+    let progress = music
+        .resources
+        .lyrics
+        .get(&current.uri)
+        .and_then(Fetch::ready)
+        .map_or(progress_ms * Lyrics::SILENCE_SPEED, |lyrics| lyrics.position(progress_ms, current.duration_ms as f32));
     let mut first = index;
-    let mut x = current_x;
-    while first > 0 && x >= -CLIP_PADDING {
+    let mut x = layout.playhead_x - progress;
+    while first > 0 && x >= -SHADOW_REACH {
         first -= 1;
-        prepare(&mut music.queue[first]);
-        x -= span(&music.queue[first]);
+        prepare(&music.queue[first], &mut music.resources, context.frame.resources);
+        x -= span(&music.queue[first], &music.resources);
     }
 
     let y = PANEL_START + context.config.height + EXTENSION;
-    let playhead_x = layout.playhead_x;
     for track in &mut music.queue[first..] {
-        if x > screen_width + CLIP_PADDING {
+        if x > context.frame.screen_size.x + SHADOW_REACH {
             break;
         }
-        if let Some(lyrics) = track.runtime.lyrics.ready_mut() {
-            lyrics.prepare(track.duration_ms as f32, context.frame.text);
-        }
+        prepare(track, &mut music.resources, context.frame.resources);
         let track_x = x;
-        x += span(track);
-        let Some(lyrics) = track.runtime.lyrics.ready() else {
+        x += span(track, &music.resources);
+        let Some(lyrics) = music.resources.lyrics.get(&track.uri).and_then(Fetch::ready) else {
             continue;
         };
-        for (background, color) in [(false, TEXT_COLOR.extend(1.0)), (true, Vec4::new(0.72, 0.86, 1.0, 1.0))] {
-            let line = lyrics.visible(
-                context.frame.text,
-                -track_x - CLIP_PADDING..screen_width - track_x + CLIP_PADDING,
-                background,
-            );
-            if line.width <= 0.0 {
+        for (index, line) in lyrics.lines.iter().enumerate() {
+            if line.text.width <= 0.0 {
                 continue;
             }
-            let placed = context.frame.text.visible(&line, vec2(track_x, y), 0.0..screen_width).with_color(color);
-            let padding = placed.size * 0.2 + 1.0;
-            context.frame.paint(
-                placed.effects(1.5).displaced(padding),
-                shader!(|text: TextFragment<'_>, playhead_x: f32, screen_width: f32| {
-                    let edge_fade =
-                        text.pixel.x.smoothstep(0.0, 32.0) * text.pixel.x.smoothstep(screen_width, screen_width - 32.0);
-                    let emphasis = (text.pixel.x - playhead_x).abs().smoothstep(110.0, 0.0);
-                    let weight = text.line.weight + emphasis * 45.0;
-                    let sample = text.distance_with_weight(text.pixel, weight).sample();
-                    let sung = text.pixel.x.smoothstep(playhead_x + 4.0, playhead_x - 4.0);
-                    let fade = edge_fade * (1.0 - sung * 0.5);
-                    sample.color(text.line.color.to_vec4(), Vec4::new(0.0, 0.0, 0.0, 0.4), 1.5).opacity(fade)
-                }),
+            shader!(
+                context
+                    .frame
+                    .upload({
+                        let playhead_x: f32 = layout.playhead_x;
+                        let lyric_layer: u32 = index as u32;
+                        let line: Text = context.frame.resources.place(line, vec2(track_x, y)).outlined(SHADOW_REACH);
+                    })
+                    .vertex(line)
+                    .fragment(|_, text| {
+                        let ahead = text.pixel.x - playhead_x;
+                        let weight = 700.0.lerp(745.0, ahead.abs().smoothstep(110.0, 0.0));
+                        let sample = text.with_weight(weight).sample_at(text.pixel);
+                        let shadow = sample.coverage * sample.distance.smoothstep(SHADOW_REACH, 0.0).powi(2);
+                        let color = if lyric_layer == 0 { LYRIC_COLOR } else { BACKGROUND_LYRIC_COLOR };
+                        color
+                            .opacity(sample.fill())
+                            .over(Vec4::new(0.0, 0.0, 0.0, shadow))
+                            .opacity(ahead.smoothstep(-100.0, 0.0))
+                    })
             );
         }
     }

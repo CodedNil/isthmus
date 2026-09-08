@@ -1,9 +1,5 @@
-use super::{buffer::UploadBuffer, image::ImageCache};
-use crate::{
-    Blend, Image, Program, ShaderData as _, bindings,
-    geometry::{DrawRecord, GeometrySample, Raster, text::PlacedGlyph},
-    program::ShaderSpec,
-};
+use super::{buffer::UploadBuffer, image::ImageCache, surface::SurfaceTarget};
+use crate::{Blend, Image, Program, ResourceData, ShaderData as _, bindings, program::ShaderSpec};
 use core::array::from_fn;
 use std::ops::Range;
 #[cfg(not(target_arch = "wasm32"))]
@@ -38,11 +34,7 @@ impl Gpu {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("isthmus"), source });
         let entries = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|binding| wgpu::BindGroupLayoutEntry {
             binding: binding as u32,
-            visibility: if matches!(binding as u32, bindings::DRAWS | bindings::FRAMES) {
-                wgpu::ShaderStages::VERTEX_FRAGMENT
-            } else {
-                wgpu::ShaderStages::FRAGMENT
-            },
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: true },
                 has_dynamic_offset: false,
@@ -56,10 +48,11 @@ impl Gpu {
         let layouts: Vec<_> = images
             .layouts
             .iter()
-            .map(|layout| {
+            .enumerate()
+            .map(|(count, layout)| {
                 device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("isthmus"),
-                    bind_group_layouts: &[Some(&bind_layout), Some(layout)],
+                    bind_group_layouts: &[Some(&bind_layout), Some(layout)][..if count == 0 { 1 } else { 2 }],
                     immediate_size: 0,
                 })
             })
@@ -122,7 +115,7 @@ impl Gpu {
             u32::try_from(buffer.values.len()).expect("buffer exceeds u32"),
         ];
         for &value in buffer.values {
-            payload.push(value);
+            value.append(&mut payload.words);
         }
         range
     }
@@ -133,46 +126,37 @@ impl Gpu {
         self.images.retain_live();
     }
 
-    pub fn emit<S: ShaderSpec>(
+    pub(crate) fn emit<S: ShaderSpec>(
         &mut self,
-        surface: &mut SurfacePaints,
-        geometry: impl IntoIterator<Item = [glam::Vec2; 3]>,
+        surface: &mut SurfaceTarget,
+        vertices: u32,
         value: S,
         image: Option<wgpu::BindGroup>,
     ) {
-        let payload = self.buffers[bindings::PAYLOAD as usize].words.len() as u32;
+        let payload = value.append(&mut self.buffers[bindings::PAYLOAD as usize].words);
         let draws = &mut self.buffers[bindings::DRAWS as usize];
-        let start = (draws.words.len() / DrawRecord::WORDS) as u32;
-        let geometry = geometry.into_iter();
-        draws.words.reserve(geometry.size_hint().0 * DrawRecord::WORDS);
-        for geometry in geometry {
-            draws.push(DrawRecord { geometry, payload });
-        }
-        let end = (draws.words.len() / DrawRecord::WORDS) as u32;
-        self.buffers[bindings::PAYLOAD as usize].push(value);
+        let start = payload.append(&mut draws.words);
+        let end = start + 1;
         if let Some(previous) = surface.paints.last_mut()
             && previous.shader == S::INDEX
+            && previous.vertices == vertices
             && previous.image == image
             && previous.draws.end == start
         {
             previous.draws.end = end;
         } else {
-            surface.paints.push(Paint {
-                shader: S::INDEX,
-                vertices: <S::Sample as GeometrySample<'static>>::Raster::VERTICES,
-                draws: start..end,
-                image,
-            });
+            surface.paints.push(Paint { shader: S::INDEX, vertices, draws: start..end, image });
         }
     }
 
-    pub fn prepare(&mut self, placed: &[PlacedGlyph]) {
+    pub fn prepare(&mut self, resources: ResourceData<'_>) {
         self.buffers[bindings::DRAWS as usize].flush(&self.device, &self.queue);
         self.buffers[bindings::PAYLOAD as usize].flush(&self.device, &self.queue);
-        self.buffers[bindings::PLACED_GLYPHS as usize].upload_if_changed(&self.device, &self.queue, placed);
+        self.buffers[bindings::TRANSIENT as usize].upload_if_changed(&self.device, &self.queue, resources.transient);
+        self.buffers[bindings::PERSISTENT as usize].upload_appended(&self.device, &self.queue, resources.persistent);
     }
 
-    pub(crate) fn draw_surface(&self, pass: &mut wgpu::RenderPass<'_>, surface: &mut SurfacePaints) {
+    pub(crate) fn draw_surface(&self, pass: &mut wgpu::RenderPass<'_>, surface: &mut SurfaceTarget) {
         let buffers = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|index| match index as u32 {
             bindings::GLOBALS => &surface.globals,
             bindings::FRAMES => &surface.frame,
@@ -197,7 +181,9 @@ impl Gpu {
         pass.set_bind_group(0, &surface.binding.as_ref().unwrap().1, &[]);
         for paint in &surface.paints {
             pass.set_pipeline(&self.pipelines[paint.shader]);
-            pass.set_bind_group(1, paint.image.as_ref().unwrap_or(&self.images.fallback), &[]);
+            if let Some(image) = &paint.image {
+                pass.set_bind_group(1, image, &[]);
+            }
             pass.draw(0..paint.vertices, paint.draws.clone());
         }
     }
@@ -208,24 +194,4 @@ pub(super) struct Paint {
     vertices: u32,
     draws: Range<u32>,
     image: Option<wgpu::BindGroup>,
-}
-
-pub struct SurfacePaints {
-    binding: Option<([wgpu::Buffer; bindings::BUFFER_COUNT], wgpu::BindGroup)>,
-    pub(super) recorded: bool,
-    pub(super) paints: Vec<Paint>,
-    pub(super) globals: UploadBuffer,
-    pub(super) frame: UploadBuffer,
-}
-
-impl SurfacePaints {
-    pub fn new(device: &wgpu::Device) -> Self {
-        Self {
-            binding: None,
-            recorded: false,
-            paints: Vec::new(),
-            globals: UploadBuffer::new(device),
-            frame: UploadBuffer::new(device),
-        }
-    }
 }

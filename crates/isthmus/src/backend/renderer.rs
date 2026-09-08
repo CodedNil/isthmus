@@ -3,27 +3,27 @@ use super::{
     setup::{self, SetupError},
     surface::SurfaceTarget,
 };
-use crate::{Frame, Program, SurfaceHandle, bindings, data::FrameData, geometry::text::Text, glam::Vec2};
-use core::marker::PhantomData;
+use crate::{Frame, Program, Resources as _, SurfaceHandle, data::FrameData, glam::Vec2};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use slotmap::SlotMap;
 use smallvec::SmallVec;
 use web_time::Instant;
 
-/// GPU resources, text caches, and presentation surfaces for one shader program.
+/// GPU resources and presentation surfaces for one shader program.
 pub struct Renderer<P: Program> {
-    program: PhantomData<P>,
     surfaces: SlotMap<SurfaceHandle, SurfaceTarget>,
     gpu: Gpu,
-    text: Text,
+    resources: P::Resources,
     started: Instant,
     last_frame: f32,
 }
 /// Records surfaces that will be submitted together in one frame.
 pub struct Render<'a, P: Program> {
     renderer: &'a mut Renderer<P>,
-    time: f32,
-    delta_time: f32,
+    /// Seconds elapsed since renderer creation.
+    pub time: f32,
+    /// Seconds since the previous frame, capped at 0.1.
+    pub delta_time: f32,
 }
 /// A failure while recording or presenting a frame.
 #[derive(Debug, thiserror::Error)]
@@ -37,23 +37,30 @@ pub enum RenderError {
 }
 impl<P: Program> Render<'_, P> {
     /// Records one surface in logical pixels; stale handles are ignored.
-    pub fn surface(&mut self, surface: SurfaceHandle, screen_size: Vec2, draw: impl FnOnce(Frame<'_, P>)) {
+    pub fn surface(
+        &mut self,
+        surface: SurfaceHandle,
+        screen_size: Vec2,
+        globals: P::Globals,
+        draw: impl FnOnce(Frame<'_, P>),
+    ) {
         let renderer = &mut *self.renderer;
         let Some(surface) = renderer.surfaces.get_mut(surface) else { return };
-        surface.paints.recorded = true;
-        let frame_data = FrameData { screen_size, time: self.time };
-        let mut globals = P::Globals::default();
+        surface.recorded = true;
+        let pixel_scale = screen_size / Vec2::new(surface.config.width as f32, surface.config.height as f32);
+        let frame_data = FrameData { screen_size, time: self.time, pixel_scale };
         draw(Frame {
             time: self.time,
             screen_size,
+            pixel_size: pixel_scale.max_element(),
             delta_time: self.delta_time,
-            globals: &mut globals,
-            text: &mut renderer.text,
+            globals,
+            resources: &mut renderer.resources,
             gpu: &mut renderer.gpu,
-            surface: &mut surface.paints,
+            surface,
         });
-        surface.paints.globals.upload(&renderer.gpu.device, &renderer.gpu.queue, &[globals]);
-        surface.paints.frame.upload(&renderer.gpu.device, &renderer.gpu.queue, &[frame_data]);
+        surface.globals.upload(&renderer.gpu.device, &renderer.gpu.queue, &[globals]);
+        surface.frame.upload(&renderer.gpu.device, &renderer.gpu.queue, &[frame_data]);
     }
 }
 impl<P: Program> Renderer<P> {
@@ -68,11 +75,11 @@ impl<P: Program> Renderer<P> {
     pub unsafe fn new(
         surface: &(impl HasDisplayHandle + HasWindowHandle),
         [width, height]: [u32; 2],
-        text: Text,
+        resources: P::Resources,
     ) -> Result<(Self, SurfaceHandle), SetupError> {
         // SAFETY: The caller keeps both native handles alive until this surface is removed.
         let (gpu, target) = unsafe { setup::new::<P>(surface, [width, height]) }?;
-        Ok(Self::from_surface(gpu, target, text))
+        Ok(Self::from_surface(gpu, target, resources))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -80,16 +87,16 @@ impl<P: Program> Renderer<P> {
     pub async fn new(
         canvas: web_sys::HtmlCanvasElement,
         size: [u32; 2],
-        text: Text,
+        resources: P::Resources,
     ) -> Result<(Self, SurfaceHandle), SetupError> {
         let (gpu, target) = setup::new::<P>(canvas, size).await?;
-        Ok(Self::from_surface(gpu, target, text))
+        Ok(Self::from_surface(gpu, target, resources))
     }
 
-    fn from_surface(gpu: Gpu, target: SurfaceTarget, text: Text) -> (Self, SurfaceHandle) {
+    fn from_surface(gpu: Gpu, target: SurfaceTarget, resources: P::Resources) -> (Self, SurfaceHandle) {
         let mut surfaces = SlotMap::with_key();
         let handle = surfaces.insert(target);
-        (Self { surfaces, gpu, text, started: Instant::now(), last_frame: 0.0, program: PhantomData }, handle)
+        (Self { surfaces, gpu, resources, started: Instant::now(), last_frame: 0.0 }, handle)
     }
 
     /// Records and presents one frame, returning surface loss or GPU validation errors.
@@ -99,28 +106,23 @@ impl<P: Program> Renderer<P> {
     pub fn render(&mut self, draw: impl FnOnce(&mut Render<'_, P>)) -> Result<(), RenderError> {
         self.gpu.begin_frame();
         for surface in self.surfaces.values_mut() {
-            surface.paints.paints.clear();
-            surface.paints.recorded = false;
+            surface.paints.clear();
+            surface.recorded = false;
         }
-        self.text.begin_frame();
+        self.resources.begin_frame();
         let elapsed = self.started.elapsed().as_secs_f32();
         let delta = (elapsed - self.last_frame).min(0.1);
         self.last_frame = elapsed;
         draw(&mut Render { renderer: self, time: elapsed, delta_time: delta });
-        if !self.surfaces.values().any(|surface| surface.paints.recorded) {
+        if !self.surfaces.values().any(|surface| surface.recorded) {
             return Ok(());
         }
-        self.text.upload_outlines(
-            &mut self.gpu.buffers[bindings::OUTLINES as usize],
-            &self.gpu.device,
-            &self.gpu.queue,
-        );
-        self.gpu.prepare(&self.text.placed);
+        self.gpu.prepare(self.resources.data());
         let mut outputs = SmallVec::<[wgpu::SurfaceTexture; 2]>::new();
         let mut encoder =
             self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("isthmus frame") });
         for surface in self.surfaces.values_mut() {
-            if !surface.paints.recorded {
+            if !surface.recorded {
                 continue;
             }
             let Some(output) = surface.acquire(&self.gpu)? else { continue };
@@ -142,7 +144,7 @@ impl<P: Program> Renderer<P> {
                     timestamp_writes: None,
                     multiview_mask: None,
                 });
-                self.gpu.draw_surface(&mut pass, &mut surface.paints);
+                self.gpu.draw_surface(&mut pass, surface);
             }
             outputs.push(output);
         }

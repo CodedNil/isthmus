@@ -28,23 +28,12 @@ impl UploadBuffer {
         self.flush(device, queue);
     }
 
-    pub fn upload_if_changed<T: ShaderData + PartialEq>(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        values: &[T],
-    ) {
-        if self.words.len() != values.len() * T::WORDS
-            || values.iter().enumerate().any(|(index, value)| T::read(&self.words, index * T::WORDS) != *value)
-        {
-            self.upload(device, queue, values);
+    pub fn upload_if_changed(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, words: &[u32]) {
+        if self.words != words {
+            self.words.clear();
+            self.words.extend_from_slice(words);
+            self.flush(device, queue);
         }
-    }
-
-    pub fn push<T: ShaderData>(&mut self, value: T) {
-        let offset = self.words.len();
-        self.words.resize(offset + T::WORDS, 0);
-        value.write(&mut self.words, offset);
     }
 
     /// Uploads the new suffix of an immutable, append-only resource arena.
