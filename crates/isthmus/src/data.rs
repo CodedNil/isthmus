@@ -1,3 +1,4 @@
+use crate::ResourceData;
 use glam::{UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
 use spirv_std::arch::IndexUnchecked;
 
@@ -160,6 +161,20 @@ impl Unorm8x4 {
 
 /// A fixed-size word codec shared by CPU and GPU, independent of Rust's memory layout.
 pub trait ShaderData: Copy {
+    /// Value exposed inside a shader after resolving shared resource handles.
+    type View<'a>: Copy;
+    /// Resolves this capture against the current frame's resource storage.
+    fn resolve(self, resources: ResourceData<'_>) -> Self::View<'_>;
+    #[cfg(not(target_arch = "spirv"))]
+    /// Appends a value and returns its word offset, rejecting arenas larger than u32 can address.
+    fn append(self, words: &mut Vec<u32>) -> u32 {
+        let offset = u32::try_from(words.len()).expect("shader arena exceeds u32");
+        let end = words.len().checked_add(Self::WORDS).expect("shader arena size overflow");
+        u32::try_from(end).expect("shader arena exceeds u32");
+        words.resize(end, 0);
+        self.write(words, offset as usize);
+        offset
+    }
     /// Number of 32-bit words occupied by one encoded value.
     const WORDS: usize;
     /// Fallback value returned when a read is out of bounds.
@@ -183,8 +198,14 @@ pub trait ShaderData: Copy {
 macro_rules! scalar {
     ($ty:ty, $zero:expr, $decode:expr, $encode:expr) => {
         impl ShaderData for $ty {
+            type View<'a> = Self;
+
             const WORDS: usize = 1;
             const ZERO: Self = $zero;
+
+            fn resolve(self, _: ResourceData<'_>) -> Self {
+                self
+            }
 
             unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
                 // SAFETY: The caller guarantees this word belongs to a complete record.
@@ -206,8 +227,12 @@ scalar!(F16x2, Self(0), Self, |value: Self| value.0);
 scalar!(Unorm16x2, Self(0), Self, |value: Self| value.0);
 
 impl ShaderData for () {
+    type View<'a> = Self;
+
     const WORDS: usize = 0;
     const ZERO: Self = ();
+
+    fn resolve(self, _: ResourceData<'_>) -> Self {}
 
     unsafe fn read_unchecked(_: &[u32], _: usize) -> Self {}
 
@@ -216,8 +241,14 @@ impl ShaderData for () {
 
 #[expect(clippy::needless_range_loop, reason = "Rust-GPU cannot lower the array slice iterators")]
 impl<T: ShaderData, const N: usize> ShaderData for [T; N] {
+    type View<'a> = Self;
+
     const WORDS: usize = T::WORDS * N;
     const ZERO: Self = [T::ZERO; N];
+
+    fn resolve(self, _: ResourceData<'_>) -> Self {
+        self
+    }
 
     unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
         let mut values = Self::ZERO;
@@ -242,6 +273,8 @@ impl<T: ShaderData, const N: usize> ShaderData for [T; N] {
 macro_rules! vector {
     ($ty:ty, $scalar:ty, $length:literal, $($field:ident: $index:literal),+) => {
         impl ShaderData for $ty {
+            type View<'a> = Self;
+            fn resolve(self, _: ResourceData<'_>) -> Self { self }
             const WORDS: usize = $length;
             const ZERO: Self = Self::ZERO;
 
@@ -263,16 +296,6 @@ vector!(UVec2, u32, 2, x: 0, y: 1);
 vector!(UVec3, u32, 3, x: 0, y: 1, z: 2);
 vector!(UVec4, u32, 4, x: 0, y: 1, z: 2, w: 3);
 
-/// Reads one element from a packed array of shader values.
-#[doc(hidden)]
-pub fn load<T: ShaderData>(words: &[u32], index: u32) -> T {
-    if T::WORDS == 0 || index as usize >= words.len() / T::WORDS {
-        return T::ZERO;
-    }
-    // SAFETY: The index is below the number of complete encoded records.
-    unsafe { T::read_unchecked(words, index as usize * T::WORDS) }
-}
-
 /// # Safety
 /// The indexed record must have been encoded in full using this codec.
 #[doc(hidden)]
@@ -286,17 +309,5 @@ pub unsafe fn load_unchecked<T: ShaderData>(words: &[u32], index: u32) -> T {
 pub struct FrameData {
     pub screen_size: Vec2,
     pub time: f32,
-}
-
-/// Straight-alpha color operations; shader output conversion belongs to Isthmus.
-pub trait ColorExt {
-    #[must_use]
-    /// Multiplies alpha by `opacity`, leaving straight RGB unchanged.
-    fn opacity(self, opacity: f32) -> Self;
-}
-
-impl ColorExt for Vec4 {
-    fn opacity(self, opacity: f32) -> Self {
-        self.truncate().extend(self.w * opacity)
-    }
+    pub pixel_scale: Vec2,
 }

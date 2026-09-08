@@ -1,29 +1,24 @@
 use crate::{
-    app::{Background, update},
+    app::{Background, CantusApp},
     config::SearchProvider,
-    interaction::Rect,
-    platform::{DesktopApp, Platform},
+    interaction::key,
+    platform::{self, DesktopApp},
     render::{
-        Fragment, GAP, Globals, PADDING, TEXT_COLOR, TextFragment, UiContext,
-        sdf::{
-            ShapeFragment, SurfaceSample, VISIBLE_ALPHA, cantus_surface, glass, pill_geometry, presence,
-            refracted_text, sample_capsule, sample_pill,
-        },
+        GAP, PADDING, Program, TEXT_COLOR, UiContext,
+        sdf::{deform, presence, refract},
     },
 };
 use fend_core::Context;
 use isthmus::{
-    ColorExt as _, Float as _, Image, Quad, Sdf,
-    geometry::{
-        sdf::{RoundedRect, rounded_rect},
-        text,
-    },
+    ColorExt as _, Float as _, Image, Quad, Unorm8x4,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     shader,
-    spirv_std::arch::kill,
 };
+use isthmus_sdf::{Shape, Text};
 use reqwest::Client;
+use serde::Deserialize;
 use std::{collections::HashMap, error::Error, ops::Range, sync::OnceLock};
+use unicode_segmentation::UnicodeSegmentation;
 
 const PANEL_WIDTH: f32 = 520.0;
 const ROW_HEIGHT: f32 = 50.0;
@@ -50,29 +45,30 @@ static EXCHANGE_RATES: OnceLock<HashMap<String, f64>> = OnceLock::new();
 
 /// Coverage of a magnifying glass centered on the origin.
 fn magnifier_icon(point: Vec2) -> f32 {
-    Sdf::new((point.length() - 6.2).abs()).union(Sdf::segment(point, vec2(4.6, 4.6), vec2(8.8, 8.8))).stroke(1.05)
+    Shape::circle(Vec2::ZERO, 6.2).stroke(2.1).union(Shape::segment(vec2(4.6, 4.6), vec2(8.8, 8.8), 2.1)).fill_at(point)
 }
 
 /// Straight color and coverage of the calculator badge shown beside a fend answer.
 fn calculator_icon(point: Vec2) -> Vec4 {
-    let badge = Sdf::rounded_box(point, Vec2::splat(13.0), 9.0).fill();
-    let equals = Sdf::capsule(vec2(point.x, point.y.abs() - 3.1), 4.3, 1.1).fill();
+    let badge = Shape::rounded_rect(Vec2::splat(26.0), 9.0).fill_at(point);
+    let equals = Shape::segment(vec2(-4.3, 0.0), vec2(4.3, 0.0), 2.2).fill_at(vec2(point.x, point.y.abs() - 3.1));
     ACCENT_COLOR.lerp(Vec3::splat(0.96), equals).extend(badge)
 }
 
 /// "↵" or "⇧" glyph coverage, drawn around the origin.
 fn key_glyph(point: Vec2, shift: bool) -> f32 {
-    let distance = if shift {
-        Sdf::segment(point, vec2(0.0, -4.0), vec2(-3.4, 0.2))
-            .union(Sdf::segment(point, vec2(0.0, -4.0), vec2(3.4, 0.2)))
-            .union(Sdf::segment(point, vec2(0.0, -0.6), vec2(0.0, 4.0)))
+    if shift {
+        Shape::segment(vec2(0.0, -4.0), vec2(-3.4, 0.2), 1.6)
+            .union(Shape::segment(vec2(0.0, -4.0), vec2(3.4, 0.2), 1.6))
+            .union(Shape::segment(vec2(0.0, -0.6), vec2(0.0, 4.0), 1.6))
+            .fill_at(point)
     } else {
-        Sdf::segment(point, vec2(3.4, -3.6), vec2(3.4, 1.8))
-            .union(Sdf::segment(point, vec2(3.4, 1.8), vec2(-2.6, 1.8)))
-            .union(Sdf::segment(point, vec2(-2.6, 1.8), vec2(0.2, -0.8)))
-            .union(Sdf::segment(point, vec2(-2.6, 1.8), vec2(0.2, 4.4)))
-    };
-    distance.stroke(0.8)
+        Shape::segment(vec2(3.4, -3.6), vec2(3.4, 1.8), 1.6)
+            .union(Shape::segment(vec2(3.4, 1.8), vec2(-2.6, 1.8), 1.6))
+            .union(Shape::segment(vec2(-2.6, 1.8), vec2(0.2, -0.8), 1.6))
+            .union(Shape::segment(vec2(-2.6, 1.8), vec2(0.2, 4.4), 1.6))
+            .fill_at(point)
+    }
 }
 
 /// Straight color and coverage of one key badge; `half_width` of 0 leaves the slot empty.
@@ -80,8 +76,8 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
     if half_width <= 0.0 {
         return Vec4::ZERO;
     }
-    let outline = Sdf::rounded_box(point, vec2(half_width, BADGE_HEIGHT * 0.5), 6.0).sample();
-    let (body, edge) = (outline.fill(), outline.stroke(0.65));
+    let sample = Shape::rounded_rect(vec2(half_width * 2.0, BADGE_HEIGHT), 6.0).sample_at(point);
+    let (body, edge) = (sample.fill(), sample.band(-0.65..0.65));
     let glyph = if shift {
         key_glyph(point + vec2(8.5, 0.0), true).max(key_glyph(point - vec2(7.5, 0.0), false))
     } else {
@@ -89,10 +85,6 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
     };
     let color = Vec3::splat(0.27).lerp(ICON_COLOR, edge).lerp(TEXT_COLOR, glyph);
     color.extend(body.max(edge).max(glyph))
-}
-
-fn sample_launcher(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
-    cantus_surface(quad, pixel, globals, time, rounded_rect(quad, BACKGROUND_RADIUS as f32).shape)
 }
 
 #[derive(Default)]
@@ -117,35 +109,41 @@ impl TextField {
         if self.cursor < self.anchor { self.cursor..self.anchor } else { self.anchor..self.cursor }
     }
 
-    pub fn selected_text(&self) -> &str {
-        &self.text[self.selection()]
-    }
-
-    pub const fn set_cursor(&mut self, index: usize, select: bool) {
-        self.cursor = index;
+    pub fn set_cursor(&mut self, index: usize, select: bool) {
+        self.cursor = self
+            .text
+            .grapheme_indices(true)
+            .map(|(offset, _)| offset)
+            .find(|&offset| offset >= index)
+            .unwrap_or(self.text.len());
         if !select {
-            self.anchor = index;
+            self.anchor = self.cursor;
         }
         self.touched = true;
     }
 
-    pub const fn select_all(&mut self) {
-        self.anchor = 0;
-        self.set_cursor(self.text.len(), true);
-    }
-
     /// Where the caret lands moving one character in `forward`'s direction.
     fn step(&self, forward: bool) -> usize {
-        let (before, after) = self.text.split_at(self.cursor);
         if forward {
-            self.cursor + after.chars().next().map_or(0, char::len_utf8)
+            self.text
+                .grapheme_indices(true)
+                .map(|(offset, _)| offset)
+                .find(|&offset| offset > self.cursor)
+                .unwrap_or(self.text.len())
         } else {
-            self.cursor - before.chars().next_back().map_or(0, char::len_utf8)
+            self.text
+                .grapheme_indices(true)
+                .map(|(offset, _)| offset)
+                .rev()
+                .find(|&offset| offset < self.cursor)
+                .unwrap_or(0)
         }
     }
 
     pub fn insert(&mut self, insertion: &str) {
         let range = self.selection();
+        let remaining = 64usize.saturating_sub(self.text.chars().count() - self.text[range.clone()].chars().count());
+        let insertion = &insertion[..insertion.char_indices().nth(remaining).map_or(insertion.len(), |(end, _)| end)];
         self.text.replace_range(range.clone(), insertion);
         self.set_cursor(range.start + insertion.len(), false);
     }
@@ -193,9 +191,7 @@ pub struct LauncherState {
     pub open: bool,
     pub session: u64,
     pub field: TextField,
-    pub matches: Vec<usize>,
-    /// The fend answer for the current query, if any.
-    pub calc_result: Option<String>,
+    entries: Vec<Entry>,
     /// Index of the highlighted entry, which enter and shift+enter act on.
     pub selected: usize,
     /// Text waiting to be put on the system clipboard by the platform layer.
@@ -211,51 +207,55 @@ struct SearchEngine {
     icon: Option<Image>,
 }
 
-enum LauncherEntry<'a> {
-    Answer(&'a str),
-    App(&'a DesktopApp),
-    Search(&'a SearchEngine),
+enum Entry {
+    Answer(String),
+    App(usize),
+    Search(usize),
 }
 
+#[derive(Default)]
 struct EntryView<'a> {
-    icon: EntryIcon<'a>,
+    image: Option<&'a Image>,
+    icon_kind: u32 = SEARCH_ICON,
     name: &'a str,
     detail: &'a str,
-    action: &'static str,
+    action: &'static str = "Open",
     alternate: Option<&'a str>,
 }
 
-enum EntryIcon<'a> {
-    Image(&'a Image),
-    Calculator,
-    Search,
-}
-
-impl<'a> LauncherEntry<'a> {
-    fn view(self, search: &'a str) -> EntryView<'a> {
+impl Entry {
+    fn view<'a>(&'a self, launcher: &'a LauncherState) -> EntryView<'a> {
         match self {
-            Self::App(app) => EntryView {
-                icon: app.icon.as_ref().map_or(EntryIcon::Search, EntryIcon::Image),
-                name: &app.name,
-                detail: &app.comment,
-                action: "Open",
-                alternate: app.action.as_ref().map(|(label, _)| label.as_str()),
-            },
-            Self::Answer(answer) => {
-                EntryView { icon: EntryIcon::Calculator, name: answer, detail: "", action: "Copy", alternate: None }
+            Self::App(index) => {
+                let app = &launcher.apps[*index];
+                EntryView {
+                    image: app.icon.as_ref(),
+                    name: &app.name,
+                    detail: &app.comment,
+                    alternate: app.action.as_ref().map(|(label, _)| label.as_str()),
+                    ..Default::default()
+                }
             }
-            Self::Search(engine) => EntryView {
-                icon: engine.icon.as_ref().map_or(EntryIcon::Search, EntryIcon::Image),
-                name: &engine.label,
-                detail: search,
-                action: "Search",
-                alternate: None,
-            },
+            Self::Answer(answer) => {
+                EntryView { icon_kind: CALCULATOR_ICON, name: answer, action: "Copy", ..Default::default() }
+            }
+            Self::Search(index) => {
+                let engine = &launcher.providers[*index];
+                EntryView {
+                    image: engine.icon.as_ref(),
+                    name: &engine.label,
+                    detail: launcher.search_query().1,
+                    action: "Search",
+                    ..Default::default()
+                }
+            }
         }
     }
 }
 
 impl LauncherState {
+    const ALWAYS_OPEN: bool = cfg!(target_arch = "wasm32");
+
     pub(crate) fn new(
         background: &Background,
         http: &Client,
@@ -264,7 +264,7 @@ impl LauncherState {
         let mut calc = Context::new();
         let rates_http = http.clone();
         background.spawn(async move {
-            #[derive(serde::Deserialize)]
+            #[derive(Deserialize)]
             struct Rates {
                 rates: HashMap<String, f64>,
             }
@@ -284,29 +284,29 @@ impl LauncherState {
             .map(|config| SearchEngine { label: format!("Search with {}", config.name), config, icon: None })
             .collect::<Vec<_>>();
         background.spawn_update(async move {
-            let mut apps = Platform::desktop_apps();
+            let mut apps = platform::desktop_apps();
             apps.sort_by_key(|app| app.name.to_lowercase());
-            Some(update(move |app| {
+            Some(move |app: &mut CantusApp| {
                 app.launcher.apps = apps;
                 app.launcher.refresh_matches();
-            }))
+            })
         });
         for (index, provider) in providers.iter().enumerate() {
             let icon = provider.config.icon.clone();
             let http = http.clone();
             background.spawn_update(async move {
-                let icon = Platform::provider_icon(http, icon).await?;
-                Some(update(move |app| {
+                let bytes = http.get(icon).send().await.ok()?.error_for_status().ok()?.bytes().await.ok()?;
+                let icon = platform::decode_icon(&bytes)?;
+                Some(move |app: &mut CantusApp| {
                     app.launcher.providers[index].icon = Some(icon);
-                }))
+                })
             });
         }
         Self {
-            open: false,
+            open: Self::ALWAYS_OPEN,
             session: 0,
             field: TextField::default(),
-            matches: Vec::new(),
-            calc_result: None,
+            entries: Vec::new(),
             selected: 0,
             pending_copy: None,
             calc,
@@ -315,10 +315,9 @@ impl LauncherState {
         }
     }
 
-    /// Opens or closes the launcher with a fresh query.
     pub fn toggle(&mut self) {
         self.session = self.session.wrapping_add(1);
-        self.open = !self.open;
+        self.open = Self::ALWAYS_OPEN || !self.open;
         self.field.clear();
         self.refresh_matches();
     }
@@ -331,7 +330,7 @@ impl LauncherState {
 
     pub(crate) fn key(&mut self, key: LauncherKey, shift: bool) {
         match key {
-            LauncherKey::Escape => self.open = false,
+            LauncherKey::Escape => self.open = Self::ALWAYS_OPEN,
             LauncherKey::Activate => self.activate(self.selected, shift),
             LauncherKey::Up => self.move_selection(-1),
             LauncherKey::Down => self.move_selection(1),
@@ -341,9 +340,12 @@ impl LauncherState {
             LauncherKey::Right => self.field.move_cursor(true, shift),
             LauncherKey::Home => self.field.set_cursor(0, shift),
             LauncherKey::End => self.field.set_cursor(self.field.text.len(), shift),
-            LauncherKey::SelectAll => self.field.select_all(),
+            LauncherKey::SelectAll => {
+                self.field.anchor = 0;
+                self.field.set_cursor(self.field.text.len(), true);
+            }
             LauncherKey::Copy | LauncherKey::Cut => {
-                self.pending_copy = Some(self.field.selected_text().to_owned());
+                self.pending_copy = Some(self.field.text[self.field.selection()].to_owned());
                 if matches!(key, LauncherKey::Cut) {
                     self.edit(|field| field.insert(""));
                 }
@@ -355,15 +357,18 @@ impl LauncherState {
         let (provider, query) = self.search_query();
         let explicit_search = provider.is_some();
         let query = query.to_owned();
-        self.calc_result = (!explicit_search && query.len() >= 4)
+        self.entries = (!explicit_search && query.len() >= 4)
             .then(|| fend_core::evaluate(&query, &mut self.calc).ok())
             .flatten()
             .map(|result| result.get_main_result().to_owned())
-            .filter(|result| !result.is_empty() && result != &query);
+            .filter(|result| !result.is_empty() && result != &query)
+            .map(Entry::Answer)
+            .into_iter()
+            .collect();
 
         let lower_query = query.to_lowercase();
         let has_search = !self.providers.is_empty() && (!lower_query.is_empty() || explicit_search);
-        let visible = MAX_VISIBLE - usize::from(self.calc_result.is_some()) - usize::from(has_search);
+        let visible = MAX_VISIBLE - self.entries.len() - usize::from(has_search);
         let mut scored = self
             .apps
             .iter()
@@ -375,48 +380,35 @@ impl LauncherState {
             })
             .collect::<Vec<_>>();
         scored.sort_by_key(|&(_, prefix_match)| !prefix_match);
-        self.matches = scored.into_iter().take(visible).map(|(index, _)| index).collect();
-        self.selected = 0;
-    }
-
-    pub fn entry_count(&self) -> usize {
-        usize::from(self.calc_result.is_some()) + self.matches.len() + usize::from(self.search_provider().is_some())
-    }
-
-    fn entry(&self, mut row: usize) -> Option<LauncherEntry<'_>> {
-        if let Some(answer) = self.calc_result.as_deref() {
-            if row == 0 {
-                return Some(LauncherEntry::Answer(answer));
-            }
-            row -= 1;
+        self.entries.extend(scored.into_iter().take(visible).map(|(index, _)| Entry::App(index)));
+        if has_search {
+            self.entries.push(Entry::Search(provider.unwrap_or_default()));
         }
-        self.matches
-            .get(row)
-            .and_then(|&app| self.apps.get(app))
-            .map(LauncherEntry::App)
-            .or_else(|| self.search_provider().filter(|_| row == self.matches.len()).map(LauncherEntry::Search))
+        self.selected = 0;
     }
 
     /// Moves the highlight by `delta` rows, stopping at either end.
     pub fn move_selection(&mut self, delta: i32) {
-        self.selected = self.selected.saturating_add_signed(delta as isize).min(self.entry_count().saturating_sub(1));
+        self.selected = self.selected.saturating_add_signed(delta as isize).min(self.entries.len().saturating_sub(1));
     }
 
     /// Runs row `index`'s action — its alternative one when `alternate` is set — then dismisses.
     pub fn activate(&mut self, index: usize, alternate: bool) {
-        match self.entry(index) {
-            Some(LauncherEntry::App(app)) => {
-                Platform::spawn(app.action.as_ref().filter(|_| alternate).map_or(&app.exec, |(_, exec)| exec));
+        match self.entries.get(index) {
+            Some(Entry::App(index)) => {
+                let app = &self.apps[*index];
+                platform::spawn(app.action.as_ref().filter(|_| alternate).map_or(&app.exec, |(_, exec)| exec));
             }
-            Some(LauncherEntry::Answer(answer)) => self.pending_copy = Some(answer.to_owned()),
-            Some(LauncherEntry::Search(engine)) => {
+            Some(Entry::Answer(answer)) => self.pending_copy = Some(answer.to_owned()),
+            Some(Entry::Search(index)) => {
+                let engine = &self.providers[*index];
                 let terms = self.search_query().1;
                 let encoded = form_urlencoded::byte_serialize(terms.as_bytes()).collect::<String>();
-                Platform::open_url(&engine.config.url.replace("{searchTerms}", &encoded));
+                platform::open_url(&engine.config.url.replace("{searchTerms}", &encoded));
             }
             None => return,
         }
-        self.open = false;
+        self.open = Self::ALWAYS_OPEN;
         self.field.clear();
         self.refresh_matches();
     }
@@ -435,13 +427,8 @@ impl LauncherState {
             .map_or((None, query), |index| (Some(index), query[self.providers[index].config.alias.len()..].trim()))
     }
 
-    fn search_provider(&self) -> Option<&SearchEngine> {
-        let (provider, query) = self.search_query();
-        self.providers.get(provider.unwrap_or_default()).filter(|_| provider.is_some() || !query.is_empty())
-    }
-
     pub(crate) fn bounds(&self, screen_size: Vec2) -> (Vec2, Vec2) {
-        let rows = self.entry_count();
+        let rows = self.entries.len();
         let height = HEADER_HEIGHT + PADDING * 2.0 + rows as f32 * ROW_HEIGHT + rows.saturating_sub(1) as f32 * GAP;
         let size = vec2(PANEL_WIDTH, height);
         ((screen_size - size) * 0.5, size)
@@ -471,40 +458,36 @@ impl LauncherState {
             return;
         }
         let (origin, size) = self.bounds(context.frame.screen_size);
-        let screen = Rect::new(0.0, 0.0, context.frame.screen_size.x, context.frame.screen_size.y);
-        let backdrop = context.interaction.interact(screen);
-        if backdrop.clicked()
-            && !Rect::from_center(origin + size * 0.5, size * 0.5).contains(context.interaction.mouse_pos())
-        {
+        let quad = Quad::from_min_max(origin, origin + size);
+        let panel = Shape::rounded_rect(quad, BACKGROUND_RADIUS as f32);
+        let screen = Quad::from_min_max(Vec2::ZERO, context.frame.screen_size);
+        context.interaction.input_region(screen);
+        let backdrop = context.interaction.interact("launcher-backdrop", Shape::rectangle(screen).difference(panel));
+        if !Self::ALWAYS_OPEN && backdrop.clicked {
             self.open = false;
             return;
         }
 
-        self.show_search(context, Quad::from_min_max(origin, origin + size));
+        self.show_search(context, quad);
         self.show_entries(context, origin);
     }
 
     fn show_search(&mut self, context: &mut UiContext, quad: Quad) {
         let origin = quad.center - quad.size * 0.5;
-        let size = quad.size;
-        let (left, right) = (PADDING + 34.0, size.x - PADDING);
+        let (left, right) = (PADDING + 34.0, quad.size.x - PADDING);
         if self.field.touched {
             self.field.touched = false;
             self.field.blink_start = context.frame.time;
         }
         let empty = self.field.text.is_empty();
         let query = if empty { "Search anything…" } else { &self.field.text };
-        let mut line =
-            context.frame.text.line(query, 18.0, 600.0).visible(vec2(left, HEADER_HEIGHT * 0.5), left..right);
-        if empty {
-            line = line.with_color(MUTED_COLOR);
-        }
+        let line = context.frame.resources.line(query, 18.0, 600.0).translated(vec2(left, HEADER_HEIGHT * 0.5));
         let selection_range = self.field.selection();
         let blink = ((context.frame.time - self.field.blink_start) * 1.4).fract();
-        let (caret, selection) = {
-            let text = &context.frame.text;
-            // Long queries are clipped rather than scrolled, so every offset maps straight to an x.
-            let at = |offset: usize| (left + text.width(&self.field.text[..offset], 18.0, 600.0)).min(right);
+        let (caret, selection): (Vec2, Vec2) = {
+            let text = &mut *context.frame.resources;
+            let mut at =
+                |offset: usize| (left + text.shape(&self.field.text[..offset], 18.0, 600.0).text.width).min(right);
             let caret = vec2(at(self.field.cursor), blink.smoothstep(0.62, 0.5));
             let selection = if selection_range.is_empty() {
                 Vec2::ZERO
@@ -513,46 +496,35 @@ impl LauncherState {
             };
             (caret, selection)
         };
-        context.frame.paint(
-            glass(rounded_rect(quad, BACKGROUND_RADIUS as f32)),
-            shader!(|fragment: ShapeFragment<RoundedRect>, caret: Vec2, selection: Vec2| {
-                let surface =
-                    cantus_surface(fragment.quad, fragment.pixel, fragment.globals, fragment.time, fragment.geometry);
-                if surface.mask <= 0.0 {
-                    kill();
-                }
-                let point = fragment.quad.local(surface.content_point(fragment.pixel)) + fragment.quad.size * 0.5;
-                let mut color = Vec3::splat(0.09).lerp(
-                    Vec3::splat(0.17),
-                    Sdf::rounded_box(
-                        surface.refracted - vec2(surface.size.x * 0.5, HEADER_HEIGHT - 0.5),
-                        vec2(surface.size.x * 0.5, 0.5),
-                        0.0,
-                    )
-                    .fill(),
-                );
-                color = color.lerp(ICON_COLOR, magnifier_icon(point - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
 
-                let selection_width = selection.y - selection.x;
-                let highlight = Sdf::rounded_box(
-                    point - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5),
-                    vec2(selection_width * 0.5, 13.0),
-                    3.0,
-                )
-                .fill();
-                color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
-                let caret_mask =
-                    Sdf::rounded_box(point - vec2(caret.x, HEADER_HEIGHT * 0.5), vec2(0.9, 12.0), 0.9).fill();
-                color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
-
-                surface.color(color).opacity(0.82)
-            }),
+        shader!(
+            context
+                .frame
+                .upload({
+                    let caret: Vec2;
+                    let selection: Vec2;
+                    let quad: Quad;
+                })
+                .vertex(|frame| deform(Shape::rounded_rect(quad, BACKGROUND_RADIUS as f32), frame))
+                .fragment(|_, surface| {
+                    let point = quad.uv(surface.content) * quad.size;
+                    let mut color = Vec3::splat(0.09)
+                        .lerp(ICON_COLOR, magnifier_icon(point - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
+                    let selection_width = selection.y - selection.x;
+                    let highlight = Shape::rounded_rect(vec2(selection_width, 26.0), 3.0)
+                        .fill_at(point - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5));
+                    color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
+                    let caret_mask = Shape::pill(vec2(1.8, 24.0)).fill_at(point - vec2(caret.x, HEADER_HEIGHT * 0.5));
+                    color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
+                    surface.glass(color).opacity(0.82)
+                })
         );
-        context.frame.paint(
-            refracted_text(line).translated(origin),
-            shader!(|text: TextFragment<'_>, quad: Quad| {
-                sample_launcher(quad, text.pixel, text.globals, text.time).text(&text)
-            }),
+        paint_text(
+            context,
+            quad,
+            BACKGROUND_RADIUS as f32,
+            line.translated(origin),
+            if empty { MUTED_COLOR } else { TEXT_COLOR.extend(1.0) },
         );
     }
 
@@ -562,110 +534,121 @@ impl LauncherState {
         let text_left = ROW_HEIGHT * 0.5 + ICON_SIZE * 0.5 + GAP * 2.0;
 
         let mut activated = None;
-        for index in 0..self.entry_count() {
+        for index in 0..self.entries.len() {
             let y = origin.y + HEADER_HEIGHT + PADDING + index as f32 * (ROW_HEIGHT + GAP);
-            let pill = Rect::new(x, y, x + width, y + ROW_HEIGHT);
-            let response = context.interaction.interact(pill);
+            let pill = Quad::from_min_max(vec2(x, y), vec2(x + width, y + ROW_HEIGHT));
+            let identity = match &self.entries[index] {
+                Entry::App(index) => key(("app", &self.apps[*index].exec)),
+                Entry::Answer(answer) => key(("answer", answer)),
+                Entry::Search(index) => key(("search", &self.providers[*index].config.url, self.search_query().1)),
+            };
+            let response = context.interaction.interact(identity, Shape::pill(pill));
             if response.hovered {
                 self.selected = index;
             }
-            if response.clicked() {
+            if response.clicked {
                 activated = Some(index);
             }
-            let pill: Quad = pill.into();
-            let entry = self.entry(index).unwrap().view(self.search_query().1);
+            let entry = self.entries[index].view(self);
 
             let mut edge = width - ROW_HEIGHT * 0.5;
             let mut badge = |label: Option<&str>, width: f32| {
                 let Some(label) = label.filter(|_| self.selected == index) else {
-                    return (Vec2::ZERO, text::Line::default());
+                    return (Vec2::ZERO, Text::default());
                 };
                 let badge = vec2(edge - width * 0.5, width * 0.5);
                 edge -= width + GAP;
-                let line = context
-                    .frame
-                    .text
-                    .line(label, 13.0, 600.0)
-                    .right(vec2(edge, ROW_HEIGHT * 0.5))
-                    .with_color(MUTED_COLOR);
-                edge -= context.frame.text.width(label, 13.0, 600.0) + GAP * 2.0;
+                let line = context.frame.resources.line(label, 13.0, 600.0).right(vec2(edge, ROW_HEIGHT * 0.5));
+                edge -= line.width + GAP * 2.0;
                 (badge, line)
             };
             let (enter_badge, action_line) = badge(Some(entry.action), ENTER_BADGE_WIDTH);
             let (alternate_badge, alternate_line) = badge(entry.alternate, ALTERNATE_BADGE_WIDTH);
 
-            let clip = text_left..edge.max(text_left);
             let (name_y, detail_y) =
                 if entry.detail.is_empty() { (ROW_HEIGHT * 0.5, 0.0) } else { (ROW_HEIGHT * 0.34, ROW_HEIGHT * 0.68) };
-            let name_line =
-                context.frame.text.line(entry.name, 16.0, 700.0).visible(vec2(text_left, name_y), clip.clone());
+            let name_line = context.frame.resources.line(entry.name, 16.0, 700.0).translated(vec2(text_left, name_y));
             let detail_line = if entry.detail.is_empty() {
-                text::Line::default()
+                Text::default()
             } else {
+                context.frame.resources.line(entry.detail, 13.0, 600.0).translated(vec2(text_left, detail_y))
+            };
+
+            shader!(
                 context
                     .frame
-                    .text
-                    .line(entry.detail, 13.0, 600.0)
-                    .visible(vec2(text_left, detail_y), clip)
-                    .with_color(DETAIL_COLOR)
-            };
-
-            let (image, icon_kind) = match entry.icon {
-                EntryIcon::Image(image) => (Some(image), 0),
-                EntryIcon::Calculator => (None, CALCULATOR_ICON),
-                EntryIcon::Search => (None, SEARCH_ICON),
-            };
-            context.frame.paint(
-                pill_geometry(pill),
-                shader!(|fragment: ShapeFragment, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
-                    let surface = sample_capsule(fragment.geometry, fragment.pixel, fragment.globals, fragment.time);
-                    if surface.alpha <= VISIBLE_ALPHA {
-                        kill();
-                    }
-                    let mut color = Vec3::splat(0.15)
-                        .lerp(Vec3::splat(0.235), presence(enter_badge.y))
-                        .lerp(Vec3::splat(0.3), (surface.bulge() / 8.0).min(1.0));
-
-                    let icon_point = surface.local - Vec2::splat(surface.size.y * 0.5);
-                    if icon_kind == CALCULATOR_ICON {
-                        let calculator = calculator_icon(icon_point);
-                        color = color.lerp(calculator.truncate(), calculator.w);
-                    } else if icon_kind == SEARCH_ICON {
-                        color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
-                    }
-
-                    let point = fragment.quad.local(surface.content_point(fragment.pixel)) + fragment.quad.size * 0.5;
-                    let paint_badge = |color: Vec3, badge: Vec2, shift: bool| {
-                        let ink = action_badge(point - vec2(badge.x, ROW_HEIGHT * 0.5), badge.y, shift);
-                        color.lerp(ink.truncate(), ink.w)
-                    };
-                    color = paint_badge(color, enter_badge, false);
-                    color = paint_badge(color, alternate_badge, true);
-
-                    surface.color(color)
-                }),
+                    .upload({
+                        let icon_kind: u32 = if entry.image.is_some() { 0 } else { entry.icon_kind };
+                        let enter_badge: Vec2;
+                        let alternate_badge: Vec2;
+                        let pill: Quad;
+                    })
+                    .vertex(|frame| deform(Shape::pill(pill), frame))
+                    .fragment(|_, surface| {
+                        let mut color = Vec3::splat(0.15)
+                            .lerp(Vec3::splat(0.235), presence(enter_badge.y))
+                            .lerp(Vec3::splat(0.3), (surface.bulge / 8.0).min(1.0));
+                        let icon_point = pill.local(surface.pixel) + vec2((pill.size.x - pill.size.y) * 0.5, 0.0);
+                        if icon_kind == CALCULATOR_ICON {
+                            let calculator = calculator_icon(icon_point);
+                            color = color.lerp(calculator.truncate(), calculator.w);
+                        } else if icon_kind == SEARCH_ICON {
+                            color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
+                        }
+                        let point = pill.uv(surface.content) * pill.size;
+                        let paint_badge = |color: Vec3, badge: Vec2, shift: bool| {
+                            let ink = action_badge(point - vec2(badge.x, ROW_HEIGHT * 0.5), badge.y, shift);
+                            color.lerp(ink.truncate(), ink.w)
+                        };
+                        color = paint_badge(color, enter_badge, false);
+                        color = paint_badge(color, alternate_badge, true);
+                        surface.glass(color)
+                    })
             );
-            if let Some(image) = image {
-                let icon = Quad::new(
-                    pill.center - vec2((pill.size.x - pill.size.y) * 0.5, 0.0),
-                    Vec2::splat(ICON_SIZE),
-                    Vec2::X,
+            if let Some(image) = entry.image {
+                shader!(
+                    context
+                        .frame
+                        .upload({
+                            let image: &Image;
+                            let quad: Quad = Quad::new(
+                                pill.center - vec2((pill.size.x - pill.size.y) * 0.5, 0.0),
+                                Vec2::splat(ICON_SIZE),
+                                Vec2::X,
+                            );
+                        })
+                        .vertex(quad)
+                        .fragment(|_, surface| image.sample(surface.uv))
                 );
-                context.frame.paint(icon, shader!(|fragment: Fragment, image: Image| image.sample(fragment.uv)));
             }
 
             let origin = vec2(x, y);
-            for line in [name_line, detail_line, action_line, alternate_line] {
-                context.frame.paint(
-                    refracted_text(line).translated(origin),
-                    shader!(|text: TextFragment<'_>, pill: Quad| {
-                        sample_pill(pill, text.pixel, text.globals, text.time).text(&text)
-                    }),
-                );
+            for (line, color) in [
+                (name_line, TEXT_COLOR.extend(1.0)),
+                (detail_line, DETAIL_COLOR),
+                (action_line, MUTED_COLOR),
+                (alternate_line, MUTED_COLOR),
+            ] {
+                paint_text(context, pill, ROW_HEIGHT * 0.5, line.translated(origin), color);
             }
         }
         if let Some(index) = activated {
             self.activate(index, false);
         }
     }
+}
+
+fn paint_text(context: &mut UiContext, quad: Quad, radius: f32, line: Text, color: Vec4) {
+    shader!(
+        context
+            .frame
+            .upload({
+                let quad: Quad;
+                let radius: f32;
+                let line: Text;
+                let text_color: Unorm8x4 = Unorm8x4::from_vec4(color);
+            })
+            .vertex(|frame| refract(Shape::rounded_rect(quad, radius), frame, line.bounds()))
+            .fragment(|_, surface| text_color.to_vec4().opacity(line.sample_at(surface.content).fill()))
+    );
 }

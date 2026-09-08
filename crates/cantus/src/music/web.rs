@@ -1,6 +1,6 @@
 //! Browser demo data standing in for librespot's native socket protocol.
 
-use super::{AudioFeatures, LyricSegment, MusicResult, PlaybackCommand, Track, TrackRuntime};
+use super::{AudioFeatures, MusicResult, PlaybackCommand, Track, TrackRuntime, lyrics::LyricSegment};
 use crate::{
     app::{AppUpdater, Background, send_update},
     config::Config,
@@ -24,14 +24,38 @@ impl Spotify {
     }
 
     pub(super) fn command(&self, command: PlaybackCommand) {
-        if let PlaybackCommand::SetPlaying(playing) = command {
-            send_update(&self.updater, move |app| {
-                app.music.timeline.position_ms = app.music.timeline.position_now();
-                app.music.timeline.observed_at = Instant::now();
-                app.music.timeline.rate = f32::from(playing);
-                app.music.playing = playing;
-            });
-        }
+        send_update(&self.updater, move |app| {
+            let music = &mut app.music;
+            let mut position = music.timeline.position_now();
+            match command {
+                PlaybackCommand::SetPlaying(playing) => music.playing = playing,
+                PlaybackCommand::Seek(milliseconds) => position = milliseconds as f32,
+                PlaybackCommand::Skip(offset) => {
+                    music.timeline.index = music
+                        .timeline
+                        .index
+                        .saturating_add_signed(isize::from(offset))
+                        .min(music.queue.len().saturating_sub(1));
+                    position = 0.0;
+                }
+                PlaybackCommand::UpdateLibrary { track_id, playlists, liked } => {
+                    for (id, include) in playlists {
+                        if let Some(playlist) = music.playlists.iter_mut().find(|playlist| playlist.id == id) {
+                            if include {
+                                playlist.tracks.insert(track_id);
+                            } else {
+                                playlist.tracks.remove(&track_id);
+                            }
+                        }
+                    }
+                    tracing::debug!(%track_id, ?liked, "Browser demo does not persist Spotify library changes");
+                }
+            }
+            let duration = music.queue.get(music.timeline.index).map_or(0.0, |track| track.duration_ms as f32);
+            music.timeline.position_ms = position.clamp(0.0, duration);
+            music.timeline.observed_at = Instant::now();
+            music.timeline.rate = f32::from(music.playing);
+        });
     }
 
     pub(super) async fn lyrics(&self, _track_id: super::TrackId) -> MusicResult<Vec<LyricSegment>> {

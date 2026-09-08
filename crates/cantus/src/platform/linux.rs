@@ -1,22 +1,22 @@
 use crate::{
-    app::{AppUpdater, Background, CantusApp, send_update, update},
-    config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
+    app::{AppUpdater, Background, CantusApp, send_update},
+    config,
     interaction::{InputEvent, Interaction},
     render::{
-        PANEL_START, Renderer, TEXT_COLOR,
+        PANEL_START, Renderer,
         launcher::{BACKGROUND_RADIUS, LauncherKey},
-        lyrics::EXTENSION as LYRICS_EXTENSION,
+        lyrics,
         status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
-        weathertime::EXTENSION as WEATHER_EXTENSION,
+        weathertime,
     },
 };
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
 use futures_util::StreamExt;
 use isthmus::{
     SurfaceHandle,
-    geometry::text::Text,
     glam::{FloatExt, Vec2, vec2},
 };
+use isthmus_sdf::layout::TextCache;
 use microfft::real::rfft_1024;
 use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
 use raw_window_handle::{
@@ -27,12 +27,11 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     env,
-    error::Error,
     ffi::c_void,
     fs::{self, File},
     future::Future,
     io::{self, Read, Write},
-    os::{fd::AsFd, unix::net::UnixDatagram as BlockingUnixDatagram},
+    os::{fd::AsFd, unix::net::UnixDatagram},
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     ptr::NonNull,
@@ -43,10 +42,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tokio::{
-    net::UnixDatagram, runtime::Builder as RuntimeBuilder, sync::mpsc::UnboundedSender, task::spawn_blocking,
-    time::sleep as tokio_sleep,
-};
+use tokio::{net, runtime, sync::mpsc::UnboundedSender, task::spawn_blocking};
 use tracing::warn;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop, event_created_child,
@@ -81,15 +77,10 @@ use wayland_protocols::{
     },
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
-    zwlr_layer_shell_v1::{Layer as LayerStyle, ZwlrLayerShellV1},
-    zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
+    zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
+    zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 use xkbcommon::xkb;
-use zbus::{
-    Connection as DbusConnection, Proxy as DbusProxy,
-    proxy::{Builder as ProxyBuilder, CacheProperties},
-    zvariant::{OwnedObjectPath, OwnedValue, Value as DbusValue},
-};
 
 const PANEL_OVERFLOW: f32 = 16.0;
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
@@ -111,272 +102,226 @@ fn spawn_thread(name: &'static str, job: impl FnOnce() + Send + 'static) {
     thread::Builder::new().name(name.into()).spawn(job).expect("failed to spawn background thread");
 }
 
-impl super::Platform {
-    pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+use super::STATUS_SAMPLE_INTERVAL;
 
-    pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
-        let volume = Arc::clone(&audio);
-        spawn_thread("cantus-audio-playback", move || monitor_playback(&audio.spectrum));
-        spawn_thread("cantus-audio-volume", move || monitor_volume(&volume.volume));
-        spawn_thread("cantus-system-status", move || monitor_status(&updates));
-    }
+pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
+    let volume = Arc::clone(&audio);
+    spawn_thread("cantus-audio-playback", move || monitor_playback(&audio.spectrum));
+    spawn_thread("cantus-audio-volume", move || monitor_volume(&volume.volume));
+    spawn_thread("cantus-system-status", move || monitor_status(&updates));
+}
 
-    pub fn start_location_monitor(background: &Background, updates: UnboundedSender<[f32; 2]>) {
-        background.spawn(async move {
-            if let Err(error) = stream_location(&updates).await {
-                warn!(%error, "Location portal unavailable");
-            }
-        });
-    }
-
-    pub async fn sleep(duration: Duration) {
-        tokio_sleep(duration).await;
-    }
-
-    pub fn set_volume(volume: f32) {
-        let volume = format!("{volume:.3}");
-        if let Err(error) = Command::new("wpctl").args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume]).spawn() {
-            warn!(%error, "Failed to set PipeWire volume");
+pub fn start_location_monitor(background: &Background, updates: UnboundedSender<[f32; 2]>) {
+    background.spawn(async move {
+        if let Err(error) = stream_location(&updates).await {
+            warn!(%error, "Location portal unavailable");
         }
-    }
+    });
+}
 
-    /// Calls logind directly, which is what `systemctl poweroff` does under the hood.
-    pub fn run_power_action(background: &Background, action: usize) {
-        let method = ["PowerOff", "Reboot"][action];
-        background.spawn(async move {
-            let result: Result<(), zbus::Error> = async {
-                DbusConnection::system()
-                    .await?
-                    .call_method(
-                        Some("org.freedesktop.login1"),
-                        "/org/freedesktop/login1",
-                        Some("org.freedesktop.login1.Manager"),
-                        method,
-                        &(false,),
-                    )
-                    .await?;
-                Ok(())
-            }
-            .await;
-            if let Err(error) = result {
-                warn!(%error, method, "Failed to run held power action");
-            }
-        });
+pub fn set_volume(volume: f32) {
+    let volume = format!("{volume:.3}");
+    if let Err(error) = Command::new("wpctl").args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume]).spawn() {
+        warn!(%error, "Failed to set PipeWire volume");
     }
+}
 
-    pub fn desktop_apps() -> Vec<super::DesktopApp> {
-        let mut seen = HashSet::new();
-        let locales = get_languages_from_env();
-        desktop_entries(&locales)
-            .into_iter()
-            .filter(|entry| seen.insert(entry.id().to_owned()))
-            .filter(|entry| !entry.no_display() && !entry.hidden() && !entry.terminal())
-            .filter_map(|entry| {
-                let action = entry.actions().and_then(|actions| {
-                    let action = actions.into_iter().find(|action| !action.is_empty())?;
-                    let name = entry.action_entry_localized(action, "Name", &locales)?;
-                    Some((name.into_owned(), entry.parse_exec_action(action).ok()?))
-                });
-                Some(super::DesktopApp {
-                    name: entry.name(&locales)?.into_owned(),
-                    exec: entry.parse_exec().ok()?,
-                    comment: entry.comment(&locales).unwrap_or_default().into_owned(),
-                    action,
-                    icon: entry
-                        .icon()
-                        .and_then(|icon| {
-                            let path = Path::new(icon);
-                            if path.is_absolute() {
-                                Some(path.to_owned())
-                            } else {
-                                freedesktop_icons::lookup(icon).with_size(64).find()
-                            }
-                        })
-                        .and_then(|path| {
-                            let bytes = fs::read(path).ok()?;
-                            Self::decode_icon(&bytes)
-                        }),
-                })
+/// Calls logind directly, which is what `systemctl poweroff` does under the hood.
+pub fn run_power_action(background: &Background, action: usize) {
+    let method = ["PowerOff", "Reboot"][action];
+    background.spawn(async move {
+        let result: Result<(), zbus::Error> = async {
+            zbus::Connection::system()
+                .await?
+                .call_method(
+                    Some("org.freedesktop.login1"),
+                    "/org/freedesktop/login1",
+                    Some("org.freedesktop.login1.Manager"),
+                    method,
+                    &(false,),
+                )
+                .await?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            warn!(%error, method, "Failed to run held power action");
+        }
+    });
+}
+
+pub fn desktop_apps() -> Vec<super::DesktopApp> {
+    let mut seen = HashSet::new();
+    let locales = get_languages_from_env();
+    desktop_entries(&locales)
+        .into_iter()
+        .filter(|entry| seen.insert(entry.id().to_owned()))
+        .filter(|entry| !entry.no_display() && !entry.hidden() && !entry.terminal())
+        .filter_map(|entry| {
+            let action = entry.actions().and_then(|actions| {
+                let action = actions.into_iter().find(|action| !action.is_empty())?;
+                let name = entry.action_entry_localized(action, "Name", &locales)?;
+                Some((name.into_owned(), entry.parse_exec_action(action).ok()?))
+            });
+            Some(super::DesktopApp {
+                name: entry.name(&locales)?.into_owned(),
+                exec: entry.parse_exec().ok()?,
+                comment: entry.comment(&locales).unwrap_or_default().into_owned(),
+                action,
+                icon: entry
+                    .icon()
+                    .and_then(|icon| {
+                        let path = Path::new(icon);
+                        if path.is_absolute() {
+                            Some(path.to_owned())
+                        } else {
+                            freedesktop_icons::lookup(icon).with_size(64).find()
+                        }
+                    })
+                    .and_then(|path| {
+                        let bytes = fs::read(path).ok()?;
+                        super::decode_icon(&bytes)
+                    }),
             })
-            .collect()
-    }
+        })
+        .collect()
+}
 
-    pub fn spawn(command: &[String]) {
-        let Some((program, args)) = command.split_first() else {
-            return;
-        };
-        if let Err(error) = Command::new("systemd-run")
-            .args(["--user", "--collect", "--quiet", "--"])
-            .arg(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            warn!(%error, program, "Failed to launch application");
-        }
+pub fn spawn(command: &[String]) {
+    let Some((program, args)) = command.split_first() else {
+        return;
+    };
+    if let Err(error) = Command::new("systemd-run")
+        .args(["--user", "--collect", "--quiet", "--"])
+        .arg(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        warn!(%error, program, "Failed to launch application");
     }
+}
 
-    pub fn open_url(url: &str) {
-        if let Err(error) = Command::new("xdg-open").arg(url).spawn() {
-            warn!(%error, %url, "Failed to open URL");
-        }
+pub fn open_url(url: &str) {
+    if let Err(error) = Command::new("xdg-open").arg(url).spawn() {
+        warn!(%error, %url, "Failed to open URL");
     }
+}
 
-    pub fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
-        let path = launcher_socket_path();
-        if BlockingUnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)).is_ok() {
-            warn!(?path, "Another Cantus instance owns the launcher socket");
-            return;
-        }
-        let _ = fs::remove_file(&path);
-        let updater = updater.clone();
-        background.spawn(async move {
-            let socket = match UnixDatagram::bind(&path) {
-                Ok(socket) => socket,
-                Err(error) => {
-                    warn!(%error, ?path, "Failed to bind launcher toggle socket");
-                    return;
-                }
-            };
-            let mut buffer = [0u8; 1];
-            while socket.recv(&mut buffer).await.is_ok() {
-                if !send_update(&updater, |app| app.launcher.toggle()) {
-                    warn!("Launcher toggle update was discarded");
-                    break;
-                }
+pub fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
+    let path = launcher_socket_path();
+    if UnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)).is_ok() {
+        warn!(?path, "Another Cantus instance owns the launcher socket");
+        return;
+    }
+    let _ = fs::remove_file(&path);
+    let updater = updater.clone();
+    background.spawn(async move {
+        let socket = match net::UnixDatagram::bind(&path) {
+            Ok(socket) => socket,
+            Err(error) => {
+                warn!(%error, ?path, "Failed to bind launcher toggle socket");
+                return;
             }
-        });
-    }
-
-    pub fn trigger_launcher() -> ! {
-        let path = launcher_socket_path();
-        if let Err(error) = BlockingUnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)) {
-            eprintln!("Failed to reach a running Cantus instance at {}: {error}", path.display());
-            process::exit(1);
-        }
-        process::exit(0);
-    }
-
-    /// Runs the Wayland application event loop.
-    ///
-    /// # Panics
-    ///
-    /// Panics when required Wayland globals or rendering resources cannot be initialized.
-    pub fn run() {
-        let runtime = RuntimeBuilder::new_multi_thread()
-            .worker_threads(2)
-            .max_blocking_threads(8)
-            .thread_keep_alive(Duration::from_secs(10))
-            .thread_name("cantus-async")
-            .thread_stack_size(512 * 1024)
-            .enable_all()
-            .build()
-            .expect("failed to start Cantus async runtime");
-        let _runtime_context = runtime.enter();
-        let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
-        let (globals, mut event_queue) =
-            registry_queue_init::<LayerShellApp>(&connection).expect("Failed to read Wayland registry");
-        let qhandle = event_queue.handle();
-        let compositor: WlCompositor = globals.bind(&qhandle, 6..=7, ()).expect("Missing wl_compositor v6");
-        let layer_shell: ZwlrLayerShellV1 = globals.bind(&qhandle, 4..=4, ()).expect("Missing zwlr_layer_shell_v1");
-        let seat: WlSeat = globals.bind(&qhandle, 8..=9, ()).expect("Missing wl_seat v8");
-
-        let mut app = LayerShellApp {
-            compositor,
-            layer_shell,
-            display_handle: NonNull::new(connection.backend().display_ptr().cast()).expect("Wayland display pointer"),
-            clipboard: {
-                let manager: WlDataDeviceManager =
-                    globals.bind(&qhandle, 3..=3, ()).expect("Missing clipboard manager v3");
-                let device = manager.get_data_device(&seat, &qhandle, ());
-                (manager, device)
-            },
-            cantus: CantusApp::default(),
-            scaling: (
-                globals.bind(&qhandle, 1..=1, ()).expect("Missing wp_viewporter"),
-                globals.bind(&qhandle, 1..=1, ()).expect("Missing wp_fractional_scale_manager_v1"),
-            ),
-            background_manager: globals.bind(&qhandle, 1..=1, ()).ok(),
-            ..
         };
-
-        // Every output is bound so its name and description arrive; the configured monitor replaces the first one.
-        let registry = globals.registry();
-        for global in globals.contents().clone_list() {
-            if global.interface == "wl_output" {
-                assert!(global.version >= 4, "Missing wl_output v4");
-                let output = registry.bind::<WlOutput, (), LayerShellApp>(global.name, 4, &qhandle, ());
-                app.output.get_or_insert(output);
-            }
-        }
-        event_queue.roundtrip(&mut app).expect("Failed to fetch output details");
-
-        app.surfaces[SurfaceKind::Bar as usize] = Some(app.create_surface(SurfaceKind::Bar, &qhandle));
-        connection.flush().expect("Failed to flush initial commit");
-
-        while !app.should_exit {
-            if let Err(error) = event_queue.blocking_dispatch(&mut app) {
-                warn!(%error, "Wayland connection closed");
+        let mut buffer = [0u8; 1];
+        while socket.recv(&mut buffer).await.is_ok() {
+            if !send_update(&updater, |app| app.launcher.toggle()) {
+                warn!("Launcher toggle update was discarded");
                 break;
             }
+        }
+    });
+}
+
+/// # Errors
+/// Returns an error when a native Cantus instance cannot be reached.
+pub fn trigger_launcher() -> io::Result<()> {
+    let path = launcher_socket_path();
+    UnixDatagram::unbound()?.send_to(&[0], &path).map_err(|error| {
+        io::Error::new(error.kind(), format!("Could not reach Cantus at {}: {error}", path.display()))
+    })?;
+    Ok(())
+}
+
+/// Runs the Wayland application event loop.
+///
+/// # Panics
+///
+/// Panics when required Wayland globals or rendering resources cannot be initialized.
+pub fn run() {
+    let runtime = runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(8)
+        .thread_keep_alive(Duration::from_secs(10))
+        .thread_name("cantus-async")
+        .thread_stack_size(512 * 1024)
+        .enable_all()
+        .build()
+        .expect("failed to start Cantus async runtime");
+    let _runtime_context = runtime.enter();
+    let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
+    let (globals, mut event_queue) =
+        registry_queue_init::<LayerShellApp>(&connection).expect("Failed to read Wayland registry");
+    let qhandle = event_queue.handle();
+    let compositor: WlCompositor = globals.bind(&qhandle, 6..=7, ()).expect("Missing wl_compositor v6");
+    let layer_shell: ZwlrLayerShellV1 = globals.bind(&qhandle, 4..=4, ()).expect("Missing zwlr_layer_shell_v1");
+    let seat: WlSeat = globals.bind(&qhandle, 8..=9, ()).expect("Missing wl_seat v8");
+
+    let mut app = LayerShellApp {
+        compositor,
+        layer_shell,
+        display_handle: NonNull::new(connection.backend().display_ptr().cast()).expect("Wayland display pointer"),
+        clipboard: {
+            let manager: WlDataDeviceManager = globals.bind(&qhandle, 3..=3, ()).expect("Missing clipboard manager v3");
+            let device = manager.get_data_device(&seat, &qhandle, ());
+            (manager, device)
+        },
+        cantus: CantusApp::default(),
+        scaling: (
+            globals.bind(&qhandle, 1..=1, ()).expect("Missing wp_viewporter"),
+            globals.bind(&qhandle, 1..=1, ()).expect("Missing wp_fractional_scale_manager_v1"),
+        ),
+        background_manager: globals.bind(&qhandle, 1..=1, ()).ok(),
+        ..
+    };
+
+    // Every output is bound so its name and description arrive; the configured monitor replaces the first one.
+    let registry = globals.registry();
+    for global in globals.contents().clone_list() {
+        if global.interface == "wl_output" {
+            assert!(global.version >= 4, "Missing wl_output v4");
+            let output = registry.bind::<WlOutput, (), LayerShellApp>(global.name, 4, &qhandle, ());
+            app.output.get_or_insert(output);
+        }
+    }
+    event_queue.roundtrip(&mut app).expect("Failed to fetch output details");
+
+    app.surfaces[SurfaceKind::Bar as usize] = Some(app.create_surface(SurfaceKind::Bar, &qhandle));
+    connection.flush().expect("Failed to flush initial commit");
+
+    while !app.should_exit {
+        if let Err(error) = event_queue.blocking_dispatch(&mut app) {
+            warn!(%error, "Wayland connection closed");
+            break;
         }
     }
 }
 
-async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    const DESTINATION: &str = "org.freedesktop.portal.Desktop";
-    let connection = DbusConnection::session().await?;
-    let location = ProxyBuilder::<DbusProxy>::new(&connection)
-        .destination(DESTINATION)?
-        .path("/org/freedesktop/portal/desktop")?
-        .interface("org.freedesktop.portal.Location")?
-        .cache_properties(CacheProperties::No)
-        .build()
-        .await?;
-    let session_token = format!("cantus_{:x}", fastrand::u64(..));
-    let session: OwnedObjectPath = location
-        .call(
-            "CreateSession",
-            &HashMap::from([
-                ("session_handle_token", DbusValue::from(session_token)),
-                ("accuracy", DbusValue::from(2u32)),
-            ]),
-        )
-        .await?;
-    let mut updates = location.receive_signal("LocationUpdated").await?;
-
-    let request_token = format!("cantus_{:x}", fastrand::u64(..));
-    let sender_name = connection.unique_name().unwrap().trim_start_matches(':').replace('.', "_");
-    let request = ProxyBuilder::<DbusProxy>::new(&connection)
-        .destination(DESTINATION)?
-        .path(format!("/org/freedesktop/portal/desktop/request/{sender_name}/{request_token}"))?
-        .interface("org.freedesktop.portal.Request")?
-        .cache_properties(CacheProperties::No)
-        .build()
-        .await?;
-    let mut response = request.receive_signal("Response").await?;
-    let _: OwnedObjectPath = location
-        .call("Start", &(&session, "", HashMap::from([("handle_token", DbusValue::from(request_token))])))
-        .await?;
-    let (status, _): (u32, HashMap<String, OwnedValue>) =
-        response.next().await.ok_or("Location portal returned no response")?.body().deserialize()?;
-    if status != 0 {
-        return Err(format!("Location request failed with status {status}").into());
-    }
-
+async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), ashpd::Error> {
+    use ashpd::desktop::location::{Accuracy, CreateSessionOptions, LocationProxy, StartOptions};
+    let location = LocationProxy::new().await?;
+    let session = location.create_session(CreateSessionOptions::default().set_accuracy(Accuracy::City)).await?;
+    let mut updates = location.receive_location_updated().await?;
+    location.start(&session, None, StartOptions::default()).await?.response()?;
     while let Some(update) = updates.next().await {
-        let (_, location): (OwnedObjectPath, HashMap<String, OwnedValue>) = update.body().deserialize()?;
-        if sender
-            .send([f64::try_from(&location["Latitude"])? as f32, f64::try_from(&location["Longitude"])? as f32])
-            .is_err()
-        {
+        if sender.send([update.latitude() as f32, update.longitude() as f32]).is_err() {
             break;
         }
     }
-    connection.call_method(Some(DESTINATION), session, Some("org.freedesktop.portal.Session"), "Close", &()).await?;
-    Ok(())
+    session.close().await
 }
 
 fn launcher_socket_path() -> PathBuf {
@@ -470,7 +415,7 @@ fn monitor_status(updates: &AppUpdater) {
         }) {
             break;
         }
-        thread::sleep(super::Platform::STATUS_SAMPLE_INTERVAL);
+        thread::sleep(STATUS_SAMPLE_INTERVAL);
     }
 }
 
@@ -733,9 +678,9 @@ macro_rules! dispatch {
 impl LayerShellApp {
     fn bar_surface_height(&self) -> f32 {
         let extension = if self.cantus.config.weathertime_enabled {
-            WEATHER_EXTENSION
+            weathertime::EXTENSION
         } else if self.cantus.config.lyrics_enabled {
-            LYRICS_EXTENSION
+            lyrics::EXTENSION
         } else {
             0.0
         } + PANEL_OVERFLOW;
@@ -750,13 +695,13 @@ impl LayerShellApp {
             &wl,
             if launcher { None } else { self.output.as_ref() },
             if launcher {
-                LayerStyle::Overlay
+                Layer::Overlay
             } else {
                 match config.layer {
-                    ConfigLayer::Background => LayerStyle::Background,
-                    ConfigLayer::Bottom => LayerStyle::Bottom,
-                    ConfigLayer::Top => LayerStyle::Top,
-                    ConfigLayer::Overlay => LayerStyle::Overlay,
+                    config::Layer::Background => Layer::Background,
+                    config::Layer::Bottom => Layer::Bottom,
+                    config::Layer::Top => Layer::Top,
+                    config::Layer::Overlay => Layer::Overlay,
                 }
             },
             if launcher { "cantus-launcher" } else { "cantus" }.into(),
@@ -764,14 +709,14 @@ impl LayerShellApp {
             kind,
         );
         layer.set_anchor(
-            LayerAnchor::Left
-                | LayerAnchor::Right
+            Anchor::Left
+                | Anchor::Right
                 | if launcher {
-                    LayerAnchor::Top | LayerAnchor::Bottom
+                    Anchor::Top | Anchor::Bottom
                 } else {
                     match config.layer_anchor {
-                        ConfigLayerAnchor::Top => LayerAnchor::Top,
-                        ConfigLayerAnchor::Bottom => LayerAnchor::Bottom,
+                        config::LayerAnchor::Top => Anchor::Top,
+                        config::LayerAnchor::Bottom => Anchor::Bottom,
                     }
                 },
         );
@@ -780,7 +725,7 @@ impl LayerShellApp {
         layer.set_exclusive_zone(if launcher {
             0
         } else {
-            (PANEL_START + config.height + f32::from(config.lyrics_enabled) * LYRICS_EXTENSION) as i32
+            (PANEL_START + config.height + f32::from(config.lyrics_enabled) * lyrics::EXTENSION) as i32
         });
         layer.set_keyboard_interactivity(if launcher {
             KeyboardInteractivity::Exclusive
@@ -834,11 +779,11 @@ impl LayerShellApp {
             .await
             .ok()?
             .ok()?;
-            Some(update(move |app| {
+            Some(move |app: &mut CantusApp| {
                 if app.launcher.open && app.launcher.session == session {
                     app.launcher.edit(|field| field.insert(&text));
                 }
-            }))
+            })
         });
         Some(())
     }
@@ -887,7 +832,7 @@ impl LayerShellApp {
                     Renderer::new(
                         &native,
                         size,
-                        Text::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR),
+                        TextCache::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf")),
                     )
                 }
                 .expect("failed to initialize renderer");
@@ -905,9 +850,7 @@ impl LayerShellApp {
         if let Err(error) = self.gpu.as_mut().unwrap().render(|render| {
             for (index, surface) in self.surfaces.iter().enumerate() {
                 if let Some(surface) = surface {
-                    render.surface(surface.gpu.unwrap(), surface.size, |frame| {
-                        self.cantus.draw(frame, index == 0, index == 1);
-                    });
+                    self.cantus.draw(render, surface.gpu.unwrap(), surface.size, index == 0, index == 1);
                 }
             }
         }) {
@@ -927,10 +870,11 @@ impl LayerShellApp {
     fn update_input_region(&mut self, qhandle: &QueueHandle<Self>) {
         let wl_surface = self.active_surface().wl.clone();
         let region = self.compositor.create_region(qhandle, ());
-        for rect in self.cantus.interaction.regions.drain(..) {
-            let [x, y, width, height] = [rect.min.x, rect.min.y, rect.max.x - rect.min.x, rect.max.y - rect.min.y]
-                .map(|value| value.round() as i32);
-            region.add(x, y, width, height);
+        for quad in self.cantus.interaction.input_regions.drain(..) {
+            let (min, max) = quad.extents();
+            let min = min.floor();
+            let size = max.ceil() - min;
+            region.add(min.x as i32, min.y as i32, size.x as i32, size.y as i32);
         }
         wl_surface.set_input_region(Some(&region));
         region.destroy();
@@ -1211,7 +1155,7 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
                 interaction.apply(InputEvent::Release);
             }
             (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging() => {
-                interaction.apply(InputEvent::CancelDrag);
+                interaction.apply(InputEvent::Cancel);
             }
             _ => {}
         },
@@ -1239,3 +1183,5 @@ delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectManagerV1);
 delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectSurfaceV1);
 
 dispatch!(WlSurface, SurfaceKind, _kind, |_state, _proxy, _event, _qhandle| {});
+
+pub use tokio::time::sleep;

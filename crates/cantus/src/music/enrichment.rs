@@ -1,6 +1,6 @@
-use super::{ART_SIZE, AudioFeatures, Music, MusicResult, Track, TrackId, lyrics::LyricsRequest, spotify::Spotify};
+use super::{ART_SIZE, AudioFeatures, MusicResult, TrackId, lyrics::Lyrics};
 use crate::{
-    app::{Background, CantusApp, update},
+    app::{Background, CantusApp},
     render::music::PALETTE_COLORS,
 };
 use arrayvec::ArrayVec;
@@ -9,19 +9,13 @@ use image::{RgbaImage, imageops};
 use isthmus::{Image, Unorm8x4, glam::Vec3};
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use reqwest::Client;
-use std::{
-    array,
-    collections::{HashMap, HashSet},
-    ops::Range,
-    time::Duration,
-};
+use std::{array, collections::HashMap, ops::Range, time::Duration};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::spawn_blocking;
 use tracing::warn;
 use web_time::Instant;
 
 const RETRY_DELAY: Duration = Duration::from_secs(30);
-pub type ArtState = Fetch<AlbumArt>;
 #[derive(Clone)]
 pub struct Enrichment {
     pub(crate) background: Background,
@@ -37,69 +31,68 @@ impl Enrichment {
     }
 }
 
-#[derive(Clone)]
 pub enum Fetch<T> {
-    Missing(Instant, Option<T>),
-    Fetching(Option<T>),
+    Missing(Instant),
+    Fetching,
     Ready(T),
 }
 
 impl<T> Default for Fetch<T> {
     fn default() -> Self {
-        Self::Missing(Instant::now(), None)
+        Self::Missing(Instant::now())
     }
 }
 
 impl<T> Fetch<T> {
     pub fn retry() -> Self {
-        Self::Missing(Instant::now() + RETRY_DELAY, None)
+        Self::Missing(Instant::now() + RETRY_DELAY)
     }
 
     pub fn request(&mut self, now: Instant) -> bool {
-        let Self::Missing(retry_at, value) = self else { return false };
+        let Self::Missing(retry_at) = self else { return false };
         if *retry_at > now {
             return false;
         }
-        *self = Self::Fetching(value.take());
+        *self = Self::Fetching;
         true
     }
 
     pub const fn ready(&self) -> Option<&T> {
         match self {
             Self::Ready(value) => Some(value),
-            Self::Missing(_, value) | Self::Fetching(value) => value.as_ref(),
+            Self::Missing(_) | Self::Fetching => None,
         }
-    }
-
-    pub const fn ready_mut(&mut self) -> Option<&mut T> {
-        match self {
-            Self::Ready(value) => Some(value),
-            Self::Missing(_, value) | Self::Fetching(value) => value.as_mut(),
-        }
-    }
-
-    pub fn refresh(&mut self)
-    where
-        T: Clone,
-    {
-        *self = Self::Missing(Instant::now(), self.ready().cloned());
     }
 }
 
-#[derive(Clone)]
 pub struct AlbumArt {
     pub image: Image,
     palette: [Unorm8x4; PALETTE_COLORS],
 }
 
-impl Fetch<AlbumArt> {
-    pub fn palette(&self) -> [Unorm8x4; PALETTE_COLORS] {
-        self.ready()
+#[derive(Default)]
+pub struct Resources {
+    pub art: HashMap<String, Fetch<AlbumArt>>,
+    pub audio: HashMap<TrackId, Fetch<AudioFeatures>>,
+    pub lyrics: HashMap<String, Fetch<Lyrics>>,
+}
+
+impl Resources {
+    pub fn art(&self, url: Option<&str>) -> Option<&AlbumArt> {
+        url.and_then(|url| self.art.get(url)).and_then(Fetch::ready)
+    }
+
+    pub fn palette(&self, url: Option<&str>) -> [Unorm8x4; PALETTE_COLORS] {
+        self.art(url)
             .map_or_else(|| [Unorm8x4::from_vec3(Vec3::new(0.24, 0.32, 0.44)); PALETTE_COLORS], |art| art.palette)
+    }
+
+    pub fn audio(&self, id: Option<TrackId>) -> AudioFeatures {
+        id.and_then(|id| self.audio.get(&id)).and_then(Fetch::ready).copied().unwrap_or_default()
     }
 }
 
-async fn fetch_art(http: &Client, url: &str) -> ArtState {
+async fn fetch_art(http: &Client, url: &str) -> Fetch<AlbumArt> {
     let result: MusicResult<_> = async {
         let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -130,119 +123,83 @@ fn decode_art(bytes: &[u8]) -> Result<AlbumArt, image::ImageError> {
     Ok(AlbumArt { palette: image_palette(&image), image: Image::rgba8((width, height).into(), image.into_raw()) })
 }
 
-fn art_slots(music: &mut Music) -> impl Iterator<Item = (&str, &mut ArtState)> {
-    music.queue.iter_mut().filter_map(|track| track.image.as_deref().map(|url| (url, &mut track.runtime.art))).chain(
-        music
-            .playlists
-            .iter_mut()
-            .filter_map(|playlist| playlist.image_url.as_deref().map(|url| (url, &mut playlist.art))),
-    )
-}
-
-fn pending_lyrics(queue: &mut [Track], current: usize, now: Instant) -> Vec<LyricsRequest> {
-    let mut lyric_uris: HashSet<_> = queue
-        .iter()
-        .filter(|track| matches!(track.runtime.lyrics, Fetch::Fetching(_)))
-        .map(|track| track.uri.clone())
-        .collect();
-    let current = current.min(queue.len().saturating_sub(1));
-    let nearby = current.saturating_sub(1)..current.saturating_add(3).min(queue.len());
-    queue[nearby]
-        .iter_mut()
-        .filter_map(|track| {
-            if track.name.trim().is_empty()
-                || !track.runtime.lyrics.request(now)
-                || !lyric_uris.insert(track.uri.clone())
-            {
-                return None;
-            }
-            Some((&*track).into())
-        })
-        .collect()
-}
-
 impl CantusApp {
     pub(crate) fn refresh_enrichment(&mut self) {
         let now = Instant::now();
+        let music = &mut self.music;
+        let resources = &mut music.resources;
+        resources.art.retain(|url, state| {
+            matches!(state, Fetch::Fetching)
+                || music.queue.iter().any(|track| track.image.as_ref() == Some(url))
+                || music.playlists.iter().any(|playlist| playlist.image_url.as_ref() == Some(url))
+        });
+        resources.audio.retain(|id, state| {
+            matches!(state, Fetch::Fetching) || music.queue.iter().any(|track| track.id == Some(*id))
+        });
+        resources
+            .lyrics
+            .retain(|uri, state| matches!(state, Fetch::Fetching) || music.queue.iter().any(|track| &track.uri == uri));
         if self.config.lyrics_enabled {
-            for request in pending_lyrics(&mut self.music.queue, self.music.timeline.index, now) {
-                self.enrichment.request_lyrics(request, self.music.spotify.clone());
+            let start = music.timeline.index.saturating_sub(1).min(music.queue.len());
+            let end = music.timeline.index.saturating_add(3).min(music.queue.len());
+            for track in &music.queue[start..end] {
+                if !track.name.trim().is_empty() && resources.lyrics.entry(track.uri.clone()).or_default().request(now)
+                {
+                    self.enrichment.request_lyrics(track.clone(), music.spotify.clone());
+                }
             }
         }
-
-        let mut audio = self
-            .music
+        let audio: Vec<_> = music
             .queue
-            .iter_mut()
-            .filter_map(|track| track.id.filter(|_| track.runtime.audio_features.request(now)))
-            .collect::<Vec<_>>();
-        audio.sort_unstable();
-        audio.dedup();
-
+            .iter()
+            .filter_map(|track| track.id)
+            .filter(|id| resources.audio.entry(*id).or_default().request(now))
+            .collect();
         if !audio.is_empty() {
-            let spotify = self.music.spotify.clone();
+            let spotify = music.spotify.clone();
             self.enrichment.background.spawn_update(async move {
-                let features = resolve_audio_features(&spotify, &audio).await;
-                Some(update(move |app| {
-                    for track in &mut app.music.queue {
-                        let Some(features) = track.id.and_then(|id| features.get(&id)) else {
-                            continue;
-                        };
-                        track.runtime.audio_features = features.map_or_else(Fetch::retry, Fetch::Ready);
+                let features = join_all(audio.into_iter().map(|id| {
+                    let spotify = &spotify;
+                    async move {
+                        let features = spotify
+                            .audio_features(id)
+                            .await
+                            .inspect_err(|error| warn!(%error, %id, "Failed to fetch Spotify audio features"))
+                            .ok();
+                        (id, features)
                     }
                 }))
+                .await;
+                Some(move |app: &mut Self| {
+                    for (id, features) in features {
+                        if let Some(slot @ Fetch::Fetching) = app.music.resources.audio.get_mut(&id) {
+                            *slot = features.map_or_else(Fetch::retry, Fetch::Ready);
+                        }
+                    }
+                })
             });
         }
-
-        let loaded = art_slots(&mut self.music)
-            .filter_map(|(url, state)| match state {
-                Fetch::Ready(art) => Some((url.to_owned(), art.clone())),
-                _ => None,
-            })
-            .collect::<HashMap<_, _>>();
-        for (url, state) in art_slots(&mut self.music) {
-            if !matches!(state, Fetch::Ready(_))
-                && let Some(art) = loaded.get(url)
-            {
-                *state = Fetch::Ready(art.clone());
+        for url in music
+            .queue
+            .iter()
+            .filter_map(|track| track.image.as_ref())
+            .chain(music.playlists.iter().filter_map(|playlist| playlist.image_url.as_ref()))
+        {
+            if !resources.art.entry(url.clone()).or_default().request(now) {
+                continue;
             }
-        }
-        let mut art = art_slots(&mut self.music)
-            .filter_map(|(url, state)| state.request(now).then(|| url.to_owned()))
-            .collect::<Vec<_>>();
-        art.sort_unstable();
-        art.dedup();
-        for url in art {
+            let url = url.clone();
             let http = self.enrichment.http.clone();
             self.enrichment.background.spawn_update(async move {
                 let state = fetch_art(&http, &url).await;
-                Some(update(move |app| {
-                    for (slot_url, slot) in art_slots(&mut app.music) {
-                        if slot_url == url {
-                            *slot = match &state {
-                                Fetch::Missing(retry_at, _) => Fetch::Missing(*retry_at, slot.ready().cloned()),
-                                _ => state.clone(),
-                            };
-                        }
+                Some(move |app: &mut Self| {
+                    if let Some(slot @ Fetch::Fetching) = app.music.resources.art.get_mut(&url) {
+                        *slot = state;
                     }
-                }))
+                })
             });
         }
     }
-}
-
-async fn resolve_audio_features(spotify: &Spotify, track_ids: &[TrackId]) -> HashMap<TrackId, Option<AudioFeatures>> {
-    join_all(track_ids.iter().map(|&id| async move {
-        let features = spotify
-            .audio_features(id)
-            .await
-            .inspect_err(|error| warn!(%error, %id, "Failed to fetch Spotify audio features"))
-            .ok();
-        (id, features)
-    }))
-    .await
-    .into_iter()
-    .collect()
 }
 
 fn complete_palette(colors: &mut ArrayVec<(Lch, f32), PALETTE_COLORS>) {
@@ -281,11 +238,7 @@ fn palette_color((color, weight): (Lch, f32), total: f32) -> Unorm8x4 {
     Unorm8x4::from_vec4(Vec3::new(rgb.red, rgb.green, rgb.blue).extend((weight / total).max(1.0 / 255.0)))
 }
 
-const fn component(color: &palette::Lab, channel: usize) -> f32 {
-    [color.l, color.a, color.b][channel]
-}
-
-fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_COLORS> {
+fn dominant_colors(pixels: &mut [Vec3]) -> ArrayVec<(Lch, f32), PALETTE_COLORS> {
     let mut buckets = ArrayVec::<Range<usize>, PALETTE_COLORS>::new();
     buckets.push(0..pixels.len());
 
@@ -295,14 +248,11 @@ fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_
             .enumerate()
             .filter(|(_, range)| range.len() > 1)
             .map(|(index, range)| {
-                let mut min = [f32::INFINITY; 3];
-                let mut max = [f32::NEG_INFINITY; 3];
-                for color in &pixels[range.clone()] {
-                    for channel in 0..3 {
-                        min[channel] = min[channel].min(component(color, channel));
-                        max[channel] = max[channel].max(component(color, channel));
-                    }
-                }
+                let (min, max) = pixels[range.clone()]
+                    .iter()
+                    .fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(min, max), &color| {
+                        (min.min(color), max.max(color))
+                    });
                 let (channel, spread) = (0..3)
                     .map(|channel| (channel, max[channel] - min[channel]))
                     .max_by(|a, b| a.1.total_cmp(&b.1))
@@ -316,8 +266,7 @@ fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_
         };
 
         let range = buckets.swap_remove(bucket_index);
-        pixels[range.clone()]
-            .select_nth_unstable_by(range.len() / 2, |a, b| component(a, channel).total_cmp(&component(b, channel)));
+        pixels[range.clone()].select_nth_unstable_by(range.len() / 2, |a, b| a[channel].total_cmp(&b[channel]));
         let middle = range.start + range.len() / 2;
         buckets.push(range.start..middle);
         buckets.push(middle..range.end);
@@ -327,23 +276,20 @@ fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_
         .into_iter()
         .map(|range| {
             let weight = range.len() as f32;
-            let sum = pixels[range].iter().fold([0.0; 3], |mut sum, color| {
-                sum[0] += color.l;
-                sum[1] += color.a;
-                sum[2] += color.b;
-                sum
-            });
-            (palette::Lab::new(sum[0] / weight, sum[1] / weight, sum[2] / weight).into_color(), weight)
+            let mean = pixels[range].iter().copied().sum::<Vec3>() / weight;
+            (palette::Lab::new(mean.x, mean.y, mean.z).into_color(), weight)
         })
         .collect()
 }
 
 fn image_palette(image: &RgbaImage) -> [Unorm8x4; PALETTE_COLORS] {
     let srgb_to_lab = |pixel: &image::Rgba<u8>| {
-        palette::Srgb::new(f32::from(pixel[0]) / 255.0, f32::from(pixel[1]) / 255.0, f32::from(pixel[2]) / 255.0)
-            .into_color()
+        let color: palette::Lab =
+            palette::Srgb::new(f32::from(pixel[0]) / 255.0, f32::from(pixel[1]) / 255.0, f32::from(pixel[2]) / 255.0)
+                .into_color();
+        Vec3::new(color.l, color.a, color.b)
     };
-    let mut pixels: Vec<palette::Lab> = image
+    let mut pixels: Vec<Vec3> = image
         .pixels()
         .filter(|pixel| {
             let max = pixel[0].max(pixel[1]).max(pixel[2]);

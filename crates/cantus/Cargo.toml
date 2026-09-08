@@ -16,6 +16,7 @@ resvg = { version = "0.48.1", default-features = false, features = [
     "raster-images",
 ] }
 isthmus = { path = "../isthmus" }
+isthmus_sdf = { path = "../isthmus_sdf" }
 bytemuck.workspace = true
 reqwest = { version = "0.12.28", default-features = false, features = [
     "json",
@@ -24,13 +25,14 @@ reqwest = { version = "0.12.28", default-features = false, features = [
 tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
 arrayvec = { version = "0.7.8", features = ["serde"] }
 smallvec.workspace = true
+unicode-segmentation = "1.13.3"
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = [
     "fmt",
     "smallvec",
     "tracing-log",
 ] }
-quick-xml = "0.42.0"
+roxmltree = "0.21.1"
 fend-core = "1.5.8"
 image = { version = "0.25.10", default-features = false, features = [
     "ico",
@@ -54,6 +56,7 @@ jiff = { version = "0.2.35", default-features = false, features = [
 web-time = "1.1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "location"] }
 schemars = { version = "1.2.2", features = ["arrayvec07", "preserve_order"] }
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 librespot-protocol = "0.8.0"

@@ -1,12 +1,18 @@
 use super::{
-    gpu::{Gpu, SurfacePaints},
+    buffer::UploadBuffer,
+    gpu::{Gpu, Paint},
     renderer::RenderError,
 };
+use crate::bindings;
 
-pub(super) struct SurfaceTarget {
+pub struct SurfaceTarget {
     pub(super) surface: wgpu::Surface<'static>,
     pub(super) config: wgpu::SurfaceConfiguration,
-    pub(super) paints: SurfacePaints,
+    pub(super) binding: Option<([wgpu::Buffer; bindings::BUFFER_COUNT], wgpu::BindGroup)>,
+    pub(super) recorded: bool,
+    pub(super) paints: Vec<Paint>,
+    pub(super) globals: UploadBuffer,
+    pub(super) frame: UploadBuffer,
     needs_reconfigure: bool,
 }
 
@@ -17,7 +23,16 @@ impl SurfaceTarget {
         config: wgpu::SurfaceConfiguration,
     ) -> Self {
         surface.configure(device, &config);
-        Self { paints: SurfacePaints::new(device), surface, config, needs_reconfigure: false }
+        Self {
+            surface,
+            config,
+            needs_reconfigure: false,
+            binding: None,
+            recorded: false,
+            paints: Vec::new(),
+            globals: UploadBuffer::new(device),
+            frame: UploadBuffer::new(device),
+        }
     }
 
     pub(super) fn acquire(&mut self, gpu: &Gpu) -> Result<Option<wgpu::SurfaceTexture>, RenderError> {

@@ -5,6 +5,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, Weak},
 };
+use wgpu::util::{DeviceExt as _, TextureDataOrder};
 
 struct CachedImage {
     source: Weak<[u8]>,
@@ -19,7 +20,6 @@ pub(super) struct ImageCache {
     groups: HashMap<ImageBindings, wgpu::BindGroup>,
     pub layouts: Vec<wgpu::BindGroupLayout>,
     samplers: [wgpu::Sampler; 4],
-    pub fallback: wgpu::BindGroup,
 }
 
 impl ImageCache {
@@ -33,7 +33,7 @@ impl ImageCache {
                             [
                                 wgpu::BindGroupLayoutEntry {
                                     binding: index as u32 * 2,
-                                    visibility: wgpu::ShaderStages::FRAGMENT,
+                                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                                     ty: wgpu::BindingType::Texture {
                                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                                         view_dimension: wgpu::TextureViewDimension::D2,
@@ -43,7 +43,7 @@ impl ImageCache {
                                 },
                                 wgpu::BindGroupLayoutEntry {
                                     binding: index as u32 * 2 + 1,
-                                    visibility: wgpu::ShaderStages::FRAGMENT,
+                                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                                     count: None,
                                 },
@@ -65,12 +65,7 @@ impl ImageCache {
                 ..Default::default()
             })
         });
-        let fallback = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("no images"),
-            layout: &layouts[0],
-            entries: &[],
-        });
-        Self { images: HashMap::new(), groups: HashMap::new(), layouts, samplers, fallback }
+        Self { images: HashMap::new(), groups: HashMap::new(), layouts, samplers }
     }
 
     pub fn retain_live(&mut self) {
@@ -119,26 +114,21 @@ impl ImageCache {
 }
 
 fn upload(device: &wgpu::Device, queue: &wgpu::Queue, size: [u32; 2], pixels: &[u8]) -> wgpu::TextureView {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("isthmus image"),
-        size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        pixels,
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size[0] * 4), rows_per_image: Some(size[1]) },
-        wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
-    );
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
+    device
+        .create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("isthmus image"),
+                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            TextureDataOrder::LayerMajor,
+            pixels,
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default())
 }

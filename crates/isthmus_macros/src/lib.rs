@@ -21,18 +21,20 @@ fn isthmus_path() -> TokenStream2 {
     }
 }
 
-/// `#[shader_data(unorm16)]` packs f32 fields in pairs, clamping to 0..=1 and rounding to 16-bit precision.
+/// Derives a word codec with optional `unorm16` packing or `view = View<'a>` resource resolution.
 #[proc_macro_derive(ShaderData, attributes(shader_data))]
 pub fn derive_shader_data(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     data::derive(&input).into()
 }
 
-/// Declares the shader program owned by the surrounding module.
+/// Declares a shader program with optional globals and host resource types: `program!(Globals, Resources)`.
 #[proc_macro]
 pub fn program(input: TokenStream) -> TokenStream {
-    let globals: syn::Type =
-        if input.is_empty() { syn::parse_quote!(()) } else { syn::parse_macro_input!(input as syn::Type) };
+    let (globals, resources) = match syntax::program_types(input.into()) {
+        Ok(types) => types,
+        Err(error) => return error.to_compile_error().into(),
+    };
     let isthmus = isthmus_path();
     let shared = syntax::program(&isthmus);
     quote! {
@@ -40,6 +42,7 @@ pub fn program(input: TokenStream) -> TokenStream {
         // SAFETY: The build generates this program's metadata and validates its shader module together.
         unsafe impl #isthmus::Program for Program {
             type Globals = #globals;
+            type Resources = #resources;
             const SHADERS: &'static [#isthmus::__private::ShaderEntry] =
                 include!(concat!(env!("OUT_DIR"), "/isthmus.manifest.rs"));
             const CODE: &'static [u8] = include_bytes!(env!("ISTHMUS_SHADER_PATH"));
@@ -52,13 +55,13 @@ pub fn program(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Declares GPU code and typed CPU captures for a geometry or text paint.
+/// Declares captures, a vertex stage, and `.fragment(|frame, fragment| ...)` with primitive-specific fragment data.
 #[proc_macro]
 pub fn shader(input: TokenStream) -> TokenStream {
     let span = proc_macro2::Span::call_site();
     let location = span.start();
     let file = proc_macro::Span::call_site().file();
-    syntax::Shader::parse(input.into(), &file, location.line, location.column)
+    syntax::shader::Shader::parse(input.into(), &file, location.line, location.column)
         .map_or_else(|error| error.to_compile_error(), |shader| shader.host(&isthmus_path()))
         .into()
 }

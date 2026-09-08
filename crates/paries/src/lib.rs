@@ -1,12 +1,7 @@
-#[path = "sdf.rs"]
 pub mod render;
 
-use crate::render::{Bamboo, Renderer};
-use isthmus::{
-    SurfaceHandle,
-    geometry::text::Text,
-    glam::{Vec3, vec2},
-};
+use crate::render::{Renderer, bamboo::Bamboo};
+use isthmus::{SurfaceHandle, glam::vec2};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
     WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
@@ -154,14 +149,8 @@ impl Wallpaper {
                     .expect("wallpaper surface is incompatible with the renderer")
             } else {
                 // SAFETY: Wallpaper retains the Wayland connection and output surface until the renderer is dropped.
-                let (renderer, surface) = unsafe {
-                    Renderer::new(
-                        &native,
-                        size,
-                        Text::new(include_bytes!("../../../assets/NotoSans-Variable.ttf"), Vec3::ONE),
-                    )
-                }
-                .expect("failed to initialize wallpaper renderer");
+                let (renderer, surface) =
+                    unsafe { Renderer::new(&native, size, ()) }.expect("failed to initialize wallpaper renderer");
                 eprintln!("Paries is rendering with {}", renderer.device_name());
                 self.renderer = Some(renderer);
                 surface
@@ -173,7 +162,7 @@ impl Wallpaper {
         renderer.resize(render_surface, size);
         let mut bamboo = Bamboo;
         if let Err(error) = renderer.render(|render| {
-            render.surface(render_surface, vec2(size[0] as f32, size[1] as f32), |mut frame| {
+            render.surface(render_surface, vec2(size[0] as f32, size[1] as f32), (), |mut frame| {
                 bamboo.show(&mut frame);
             });
         }) {

@@ -1,147 +1,132 @@
-use crate::render::{Globals, Program, TextFragment};
+use crate::render::Program;
 use isthmus::{
-    Float as _, Quad, Sdf,
-    geometry::{
-        sdf::{Capsule, SdfShape, Shape, pill},
-        text::Line,
-    },
+    Float as _, Primitive, Quad, ShaderFrame,
     glam::{UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
+    surface,
 };
+use isthmus_sdf::{Outlined, Sample, Shape};
 
 const SHADOW_OPACITY: f32 = 0.16;
 const SHADOW_DECAY: f32 = 0.3;
 const POINTER_REACH: f32 = 150.0;
 const POINTER_REFRACTION: f32 = 0.035;
 const RIPPLE_REFRACTION: f32 = 3.0;
+const POINTER_BULGE: f32 = 8.0;
+const RIPPLE_BULGE: f32 = 22.0;
+const LENS_REACH: f32 = 3.0;
 /// Smallest coverage worth shading; analytic shadows never reach exact zero.
 pub const VISIBLE_ALPHA: f32 = 1.0 / 1024.0;
 
-/// Reserves the same held-pointer and ripple displacement used by surface optics.
-pub fn refracted_text(line: Line) -> Line {
-    // The radial falloff bounds u * (1 - smoothstep(0, 1, u)) below 0.26.
-    line.displaced(POINTER_REACH * 0.26 * 2.0 * POINTER_REFRACTION + 4.0 * 0.5 * RIPPLE_REFRACTION)
+pub fn deform(
+    shape: Shape<impl Fn(Vec2) -> f32 + Copy>,
+    frame: ShaderFrame<Program>,
+) -> impl Primitive<Program, Outputs = (), Sample = DeformedSample> {
+    let (bulge_reach, _) = reach(shape, frame);
+    let reach = (SHADOW_OPACITY / VISIBLE_ALPHA).ln() / SHADOW_DECAY;
+    surface(shape.bounds(reach + bulge_reach), move |point| {
+        let mut sample = sample_deformation(shape, frame, point);
+        sample.sdf.coverage = sample.sdf.band(-f32::MAX..reach)
+            * sample.sdf.fill().max((-sample.sdf.distance.max(0.0) * SHADOW_DECAY).exp() * SHADOW_OPACITY);
+        (sample, sample.sdf.coverage)
+    })
 }
 
-pub type ShapeFragment<S = Capsule> = isthmus::Fragment<Program, S>;
-
-pub fn pill_geometry(quad: Quad) -> Shape<Capsule> {
-    glass(pill(quad))
+/// Supplies displaced coordinates without clipping content to the parent.
+pub fn refract(
+    parent: Shape<impl Fn(Vec2) -> f32 + Copy>,
+    frame: ShaderFrame<Program>,
+    bounds: impl Into<Option<Quad>>,
+) -> impl Primitive<Program, Outputs = (), Sample = DeformedSample> {
+    let (_, refraction_reach) = reach(parent, frame);
+    surface(bounds.into().map(|bounds| bounds.expanded(refraction_reach)), move |point| {
+        let sample = sample_deformation(parent, frame, point);
+        (sample, 1.0)
+    })
 }
 
-/// Fits the material's shadow and maximum interaction bulge around any bounded shape.
-pub fn glass<S: SdfShape>(shape: Shape<S>) -> Shape<S> {
-    let shadow = (SHADOW_OPACITY / VISIBLE_ALPHA).ln() / SHADOW_DECAY;
-    shape.effects(shadow + (2.0 * 8.0 + 4.0 * 11.0) * 0.5)
+/// Applies the parent's edge lensing and bulge to an independently bounded layer.
+pub fn lens<F: Fn(Vec2) -> f32 + Copy>(
+    parent: Shape<impl Fn(Vec2) -> f32 + Copy>,
+    frame: ShaderFrame<Program>,
+    shape: impl Into<Outlined<F>>,
+) -> impl Primitive<Program, Outputs = (), Sample = DeformedSample> {
+    let outlined = shape.into();
+    let (bulge_reach, refraction_reach) = reach(parent, frame);
+    surface(outlined.bounds(refraction_reach + bulge_reach + LENS_REACH), move |point| {
+        let mut parent = sample_deformation(parent, frame, point);
+        parent.sdf = outlined.sample(outlined.shape.distance_at(parent.refracted) - parent.bulge * 0.5);
+        (parent, parent.sdf.coverage)
+    })
 }
 
-pub fn sample_pill(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
-    sample_capsule(pill(quad).shape, pixel, globals, time)
+fn reach(shape: Shape<impl Fn(Vec2) -> f32 + Copy>, frame: ShaderFrame<Program>) -> (f32, f32) {
+    let pressure = frame.globals.pressure * shape.distance_at(frame.globals.pointer).smoothstep(0.5, -0.5);
+    let mut ripple = 0.0;
+    for index in 0..frame.globals.ripples.len() {
+        let pulse = frame.globals.ripples[index];
+        if pulse.start_time > 0.0 {
+            ripple += (1.0 - ((frame.time - pulse.start_time) * 1.2).saturate()).powi(2) * 0.5;
+        }
+    }
+    let bulge_reach = (pressure * POINTER_BULGE + ripple * RIPPLE_BULGE) * 0.5;
+    let refraction_reach = POINTER_REACH * pressure * POINTER_REFRACTION + ripple * RIPPLE_REFRACTION;
+    (bulge_reach, refraction_reach)
 }
 
-pub fn sample_capsule(shape: Capsule, pixel: Vec2, globals: Globals, time: f32) -> SurfaceSample {
-    cantus_surface(shape.quad, pixel, globals, time, shape)
-}
-
-/// Samples arbitrary Cantus SDF geometry with interaction, refraction and shadowing.
-pub fn cantus_surface(quad: Quad, pixel: Vec2, globals: Globals, time: f32, shape: impl SdfShape) -> SurfaceSample {
-    let distance = shape.distance_at(pixel).distance;
-    let mouse_distance = if globals.pressure > 0.0 { shape.distance_at(globals.pointer).distance } else { 1.0 };
-    let mouse_mask = mouse_distance.smoothstep(0.5, -0.5);
-    let interaction = interaction(pixel, globals, time, mouse_mask);
-    SurfaceSample::new(quad.local(pixel) + quad.size * 0.5, quad.size, Sdf::new(distance), interaction)
+pub fn sample_deformation(
+    shape: Shape<impl Fn(Vec2) -> f32 + Copy>,
+    frame: ShaderFrame<Program>,
+    point: Vec2,
+) -> DeformedSample {
+    let pressure = frame.globals.pressure * shape.distance_at(frame.globals.pointer).smoothstep(0.5, -0.5);
+    let mut ripple = Vec2::ZERO;
+    let mut flash = 0.0;
+    // Rust-GPU cannot lower this slice iterator without a pointer-to-integer conversion.
+    for index in 0..frame.globals.ripples.len() {
+        let pulse = frame.globals.ripples[index];
+        let progress = ((frame.time - pulse.start_time) * 1.2).saturate();
+        if pulse.start_time > 0.0 && progress < 1.0 {
+            let offset = point - pulse.origin;
+            let distance = offset.length();
+            let direction = if distance > 0.0001 { offset / distance } else { Vec2::ZERO };
+            let wave = (distance - progress * 600.0).abs().smoothstep(80.0, 0.0) * (1.0 - progress);
+            ripple += direction * wave * (1.0 - progress) * 0.5;
+            flash = (flash + wave * 0.5).min(1.0);
+        }
+    }
+    let pointer_offset = point - frame.globals.pointer;
+    let mouse_lift = pointer_offset.length().smoothstep(POINTER_REACH, 0.0) * pressure;
+    let bulge = mouse_lift * POINTER_BULGE + ripple.length() * RIPPLE_BULGE;
+    let content = point - pointer_offset * mouse_lift * POINTER_REFRACTION - ripple * RIPPLE_REFRACTION;
+    let sdf = Sample::new(shape.distance_at(point) - bulge * 0.5, 0.0);
+    let lens = (1.0 + sdf.distance.min(0.0) / 12.0).saturate() * LENS_REACH;
+    let refracted = content - sdf.gradient / sdf.gradient.length().max(f32::MIN_POSITIVE) * lens;
+    DeformedSample { content, refracted, sdf, bulge, ripple, flash }
 }
 
 #[derive(Clone, Copy)]
-pub struct SurfaceSample {
-    bulge: f32,
-    refraction: Vec2,
-    /// Unmodified top-left-relative surface coordinates.
-    pub local: Vec2,
-    /// Ripple- and edge-refracted top-left-relative coordinates.
+pub struct DeformedSample {
+    /// Displaced screen position without edge lensing.
+    pub content: Vec2,
+    /// Displaced screen position including edge lensing.
     pub refracted: Vec2,
-    pub size: Vec2,
-    pub distance: f32,
-    pub mask: f32,
-    pub alpha: f32,
+    pub sdf: Sample,
+    pub bulge: f32,
     pub ripple: Vec2,
     flash: f32,
 }
 
-impl SurfaceSample {
-    fn new(local: Vec2, size: Vec2, shape: Sdf, interaction: Interaction) -> Self {
-        let mut surface = Self {
-            bulge: interaction.bulge,
-            refraction: interaction.refraction,
-            local,
-            refracted: local,
-            size,
-            distance: shape.distance,
-            mask: 0.0,
-            alpha: 0.0,
-            ripple: interaction.ripple,
-            flash: interaction.flash,
-        };
-        surface.resolve(shape);
-        surface
-    }
-
-    fn resolve(&mut self, shape: Sdf) {
-        self.distance = shape.distance - self.bulge * 0.5;
-        self.mask = Sdf::new(self.distance).fill();
-        let shadow = (-self.distance.max(0.0) * SHADOW_DECAY).exp() * SHADOW_OPACITY;
-        self.alpha = self.mask.max(shadow);
-        let uv = self.local / self.size;
-        let edge_lens =
-            (uv.clamp(Vec2::ZERO, Vec2::ONE) - 0.5) * (1.0 + self.distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08;
-        self.refracted = (uv - edge_lens) * self.size - self.refraction;
-    }
-
-    /// Resolves child geometry with this surface's existing interaction and optics.
-    pub fn layer(mut self, shape: Sdf) -> Self {
-        self.resolve(shape);
-        self
-    }
-
-    pub fn uv(self) -> Vec2 {
-        self.local / self.size
-    }
-
-    /// Maps a fragment coordinate through this surface's optical displacement.
-    pub fn refract(self, pixel: Vec2) -> Vec2 {
-        pixel + self.displacement()
-    }
-
-    /// Moves content with interaction while avoiding edge distortion of text baselines.
-    pub fn content_point(self, pixel: Vec2) -> Vec2 {
-        pixel - self.refraction
-    }
-
-    pub fn text(self, text: &TextFragment) -> Vec4 {
-        text.color(text.alpha_at(self.content_point(text.pixel)) * self.mask)
-    }
-
-    pub fn displacement(self) -> Vec2 {
-        self.refracted - self.local
-    }
-
-    pub const fn bulge(self) -> f32 {
-        self.bulge
-    }
-
-    fn shade(self, mut color: Vec3) -> Vec3 {
-        color += color.lerp(Vec3::ONE, 0.32) * self.distance.smoothstep(5.0, -3.0) * 0.14;
-        color.lerp(color * 1.5 + 0.1, self.flash)
-    }
-
-    /// Straight-alpha surface color including its outer shadow.
-    pub fn color(self, color: Vec3) -> Vec4 {
-        // Preserve the outer shadow without applying straight-alpha coverage twice.
-        (self.shade(color) * self.mask / self.alpha.max(0.0001)).extend(self.alpha)
-    }
-
-    /// Straight-alpha surface color clipped to the shape without a shadow.
-    pub fn fill_color(self, color: Vec3) -> Vec4 {
-        self.shade(color).extend(self.mask)
+impl DeformedSample {
+    /// Glass appearance; coverage is applied by the primitive after shading.
+    pub fn glass(self, mut color: Vec3) -> Vec4 {
+        let facing = (self.sdf.gradient / self.sdf.gradient.length().max(f32::MIN_POSITIVE)).dot(vec2(-0.6, -0.8));
+        let inward = (-self.sdf.distance).max(0.0);
+        let sheen = (1.0 - inward / 6.0).saturate().powi(2)
+            * (0.10 + 0.30 * facing.max(0.0).powi(4) + 0.10 * (-facing).max(0.0).powi(4))
+            + (1.0 - inward / 12.0).saturate().powi(3) * 0.02;
+        color = color.lerp(Vec3::ONE, sheen);
+        color = color.lerp(color * 1.5 + 0.1, self.flash);
+        (color * (self.sdf.fill() / self.sdf.coverage.max(f32::MIN_POSITIVE))).extend(1.0)
     }
 }
 
@@ -190,52 +175,7 @@ pub fn fbm(mut p: Vec2) -> f32 {
     0.5 + density * 0.5
 }
 
-pub fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
-    fbm(p / scale * 0.14 + vec2(time * 0.012, 6.1))
-}
-
 /// 1.0 when positive, else 0.0; core lowers `f32::from(bool)` through `u8`, which costs an extra conversion.
 pub fn presence(value: f32) -> f32 {
     if value > 0.0 { 1.0 } else { 0.0 }
-}
-
-#[derive(Clone, Copy)]
-struct Interaction {
-    bulge: f32,
-    refraction: Vec2,
-    ripple: Vec2,
-    flash: f32,
-}
-
-fn interaction(pixel: Vec2, globals: Globals, time: f32, mouse_mask: f32) -> Interaction {
-    let mut ripple = Vec2::ZERO;
-    let mut ripple_flash = 0.0;
-    // Rust-GPU cannot lower this slice iterator without a pointer-to-integer conversion.
-    for index in 0..globals.ripples.len() {
-        let pulse = globals.ripples[index];
-        let progress = ((time - pulse.start_time) * 1.2).saturate();
-        // Uniform across the draw, so expired slots skip all per-pixel distance work.
-        if pulse.start_time > 0.0 && progress < 1.0 {
-            let offset = pixel - pulse.origin;
-            let distance = offset.length();
-            // Avoid normalize_or_zero's Naga-invalid infinity constant and duplicate square root.
-            let direction = if distance > 0.0001 { offset / distance } else { Vec2::ZERO };
-            let wave = (distance - progress * 600.0).abs().smoothstep(80.0, 0.0) * (1.0 - progress);
-            ripple += direction * wave * (1.0 - progress) * 0.5;
-            ripple_flash = (ripple_flash + wave * 0.5).min(1.0);
-        }
-    }
-
-    let pointer_offset = pixel - globals.pointer;
-    let mouse_lift = if globals.pressure > 0.0 {
-        pointer_offset.length().smoothstep(POINTER_REACH, 0.0) * globals.pressure
-    } else {
-        0.0
-    };
-    Interaction {
-        bulge: mouse_lift * mouse_mask * 8.0 + ripple.length() * 22.0,
-        refraction: pointer_offset * mouse_lift * mouse_mask * POINTER_REFRACTION + ripple * RIPPLE_REFRACTION,
-        ripple,
-        flash: ripple_flash,
-    }
 }

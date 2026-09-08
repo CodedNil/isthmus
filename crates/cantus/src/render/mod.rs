@@ -2,12 +2,13 @@ use crate::{
     app::Background,
     config::Config,
     interaction::Interaction,
-    music::{Enrichment, Music},
+    music::{Music, enrichment::Enrichment},
 };
 use isthmus::{
     ShaderData,
     glam::{Vec2, Vec3},
 };
+use isthmus_sdf::layout::TextCache;
 
 pub mod launcher;
 pub mod lyrics;
@@ -25,16 +26,18 @@ pub const UNIT: f32 = 4.0;
 pub const GAP: f32 = UNIT * 2.0;
 /// The standard inset between a container edge and its contents.
 pub const PADDING: f32 = UNIT * 3.0;
+pub const RIPPLE_COUNT: usize = 4;
+pub const HELD_PRESSURE: f32 = 2.0;
 
 #[derive(Clone, Copy, Default, ShaderData)]
 pub struct Globals {
     pub pointer: Vec2,
     pub pressure: f32,
     pub bar_height: f32,
-    pub ripples: [RipplePulse; 4],
+    pub ripples: [RipplePulse; RIPPLE_COUNT],
 }
 
-isthmus::program!(Globals);
+isthmus::program!(Globals, TextCache);
 
 #[derive(Clone, Copy, Default, ShaderData)]
 pub struct RipplePulse {

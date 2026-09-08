@@ -2,6 +2,7 @@
 #![cfg_attr(target_arch = "spirv", no_std)]
 #![warn(missing_docs)]
 #![feature(trait_alias)]
+#![cfg_attr(not(target_arch = "spirv"), feature(const_cmp, const_trait_impl))]
 
 extern crate self as isthmus;
 
@@ -9,13 +10,15 @@ use spirv_std::num_traits;
 
 #[cfg(not(target_arch = "spirv"))]
 mod bindings;
+mod color;
 mod data;
 #[cfg(not(target_arch = "spirv"))]
 mod frame;
-/// Raster geometry, composable distance fields, and vector text.
-pub mod geometry;
+mod geometry;
 mod image;
 mod program;
+mod resources;
+mod shader;
 
 #[cfg(not(target_arch = "spirv"))]
 mod backend;
@@ -26,20 +29,21 @@ pub use backend::{
     setup::SetupError,
     surface::SurfaceHandle,
 };
-pub use data::{Buffer, ColorExt, F16x2, ShaderData, Unorm8x4, Unorm16x2};
+pub use color::ColorExt;
+pub use data::{Buffer, F16x2, ShaderData, Unorm8x4, Unorm16x2};
 #[cfg(not(target_arch = "spirv"))]
 pub use frame::Frame;
-#[cfg(not(target_arch = "spirv"))]
-pub use geometry::Geometry;
-pub use geometry::{
-    Fragment, Quad, Triangle, TriangleFragment,
-    sdf::{Sdf, SdfSample},
-    text::TextFragment,
-};
+pub use geometry::{quad::Quad, triangle::Triangle};
 pub use glam;
 pub use image::{Image, Sampling};
 pub use isthmus_macros::{ShaderData, program, shader};
 pub use program::{Blend, Program};
+pub use resources::ResourceData;
+#[cfg(not(target_arch = "spirv"))]
+pub use resources::Resources;
+pub use shader::{
+    Flat, Fragment, Primitive, ShaderFrame, Smooth, Surface, Vertex, VertexInput, Vertices, surface, vertices,
+};
 pub use spirv_std;
 
 /// Floating-point math and interpolation available on both host and shader targets.
@@ -53,7 +57,6 @@ pub mod __private {
     pub use crate::program::{ShaderEntry, ShaderSpec, shader_index};
     pub use crate::{
         data::{FrameData, load_unchecked},
-        geometry::{DrawRecord, ShaderInput},
         image::ShaderImage,
     };
 }

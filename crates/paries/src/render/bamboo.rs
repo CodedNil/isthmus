@@ -1,21 +1,24 @@
-use super::{Fragment, Frame, fbm, hash, noise, tapered_segment};
+use super::{Frame, Program, fbm, hash, noise, tapered_segment};
 use core::f32::consts::{PI, TAU};
 use isthmus::{
     Blend, Float as _, Quad,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     shader,
 };
+use isthmus_sdf::Shape;
 
 pub struct Bamboo;
 
 impl Bamboo {
     pub fn show(&mut self, frame: &mut Frame<'_>) {
-        let size = frame.screen_size;
-        frame.paint(
-            Quad::new(size * 0.5, size, Vec2::X),
-            shader!(Blend::Replace, |fragment: Fragment, size: Vec2| {
-                wallpaper(fragment.pixel, size, fragment.time)
-            }),
+        shader!(
+            frame
+                .blend(Blend::Replace)
+                .upload({
+                    let size: Vec2 = frame.screen_size;
+                })
+                .vertex(Quad::new(size * 0.5, size, Vec2::X))
+                .fragment(|frame, surface| wallpaper(surface.pixel, size, frame.time))
         );
     }
 }
@@ -36,7 +39,14 @@ fn foliage(mut color: Vec3, point: Vec2, root: Vec2, direction: Vec2, scale: f32
     let axis = direction.normalize();
     let side = axis.perp();
     let tip = root + axis * 88.0 * scale;
-    color = over(color, vec3(0.018, 0.10, 0.03), tapered_segment(point, root, tip, 2.0 * scale, 0.4 * scale).fill());
+    color = over(
+        color,
+        vec3(0.018, 0.10, 0.03),
+        Shape::from_fn(Quad::from_min_max(root.min(tip) - 2.0 * scale, root.max(tip) + 2.0 * scale), move |point| {
+            tapered_segment(point, root, tip, 2.0 * scale, 0.4 * scale)
+        })
+        .fill_at(point),
+    );
     for index in 0..3 {
         let (along, handedness, length, width) = if index == 0 {
             (0.43, -0.48, 29.0, 6.5)

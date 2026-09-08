@@ -1,4 +1,4 @@
-use cantus::{Platform, run};
+use cantus::{platform, run};
 use std::{env, io};
 
 fn main() -> io::Result<()> {
@@ -7,7 +7,7 @@ fn main() -> io::Result<()> {
         return cantus::generate_nix_options();
     }
     if env::args().any(|arg| arg == "--launcher") {
-        Platform::trigger_launcher();
+        return platform::trigger_launcher();
     }
     run();
     Ok(())
