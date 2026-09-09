@@ -1,5 +1,5 @@
 use crate::{
-    Program, Quad,
+    Program, Rect,
     glam::{Vec2, Vec4, vec4},
 };
 use core::ops::Deref;
@@ -59,7 +59,7 @@ pub trait Primitive<P: Program>: Copy {
     /// Prepared input supplied to the fragment closure.
     type Sample;
     /// Number of vertices to submit; zero suppresses the draw.
-    fn vertex_count(self, pixel_size: f32) -> u32;
+    fn vertex_count(self) -> u32;
     /// Evaluates one vertex entirely on the GPU.
     fn vertex(self, input: VertexInput<P>) -> Vertex<Self::Outputs>;
     /// Prepares shading data and antialiased coverage before user fragment evaluation.
@@ -69,25 +69,30 @@ pub trait Primitive<P: Program>: Copy {
 /// A bounded fragment sampler rasterized with an antialiasing margin.
 #[derive(Clone, Copy)]
 pub struct Surface<F> {
-    bounds: Option<Quad>,
+    bounds: Rect,
     sample: F,
 }
 
 /// Pairs conservative bounds with a shader returning prepared data and coverage.
-pub const fn surface<F>(bounds: Option<Quad>, sample: F) -> Surface<F> {
+pub fn surface<F>(bounds: Rect, sample: F) -> Surface<F> {
     Surface { bounds, sample }
 }
 
-impl<P: Program, T, F: Fn(Vec2) -> (T, f32) + Copy> Primitive<P> for Surface<F> {
+/// Rasterizes conservative bounds with automatic antialiasing padding for custom fragment sampling.
+pub fn raster(bounds: Rect) -> Surface<impl Fn(Vec2) -> ((), f32) + Copy> {
+    surface(bounds, |_| ((), 1.0))
+}
+
+impl<P: Program, T, F: FnOnce(Vec2) -> (T, f32) + Copy> Primitive<P> for Surface<F> {
     type Outputs = ();
     type Sample = T;
 
-    fn vertex_count(self, pixel_size: f32) -> u32 {
-        if self.bounds.is_some_and(|bounds| bounds.expanded(pixel_size).size.cmpge(Vec2::ZERO).all()) { 4 } else { 0 }
+    fn vertex_count(self) -> u32 {
+        Primitive::<P>::vertex_count(self.bounds)
     }
 
     fn vertex(self, input: VertexInput<P>) -> Vertex {
-        self.bounds.unwrap_or_else(|| Vec2::ZERO.into()).expanded(input.frame.pixel_size).vertex(input)
+        self.bounds.expanded(input.frame.pixel_size).vertex(input)
     }
 
     fn sample(self, fragment: Fragment, (): ()) -> (T, f32) {
@@ -115,7 +120,7 @@ impl<P: Program, T: Copy, F: FnOnce(VertexInput<P>) -> Vertex<T> + Copy> Primiti
         (outputs, 1.0)
     }
 
-    fn vertex_count(self, _: f32) -> u32 {
+    fn vertex_count(self) -> u32 {
         self.count
     }
 
@@ -141,6 +146,16 @@ pub struct Fragment<T = ()> {
     pub uv: Vec2,
     /// Primitive-specific data, also accessible through dereferencing this fragment.
     pub sample: T,
+    /// Coverage applied by the renderer after fragment evaluation.
+    pub coverage: f32,
+}
+
+impl<T: Paint + Copy> Fragment<T> {
+    /// Paints the main primitive, accounting for its deferred coverage exactly once.
+    pub fn paint(&self, fill: Vec4, outline: Vec4) -> Vec4 {
+        let color = self.sample.paint(fill, outline);
+        color.with_w(color.w / self.coverage.max(f32::MIN_POSITIVE))
+    }
 }
 
 impl<T> Deref for Fragment<T> {
@@ -149,4 +164,18 @@ impl<T> Deref for Fragment<T> {
     fn deref(&self) -> &T {
         &self.sample
     }
+}
+
+/// Composites straight RGBA foreground over background.
+pub fn source_over(foreground: Vec4, background: Vec4) -> Vec4 {
+    let behind = background.w * (1.0 - foreground.w);
+    let alpha = foreground.w + behind;
+    ((foreground.truncate() * foreground.w + background.truncate() * behind) / alpha.max(f32::MIN_POSITIVE))
+        .extend(alpha)
+}
+
+/// Composes fill and outline into a covered straight RGBA colour.
+pub trait Paint {
+    /// Includes antialiased fill and outer coverage in the returned colour.
+    fn paint(self, fill: Vec4, outline: Vec4) -> Vec4;
 }

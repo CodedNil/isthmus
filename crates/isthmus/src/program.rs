@@ -15,7 +15,7 @@ pub trait Program: Copy + 'static {
     const SHADERS: &'static [ShaderEntry];
 }
 
-/// How a shader's straight-alpha output combines with the render target.
+/// How a shader's colour combines with the render target.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum Blend {
     #[default]

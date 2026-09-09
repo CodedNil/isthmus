@@ -4,13 +4,13 @@ use crate::{
     platform,
     render::{
         GAP, PANEL_START, Program, TEXT_COLOR, UNIT, UiContext,
-        sdf::{VISIBLE_ALPHA, deform, fbm, hash, refract, sample_deformation},
+        sdf::{VISIBLE_ALPHA, deform, fbm, glass, hash, refract, sample_deformation},
     },
 };
 use arrayvec::{ArrayString, ArrayVec};
 use core::f32::consts::PI;
 use isthmus::prelude::*;
-use isthmus_sdf::{Shape, Text};
+use isthmus_sdf::prelude::*;
 use jiff::{
     Span, Timestamp, Zoned,
     civil::{DateTime, Time},
@@ -70,12 +70,12 @@ fn grid_cell(index: usize) -> Vec2 {
     )
 }
 
-fn weather_panel(pill: Quad, expansion: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-    let pill_min = pill.center - pill.size * 0.5;
+fn weather_panel(pill: Rect, expansion: f32) -> impl Sdf {
     let popup_size = vec2(WIDTH + FORECAST_X * expansion, ((EXTENSION - GAP) * expansion).max(0.001));
-    let popup_center = pill_min + vec2(-FORECAST_X * expansion * 0.5, pill.size.y + GAP * expansion) + popup_size * 0.5;
+    let popup_center =
+        pill.min + vec2(-FORECAST_X * expansion * 0.5, pill.size().y + GAP * expansion) + popup_size * 0.5;
     Shape::pill(pill).smooth_union(
-        Shape::rounded_rect(Quad::new(popup_center, popup_size, Vec2::X), 18.0),
+        Shape::rounded_rect(Rect::from_center_size(popup_center, popup_size), 18.0),
         56.0,
         expansion,
     )
@@ -219,7 +219,7 @@ pub struct WeatherPanel {
 mod monitor {
     use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, WeatherCondition, WeatherPanel};
     use crate::{
-        app::{Background, send_update},
+        app::{Background, fetch_json, send_update},
         platform,
     };
     use futures_util::future::join_all;
@@ -228,7 +228,7 @@ mod monitor {
         tz::{Offset, TimeZone},
     };
     use reqwest::Client;
-    use serde::{Deserialize, de::DeserializeOwned};
+    use serde::Deserialize;
     use std::{array::from_fn, iter::once, time::Duration};
     use tokio::sync::mpsc;
     use tracing::warn;
@@ -443,7 +443,9 @@ mod monitor {
         let city = timezone.rsplit('/').next().unwrap_or(timezone).replace('_', " ");
         let query: String = form_urlencoded::byte_serialize(city.as_bytes()).collect();
         let results: SearchResults =
-            get_json(http, format!("https://geocoding-api.open-meteo.com/v1/search?name={query}&count=10")).await?;
+            fetch_json(http.get(format!("https://geocoding-api.open-meteo.com/v1/search?name={query}&count=10")))
+                .await
+                .map_err(|error| error.to_string())?;
         let place = results
             .results
             .iter()
@@ -463,21 +465,11 @@ mod monitor {
             "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current={WEATHER_FIELDS},relative_humidity_2m,wind_speed_10m&hourly={WEATHER_FIELDS}&forecast_hours=24&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&temperature_unit=celsius&timezone=auto&forecast_days=6"
         );
         if locations.len() == 1 {
-            get_json(http, url).await.map(|forecast| vec![forecast])
+            fetch_json(http.get(url)).await.map(|forecast| vec![forecast])
         } else {
-            get_json(http, url).await
+            fetch_json(http.get(url)).await
         }
-    }
-
-    async fn get_json<T: DeserializeOwned>(http: &Client, url: String) -> Result<T, String> {
-        http.get(url)
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(|error| error.to_string())?
-            .json()
-            .await
-            .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())
     }
 }
 impl WeatherPanel {
@@ -504,7 +496,7 @@ impl WeatherPanel {
     pub fn show(&mut self, context: &mut UiContext, status_width: f32) -> StatusSky {
         let height = context.config.height;
         let x = context.frame.screen_size.x - WIDTH - GAP - status_width;
-        let pill = Quad::from_min_max(vec2(x, PANEL_START), vec2(x + WIDTH, PANEL_START + height));
+        let pill = Rect::new(vec2(x, PANEL_START), vec2(x + WIDTH, PANEL_START + height));
         let hovered = context.interaction.pointer_in(weather_panel(pill, self.expansion.smoothstep(0.0, 1.0)));
         self.expansion =
             self.expansion.move_towards(f32::from(hovered), context.frame.delta_time.min(1.0 / 30.0) * 3.0);
@@ -514,10 +506,8 @@ impl WeatherPanel {
         let expansion = self.expansion.smoothstep(0.0, 1.0);
         let panel = weather_panel(pill, expansion);
         context.interaction.input_region(pill);
-        if expansion > 0.0
-            && let Some(bounds) = panel.bounds(0.0)
-        {
-            context.interaction.input_region(bounds);
+        if expansion > 0.0 {
+            context.interaction.input_region(panel.bounds(0.0));
         }
         shader!(
             context
@@ -525,29 +515,29 @@ impl WeatherPanel {
                 .upload({
                     let current: WeatherCondition;
                     let next: WeatherCondition = self.hourly[1].conditions;
-                    let pill: Quad;
+                    let pill: Rect;
                     let expansion: f32;
                     let phase: Vec3 = sky_phase(sun.y);
                     let sun_center: Vec2 =
-                        vec2(16.0 + sun.x * (pill.size.x - 32.0), pill.size.y * (0.72 - sun.y.saturate() * 0.45));
+                        vec2(16.0 + sun.x * (pill.size().x - 32.0), pill.size().y * (0.72 - sun.y.saturate() * 0.45));
                     let sun_color: Vec4 = vec3(0.96, 0.98, 1.0)
                         .lerp(vec3(0.98, 0.74, 0.66), sun.y.smoothstep(0.55, 0.02))
                         .extend(sun.y.smoothstep(-0.02, 0.04));
                 })
-                .vertex(|frame| deform(weather_panel(pill, expansion), frame))
+                .primitive(|frame| deform(weather_panel(pill, expansion), frame))
                 .fragment(|frame, surface| {
-                    let body_local = pill.local(surface.pixel) + pill.size * 0.5;
-                    let edge = ((body_local.x / pill.size.x).clamp(0.0, 1.0) - 0.5).abs();
+                    let body_local = surface.pixel - pill.min;
+                    let edge = ((body_local.x / pill.size().x).clamp(0.0, 1.0) - 0.5).abs();
                     let conditions = current.lerp(next, edge.smoothstep(0.05, 0.25)).lerp(current, expansion);
                     let mut color = scene(
                         frame.time,
                         frame.globals.bar_height,
-                        pill.uv(surface.refracted) * pill.size,
-                        pill.size.x,
+                        surface.refracted - pill.min,
+                        pill.size().x,
                         phase,
                         conditions,
                     );
-                    if body_local.y <= pill.size.y {
+                    if body_local.y <= pill.size().y {
                         let distance = body_local.distance(sun_center);
                         color = color.lerp(
                             sun_color.truncate(),
@@ -555,7 +545,7 @@ impl WeatherPanel {
                                 * sun_color.w,
                         );
                     }
-                    surface.glass(color)
+                    glass(surface, color)
                 })
         );
         let line = context
@@ -568,26 +558,21 @@ impl WeatherPanel {
         StatusSky { sun_height: sun.y, conditions: current }
     }
 
-    fn paint_text(&self, context: &mut UiContext, line: Text, pill: Quad, color: Vec4, clip: bool) {
+    fn paint_text(&self, context: &mut UiContext, line: Text, pill: Rect, color: Vec4, clip: bool) {
         shader!(
             context
                 .frame
                 .upload({
-                    let pill: Quad;
+                    let pill: Rect;
                     let expansion: f32 = self.expansion.smoothstep(0.0, 1.0);
                     let line: Text = line.outlined(0.8);
-                    let text_color: Unorm8x4 = Unorm8x4::from_vec4(color);
+                    let color: Vec4;
                     let clip: bool;
                 })
-                .vertex(|frame| refract(weather_panel(pill, expansion), frame, line.bounds()))
+                .primitive(|frame| refract(weather_panel(pill, expansion), frame, line))
                 .fragment(|_, surface| {
-                    let color = text_color.to_vec4();
-                    let sample = line.sample_at(surface.content);
-                    color
-                        .truncate()
-                        .extend(sample.fill())
-                        .over(Vec4::W.opacity(sample.coverage * 0.18))
-                        .opacity(color.w * if clip { surface.sdf.fill() } else { 1.0 })
+                    surface.paint(color.with_w(1.0), Vec3::ZERO.extend(0.18))
+                        * vec4(1.0, 1.0, 1.0, color.w * if clip { surface.parent_fill } else { 1.0 })
                 })
         );
     }
@@ -600,7 +585,7 @@ impl WeatherPanel {
         center: Vec2,
         spacing: f32,
         alpha: f32,
-        pill: Quad,
+        pill: Rect,
     ) {
         for (index, label) in labels.into_iter().enumerate() {
             let line = context
@@ -628,18 +613,19 @@ impl WeatherPanel {
         (label, hour)
     }
 
-    fn show_calendar(&mut self, context: &mut UiContext, pill: Quad) {
+    fn show_calendar(&mut self, context: &mut UiContext, pill: Rect) {
         if self.expansion <= 0.0 {
             return;
         }
-        let origin = pill.center + vec2(-WIDTH * 0.5 - FORECAST_X * 0.5, pill.size.y * 0.5);
-        let height = pill.size.y;
+        let origin = vec2(pill.min.x - FORECAST_X * 0.5, pill.max.y);
+        let height = pill.size().y;
         let expansion = self.expansion.smoothstep(0.0, 1.0);
         let reveal = reveal_progress(expansion, TITLE.y);
 
-        let title = context
-            .interaction
-            .interact("calendar-month", Shape::pill(Quad::new(origin + TITLE, vec2(UNIT * 52.0, UNIT * 8.0), Vec2::X)));
+        let title = context.interaction.interact(
+            "calendar-month",
+            Shape::pill(Rect::from_center_size(origin + TITLE, vec2(UNIT * 52.0, UNIT * 8.0))),
+        );
         if title.clicked {
             self.month_offset = 0;
         }
@@ -683,7 +669,7 @@ impl WeatherPanel {
             let size = Vec2::new(WIDTH - GAP * 2.0, height);
             let row_origin = Vec2::new(FORECAST_X + WIDTH * 0.5, forecast_center(height, row as f32)) - size * 0.5;
             let step = size.x / items.len() as f32;
-            let forecast_pill = Quad::from_min_max(origin + row_origin, origin + row_origin + size);
+            let forecast_pill = Rect::new(origin + row_origin, origin + row_origin + size);
             let alpha = reveal_progress(expansion, row_origin.y + size.y * 0.5);
             if alpha > 0.0
                 && context
@@ -704,11 +690,11 @@ impl WeatherPanel {
                         let start_hour: f32 = items[0].hour;
                         let sun_hours: [f32; 2] = self.sun_hours;
                         let alpha: f32;
-                        let forecast_pill: Quad;
-                        let pill: Quad;
+                        let forecast_pill: Rect;
+                        let pill: Rect;
                         let expansion: f32;
                     })
-                    .vertex(|frame| deform(Shape::pill(forecast_pill), frame))
+                    .primitive(|frame| deform(Shape::pill(forecast_pill), frame))
                     .fragment(|frame, surface| {
                         let panel = sample_deformation(weather_panel(pill, expansion), frame, surface.pixel);
                         let position =
@@ -726,12 +712,12 @@ impl WeatherPanel {
                         let color = scene(
                             frame.time,
                             frame.globals.bar_height,
-                            forecast_pill.uv(surface.refracted) * forecast_pill.size,
-                            forecast_pill.size.x,
+                            surface.refracted - forecast_pill.min,
+                            forecast_pill.size().x,
                             sky_phase(sun_position(hour, sun_hours)[1]),
                             conditions,
                         );
-                        surface.glass(color).opacity(alpha * panel.sdf.fill())
+                        glass(surface, color) * vec4(1.0, 1.0, 1.0, alpha * panel.sdf.fill())
                     })
             );
             for (column, forecast) in items.iter().enumerate() {

@@ -1,6 +1,6 @@
 use crate::render::Program;
 use isthmus::prelude::*;
-use isthmus_sdf::{Outlined, Sample, Shape};
+use isthmus_sdf::prelude::*;
 
 const SHADOW_OPACITY: f32 = 0.16;
 const SHADOW_DECAY: f32 = 0.3;
@@ -14,48 +14,46 @@ const LENS_REACH: f32 = 3.0;
 pub const VISIBLE_ALPHA: f32 = 1.0 / 1024.0;
 
 pub fn deform(
-    shape: Shape<impl Fn(Vec2) -> f32 + Copy>,
+    shape: impl Sdf,
     frame: ShaderFrame<Program>,
 ) -> impl Primitive<Program, Outputs = (), Sample = DeformedSample> {
     let (bulge_reach, _) = reach(shape, frame);
-    let reach = (SHADOW_OPACITY / VISIBLE_ALPHA).ln() / SHADOW_DECAY;
-    surface(shape.bounds(reach + bulge_reach), move |point| {
-        let mut sample = sample_deformation(shape, frame, point);
-        sample.sdf.coverage = sample.sdf.band(-f32::MAX..reach)
-            * sample.sdf.fill().max((-sample.sdf.distance.max(0.0) * SHADOW_DECAY).exp() * SHADOW_OPACITY);
+    let shape = shape.outlined((SHADOW_OPACITY / VISIBLE_ALPHA).ln() / SHADOW_DECAY);
+    surface(shape.bounds(bulge_reach), move |point| {
+        let sample = sample_deformation(shape, frame, point);
         (sample, sample.sdf.coverage)
     })
 }
 
-/// Supplies displaced coordinates without clipping content to the parent.
+/// Samples a child at displaced coordinates without clipping it to its parent.
 pub fn refract(
-    parent: Shape<impl Fn(Vec2) -> f32 + Copy>,
+    parent: impl Sdf,
     frame: ShaderFrame<Program>,
-    bounds: impl Into<Option<Quad>>,
+    shape: impl Sdf,
 ) -> impl Primitive<Program, Outputs = (), Sample = DeformedSample> {
     let (_, refraction_reach) = reach(parent, frame);
-    surface(bounds.into().map(|bounds| bounds.expanded(refraction_reach)), move |point| {
-        let sample = sample_deformation(parent, frame, point);
-        (sample, 1.0)
+    surface(shape.bounds(refraction_reach), move |point| {
+        let mut sample = sample_deformation(parent, frame, point);
+        sample.sdf = shape.sample_at(sample.content);
+        (sample, sample.sdf.coverage)
     })
 }
 
 /// Applies the parent's edge lensing and bulge to an independently bounded layer.
-pub fn lens<F: Fn(Vec2) -> f32 + Copy>(
-    parent: Shape<impl Fn(Vec2) -> f32 + Copy>,
+pub fn lens(
+    parent: impl Sdf,
     frame: ShaderFrame<Program>,
-    shape: impl Into<Outlined<F>>,
+    shape: impl Sdf,
 ) -> impl Primitive<Program, Outputs = (), Sample = DeformedSample> {
-    let outlined = shape.into();
     let (bulge_reach, refraction_reach) = reach(parent, frame);
-    surface(outlined.bounds(refraction_reach + bulge_reach + LENS_REACH), move |point| {
+    surface(shape.bounds(refraction_reach + bulge_reach + LENS_REACH), move |point| {
         let mut parent = sample_deformation(parent, frame, point);
-        parent.sdf = outlined.sample(outlined.shape.distance_at(parent.refracted) - parent.bulge * 0.5);
+        parent.sdf = shape.sample_distance(shape.distance_at(parent.refracted) - parent.bulge * 0.5);
         (parent, parent.sdf.coverage)
     })
 }
 
-fn reach(shape: Shape<impl Fn(Vec2) -> f32 + Copy>, frame: ShaderFrame<Program>) -> (f32, f32) {
+fn reach(shape: impl Sdf, frame: ShaderFrame<Program>) -> (f32, f32) {
     let pressure = frame.globals.pressure * shape.distance_at(frame.globals.pointer).smoothstep(0.5, -0.5);
     let mut ripple = 0.0;
     for index in 0..frame.globals.ripples.len() {
@@ -69,11 +67,7 @@ fn reach(shape: Shape<impl Fn(Vec2) -> f32 + Copy>, frame: ShaderFrame<Program>)
     (bulge_reach, refraction_reach)
 }
 
-pub fn sample_deformation(
-    shape: Shape<impl Fn(Vec2) -> f32 + Copy>,
-    frame: ShaderFrame<Program>,
-    point: Vec2,
-) -> DeformedSample {
+pub fn sample_deformation(shape: impl Sdf, frame: ShaderFrame<Program>, point: Vec2) -> DeformedSample {
     let pressure = frame.globals.pressure * shape.distance_at(frame.globals.pointer).smoothstep(0.5, -0.5);
     let mut ripple = Vec2::ZERO;
     let mut flash = 0.0;
@@ -94,10 +88,10 @@ pub fn sample_deformation(
     let mouse_lift = pointer_offset.length().smoothstep(POINTER_REACH, 0.0) * pressure;
     let bulge = mouse_lift * POINTER_BULGE + ripple.length() * RIPPLE_BULGE;
     let content = point - pointer_offset * mouse_lift * POINTER_REFRACTION - ripple * RIPPLE_REFRACTION;
-    let sdf = Sample::new(shape.distance_at(point) - bulge * 0.5, 0.0);
+    let sdf = shape.sample_distance(shape.distance_at(point) - bulge * 0.5);
     let lens = (1.0 + sdf.distance.min(0.0) / 12.0).saturate() * LENS_REACH;
     let refracted = content - sdf.gradient / sdf.gradient.length().max(f32::MIN_POSITIVE) * lens;
-    DeformedSample { content, refracted, sdf, bulge, ripple, flash }
+    DeformedSample { content, refracted, parent_fill: sdf.fill(), sdf, bulge, ripple, flash }
 }
 
 #[derive(Clone, Copy)]
@@ -107,23 +101,30 @@ pub struct DeformedSample {
     /// Displaced screen position including edge lensing.
     pub refracted: Vec2,
     pub sdf: Sample,
+    /// Parent fill coverage, preserved when sampling a child layer.
+    pub parent_fill: f32,
     pub bulge: f32,
     pub ripple: Vec2,
     flash: f32,
 }
 
-impl DeformedSample {
-    /// Glass appearance; coverage is applied by the primitive after shading.
-    pub fn glass(self, mut color: Vec3) -> Vec4 {
-        let facing = (self.sdf.gradient / self.sdf.gradient.length().max(f32::MIN_POSITIVE)).dot(vec2(-0.6, -0.8));
-        let inward = (-self.sdf.distance).max(0.0);
-        let sheen = (1.0 - inward / 6.0).saturate().powi(2)
-            * (0.10 + 0.30 * facing.max(0.0).powi(4) + 0.10 * (-facing).max(0.0).powi(4))
-            + (1.0 - inward / 12.0).saturate().powi(3) * 0.02;
-        color = color.lerp(Vec3::ONE, sheen);
-        color = color.lerp(color * 1.5 + 0.1, self.flash);
-        (color * (self.sdf.fill() / self.sdf.coverage.max(f32::MIN_POSITIVE))).extend(1.0)
+impl Paint for DeformedSample {
+    fn paint(self, fill: Vec4, outline: Vec4) -> Vec4 {
+        self.sdf.paint(fill, outline)
     }
+}
+
+/// Shades the main glass surface over its distance-based shadow.
+pub fn glass(surface: Fragment<DeformedSample>, mut color: Vec3) -> Vec4 {
+    let facing = (surface.sdf.gradient / surface.sdf.gradient.length().max(f32::MIN_POSITIVE)).dot(vec2(-0.6, -0.8));
+    let inward = (-surface.sdf.distance).max(0.0);
+    let sheen = (1.0 - inward / 6.0).saturate().powi(2)
+        * (0.10 + 0.30 * facing.max(0.0).powi(4) + 0.10 * (-facing).max(0.0).powi(4))
+        + (1.0 - inward / 12.0).saturate().powi(3) * 0.02;
+    color = color.lerp(Vec3::ONE, sheen);
+    color = color.lerp(color * 1.5 + 0.1, surface.flash);
+    let shadow = (-surface.sdf.distance.max(0.0) * SHADOW_DECAY).exp() * SHADOW_OPACITY;
+    surface.paint(color.extend(1.0), Vec3::ZERO.extend(shadow))
 }
 
 /// Core 2-lane avalanche mixer for hash functions

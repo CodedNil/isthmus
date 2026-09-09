@@ -109,7 +109,7 @@ impl Music {
             if let Some(previous) = old.get_mut(&track.uri).and_then(VecDeque::pop_front) {
                 track.interaction_id = previous.interaction_id;
                 track.runtime = previous.runtime;
-                if track.image.is_none() {
+                if self.resources.art(previous.image.as_deref()).is_some() || track.image.is_none() {
                     track.image = previous.image;
                 }
             }

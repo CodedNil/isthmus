@@ -1,6 +1,3 @@
-//! Macros for declaring typed shader programs, captures, and word codecs.
-#![warn(missing_docs)]
-
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
@@ -54,7 +51,7 @@ pub fn program(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Draws inline Rust: `shader!(frame.upload({ typed captures }).vertex(stage).fragment(shader))`.
+/// Draws inline Rust: `shader!(frame.upload({ typed captures }).primitive(shape).fragment(shader))`.
 #[proc_macro]
 pub fn shader(input: TokenStream) -> TokenStream {
     let span = proc_macro2::Span::call_site();

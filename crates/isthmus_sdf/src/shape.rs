@@ -1,24 +1,23 @@
 use core::{f32::consts::TAU, ops::Range};
 use isthmus::{
-    Fragment, Primitive, Program, Quad, Vertex, VertexInput,
-    glam::{FloatExt, Vec2, vec2},
+    Fragment, Paint, Primitive, Program, Quad, Rect, Vertex, VertexInput,
+    glam::{FloatExt, Vec2, Vec4, vec2},
+    raster,
     spirv_std::arch::Derivative,
-    surface,
 };
 
 /// A distance function with automatically composed bounds.
 #[derive(Clone, Copy)]
-#[must_use]
 pub struct Shape<F = fn(Vec2) -> f32> {
     distance: F,
-    bounds: Quad,
+    bounds: Rect,
+    outline: f32,
 }
 
 impl Shape {
     /// Creates an unrestricted field with a declared conservative draw region.
-    pub fn from_fn<F: Fn(Vec2) -> f32 + Copy>(bounds: impl Into<Quad>, distance: F) -> Shape<F> {
-        let (min, max) = bounds.into().extents();
-        Shape { distance, bounds: Quad::from_min_max(min, max) }
+    pub fn from_fn<F: Fn(Vec2) -> f32 + Copy>(bounds: impl Into<Rect>, distance: F) -> Shape<F> {
+        Shape { distance, bounds: bounds.into(), outline: 0.0 }
     }
 
     /// Creates a rounded rectangle preserving the supplied outer dimensions.
@@ -45,21 +44,15 @@ impl Shape {
     /// Creates a disk with a nonnegative radius.
     pub fn circle(center: Vec2, radius: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         let radius = radius.max(0.0);
-        Self::from_fn(Quad::new(center, Vec2::splat(radius * 2.0), Vec2::X), move |point| {
+        Self::from_fn(Rect::from_center_size(center, Vec2::splat(radius * 2.0)), move |point| {
             point.distance(center) - radius
         })
     }
 
     /// Creates a round-ended segment with the given full width.
     pub fn segment(start: Vec2, end: Vec2, width: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-        let direction = end - start;
-        let length = direction.length();
         let width = width.max(0.0);
-        Self::pill(Quad::new(
-            start.midpoint(end),
-            vec2(length + width, width),
-            if length > 0.0 { direction / length } else { Vec2::X },
-        ))
+        Self::pill(Quad::oriented(start.midpoint(end), vec2(start.distance(end) + width, width), end - start))
     }
 
     /// Creates an unsigned circular arc centerline.
@@ -90,7 +83,7 @@ impl Shape {
     pub fn star(radius: f32, inner_radius: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         let radius = radius.max(0.0);
         let inner_radius = inner_radius.clamp(0.0, radius);
-        Self::from_fn(Quad::new(Vec2::ZERO, Vec2::splat(radius * 2.0), Vec2::X), move |point| {
+        Self::from_fn(Vec2::splat(radius * 2.0), move |point| {
             if radius == 0.0 {
                 return point.length();
             }
@@ -113,7 +106,7 @@ impl Shape {
         let extent = size.max(0.0) - radius;
         let k = 1.732_050_8;
         Self::from_fn(
-            Quad::new(vec2(0.0, extent * 0.25), vec2(k * extent, 1.5 * extent) + radius * 2.0, Vec2::X),
+            Rect::from_center_size(vec2(0.0, extent * 0.25), vec2(k * extent, 1.5 * extent) + radius * 2.0),
             move |point| {
                 let mut point = vec2(point.x.abs(), point.y);
                 let h = (point.x + k * point.y).max(0.0);
@@ -130,109 +123,148 @@ impl Shape {
     }
 }
 
-impl<F: Fn(Vec2) -> f32 + Copy> Shape<F> {
-    /// Encloses the field and its declared effects at the requested distance threshold.
-    pub fn bounds(self, reach: f32) -> Option<Quad> {
-        let bounds = self.bounds.expanded(reach);
-        bounds.size.cmpge(Vec2::ZERO).all().then_some(bounds)
-    }
+/// Signed distance, geometry bounds and reserved outline shared by shapes and glyphs.
+pub trait Sdf: Copy {
+    /// Axis-aligned bounds before outline expansion.
+    fn geometry_bounds(self) -> Rect;
+    /// Reserved exterior margin.
+    fn outline_width(self) -> f32;
+    /// Evaluates signed distance to the contour.
+    fn distance_at(self, point: Vec2) -> f32;
 
-    /// Samples the composed signed distance.
-    pub fn distance_at(self, point: Vec2) -> f32 {
-        (self.distance)(point)
+    /// Encloses the geometry, outline and additional effect reach.
+    fn bounds(self, reach: f32) -> Rect {
+        self.geometry_bounds().expanded(self.outline_width() + reach)
     }
-
-    /// Tests membership, including the boundary.
-    pub fn contains(self, point: Vec2) -> bool {
+    /// Tests membership in the unoutlined geometry.
+    fn contains(self, point: Vec2) -> bool {
         self.distance_at(point) <= 0.0
     }
-
-    /// Declares an exterior outline, expanding raster bounds while preserving the contour.
-    pub const fn outlined(self, width: f32) -> Outlined<F> {
-        Outlined { shape: self, width: width.max(0.0) }
+    /// Resolves an adjusted distance within the reserved outline.
+    fn sample_distance(self, distance: f32) -> Sample {
+        Sample::new(distance, self.outline_width())
     }
-
-    /// Evaluates the field and its screen-space gradient once for coverage queries.
-    pub fn sample_at(self, point: Vec2) -> Sample {
-        Sample::new(self.distance_at(point), 0.0)
+    /// Evaluates distance, gradient and antialiased coverage.
+    fn sample_at(self, point: Vec2) -> Sample {
+        self.sample_distance(self.distance_at(point))
     }
-
     /// Samples antialiased interior coverage.
-    pub fn fill_at(self, point: Vec2) -> f32 {
+    fn fill_at(self, point: Vec2) -> f32 {
         self.sample_at(point).fill()
     }
-
-    fn combined_bounds(self, other: Quad, intersection: bool) -> Quad {
-        let (amin, amax) = self.bounds.extents();
-        let (bmin, bmax) = other.extents();
-        if intersection {
-            Quad::from_min_max(amin.max(bmin), amax.min(bmax))
-        } else {
-            Quad::from_min_max(amin.min(bmin), amax.max(bmax))
+    /// Reserves exterior space without changing the contour.
+    fn outlined(self, width: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+        Shape {
+            bounds: self.geometry_bounds(),
+            outline: width.max(0.0),
+            distance: move |point| self.distance_at(point),
         }
     }
-
     /// Includes either operand.
-    pub fn union(self, other: Shape<impl Fn(Vec2) -> f32 + Copy>) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-        Shape::from_fn(self.combined_bounds(other.bounds, false), move |point| {
-            (self.distance)(point).min((other.distance)(point))
-        })
+    fn union(self, other: impl Sdf) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+        Shape {
+            bounds: self.geometry_bounds().union(other.geometry_bounds()),
+            outline: self.outline_width(),
+            distance: move |point| self.distance_at(point).min(other.distance_at(point)),
+        }
     }
-
-    /// Includes both operands, retaining inverted bounds until rasterization.
-    pub fn intersection(self, other: Shape<impl Fn(Vec2) -> f32 + Copy>) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-        Shape::from_fn(self.combined_bounds(other.bounds, true), move |point| {
-            (self.distance)(point).max((other.distance)(point))
-        })
+    /// Keeps the shared region, retaining inverted bounds for empty intersections.
+    fn intersection(self, other: impl Sdf) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+        Shape {
+            bounds: self.geometry_bounds().intersection(other.geometry_bounds()),
+            outline: self.outline_width(),
+            distance: move |point| self.distance_at(point).max(other.distance_at(point)),
+        }
     }
-
     /// Cuts the second operand out of this shape.
-    pub fn difference(self, other: Shape<impl Fn(Vec2) -> f32 + Copy>) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-        Shape::from_fn(self.bounds, move |point| (self.distance)(point).max(-(other.distance)(point)))
+    fn difference(self, other: impl Sdf) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+        Shape {
+            bounds: self.geometry_bounds(),
+            outline: self.outline_width(),
+            distance: move |point| self.distance_at(point).max(-other.distance_at(point)),
+        }
     }
-
-    /// Blends toward a polynomial smooth union.
-    pub fn smooth_union(
-        self,
-        other: Shape<impl Fn(Vec2) -> f32 + Copy>,
-        radius: f32,
-        amount: f32,
-    ) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+    /// Blends the first operand toward a polynomial smooth union.
+    fn smooth_union(self, other: impl Sdf, radius: f32, amount: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         let radius = radius.max(0.0);
         let amount = amount.saturate();
         let bounds = if amount == 0.0 {
-            self.bounds
+            self.geometry_bounds()
         } else {
-            self.combined_bounds(other.bounds, false).expanded(radius * amount * 0.25)
+            self.geometry_bounds().union(other.geometry_bounds()).expanded(radius * amount * 0.25)
         };
-        Shape::from_fn(bounds, move |point| {
-            let a = (self.distance)(point);
-            if amount == 0.0 {
-                return a;
-            }
-            let b = (other.distance)(point);
-            let blend = (1.0 - (a - b).abs() / radius.max(f32::MIN_POSITIVE)).saturate();
-            let union = a.min(b) - radius * blend * blend * 0.25;
-            if amount >= 1.0 { union } else { a.lerp(union, amount) }
-        })
+        Shape {
+            bounds,
+            outline: self.outline_width(),
+            distance: move |point| {
+                let a = self.distance_at(point);
+                if amount == 0.0 {
+                    return a;
+                }
+                let b = other.distance_at(point);
+                let blend = (1.0 - (a - b).abs() / radius.max(f32::MIN_POSITIVE)).saturate();
+                let union = a.min(b) - radius * blend * blend * 0.25;
+                if amount >= 1.0 { union } else { a.lerp(union, amount) }
+            },
+        }
     }
-
     /// Expands the contour; negative amounts erode it.
-    pub fn offset(self, amount: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-        Shape::from_fn(self.bounds.expanded(amount), move |point| (self.distance)(point) - amount)
+    fn offset(self, amount: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+        Shape {
+            bounds: self.geometry_bounds().expanded(amount),
+            outline: self.outline_width(),
+            distance: move |point| self.distance_at(point) - amount,
+        }
     }
-
     /// Creates a centered band with the given full thickness.
-    pub fn stroke(self, thickness: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+    fn stroke(self, thickness: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         let width = thickness.max(0.0) * 0.5;
-        Shape::from_fn(self.bounds.expanded(width), move |point| (self.distance)(point).abs() - width)
+        Shape {
+            bounds: self.geometry_bounds().expanded(width),
+            outline: self.outline_width(),
+            distance: move |point| self.distance_at(point).abs() - width,
+        }
+    }
+    /// Moves geometry and bounds together.
+    fn translated(self, offset: Vec2) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+        let bounds = self.geometry_bounds();
+        Shape {
+            bounds: Rect::new(bounds.min + offset, bounds.max + offset),
+            outline: self.outline_width(),
+            distance: move |point| self.distance_at(point - offset),
+        }
+    }
+}
+
+impl<F: Fn(Vec2) -> f32 + Copy> Sdf for Shape<F> {
+    fn geometry_bounds(self) -> Rect {
+        self.bounds
     }
 
-    /// Moves the field and its bounds together.
-    pub fn translated(self, offset: Vec2) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-        let mut bounds = self.bounds;
-        bounds.center += offset;
-        Shape::from_fn(bounds, move |point| (self.distance)(point - offset))
+    fn outline_width(self) -> f32 {
+        self.outline
+    }
+
+    fn distance_at(self, point: Vec2) -> f32 {
+        (self.distance)(point)
+    }
+}
+
+impl<P: Program, F: Fn(Vec2) -> f32 + Copy> Primitive<P> for Shape<F> {
+    type Outputs = ();
+    type Sample = Sample;
+
+    fn sample(self, fragment: Fragment, (): ()) -> (Sample, f32) {
+        let sample = self.sample_at(fragment.pixel);
+        (sample, sample.coverage)
+    }
+
+    fn vertex_count(self) -> u32 {
+        Primitive::<P>::vertex_count(raster(self.bounds(0.0)))
+    }
+
+    fn vertex(self, input: VertexInput<P>) -> Vertex {
+        raster(self.bounds(0.0)).vertex(input)
     }
 }
 
@@ -245,6 +277,15 @@ pub struct Sample {
     pub gradient: Vec2,
     /// Antialiased coverage of the primitive's selected distance region.
     pub coverage: f32,
+}
+
+impl Paint for Sample {
+    fn paint(self, fill: Vec4, outline: Vec4) -> Vec4 {
+        let foreground = fill.w * self.fill();
+        let background = outline.w * (self.coverage - foreground).max(0.0);
+        let alpha = foreground + background;
+        ((fill.truncate() * foreground + outline.truncate() * background) / alpha.max(f32::MIN_POSITIVE)).extend(alpha)
+    }
 }
 
 impl Sample {
@@ -269,58 +310,3 @@ impl Sample {
         (self.below(range.end) - self.below(range.start)).max(0.0)
     }
 }
-
-/// A composed shape with an exterior outline and automatically expanded bounds.
-#[derive(Clone, Copy)]
-pub struct Outlined<F> {
-    /// Geometry retained for additional distance queries.
-    pub shape: Shape<F>,
-    width: f32,
-}
-
-impl<F: Fn(Vec2) -> f32 + Copy> From<Shape<F>> for Outlined<F> {
-    fn from(shape: Shape<F>) -> Self {
-        shape.outlined(0.0)
-    }
-}
-
-impl<F: Fn(Vec2) -> f32 + Copy> Outlined<F> {
-    fn raster<P: Program>(self) -> impl Primitive<P, Outputs = (), Sample = ()> {
-        surface(self.bounds(0.0), |_| ((), 1.0))
-    }
-
-    /// Encloses the shape, its outline, and any additional displacement.
-    pub fn bounds(self, reach: f32) -> Option<Quad> {
-        self.shape.bounds(reach + self.width)
-    }
-
-    /// Samples a distance using the declared outline width.
-    pub fn sample(self, distance: f32) -> Sample {
-        Sample::new(distance, self.width)
-    }
-}
-
-macro_rules! primitive {
-    ($ty:ident, $sample:expr) => {
-        impl<P: Program, F: Fn(Vec2) -> f32 + Copy> Primitive<P> for $ty<F> {
-            type Outputs = ();
-            type Sample = Sample;
-
-            fn sample(self, fragment: Fragment, (): ()) -> (Sample, f32) {
-                let sample = ($sample)(self, fragment.pixel);
-                (sample, sample.coverage)
-            }
-
-            fn vertex_count(self, pixel_size: f32) -> u32 {
-                Primitive::<P>::vertex_count(Outlined::from(self).raster(), pixel_size)
-            }
-
-            fn vertex(self, input: VertexInput<P>) -> Vertex {
-                Outlined::from(self).raster().vertex(input)
-            }
-        }
-    };
-}
-
-primitive!(Shape, |shape: Shape<F>, point| shape.sample_at(point));
-primitive!(Outlined, |outlined: Outlined<F>, point| outlined.sample(outlined.shape.distance_at(point)));

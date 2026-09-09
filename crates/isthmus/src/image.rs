@@ -1,3 +1,4 @@
+use glam::Vec4;
 use spirv_std::{Sampler, image::Image2d};
 #[cfg(not(target_arch = "spirv"))]
 use std::sync::Arc;
@@ -35,23 +36,28 @@ impl Image {
     /// Creates straight-alpha RGBA8 data, requiring nonzero dimensions and exactly four bytes per pixel.
     pub fn rgba8(size: [u32; 2], pixels: impl Into<Arc<[u8]>>) -> Self {
         assert!(size[0] > 0 && size[1] > 0, "image dimensions must be non-zero");
-        let pixels = pixels.into();
+        let mut pixels = pixels.into();
         assert_eq!(
             Some(pixels.len()),
             size.into_iter().try_fold(4usize, |bytes, dimension| bytes.checked_mul(dimension as usize)),
             "RGBA8 image data has the wrong length"
         );
+        for rgba in Arc::make_mut(&mut pixels).chunks_exact_mut(4) {
+            let alpha = u16::from(rgba[3]);
+            for channel in &mut rgba[..3] {
+                *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+            }
+        }
         Self { size, pixels, sampling: Sampling::default() }
     }
 
-    #[must_use]
     /// Changes sampling settings while sharing the original pixel storage.
     pub fn sampled(&self, sampling: Sampling) -> Self {
         Self { sampling, ..self.clone() }
     }
 
-    /// Samples normalized coordinates using this image's filtering and addressing settings.
-    pub fn sample(&self, uv: glam::Vec2) -> glam::Vec4 {
+    /// Samples straight RGBA after filtering premultiplied pixels to avoid transparent-edge halos.
+    pub fn sample(&self, uv: glam::Vec2) -> Vec4 {
         let size = glam::IVec2::from_array(self.size.map(|value| value as i32));
         let repeat = matches!(self.sampling, Sampling::LinearRepeat | Sampling::NearestRepeat);
         let pixel = |point: glam::IVec2| {
@@ -62,18 +68,20 @@ impl Image {
             };
             let offset = (point.y * size.x + point.x) as usize * 4;
             let rgba = &self.pixels[offset..offset + 4];
-            glam::Vec4::new(f32::from(rgba[0]), f32::from(rgba[1]), f32::from(rgba[2]), f32::from(rgba[3])) / 255.0
+            Vec4::new(f32::from(rgba[0]), f32::from(rgba[1]), f32::from(rgba[2]), f32::from(rgba[3])) / 255.0
         };
         let uv = if repeat { uv - uv.floor() } else { uv.clamp(glam::Vec2::ZERO, glam::Vec2::ONE) };
         if matches!(self.sampling, Sampling::Nearest | Sampling::NearestRepeat) {
-            return pixel((uv * size.as_vec2()).floor().as_ivec2());
+            return straight(pixel((uv * size.as_vec2()).floor().as_ivec2()));
         }
         let position = uv * size.as_vec2() - 0.5;
         let lower = position.floor().as_ivec2();
         let fraction = position - position.floor();
-        pixel(lower)
-            .lerp(pixel(lower + glam::IVec2::X), fraction.x)
-            .lerp(pixel(lower + glam::IVec2::Y).lerp(pixel(lower + glam::IVec2::ONE), fraction.x), fraction.y)
+        straight(
+            pixel(lower)
+                .lerp(pixel(lower + glam::IVec2::X), fraction.x)
+                .lerp(pixel(lower + glam::IVec2::Y).lerp(pixel(lower + glam::IVec2::ONE), fraction.x), fraction.y),
+        )
     }
 }
 
@@ -88,7 +96,11 @@ impl<'a> ShaderImage<'a> {
         Self { image, sampler }
     }
 
-    pub fn sample(&self, uv: glam::Vec2) -> glam::Vec4 {
-        self.image.sample_by_lod(self.sampler, uv, 0.0)
+    pub fn sample(&self, uv: glam::Vec2) -> Vec4 {
+        straight(self.image.sample_by_lod(self.sampler, uv, 0.0))
     }
+}
+
+fn straight(color: Vec4) -> Vec4 {
+    (color.truncate() / color.w.max(f32::MIN_POSITIVE)).extend(color.w)
 }

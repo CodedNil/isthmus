@@ -1,6 +1,3 @@
-//! Extracts inline Rust shaders and compiles validated WGSL modules.
-#![warn(missing_docs)]
-
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{CargoOpt, DependencyKind, MetadataCommand};
 use naga::{

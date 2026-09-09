@@ -118,7 +118,7 @@ pub fn load() -> Config {
 pub fn generate_nix_options() -> io::Result<()> {
     use schemars::generate::SchemaSettings;
     use serde_json::Value;
-    use std::fmt::Write as _;
+    use std::fmt::Write;
 
     fn nix_string(value: &str) -> String {
         serde_json::to_string(value).unwrap().replace("${", "\\${")

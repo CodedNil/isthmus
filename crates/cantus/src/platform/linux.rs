@@ -492,50 +492,6 @@ fn monitor_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) {
     }
 }
 
-#[derive(Default)]
-struct PipeWireState {
-    default_sink: Option<String>,
-    sinks: HashMap<String, f32>,
-}
-
-impl PipeWireState {
-    fn update(&mut self, object: &Value) -> Option<f32> {
-        if let Some(metadata) = object["metadata"]
-            .as_array()
-            .and_then(|items| items.iter().find(|item| item["key"] == "default.audio.sink"))
-        {
-            self.default_sink = metadata["value"]["name"].as_str().map(str::to_owned);
-            return self.sinks.get(self.default_sink.as_ref()?).copied();
-        }
-        let info = &object["info"];
-        if info["props"]["media.class"] == "Audio/Sink"
-            && let Some(name) = info["props"]["node.name"].as_str()
-            && let Some(props) = info["params"]["Props"]
-                .as_array()
-                .and_then(|items| items.iter().find(|props| props["channelVolumes"].is_array()))
-        {
-            let volumes = props["channelVolumes"].as_array().unwrap();
-            let mut volume =
-                (volumes.iter().filter_map(Value::as_f64).sum::<f64>() / volumes.len().max(1) as f64).cbrt() as f32;
-            if props["mute"].as_bool().unwrap_or_default() {
-                volume = -volume;
-            }
-            self.sinks.insert(name.to_owned(), volume);
-            return (Some(name) == self.default_sink.as_deref()).then_some(volume);
-        }
-        None
-    }
-}
-
-fn monitor_volume(volume: &AtomicU32) {
-    loop {
-        if let Err(error) = capture_volume(volume) {
-            warn!(%error, "PipeWire volume monitor stopped");
-        }
-        thread::sleep(Duration::from_secs(1));
-    }
-}
-
 fn with_output(command: &mut Command, read: impl FnOnce(process::ChildStdout) -> io::Result<()>) -> io::Result<()> {
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
     let result = read(child.stdout.take().expect("stdout was piped"));
@@ -544,18 +500,49 @@ fn with_output(command: &mut Command, read: impl FnOnce(process::ChildStdout) ->
     result
 }
 
-fn capture_volume(volume: &AtomicU32) -> io::Result<()> {
-    with_output(Command::new("pw-dump").args(["--monitor", "--no-colors", "--indent", "0"]), |output| {
-        let mut state = PipeWireState::default();
-        for batch in serde_json::Deserializer::from_reader(output).into_iter::<Vec<Value>>() {
-            for object in batch.map_err(io::Error::other)? {
-                if let Some(level) = state.update(&object) {
-                    volume.store(level.to_bits(), Ordering::Relaxed);
+fn monitor_volume(volume: &AtomicU32) {
+    loop {
+        let result =
+            with_output(Command::new("pw-dump").args(["--monitor", "--no-colors", "--indent", "0"]), |output| {
+                let mut default_sink = None;
+                let mut sinks = HashMap::new();
+                for batch in serde_json::Deserializer::from_reader(output).into_iter::<Vec<Value>>() {
+                    for object in batch.map_err(io::Error::other)? {
+                        if let Some(metadata) = object["metadata"]
+                            .as_array()
+                            .and_then(|items| items.iter().find(|item| item["key"] == "default.audio.sink"))
+                        {
+                            default_sink = metadata["value"]["name"].as_str().map(str::to_owned);
+                        } else {
+                            let info = &object["info"];
+                            if info["props"]["media.class"] != "Audio/Sink" {
+                                continue;
+                            }
+                            let Some(name) = info["props"]["node.name"].as_str() else { continue };
+                            let Some(props) = info["params"]["Props"]
+                                .as_array()
+                                .and_then(|items| items.iter().find(|props| props["channelVolumes"].is_array()))
+                            else {
+                                continue;
+                            };
+                            let volumes = props["channelVolumes"].as_array().unwrap();
+                            let level = (volumes.iter().filter_map(Value::as_f64).sum::<f64>()
+                                / volumes.len().max(1) as f64)
+                                .cbrt() as f32;
+                            sinks.insert(name.to_owned(), if props["mute"] == true { -level } else { level });
+                        }
+                        if let Some(level) = default_sink.as_ref().and_then(|name| sinks.get(name)) {
+                            volume.store(level.to_bits(), Ordering::Relaxed);
+                        }
+                    }
                 }
-            }
+                Ok(())
+            });
+        if let Err(error) = result {
+            warn!(%error, "PipeWire volume monitor stopped");
         }
-        Ok(())
-    })
+        thread::sleep(Duration::from_secs(1));
+    }
 }
 
 fn capture_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) -> io::Result<()> {
@@ -765,7 +752,6 @@ impl LayerShellApp {
         surface
     }
 
-    /// Re-fires the held key for as long as it stays down, once the initial delay has passed.
     /// Reads clipboard data off the event loop so this client can also serve its own selection.
     fn paste(&self) -> Option<()> {
         let offer = self
@@ -828,7 +814,10 @@ impl LayerShellApp {
                 let (gpu, handle) = pollster::block_on(Renderer::new(
                     Arc::clone(&surface.native),
                     size,
-                    TextCache::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf")),
+                    TextCache::new(&[
+                        include_bytes!("../../../../assets/NotoSans-Variable.ttf"),
+                        include_bytes!("../../../../assets/NotoSansSymbols-Music.ttf"),
+                    ]),
                 ))
                 .expect("failed to initialize renderer");
                 tracing::info!("Using GPU device: {}", gpu.device_name());
@@ -856,10 +845,9 @@ impl LayerShellApp {
             tracing::error!(%error, "Could not render frame");
         }
         let region = self.compositor.create_region(qhandle, ());
-        for quad in self.cantus.interaction.input_regions.drain(..) {
-            let (min, max) = quad.extents();
-            let min = min.floor();
-            let size = max.ceil() - min;
+        for rect in self.cantus.interaction.input_regions.drain(..) {
+            let min = rect.min.floor();
+            let size = rect.max.ceil() - min;
             region.add(min.x as i32, min.y as i32, size.x as i32, size.y as i32);
         }
         self.active_surface().native.wl.set_input_region(Some(&region));
@@ -1128,38 +1116,28 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
     }
     let surface = Arc::clone(&state.active_surface().native);
     let interaction = &mut state.cantus.interaction;
-    match event {
+    let input = match event {
         wl_pointer::Event::Enter { surface: wl_surface, surface_x, surface_y, .. } if surface.wl == wl_surface => {
-            interaction.apply(InputEvent::Enter(vec2(surface_x as f32, surface_y as f32)));
+            InputEvent::Enter(vec2(surface_x as f32, surface_y as f32))
         }
         wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
-            let position = vec2(surface_x as f32, surface_y as f32);
-            interaction.apply(InputEvent::Motion(position));
+            InputEvent::Motion(vec2(surface_x as f32, surface_y as f32))
         }
-        wl_pointer::Event::Leave { .. } => {
-            interaction.apply(InputEvent::Leave);
-        }
-        wl_pointer::Event::Button { button, state: button_state, .. } => match (button, button_state) {
-            (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => {
-                interaction.apply(InputEvent::Press);
-            }
-            (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
-                interaction.apply(InputEvent::Release);
-            }
-            (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging() => {
-                interaction.apply(InputEvent::Cancel);
-            }
-            _ => {}
+        wl_pointer::Event::Leave { .. } => InputEvent::Leave,
+        wl_pointer::Event::Button { button, state: WEnum::Value(button_state), .. } => match (button, button_state) {
+            (0x110, wl_pointer::ButtonState::Pressed) => InputEvent::Press,
+            (0x110, wl_pointer::ButtonState::Released) => InputEvent::Release,
+            (0x111, wl_pointer::ButtonState::Pressed) if interaction.dragging() => InputEvent::Cancel,
+            _ => return,
         },
-        wl_pointer::Event::AxisValue120 {
-            axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-            value120: discrete,
-            ..
-        } if discrete != 0 => {
-            interaction.apply(InputEvent::Scroll(discrete.signum()));
+        wl_pointer::Event::AxisValue120 { axis: WEnum::Value(wl_pointer::Axis::VerticalScroll), value120, .. }
+            if value120 != 0 =>
+        {
+            InputEvent::Scroll(value120.signum())
         }
-        _ => {}
-    }
+        _ => return,
+    };
+    interaction.apply(input);
 });
 
 dispatch!(WlRegistry, GlobalListContents, _globals, |_state, _proxy, _event, _qhandle| {});

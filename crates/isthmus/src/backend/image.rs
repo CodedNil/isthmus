@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, Weak},
 };
-use wgpu::util::{DeviceExt as _, TextureDataOrder};
+use wgpu::util::{DeviceExt, TextureDataOrder};
 
 struct CachedImage {
     source: Weak<[u8]>,

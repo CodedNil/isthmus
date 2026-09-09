@@ -11,7 +11,6 @@ pub struct SurfaceTarget {
     pub(super) binding: Option<([wgpu::Buffer; bindings::BUFFER_COUNT], wgpu::BindGroup)>,
     pub(super) recorded: bool,
     pub(super) paints: Vec<Paint>,
-    pub(super) globals: UploadBuffer,
     pub(super) frame: UploadBuffer,
     needs_reconfigure: bool,
 }
@@ -30,7 +29,6 @@ impl SurfaceTarget {
             binding: None,
             recorded: false,
             paints: Vec::new(),
-            globals: UploadBuffer::new(device),
             frame: UploadBuffer::new(device),
         }
     }

@@ -1,5 +1,3 @@
-//! Browser demo data standing in for librespot's native socket protocol.
-
 use super::{AudioFeatures, MusicResult, PlaybackCommand, Track, TrackRuntime, lyrics::LyricSegment};
 use crate::{
     app::{AppUpdater, send_update},

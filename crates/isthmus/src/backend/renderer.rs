@@ -3,7 +3,7 @@ use super::{
     setup::{self, SetupError},
     surface::SurfaceTarget,
 };
-use crate::{Frame, Program, Resources as _, SurfaceHandle, data::FrameData, glam::Vec2};
+use crate::{Frame, Program, Resources, SurfaceHandle, data::FrameData, glam::Vec2};
 use slotmap::SlotMap;
 use smallvec::SmallVec;
 use web_time::Instant;
@@ -48,7 +48,7 @@ impl<P: Program> Render<'_, P> {
         assert!(!surface.recorded, "record each surface once per render batch");
         surface.recorded = true;
         let pixel_scale = screen_size / Vec2::new(surface.config.width as f32, surface.config.height as f32);
-        let frame_data = FrameData { screen_size, time: self.time, pixel_scale };
+        let frame_data = FrameData { screen_size, time: self.time, pixel_scale, globals };
         draw(Frame {
             time: self.time,
             screen_size,
@@ -59,7 +59,6 @@ impl<P: Program> Render<'_, P> {
             gpu: &mut renderer.gpu,
             surface,
         });
-        surface.globals.upload(&renderer.gpu.device, &renderer.gpu.queue, globals);
         surface.frame.upload(&renderer.gpu.device, &renderer.gpu.queue, frame_data);
     }
 }

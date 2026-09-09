@@ -3,14 +3,14 @@ use crate::{
     platform,
     render::{
         GAP, PANEL_START, Program, TEXT_COLOR, UiContext,
-        sdf::{deform, hash, lens, refract, sample_deformation},
+        sdf::{deform, glass, hash, lens, refract, sample_deformation},
         weathertime::{StatusSky, WeatherCondition, scene, sky_phase},
     },
 };
 use arrayvec::ArrayString;
 use core::f32::consts::TAU;
 use isthmus::prelude::*;
-use isthmus_sdf::Shape;
+use isthmus_sdf::prelude::*;
 use std::{
     fmt::Write,
     sync::{
@@ -105,10 +105,10 @@ impl StatusPanel {
         let height = context.config.height;
         let width = self.width();
         let x = context.frame.screen_size.x - width - GAP;
-        let pill_quad = Quad::from_min_max(vec2(x, PANEL_START), vec2(x + width, PANEL_START + height));
+        let panel = Rect::new(vec2(x, PANEL_START), vec2(x + width, PANEL_START + height));
         let mut cursor = STATUS_INSET;
         let section = |center: f32, section_width: f32| {
-            Quad::new(vec2(x + center, PANEL_START + height * 0.5), vec2(section_width, height), Vec2::X)
+            Rect::from_center_size(vec2(x + center, PANEL_START + height * 0.5), vec2(section_width, height))
         };
 
         shader!(
@@ -116,19 +116,22 @@ impl StatusPanel {
                 .frame
                 .upload({
                     let conditions: WeatherCondition = sky.conditions;
-                    let pill_quad: Quad;
+                    let panel: Rect;
                     let phase: Vec3 = sky_phase(sky.sun_height);
                 })
-                .vertex(|frame| deform(Shape::pill(pill_quad), frame))
+                .primitive(|frame| deform(Shape::pill(panel), frame))
                 .fragment(|frame, surface| {
-                    surface.glass(scene(
-                        frame.time,
-                        frame.globals.bar_height,
-                        pill_quad.uv(surface.refracted) * pill_quad.size,
-                        pill_quad.size.x,
-                        phase,
-                        conditions,
-                    ))
+                    glass(
+                        surface,
+                        scene(
+                            frame.time,
+                            frame.globals.bar_height,
+                            surface.refracted - panel.min,
+                            panel.size().x,
+                            phase,
+                            conditions,
+                        ),
+                    )
                 })
         );
 
@@ -139,7 +142,7 @@ impl StatusPanel {
         for processor in &mut self.processors {
             processor.temperature += (processor.target_temperature - processor.temperature) * temperature_blend;
             let center = cursor + GRAPH_WIDTH * 0.5;
-            let graph_pill = Quad::from_min_max(
+            let graph_pill = Rect::new(
                 vec2(x + cursor, PANEL_START + GAP),
                 vec2(x + cursor + GRAPH_WIDTH, PANEL_START + height - GAP),
             );
@@ -151,10 +154,10 @@ impl StatusPanel {
                 context
                     .frame
                     .upload({
-                        let pill_quad: Quad;
+                        let panel: Rect;
                         let history: Buffer<'_, Unorm16x2> = Buffer::new(&processor.history);
                         let history_scroll: f32 = self.history_scroll;
-                        let graph_pill: Quad;
+                        let graph_pill: Rect;
                         let frame_color: Vec3 = {
                             let heat = vec3(0.22, 0.62, 1.0)
                                 .lerp(vec3(1.0, 0.38, 0.08), processor.temperature.smoothstep(60.0, 72.0))
@@ -164,15 +167,15 @@ impl StatusPanel {
                                 .lerp(heat, processor.temperature.smoothstep(60.0, 86.0) * 0.9)
                         };
                     })
-                    .vertex(|frame| lens(Shape::pill(pill_quad), frame, Shape::pill(graph_pill)))
+                    .primitive(|frame| lens(Shape::pill(panel), frame, Shape::pill(graph_pill)))
                     .fragment(|_, surface| {
                         let point = graph_pill.local(surface.refracted);
-                        let half_width = graph_pill.size.x * 0.5;
-                        let radius = graph_pill.size.y * 0.5;
+                        let half_width = graph_pill.size().x * 0.5;
+                        let radius = graph_pill.size().y * 0.5;
                         let history_step = half_width * 2.0 / HISTORY_END as f32;
                         let graph_height = radius - 2.0;
                         let curve = |channel: Vec2, color: Vec3, fill_strength: f32| {
-                            let sample = Shape::from_fn(graph_pill.size, move |point| {
+                            let distance = {
                                 let sample = ((point.x + half_width) / history_step + history_scroll)
                                     .clamp(0.0, HISTORY_END as f32);
                                 let index = sample.floor() as usize;
@@ -185,20 +188,16 @@ impl StatusPanel {
                                 let graph_y = start + delta * t * t * (3.0 - 2.0 * t);
                                 let slope = delta * 6.0 * t * (1.0 - t) / history_step;
                                 (graph_y - point.y) / (1.0 + slope * slope).sqrt()
-                            })
-                            .sample_at(point);
-                            color
-                                * surface.sdf.fill()
-                                * (sample.fill() * fill_strength + sample.band(-CHART_LINE_WIDTH..CHART_LINE_WIDTH))
+                            };
+                            let sample = Sample::new(distance, 0.0);
+                            color * (sample.fill() * fill_strength + sample.band(-CHART_LINE_WIDTH..CHART_LINE_WIDTH))
                         };
                         let graphs = curve(Vec2::X, USAGE_COLOR, 0.156) + curve(Vec2::Y, MEMORY_COLOR, 0.084);
                         let cell = (((point + vec2(half_width, radius)) / vec2(7.0, 6.1)).fract() - 0.5).abs();
-                        let grid = surface.sdf.fill()
-                            * cell.x.smoothstep(0.49, 0.46).max(cell.y.smoothstep(0.49, 0.45))
-                            * 0.045;
+                        let grid = cell.x.smoothstep(0.49, 0.46).max(cell.y.smoothstep(0.49, 0.45)) * 0.045;
                         let hardware = surface.sdf.band(-1.45..1.45);
                         let color = vec3(0.004, 0.012, 0.026).lerp(frame_color, hardware) + Vec3::splat(grid) + graphs;
-                        surface.glass(color)
+                        glass(surface, color)
                     })
             );
             let line = context
@@ -207,7 +206,7 @@ impl StatusPanel {
                 .line(&label, 11.0, 700.0)
                 .fit(GAP + 5.0, center - half_width..center + half_width)
                 .translated(vec2(x, PANEL_START));
-            context.paint_text(pill_quad, pill_quad.size.y * 0.5, line, TEXT_COLOR.extend(1.0));
+            context.paint_text(panel, panel.size().y * 0.5, line, TEXT_COLOR.extend(1.0));
             cursor += GRAPH_WIDTH + GAP;
         }
 
@@ -217,30 +216,27 @@ impl StatusPanel {
                 context
                     .frame
                     .upload({
-                        let pill_quad: Quad;
-                        let quad: Quad = section(center, DATA_WIDTH);
+                        let panel: Rect;
+                        let rect: Rect = section(center, DATA_WIDTH);
                         let charging: f32 = if battery_level < 0.0 { 1.0 } else { 0.0 };
                         let level: f32 = battery_level.abs();
                         let liquid_color: Vec3 = vec3(1.0, 0.18, 0.10)
                             .lerp(vec3(1.0, 0.72, 0.12), level.smoothstep(0.08, 0.28))
                             .lerp(vec3(0.22, 0.95, 0.55), level.smoothstep(0.18, 0.72));
                     })
-                    .vertex(quad)
+                    .primitive(rect)
                     .fragment(|frame, surface| {
-                        let surface = sample_deformation(Shape::pill(pill_quad), frame, surface.pixel);
-                        let point = quad.local(surface.refracted) / 0.8;
+                        let surface = sample_deformation(Shape::pill(panel), frame, surface.pixel);
+                        let point = rect.local(surface.refracted) / 0.8;
                         let body = Shape::rounded_rect(vec2(23.0, 30.0), 3.2).translated(vec2(0.0, 1.0));
                         let terminal = Shape::rounded_rect(vec2(8.0, 3.6), 0.8).translated(vec2(0.0, -15.6));
                         let shell = body.union(terminal).fill_at(point);
                         let inside = Shape::rounded_rect(vec2(17.0, 24.0), 1.7).translated(vec2(0.0, 1.0));
                         let liquid_y = 12.0 - level.saturate() * 24.0;
-                        let liquid = inside
-                            .intersection(Shape::from_fn(vec2(17.0, 28.0), move |point| {
-                                let wave = (point.x * 0.62 + frame.time * (1.4 + charging * 1.2)).sin() * 1.15
-                                    + (point.x * 0.27 - frame.time * 0.8).sin() * 0.45;
-                                liquid_y + wave - (point.y - 1.0)
-                            }))
-                            .fill_at(point);
+                        let wave = (point.x * 0.62 + frame.time * (1.4 + charging * 1.2)).sin() * 1.15
+                            + (point.x * 0.27 - frame.time * 0.8).sin() * 0.45;
+                        let liquid =
+                            Sample::new(inside.distance_at(point).max(liquid_y + wave - (point.y - 1.0)), 0.0).fill();
                         let column = (point.x / 3.0).floor();
                         let seed = hash(vec2(column, 0.0));
                         let cycle = (frame.time * (0.35 + seed.y * 0.5) + seed.x * 7.0).fract();
@@ -248,10 +244,8 @@ impl StatusPanel {
                         let bubble = Shape::circle(center, 0.4 + seed.y * 0.5).stroke(0.9).intersection(inside);
                         let fade = cycle.smoothstep(0.0, 0.25) * cycle.smoothstep(1.0, 0.7);
                         let bubble = bubble.fill_at(point) * fade * charging;
-                        let color = TEXT_COLOR.lerp(liquid_color, liquid) * shell
-                            + liquid_color.lerp(Vec3::ONE, 0.72) * bubble * 0.9;
-                        let alpha = shell.max(liquid).max(bubble);
-                        (color / alpha.max(0.0001)).extend(alpha)
+                        (TEXT_COLOR.lerp(liquid_color, liquid) + liquid_color.lerp(Vec3::ONE, 0.72) * bubble * 0.9)
+                            .extend(shell)
                     })
             );
             cursor += DATA_WIDTH + GAP;
@@ -273,14 +267,14 @@ impl StatusPanel {
             context
                 .frame
                 .upload({
-                    let pill_quad: Quad;
+                    let panel: Rect;
                     let audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS] = self.audio_spectrum;
                     let volume: f32;
-                    let audio_quad: Quad = section(center, DATA_WIDTH);
+                    let audio_rect: Rect = section(center, DATA_WIDTH);
                 })
-                .vertex(|frame| lens(Shape::pill(pill_quad), frame, Shape::rectangle(audio_quad)))
+                .primitive(|frame| lens(Shape::pill(panel), frame, Shape::rectangle(audio_rect)))
                 .fragment(|_, surface| {
-                    let point = audio_quad.local(surface.refracted);
+                    let point = audio_rect.local(surface.refracted);
                     let muted = if volume < 0.0 { 1.0 } else { 0.0 };
                     let volume = volume.abs();
                     let middle = (AUDIO_SPECTRUM_BANDS - 1) as f32 * 0.5;
@@ -295,8 +289,7 @@ impl StatusPanel {
                     let level_x = AUDIO_HALF_WIDTH * (volume.saturate() * 2.0 - 1.0);
                     let level = rail * rail_point.x.smoothstep(level_x + 0.8, level_x - 0.8);
                     let color = vec3(0.18, 0.96, 1.0);
-                    let alpha = bars.max(level);
-                    ((color * bars + color.lerp(MUTED_COLOR, muted) * level) / alpha.max(0.0001)).extend(alpha)
+                    source_over(color.extend(bars), color.lerp(MUTED_COLOR, muted).extend(level))
                 })
         );
         cursor += DATA_WIDTH + GAP;
@@ -318,7 +311,7 @@ impl StatusPanel {
                 context
                     .frame
                     .upload({
-                        let panel: Quad = pill_quad;
+                        let panel: Rect;
                         let reboot: bool = action == 1;
                         let hover: f32 = self.action_hover[action];
                         let selected: f32 = f32::from(response.held && response.hovered);
@@ -328,10 +321,10 @@ impl StatusPanel {
                         let button_center: Vec2 = vec2(x + center, PANEL_START + height * 0.5);
                         let button_radius: f32 = ACTION_WIDTH.min(height) * 0.5;
                     })
-                    .vertex(|frame| refract(
+                    .primitive(|frame| refract(
                         Shape::pill(panel),
                         frame,
-                        Shape::circle(button_center, button_radius).bounds(0.0)
+                        Shape::rectangle(Rect::from_center_size(button_center, Vec2::splat(button_radius * 2.0)))
                     ))
                     .fragment(|frame, surface| {
                         let point = (surface.refracted - button_center) / (1.0 + hover * 0.07);
@@ -359,11 +352,11 @@ impl StatusPanel {
                             (sample.fill(), sample.band(-f32::MAX..0.8))
                         };
                         let color = TEXT_COLOR.lerp(vec3(0.95, 0.42, 0.4), hover.max(selected * (0.5 + charge * 0.5)));
-                        (color * (1.0 + charge * 0.45)).extend(icon).over(Vec4::W.opacity(expanded * 0.18))
+                        source_over((color * (1.0 + charge * 0.45)).extend(icon), Vec3::ZERO.extend(expanded * 0.18))
                     })
             );
             cursor += ACTION_WIDTH + GAP;
         }
-        context.interaction.input_region(pill_quad);
+        context.interaction.input_region(panel);
     }
 }

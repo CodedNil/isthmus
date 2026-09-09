@@ -12,7 +12,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                 let kind: u32 = (hash(seed + 23.0) * 4.0) as u32;
                 let reach: f32 = (0.012 + depth * 0.13) * (0.65 + hash(seed + 31.0) * 0.6);
             })
-            .vertex(
+            .primitive(
                 Quad::new(
                     (root - vec2(0.0, reach * 0.4)) * size.y + vec2(size.x * 0.5, 0.0),
                     vec2(2.4, 1.6) * reach * size.y,

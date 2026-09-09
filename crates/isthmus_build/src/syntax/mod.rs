@@ -8,7 +8,7 @@ use syn::punctuated::Punctuated;
 pub mod bindings;
 
 pub fn program_types(tokens: TokenStream2) -> syn::Result<(syn::Type, syn::Type)> {
-    use syn::parse::Parser as _;
+    use syn::parse::Parser;
     let types = Punctuated::<syn::Type, syn::Token![,]>::parse_terminated.parse2(tokens)?;
     if types.len() > 2 {
         return Err(syn::Error::new_spanned(types, "expected globals and optional resources type"));
@@ -58,7 +58,6 @@ fn shader_entry(
     let payload_binding = bindings::PAYLOAD;
     let transient_binding = bindings::TRANSIENT;
     let persistent_binding = bindings::PERSISTENT;
-    let globals_binding = bindings::GLOBALS;
     let frames_binding = bindings::FRAMES;
     let image_resources = images.iter().enumerate().map(|(index, name)| {
         let image_binding = index as u32 * 2;
@@ -79,8 +78,6 @@ fn shader_entry(
             #varyings
             #[spirv(storage_buffer, descriptor_set = 0, binding = #draws_binding)]
             draws: &[u32],
-            #[spirv(storage_buffer, descriptor_set = 0, binding = #globals_binding)]
-            globals: &[u32],
             #[spirv(storage_buffer, descriptor_set = 0, binding = #frames_binding)]
             frame: &[u32],
             #[spirv(storage_buffer, descriptor_set = 0, binding = #payload_binding)]
@@ -91,10 +88,11 @@ fn shader_entry(
             _persistent: &[u32],
             #(#image_resources)*
         ) {
+            type FrameData = #isthmus::__private::FrameData<<Program as #isthmus::Program>::Globals>;
             // SAFETY: Renderer draw ranges and frame uploads use these generated codecs.
             let (draw, frame) = unsafe {
                 (<u32 as #isthmus::ShaderData>::read_unchecked(draws, draw_index as usize),
-                 <#isthmus::__private::FrameData as #isthmus::ShaderData>::read_unchecked(frame, 0))
+                 <FrameData as #isthmus::ShaderData>::read_unchecked(frame, 0))
             };
             // SAFETY: Draw offsets address complete payloads encoded by this generated shader interface.
             let _instance = unsafe {

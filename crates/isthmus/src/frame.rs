@@ -52,7 +52,7 @@ impl<P: Program> Frame<'_, P> {
             pixel_size: self.pixel_size,
             globals: self.globals,
         })
-        .vertex_count(self.pixel_size)
+        .vertex_count()
     }
 
     #[doc(hidden)]

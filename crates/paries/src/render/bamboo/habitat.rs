@@ -27,7 +27,7 @@ pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                         Vec2::from_angle((hash(seed + index as f32 * 11.0) - 0.5) * 0.3),
                     );
                 })
-                .vertex(quad)
+                .primitive(quad)
                 .fragment(|_, surface| {
                     let point = surface.uv * 2.0 - 1.0;
                     let aa = 2.0 / quad.size.y;
@@ -74,7 +74,7 @@ pub(super) fn deadwood(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32)
                     Vec2::from_angle(-0.18 + hash(seed) * 0.35),
                 );
             })
-            .vertex(quad)
+            .primitive(quad)
             .fragment(|_, surface| {
                 let mut point = surface.uv * 2.0 - 1.0;
                 point.y += (point.x * 3.0).sin() * 0.09;
@@ -132,7 +132,7 @@ pub(super) fn fish(frame: &mut Frame<'_>) {
                         velocity,
                     );
                 })
-                .vertex(quad)
+                .primitive(quad)
                 .fragment(|_, surface| {
                     let mut point = surface.uv * 2.0 - 1.0;
                     let aa = 2.0 / quad.size.y;
