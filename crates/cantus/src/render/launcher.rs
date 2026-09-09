@@ -602,7 +602,7 @@ impl LauncherState {
                         };
                         color = paint_badge(color, enter_badge, false);
                         color = paint_badge(color, alternate_badge, true);
-                        surface.glass(color)
+                        surface.glass(color).opacity(0.7)
                     })
             );
             if let Some(image) = entry.image {

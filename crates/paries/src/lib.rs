@@ -69,6 +69,7 @@ struct Wallpaper {
     layer_shell: ZwlrLayerShellV1,
     display: NonNull<c_void>,
     renderer: Option<Renderer>,
+    bamboo: Bamboo,
     outputs: Vec<OutputSurface>,
 }
 
@@ -160,10 +161,9 @@ impl Wallpaper {
         let render_surface = self.outputs[index].render_surface.unwrap();
         let renderer = self.renderer.as_mut().unwrap();
         renderer.resize(render_surface, size);
-        let mut bamboo = Bamboo;
         if let Err(error) = renderer.render(|render| {
             render.surface(render_surface, vec2(size[0] as f32, size[1] as f32), (), |mut frame| {
-                bamboo.show(&mut frame);
+                self.bamboo.show(&mut frame);
             });
         }) {
             eprintln!("Paries could not render output {id}: {error}");
@@ -196,6 +196,7 @@ pub fn run() {
         layer_shell,
         display: NonNull::new(connection.backend().display_ptr().cast()).expect("Wayland display pointer exists"),
         renderer: None,
+        bamboo: Bamboo::default(),
         outputs: Vec::new(),
     };
     let registry = globals.registry();

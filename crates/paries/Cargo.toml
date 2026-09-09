@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 isthmus = { path = "../isthmus" }
-isthmus_sdf = { path = "../isthmus_sdf" }
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
 raw-window-handle.workspace = true
