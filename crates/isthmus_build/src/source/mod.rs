@@ -6,21 +6,24 @@ use references::References;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
 };
-use syn::{Item, UseTree, punctuated::Punctuated, visit::Visit};
+use syn::{
+    Item, UseTree,
+    punctuated::Punctuated,
+    visit::{self, Visit},
+};
 
 pub struct Generated {
     pub source: String,
     pub shaders: Vec<Shader>,
+    pub identifiers: BTreeSet<String>,
 }
 
-pub fn generate(path: &Path) -> Result<Generated, String> {
+pub fn generate(path: &Path, root: Vec<String>, isthmus: &TokenStream) -> Result<Generated, String> {
     let mut entries = Vec::new();
-    let mut graph = Graph::default();
-    graph.load(path, None, None)?;
+    let mut graph = Graph { root, isthmus: isthmus.clone(), ..Graph::default() };
+    graph.load(path, &module_directory(path), None, None)?;
     for scope in 0..graph.modules.len() {
         let mut shaders = References::default();
         for item in &graph.modules[scope].items {
@@ -32,6 +35,7 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
                 &graph.modules[scope].file.to_string_lossy(),
                 location.line,
                 location.column,
+                isthmus,
             )
             .map_err(|error| format!("{}:{}: {error}", graph.modules[scope].file.display(), location.line))?;
             let mut refs = References::default();
@@ -49,7 +53,7 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
                 ));
             }
             graph.follow(scope, refs);
-            graph.modules[scope].shaders.push(shader.gpu(&quote!(::isthmus)));
+            graph.modules[scope].shaders.push(shader.gpu(isthmus));
             entries.push(shader);
         }
     }
@@ -70,8 +74,13 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
                     continue;
                 }
                 for (member, declaration) in item.items.iter().enumerate() {
-                    if (item.trait_.is_some()
-                        || member_name(declaration).is_some_and(|name| graph.methods.contains(&name)))
+                    let name = match declaration {
+                        syn::ImplItem::Fn(item) => Some(&item.sig.ident),
+                        syn::ImplItem::Const(item) => Some(&item.ident),
+                        syn::ImplItem::Type(item) => Some(&item.ident),
+                        _ => None,
+                    };
+                    if (item.trait_.is_some() || name.is_some_and(|name| graph.methods.contains(&name.to_string())))
                         && !graph.modules[scope].impl_members.contains(&(index, member))
                     {
                         additions.push((scope, index, member));
@@ -94,37 +103,38 @@ pub fn generate(path: &Path) -> Result<Generated, String> {
             graph.follow(scope, refs);
         }
     }
-    let items = graph.emit(0);
-    let module = quote!(pub mod render { #items });
+    let mut module = graph.emit(0);
+    for name in graph.root.iter().rev() {
+        let name = syn::Ident::new(name, proc_macro2::Span::call_site());
+        module = quote!(pub mod #name { #module });
+    }
     let source = quote! {
         #![no_std]
         #![feature(default_field_values)]
         #![allow(dead_code, unused_imports, unused_features, reason = "shared shader code may not use every retained method, import, or enabled language feature")]
         #module
     };
-    Ok(Generated { source: format(&source.to_string())?, shaders: entries })
+    let source = syn::parse2(source).map_err(|error| error.to_string())?;
+    let mut dependencies = Dependencies::default();
+    dependencies.visit_file(&source);
+    Ok(Generated { source: prettyplease::unparse(&source), shaders: entries, identifiers: dependencies.0 })
 }
 
-pub fn format(source: &str) -> Result<String, String> {
-    let mut formatter = Command::new("rustfmt")
-        .args(["--edition", "2024", "--emit", "stdout", "--config", "skip_children=true"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to start rustfmt for generated shaders: {error}"))?;
-    formatter
-        .stdin
-        .take()
-        .ok_or("rustfmt stdin is unavailable")?
-        .write_all(source.as_bytes())
-        .map_err(|error| format!("failed to send generated shaders to rustfmt: {error}"))?;
-    let output =
-        formatter.wait_with_output().map_err(|error| format!("failed to format generated shaders: {error}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+#[derive(Default)]
+struct Dependencies(BTreeSet<String>);
+impl<'ast> Visit<'ast> for Dependencies {
+    fn visit_path(&mut self, i: &'ast syn::Path) {
+        if i.leading_colon.is_some() || i.segments.len() > 1 {
+            self.0.insert(i.segments[0].ident.to_string());
+        }
+        visit::visit_path(self, i);
     }
-    String::from_utf8(output.stdout).map_err(|error| error.to_string())
+
+    fn visit_item_use(&mut self, i: &'ast syn::ItemUse) {
+        let mut paths = Vec::new();
+        flatten(&i.tree, Vec::new(), &mut paths);
+        self.0.extend(paths.into_iter().map(|(_, path)| path.segments[0].ident.to_string()));
+    }
 }
 
 #[derive(Default)]
@@ -145,13 +155,21 @@ struct Module {
 
 #[derive(Default)]
 struct Graph {
+    root: Vec<String>,
+    isthmus: TokenStream,
     modules: Vec<Module>,
     pending: VecDeque<(usize, usize)>,
     methods: HashSet<String>,
 }
 
 impl Graph {
-    fn load(&mut self, file: &Path, parent: Option<usize>, inline: Option<Vec<Item>>) -> Result<usize, String> {
+    fn load(
+        &mut self,
+        file: &Path,
+        directory: &Path,
+        parent: Option<usize>,
+        inline: Option<Vec<Item>>,
+    ) -> Result<usize, String> {
         let items = if let Some(items) = inline {
             items
         } else {
@@ -165,10 +183,11 @@ impl Graph {
                 && declaration.mac.path.segments.last().is_some_and(|segment| segment.ident == "program")
             {
                 let (globals, _) = program_types(declaration.mac.tokens.clone()).map_err(|error| error.to_string())?;
-                let shared = program(&quote!(::isthmus));
+                let isthmus = &self.isthmus;
+                let shared = program();
                 let file: syn::File = syn::parse2(quote! {
                     #shared
-                    unsafe impl ::isthmus::Program for Program { type Globals = #globals; }
+                    impl #isthmus::Program for Program { type Globals = #globals; }
                 })
                 .map_err(|error| error.to_string())?;
                 expanded.extend(file.items);
@@ -198,7 +217,7 @@ impl Graph {
             }
             if let Item::Mod(module) = item {
                 let child = if let Some((_, items)) = &module.content {
-                    self.load(file, Some(scope), Some(items.clone()))?
+                    self.load(file, &directory.join(module.ident.to_string()), Some(scope), Some(items.clone()))?
                 } else {
                     let parent = file.parent().ok_or("shader source needs a parent directory")?;
                     let explicit = module.attrs.iter().find_map(|attribute| {
@@ -214,14 +233,12 @@ impl Graph {
                     });
                     let child = explicit.map_or_else(
                         || {
-                            let directory =
-                                if file.ends_with("mod.rs") { parent.to_path_buf() } else { file.with_extension("") };
                             let child = directory.join(format!("{}.rs", module.ident));
                             if child.exists() { child } else { directory.join(module.ident.to_string()).join("mod.rs") }
                         },
                         |path| parent.join(path),
                     );
-                    self.load(&child, Some(scope), None)?
+                    self.load(&child, &module_directory(&child), Some(scope), None)?
                 };
                 self.modules[scope].children.insert(module.ident.to_string(), child);
             }
@@ -253,7 +270,7 @@ impl Graph {
         }
         let (first, rest) = parts.split_first()?;
         match first.as_str() {
-            "crate" if rest.first().is_some_and(|name| name == "render") => return self.resolve(0, &rest[1..], seen),
+            "crate" if rest.starts_with(&self.root) => return self.resolve(0, &rest[self.root.len()..], seen),
             "self" => return self.resolve(scope, rest, seen),
             "super" => return self.resolve(self.modules[scope].parent?, rest, seen),
             _ => {}
@@ -275,6 +292,9 @@ impl Graph {
             return self.resolve(scope, &path, seen);
         }
         for glob in self.modules[scope].globs.clone() {
+            if !seen.insert((scope, vec!["*".into(), glob.to_token_stream().to_string()])) {
+                continue;
+            }
             let path = glob
                 .segments
                 .iter()
@@ -360,18 +380,6 @@ fn item_name(item: &Item) -> Option<String> {
     )
 }
 
-fn member_name(item: &syn::ImplItem) -> Option<String> {
-    Some(
-        match item {
-            syn::ImplItem::Fn(item) => &item.sig.ident,
-            syn::ImplItem::Const(item) => &item.ident,
-            syn::ImplItem::Type(item) => &item.ident,
-            _ => return None,
-        }
-        .to_string(),
-    )
-}
-
 fn flatten(tree: &UseTree, mut prefix: Vec<syn::Ident>, output: &mut Vec<(String, syn::Path)>) {
     match tree {
         UseTree::Path(path) => {
@@ -417,4 +425,12 @@ fn shader_derives(attribute: &syn::Attribute) -> Option<Punctuated<syn::Path, sy
             })
             .collect(),
     )
+}
+
+fn module_directory(file: &Path) -> PathBuf {
+    if ["mod.rs", "lib.rs", "main.rs"].iter().any(|name| file.ends_with(name)) {
+        file.parent().unwrap().to_path_buf()
+    } else {
+        file.with_extension("")
+    }
 }

@@ -114,10 +114,7 @@ pub fn load() -> Config {
 }
 
 #[cfg(target_os = "linux")]
-/// # Errors
-/// Returns errors writing `generated-options.nix` in the current directory.
-/// # Panics
-/// Panics if the configuration schema contains unsupported types or missing defaults.
+/// Writes `generated-options.nix` from the configuration schema and defaults.
 pub fn generate_nix_options() -> io::Result<()> {
     use schemars::generate::SchemaSettings;
     use serde_json::Value;

@@ -23,40 +23,48 @@ mod shader;
 #[cfg(not(target_arch = "spirv"))]
 mod backend;
 
-#[cfg(not(target_arch = "spirv"))]
-pub use backend::{
-    renderer::{Render, RenderError, Renderer},
-    setup::SetupError,
-    surface::SurfaceHandle,
-};
 pub use color::ColorExt;
 pub use data::{Buffer, F16x2, ShaderData, Unorm8x4, Unorm16x2};
-#[cfg(not(target_arch = "spirv"))]
-pub use frame::Frame;
 pub use geometry::{quad::Quad, triangle::Triangle};
 pub use glam;
 pub use image::{Image, Sampling};
 pub use isthmus_macros::{ShaderData, program, shader};
 pub use program::{Blend, Program};
 pub use resources::ResourceData;
-#[cfg(not(target_arch = "spirv"))]
-pub use resources::Resources;
 pub use shader::{
     Flat, Fragment, Primitive, ShaderFrame, Smooth, Surface, Vertex, VertexInput, Vertices, surface, vertices,
 };
 pub use spirv_std;
+#[cfg(not(target_arch = "spirv"))]
+pub use {
+    backend::{
+        renderer::{Render, RenderError, Renderer},
+        setup::SetupError,
+        surface::SurfaceHandle,
+    },
+    frame::Frame,
+    resources::Resources,
+    wgpu,
+};
 
 /// Floating-point math and interpolation available on both host and shader targets.
 pub trait Float = glam::FloatExt + num_traits::Float;
 
+/// Common shader types and operations, intended for `use isthmus::prelude::*`.
+pub mod prelude {
+    pub use crate::{
+        Blend, Buffer, ColorExt, F16x2, Flat, Float, Fragment, Image, Primitive, Quad, Sampling, ShaderData,
+        ShaderFrame, Smooth, Triangle, Unorm8x4, Unorm16x2, Vertex, VertexInput, program, shader, surface, vertices,
+    };
+    pub use glam::{
+        IVec2, IVec3, IVec4, Mat2, Mat3, Mat4, Quat, UVec2, UVec3, UVec4, Vec2, Vec3, Vec4, ivec2, ivec3, ivec4, uvec2,
+        uvec3, uvec4, vec2, vec3, vec4,
+    };
+}
+
 #[doc(hidden)]
 pub mod __private {
     #[cfg(not(target_arch = "spirv"))]
-    pub use crate::backend::gpu::Gpu;
-    #[cfg(not(target_arch = "spirv"))]
-    pub use crate::program::{ShaderEntry, ShaderSpec, shader_index};
-    pub use crate::{
-        data::{FrameData, load_unchecked},
-        image::ShaderImage,
-    };
+    pub use crate::program::{ShaderEntry, shader_index};
+    pub use crate::{data::FrameData, image::ShaderImage};
 }

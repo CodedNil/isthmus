@@ -3,12 +3,7 @@ use super::{
     landscape::{river, water_mask},
     noise, pigment, undergrowth, wash,
 };
-use isthmus::{
-    Float as _, Quad,
-    glam::{Vec2, vec2, vec3},
-    shader,
-    spirv_std::arch::kill,
-};
+use isthmus::{prelude::*, spirv_std::arch::kill};
 
 pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
     for index in 0..3 {

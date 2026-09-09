@@ -3,12 +3,7 @@ use super::{
     landscape::{reflected_point, water_mask},
     noise, pigment, undergrowth, wash, wind,
 };
-use isthmus::{
-    Float as _, Quad,
-    glam::{Vec2, vec2, vec3},
-    shader,
-    spirv_std::arch::kill,
-};
+use isthmus::{prelude::*, spirv_std::arch::kill};
 
 pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
     let size = frame.screen_size;

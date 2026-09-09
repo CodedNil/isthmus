@@ -1,14 +1,7 @@
-use crate::{
-    app::Background,
-    config::Config,
-    interaction::Interaction,
-    music::{Music, enrichment::Enrichment},
-};
-use isthmus::{
-    ShaderData,
-    glam::{Vec2, Vec3},
-};
-use isthmus_sdf::layout::TextCache;
+use crate::{app::Background, config::Config, interaction::Interaction, music::Music};
+use isthmus::prelude::*;
+use isthmus_sdf::{Shape, Text, layout::TextCache};
+use sdf::refract;
 
 pub mod launcher;
 pub mod lyrics;
@@ -64,11 +57,9 @@ pub struct Bar {
 }
 
 impl Bar {
-    pub fn new(config: &Config, background: &Background, enrichment: &Enrichment) -> Self {
+    pub fn new(config: &Config, background: &Background) -> Self {
         Self {
-            weather: config
-                .weathertime_enabled
-                .then(|| weathertime::WeatherPanel::new(&config.timezones, background, enrichment.http.clone())),
+            weather: config.weathertime_enabled.then(|| weathertime::WeatherPanel::new(&config.timezones, background)),
             status: config.status_enabled.then(|| status::StatusPanel::new(background)),
             music_view: music::MusicView::default(),
         }
@@ -97,5 +88,21 @@ impl Bar {
             status.show(context, sky);
         }
         self.music_view.show(context, music, layout);
+    }
+}
+
+impl UiContext<'_> {
+    fn paint_text(&mut self, quad: Quad, radius: f32, line: Text, color: Vec4) {
+        shader!(
+            self.frame
+                .upload({
+                    let quad: Quad;
+                    let radius: f32;
+                    let line: Text;
+                    let text_color: Unorm8x4 = Unorm8x4::from_vec4(color);
+                })
+                .vertex(|frame| refract(Shape::rounded_rect(quad, radius), frame, line.bounds()))
+                .fragment(|_, surface| text_color.to_vec4().opacity(line.sample_at(surface.content).fill()))
+        );
     }
 }

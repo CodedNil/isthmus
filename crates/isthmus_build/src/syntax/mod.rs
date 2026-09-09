@@ -17,7 +17,7 @@ pub fn program_types(tokens: TokenStream2) -> syn::Result<(syn::Type, syn::Type)
     Ok((types.next().unwrap_or_else(|| syn::parse_quote!(())), types.next().unwrap_or_else(|| syn::parse_quote!(()))))
 }
 
-pub fn program(_: &TokenStream2) -> TokenStream2 {
+pub fn program() -> TokenStream2 {
     quote! {
         /// Shader program declared by this module.
         #[derive(Clone, Copy)]
@@ -31,7 +31,7 @@ fn shader_entry(
     isthmus: &TokenStream2,
     entry_name: &syn::LitStr,
     vertex: bool,
-    images: &[syn::Ident],
+    images: &[&syn::Ident],
     payload: &syn::Ident,
     varyings: &TokenStream2,
     body: &TokenStream2,
@@ -93,8 +93,8 @@ fn shader_entry(
         ) {
             // SAFETY: Renderer draw ranges and frame uploads use these generated codecs.
             let (draw, frame) = unsafe {
-                (#isthmus::__private::load_unchecked::<u32>(draws, draw_index),
-                 #isthmus::__private::load_unchecked::<#isthmus::__private::FrameData>(frame, 0))
+                (<u32 as #isthmus::ShaderData>::read_unchecked(draws, draw_index as usize),
+                 <#isthmus::__private::FrameData as #isthmus::ShaderData>::read_unchecked(frame, 0))
             };
             // SAFETY: Draw offsets address complete payloads encoded by this generated shader interface.
             let _instance = unsafe {

@@ -79,14 +79,7 @@ impl Unorm16x2 {
 
     /// Decodes both channels to floats in 0..=1.
     pub fn to_vec2(self) -> Vec2 {
-        #[cfg(target_arch = "spirv")]
-        {
-            spirv_std::float::u16x2_to_vec2_unorm(self.0)
-        }
-        #[cfg(not(target_arch = "spirv"))]
-        {
-            Vec2::new((self.0 & 65535) as f32, (self.0 >> 16) as f32) / 65535.0
-        }
+        Vec2::new((self.0 & 65535) as f32, (self.0 >> 16) as f32) / 65535.0
     }
 }
 
@@ -138,19 +131,12 @@ impl Unorm8x4 {
 
     /// Decodes all four channels to floats in 0..=1.
     pub fn to_vec4(self) -> Vec4 {
-        #[cfg(target_arch = "spirv")]
-        {
-            spirv_std::float::u8x4_to_vec4_unorm(self.0)
-        }
-        #[cfg(not(target_arch = "spirv"))]
-        {
-            Vec4::new(
-                (self.0 & 255) as f32,
-                ((self.0 >> 8) & 255) as f32,
-                ((self.0 >> 16) & 255) as f32,
-                (self.0 >> 24) as f32,
-            ) / 255.0
-        }
+        Vec4::new(
+            (self.0 & 255) as f32,
+            ((self.0 >> 8) & 255) as f32,
+            ((self.0 >> 16) & 255) as f32,
+            (self.0 >> 24) as f32,
+        ) / 255.0
     }
 
     /// Decodes the first three channels, discarding the fourth.
@@ -254,11 +240,7 @@ impl<T: ShaderData, const N: usize> ShaderData for [T; N] {
         let mut values = Self::ZERO;
         for index in 0..N {
             // SAFETY: Each element lies within the complete array guaranteed by the caller.
-            let value = unsafe { T::read_unchecked(words, offset + index * T::WORDS) };
-            // SAFETY: The loop index is strictly below the array length.
-            unsafe {
-                *values.index_unchecked_mut(index) = value;
-            }
+            values[index] = unsafe { T::read_unchecked(words, offset + index * T::WORDS) };
         }
         values
     }
@@ -295,14 +277,6 @@ vector!(Vec4, f32, 4, x: 0, y: 1, z: 2, w: 3);
 vector!(UVec2, u32, 2, x: 0, y: 1);
 vector!(UVec3, u32, 3, x: 0, y: 1, z: 2);
 vector!(UVec4, u32, 4, x: 0, y: 1, z: 2, w: 3);
-
-/// # Safety
-/// The indexed record must have been encoded in full using this codec.
-#[doc(hidden)]
-pub unsafe fn load_unchecked<T: ShaderData>(words: &[u32], index: u32) -> T {
-    // SAFETY: The caller guarantees a complete encoded record at this index.
-    unsafe { T::read_unchecked(words, index as usize * T::WORDS) }
-}
 
 #[doc(hidden)]
 #[derive(Clone, Copy, Default, crate::ShaderData)]

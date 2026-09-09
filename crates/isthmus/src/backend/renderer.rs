@@ -4,7 +4,6 @@ use super::{
     surface::SurfaceTarget,
 };
 use crate::{Frame, Program, Resources as _, SurfaceHandle, data::FrameData, glam::Vec2};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use slotmap::SlotMap;
 use smallvec::SmallVec;
 use web_time::Instant;
@@ -36,7 +35,7 @@ pub enum RenderError {
     Validation,
 }
 impl<P: Program> Render<'_, P> {
-    /// Records one surface in logical pixels; stale handles are ignored.
+    /// Records a surface once per batch in logical pixels; stale handles are ignored.
     pub fn surface(
         &mut self,
         surface: SurfaceHandle,
@@ -46,6 +45,7 @@ impl<P: Program> Render<'_, P> {
     ) {
         let renderer = &mut *self.renderer;
         let Some(surface) = renderer.surfaces.get_mut(surface) else { return };
+        assert!(!surface.recorded, "record each surface once per render batch");
         surface.recorded = true;
         let pixel_scale = screen_size / Vec2::new(surface.config.width as f32, surface.config.height as f32);
         let frame_data = FrameData { screen_size, time: self.time, pixel_scale };
@@ -59,50 +59,24 @@ impl<P: Program> Render<'_, P> {
             gpu: &mut renderer.gpu,
             surface,
         });
-        surface.globals.upload(&renderer.gpu.device, &renderer.gpu.queue, &[globals]);
-        surface.frame.upload(&renderer.gpu.device, &renderer.gpu.queue, &[frame_data]);
+        surface.globals.upload(&renderer.gpu.device, &renderer.gpu.queue, globals);
+        surface.frame.upload(&renderer.gpu.device, &renderer.gpu.queue, frame_data);
     }
 }
 impl<P: Program> Renderer<P> {
-    /// Creates a renderer and primary surface, validating both GPU and shader support.
-    ///
-    /// # Errors
-    /// Returns GPU, surface, and shader initialization failures.
-    ///
-    /// # Safety
-    /// The native display and window must remain alive until the surface is removed or the renderer is dropped.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub unsafe fn new(
-        surface: &(impl HasDisplayHandle + HasWindowHandle),
-        [width, height]: [u32; 2],
-        resources: P::Resources,
-    ) -> Result<(Self, SurfaceHandle), SetupError> {
-        // SAFETY: The caller keeps both native handles alive until this surface is removed.
-        let (gpu, target) = unsafe { setup::new::<P>(surface, [width, height]) }?;
-        Ok(Self::from_surface(gpu, target, resources))
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    /// Creates a WebGPU renderer for a canvas, returning initialization failures.
+    /// Creates a renderer that owns its presentation target.
     pub async fn new(
-        canvas: web_sys::HtmlCanvasElement,
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
         size: [u32; 2],
         resources: P::Resources,
     ) -> Result<(Self, SurfaceHandle), SetupError> {
-        let (gpu, target) = setup::new::<P>(canvas, size).await?;
-        Ok(Self::from_surface(gpu, target, resources))
-    }
-
-    fn from_surface(gpu: Gpu, target: SurfaceTarget, resources: P::Resources) -> (Self, SurfaceHandle) {
+        let (gpu, target) = setup::new::<P>(target, size).await?;
         let mut surfaces = SlotMap::with_key();
         let handle = surfaces.insert(target);
-        (Self { surfaces, gpu, resources, started: Instant::now(), last_frame: 0.0 }, handle)
+        Ok((Self { surfaces, gpu, resources, started: Instant::now(), last_frame: 0.0 }, handle))
     }
 
     /// Records and presents one frame, returning surface loss or GPU validation errors.
-    ///
-    /// # Errors
-    /// Returns presentation or GPU validation failures.
     pub fn render(&mut self, draw: impl FnOnce(&mut Render<'_, P>)) -> Result<(), RenderError> {
         self.gpu.begin_frame();
         for surface in self.surfaces.values_mut() {
@@ -162,6 +136,21 @@ impl<P: Program> Renderer<P> {
         &self.gpu.device_name
     }
 
+    /// Borrows the device for custom GPU resources and commands.
+    pub const fn device(&self) -> &wgpu::Device {
+        &self.gpu.device
+    }
+
+    /// Borrows the queue for custom uploads and submissions.
+    pub const fn queue(&self) -> &wgpu::Queue {
+        &self.gpu.queue
+    }
+
+    /// Returns the format shared by this renderer's presentation surfaces.
+    pub const fn format(&self) -> wgpu::TextureFormat {
+        self.gpu.format
+    }
+
     /// Updates physical surface dimensions, ignoring zero dimensions and stale handles.
     pub fn resize(&mut self, surface: SurfaceHandle, [width, height]: [u32; 2]) {
         if let Some(slot) = self.surfaces.get_mut(surface) {
@@ -169,24 +158,14 @@ impl<P: Program> Renderer<P> {
         }
     }
 
-    /// Adds a presentation surface when it supports the renderer's format.
-    ///
-    /// # Errors
-    /// Returns surface initialization and format compatibility failures.
-    ///
-    /// # Safety
-    /// The native display and window must remain alive until the surface is removed or the renderer is dropped.
-    pub unsafe fn add_surface(
+    /// Adds an owned presentation target.
+    pub fn add_surface(
         &mut self,
-        target: &(impl HasDisplayHandle + HasWindowHandle),
-        [width, height]: [u32; 2],
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        size: [u32; 2],
     ) -> Result<SurfaceHandle, SetupError> {
-        // SAFETY: The caller keeps both native handles alive until this surface is removed.
-        let surface = unsafe { setup::create_surface(&self.gpu.instance, target) }?;
-        let config = setup::configure_surface(&self.gpu.adapter, &surface, width, height)?;
-        if config.format != self.gpu.format {
-            return Err(SetupError::IncompatibleSurface);
-        }
+        let surface = self.gpu.instance.create_surface(target)?;
+        let config = setup::configure_surface(&self.gpu.adapter, &surface, size, Some(self.gpu.format))?;
         Ok(self.surfaces.insert(SurfaceTarget::from_raw(&self.gpu.device, surface, config)))
     }
 

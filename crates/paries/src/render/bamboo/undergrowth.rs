@@ -1,10 +1,5 @@
 use super::{Frame, Program, daylight, hash, noise, pigment, segment, wash, wind};
-use isthmus::{
-    Float as _, Quad,
-    glam::{Vec2, vec2, vec3},
-    shader,
-    spirv_std::arch::kill,
-};
+use isthmus::{prelude::*, spirv_std::arch::kill};
 
 pub(super) fn draw(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
     shader!(
@@ -14,7 +9,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                 let root: Vec2;
                 let depth: f32;
                 let seed: f32;
-                // Copper fern, maidong, woodland violet, or white anemone.
                 let kind: u32 = (hash(seed + 23.0) * 4.0) as u32;
                 let reach: f32 = (0.012 + depth * 0.13) * (0.65 + hash(seed + 31.0) * 0.6);
             })
@@ -24,7 +18,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                     vec2(2.4, 1.6) * reach * size.y,
                     Vec2::X,
                 )
-                .expanded(2.0),
+                .expanded(2.0)
             )
             .fragment(|frame, surface| {
                 let point = (surface.pixel - vec2(size.x * 0.5, 0.0)) / size.y;

@@ -32,11 +32,10 @@ impl Curve {
 }
 
 impl Outlines {
-    fn glyph(&mut self, font: &[u8], weights: &[f32], span: f32, id: u32) -> (u32, Glyph) {
+    fn glyph(&mut self, face: &FontRef<'_>, weights: &[f32], span: f32, id: u32) -> (u32, Glyph) {
         if let Some(&glyph) = self.glyphs.get(&id) {
             return glyph;
         }
-        let face = FontRef::new(font).expect("parse font");
         let outline = face.outline_glyphs().get(GlyphId::new(id));
         let paths: Vec<Vec<PathSeg>> = weights
             .iter()
@@ -169,18 +168,12 @@ impl TextCache {
         self.place(&shaped, Vec2::ZERO)
     }
 
-    /// Builds the font's geometry and shaping data independently of the GPU backend.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the supplied variable font cannot be parsed or its outlines cannot be read.
+    /// Prepares valid font outlines and metrics independently of the GPU backend.
     pub fn new(font: &[u8]) -> Self {
         let face = FontRef::new(font).expect("parse font");
         let metrics = face.metrics(Size::unscaled(), LocationRef::default());
-        let ascent = metrics.ascent;
-        let descent = metrics.descent;
-        let span = ascent - descent;
-        let baseline = (ascent + descent) * 0.5 / span;
+        let span = metrics.ascent - metrics.descent;
+        let baseline = (metrics.ascent + metrics.descent) * 0.5 / span;
         let weights = weight_locations(&face);
         let mut outlines = Outlines::default();
         (weights.len() as u32).append(&mut outlines.words);
@@ -212,8 +205,6 @@ impl TextCache {
     }
 
     /// Combines independently positioned text parts into one run using logical pixel offsets.
-    /// # Panics
-    /// Panics if a font contains incompatible variable outlines.
     pub fn shape_positioned<'a>(
         &mut self,
         parts: impl IntoIterator<Item = (&'a str, Vec2)>,
@@ -237,7 +228,7 @@ impl TextCache {
             let y = position.y / size;
             for character in text.chars() {
                 let id = charmap.map(character).unwrap_or_default();
-                let (glyph, data) = self.outlines.glyph(&self.font, &self.weights, self.span, id.to_u32());
+                let (glyph, data) = self.outlines.glyph(&face, &self.weights, self.span, id.to_u32());
                 if data.count > 0 {
                     min = min.min(vec2(x + data.min.x, y - data.max.y));
                     max = max.max(vec2(x + data.max.x, y - data.min.y));

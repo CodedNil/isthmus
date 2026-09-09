@@ -2,7 +2,7 @@
 
 use super::{AudioFeatures, MusicResult, PlaybackCommand, Track, TrackRuntime, lyrics::LyricSegment};
 use crate::{
-    app::{AppUpdater, Background, send_update},
+    app::{AppUpdater, send_update},
     config::Config,
 };
 use web_time::Instant;
@@ -13,7 +13,7 @@ pub struct Spotify {
 }
 
 impl Spotify {
-    pub(super) fn new(_config: &Config, updater: &AppUpdater, _background: &Background) -> Self {
+    pub(super) fn new(_config: &Config, updater: &AppUpdater) -> Self {
         let spotify = Self { updater: updater.clone() };
         let queue = example_queue();
         send_update(updater, move |app| {

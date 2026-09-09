@@ -1,18 +1,15 @@
 use crate::ShaderData;
 
 /// A nominal shader program whose interfaces are generated together.
-///
-/// # Safety
-/// Metadata and code must come from the same validated program and match its globals layout.
-pub unsafe trait Program: Copy + 'static {
+pub trait Program: Copy + 'static {
     /// Application data shared by the program's shaders.
-    type Globals: ShaderData + Default;
+    type Globals: ShaderData;
     #[cfg(not(target_arch = "spirv"))]
     /// Shared host resources used by this program's captured handles.
     type Resources: crate::Resources;
     #[cfg(not(target_arch = "spirv"))]
     /// Compiled shader module embedded by the program macro.
-    const CODE: &'static [u8];
+    const CODE: &'static str;
     #[cfg(not(target_arch = "spirv"))]
     /// Generated shader entry points and pipeline state.
     const SHADERS: &'static [ShaderEntry];
@@ -44,7 +41,6 @@ pub struct ShaderEntry {
 }
 
 #[cfg(not(target_arch = "spirv"))]
-/// # Panics
 /// Fails constant evaluation when a shader is absent from its generated program.
 pub const fn shader_index(entries: &[ShaderEntry], name: &str) -> usize {
     let mut index = 0;
@@ -55,16 +51,4 @@ pub const fn shader_index(entries: &[ShaderEntry], name: &str) -> usize {
         index += 1;
     }
     panic!("shader was not extracted into this program");
-}
-
-/// Describes the host-visible interface and fixed state of one shader.
-///
-/// # Safety
-/// The entry must use this payload layout, globals type and geometry in the generated program.
-#[cfg(not(target_arch = "spirv"))]
-pub unsafe trait ShaderSpec: ShaderData {
-    /// Program containing this shader's generated entry points.
-    type Program: Program;
-    /// Index into the program's shader metadata.
-    const INDEX: usize;
 }

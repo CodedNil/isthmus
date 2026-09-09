@@ -1,9 +1,5 @@
 use crate::render::Program;
-use isthmus::{
-    Float as _, Primitive, Quad, ShaderFrame,
-    glam::{UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
-    surface,
-};
+use isthmus::prelude::*;
 use isthmus_sdf::{Outlined, Sample, Shape};
 
 const SHADOW_OPACITY: f32 = 0.16;

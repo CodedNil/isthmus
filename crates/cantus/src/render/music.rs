@@ -10,9 +10,7 @@ use core::{
     f64,
 };
 use isthmus::{
-    Blend, ColorExt as _, Float as _, Image, Quad, ShaderData, Unorm8x4,
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
-    shader,
+    prelude::*,
     spirv_std::arch::{Derivative as _, kill},
 };
 use isthmus_sdf::{Shape, Text};
@@ -25,7 +23,6 @@ pub const PALETTE_COLORS: usize = 4;
 const ICON_WIDTH: f32 = 21.6;
 /// Center-to-center icon spacing for rating stars and playlist artwork.
 const ICON_SPACING: f32 = 18.0;
-const ICON_REACTION_RADIUS: f32 = ICON_WIDTH * 2.5;
 const PRIMARY_SUPPORT_DEPTH: f32 = 7.0;
 const SECONDARY_SUPPORT_DEPTH: f32 = 18.0;
 
@@ -115,6 +112,7 @@ impl MusicView {
         if music.queue.is_empty() {
             return;
         }
+
         // Track layout
         let gap = TRACK_SPACING_MS * bar.px_per_ms;
         let width_trim = (GAP - gap).max(0.0);
@@ -429,8 +427,8 @@ impl MusicView {
                     );
                     hovered |= response.hovered;
                     let mouse_distance = center.distance(mouse_pos);
-                    let proximity = mouse_distance.smoothstep(ICON_REACTION_RADIUS, ICON_WIDTH * 0.25)
-                        * mouse_pressure.clamp(0.0, 1.0);
+                    let proximity =
+                        mouse_distance.smoothstep(ICON_WIDTH * 2.5, ICON_WIDTH * 0.25) * mouse_pressure.clamp(0.0, 1.0);
                     let x_push = (center.x - mouse_pos.x) * proximity * 0.5;
                     let radius = ICON_WIDTH * 0.5 * (1.05 + 0.63 * proximity);
                     let quad = Quad::new(

@@ -13,12 +13,10 @@ members = [
 [workspace.dependencies]
 bytemuck = "1.25.2"
 glam = { version = "0.33.7", default-features = false, features = ["u32"] }
-spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
-spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
 serde = { version = "1.0.229", features = ["derive"] }
 smallvec = "1.16.0"
-raw-window-handle = "0.6.2"
-pollster = "1.0.1"
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
 wgpu = { version = "30.0.1", default-features = false }
 
 [workspace.lints.rust]
@@ -32,6 +30,8 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 
 must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
 too_many_lines = "allow"
 too_many_arguments = "allow"
 cast_possible_truncation = "allow"

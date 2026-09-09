@@ -1,8 +1,4 @@
-use crate::{
-    app::{AppUpdater, Background},
-    config::Config,
-    render::music::AudioFeatures,
-};
+use crate::{app::AppUpdater, config::Config, render::music::AudioFeatures};
 use arrayvec::ArrayString;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -15,13 +11,9 @@ use web_time::Instant;
 
 pub mod enrichment;
 pub mod lyrics;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(target_arch = "wasm32", path = "web.rs")]
 mod spotify;
-#[cfg(target_arch = "wasm32")]
-mod web;
-use enrichment::Resources;
-#[cfg(target_arch = "wasm32")]
-use web as spotify;
+use enrichment::TrackCache;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
@@ -31,7 +23,7 @@ pub const TRACK_SPACING_MS: f32 = 4000.0;
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct Music {
-    pub resources: Resources,
+    pub resources: TrackCache,
     pub playing: bool,
     pub queue: Vec<Track>,
     pub playlists: Vec<CondensedPlaylist>,
@@ -41,34 +33,27 @@ pub struct Music {
 }
 
 impl Music {
-    pub(crate) fn spotify(config: &Config, updater: &AppUpdater, background: &Background) -> Self {
+    pub(crate) fn spotify(config: &Config, updater: &AppUpdater) -> Self {
         Self {
-            resources: Resources::default(),
+            resources: TrackCache::default(),
             playing: false,
             queue: Vec::new(),
             playlists: Vec::new(),
-            timeline: Timeline {
-                index: 0,
-                position_ms: 0.0,
-                rate: 0.0,
-                observed_at: Instant::now(),
-                queue_start_ms: 0.0,
-                movement: 0.0,
-            },
+            timeline: Timeline { observed_at: Instant::now(), .. },
             last_toggle: Instant::now(),
-            spotify: spotify::Spotify::new(config, updater, background),
+            spotify: spotify::Spotify::new(config, updater),
         }
     }
 }
 
 /// The observed and visually smoothed position of the playback queue.
 pub struct Timeline {
-    pub index: usize,
-    pub position_ms: f32,
-    pub rate: f32,
+    pub index: usize = 0,
+    pub position_ms: f32 = 0.0,
+    pub rate: f32 = 0.0,
     pub observed_at: Instant,
-    pub queue_start_ms: f32,
-    pub movement: f32,
+    pub queue_start_ms: f32 = 0.0,
+    pub movement: f32 = 0.0,
 }
 
 impl Timeline {

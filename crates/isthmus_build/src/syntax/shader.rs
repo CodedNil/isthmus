@@ -64,7 +64,7 @@ fn argument(expr: &mut Expr, name: &str) -> syn::Result<Option<Expr>> {
     if let Expr::MethodCall(call) = expr
         && call.method == name
     {
-        if call.args.len() != 1 || call.turbofish.is_some() || !call.attrs.is_empty() {
+        if call.args.len() != 1 || call.turbofish.is_some() {
             return Err(syn::Error::new_spanned(call, "expected one argument"));
         }
         let value = call.args.pop().unwrap();
@@ -113,7 +113,13 @@ fn custom(stage: &mut Expr) -> syn::Result<Option<&mut syn::ExprClosure>> {
 }
 
 impl Shader {
-    pub fn parse(tokens: TokenStream, file: &str, line: usize, column: usize) -> syn::Result<Self> {
+    pub fn parse(
+        tokens: TokenStream,
+        file: &str,
+        line: usize,
+        column: usize,
+        isthmus: &TokenStream,
+    ) -> syn::Result<Self> {
         let mut frame: Expr = syn::parse2(tokens)?;
         let mut fragment = argument(&mut frame, "fragment")?
             .ok_or_else(|| syn::Error::new_spanned(&frame, "end the shader with .fragment(|frame, fragment| color)"))?;
@@ -127,26 +133,19 @@ impl Shader {
         let mut captures = Vec::new();
         if let Some(upload) = argument(&mut frame, "upload")? {
             let Expr::Block(block) = upload else {
-                return Err(syn::Error::new_spanned(upload, "expected .upload({ let name: Type = value; })"));
+                return Err(syn::Error::new_spanned(upload, "expected { let name: Type = value; }"));
             };
             for statement in block.block.stmts {
                 let Stmt::Local(local) = statement else {
                     return Err(syn::Error::new_spanned(statement, "uploads must be typed let declarations"));
                 };
-                let binding = Binding::parse(local)?;
-                if captures.iter().any(|previous: &Binding| previous.name == binding.name) {
-                    return Err(syn::Error::new_spanned(binding.name, "duplicate upload"));
-                }
-                captures.push(binding);
+                captures.push(Binding::parse(local)?);
             }
         }
-        let blend = argument(&mut frame, "blend")?.unwrap_or_else(|| parse_quote!(::isthmus::Blend::Over));
+        let blend = argument(&mut frame, "blend")?.unwrap_or_else(|| parse_quote!(#isthmus::Blend::Over));
         let Expr::Path(blend) = blend else {
             return Err(syn::Error::new_spanned(blend, "expected Blend::Over, Blend::Add or Blend::Replace"));
         };
-        if !matches!(blend.path.segments.last().unwrap().ident.to_string().as_str(), "Over" | "Add" | "Replace") {
-            return Err(syn::Error::new_spanned(blend, "expected Blend::Over, Blend::Add or Blend::Replace"));
-        }
         if let Expr::MethodCall(call) = &frame
             && ["blend", "upload", "vertex", "fragment"].iter().any(|name| call.method == *name)
         {
@@ -172,46 +171,17 @@ impl Shader {
                     let syn::PathArguments::AngleBracketed(args) = &marker.arguments else {
                         return Err(syn::Error::new_spanned(marker, "specify the output type"));
                     };
-                    let Some(syn::GenericArgument::Type(Type::Path(ty))) = args.args.first() else {
-                        return Err(syn::Error::new_spanned(args, "outputs must be 32-bit scalars or vectors"));
+                    let Some(syn::GenericArgument::Type(ty)) = args.args.first().filter(|_| args.args.len() == 1)
+                    else {
+                        return Err(syn::Error::new_spanned(args, "specify one shader output type"));
                     };
-                    let kind = ty.path.segments.last().unwrap().ident.to_string();
-                    let float = ["f32", "Vec2", "Vec3", "Vec4"].contains(&kind.as_str());
-                    if args.args.len() != 1
-                        || !(float
-                            || marker.ident == "Flat"
-                                && ["u32", "i32", "UVec2", "UVec3", "UVec4", "IVec2", "IVec3", "IVec4"]
-                                    .contains(&kind.as_str()))
-                    {
-                        return Err(syn::Error::new_spanned(
-                            args,
-                            "Smooth requires floating-point values; Flat also supports 32-bit integers",
-                        ));
-                    }
-                    if outputs.len() == 14 || outputs.iter().any(|output: &Output| output.name == binding.name) {
+                    if outputs.len() == 14 {
                         return Err(syn::Error::new_spanned(
                             binding.name,
-                            "vertex outputs must be unique and fit 14 stage locations",
+                            "vertex outputs must fit 14 stage locations",
                         ));
                     }
-                    outputs.push(Output {
-                        name: binding.name,
-                        ty: Type::Path(ty.clone()),
-                        flat: marker.ident == "Flat",
-                    });
-                } else if let Some(init) = &local.init
-                    && let Expr::Call(call) = &*init.expr
-                    && let Expr::Path(path) = &*call.func
-                    && path
-                        .path
-                        .segments
-                        .last()
-                        .is_some_and(|segment| segment.ident == "Flat" || segment.ident == "Smooth")
-                {
-                    return Err(syn::Error::new_spanned(
-                        local,
-                        "name the output type: let name: Flat<T> = Flat(value);",
-                    ));
+                    outputs.push(Output { name: binding.name, ty: ty.clone(), flat: marker.ident == "Flat" });
                 }
             }
         }
@@ -239,10 +209,14 @@ impl Shader {
         self.entry.value().replace("_fragment", "_vertex")
     }
 
+    fn images(&self) -> impl Iterator<Item = &Ident> {
+        self.captures.iter().filter(|capture| capture.kind == CaptureKind::Image).map(|capture| &capture.name)
+    }
+
     pub fn metadata(&self) -> TokenStream {
         let (name, vertex) = (&self.entry, self.vertex_entry());
         let blend = &self.blend.segments.last().unwrap().ident;
-        let images = self.captures.iter().filter(|capture| capture.kind == CaptureKind::Image).count();
+        let images = self.images().count();
         quote!(ShaderEntry { name: #name, vertex: #vertex, blend: Blend::#blend, images: #images })
     }
 
@@ -306,47 +280,37 @@ impl Shader {
         });
         let views = self.captures.iter().filter(|capture| capture.kind == CaptureKind::Data).map(|capture| {
             let name = &capture.name;
-            quote!(let #name = #isthmus::ShaderData::resolve(#name, #isthmus::Resources::data(&*(#frame).resources));)
+            quote!(let #name = #isthmus::ShaderData::resolve(
+                #name, #isthmus::Resources::data(&*__isthmus_frame.resources)
+            );)
         });
         let fields = self.captures.iter().filter(|capture| capture.kind != CaptureKind::Image).map(|capture| {
             let name = &capture.name;
             if capture.kind == CaptureKind::Buffer {
-                quote!(#name: (#frame).gpu.capture_buffer(#name))
+                quote!(#name: __isthmus_frame.capture_buffer(#name))
             } else {
                 quote!(#name)
             }
         });
-        let images = self
-            .captures
-            .iter()
-            .filter(|capture| capture.kind == CaptureKind::Image)
-            .map(|capture| &capture.name)
-            .collect::<Vec<_>>();
-        let images = if images.is_empty() { quote!(None) } else { quote!(Some((#frame).gpu.images(&[#(&#images),*]))) };
+        let images = self.images();
+
         let payload = self.payload(isthmus, &format_ident!("__IsthmusPayload"));
         let (outputs, stage) = self.stage(isthmus, &format_ident!("__IsthmusOutputs"));
         quote!({
             const _: () = assert!(matches!(#blend, #isthmus::Blend::#variant));
             #(#bindings)*
+            let __isthmus_frame: &mut #isthmus::Frame<'_, Program> = (#frame).reborrow();
             #outputs
             let __vertices = {
                 #(#views)*
-                (#frame).prepare(#stage, #fragment)
+                __isthmus_frame.prepare(#stage, #fragment)
             };
             #payload
-            // SAFETY: This declaration generates the payload, resources, and both shader stages together.
-            unsafe impl #isthmus::__private::ShaderSpec for __IsthmusPayload {
-                type Program = Program;
-                const INDEX: usize = #isthmus::__private::shader_index(
-                    <Self::Program as #isthmus::Program>::SHADERS, #entry,
-                );
-            }
-            const _: usize = <__IsthmusPayload as #isthmus::__private::ShaderSpec>::INDEX;
+            const __SHADER: usize = #isthmus::__private::shader_index(<Program as #isthmus::Program>::SHADERS, #entry);
             if __vertices >= 3 {
                 let __payload = __IsthmusPayload { #(#fields),* };
-                let __images = #images;
-                // SAFETY: Generated metadata and codecs match the shader entries.
-                unsafe { (#frame).record(__vertices, __payload, __images); }
+                let __images: &[&#isthmus::Image] = &[#(&#images),*];
+                __isthmus_frame.record(__SHADER, __vertices, __payload, __images);
             }
         })
     }
@@ -381,7 +345,7 @@ impl Shader {
             #(#bindings)*
             // SAFETY: Every surface uploads a complete globals value using this program's codec.
             let __globals = unsafe {
-                #isthmus::__private::load_unchecked::<<__Program as #isthmus::Program>::Globals>(globals, 0)
+                <<__Program as #isthmus::Program>::Globals as #isthmus::ShaderData>::read_unchecked(globals, 0)
             };
             let __frame = #isthmus::ShaderFrame::<__Program> {
                 time: frame.time, screen_size: frame.screen_size,
@@ -411,12 +375,8 @@ impl Shader {
             quote!(#name: #varying)
         });
         let read = if self.outputs.is_empty() { quote!(()) } else { quote!(#data { #(#reads),* }) };
-        let images = self
-            .captures
-            .iter()
-            .filter(|capture| capture.kind == CaptureKind::Image)
-            .map(|capture| capture.name.clone())
-            .collect::<Vec<_>>();
+        let images = self.images();
+        let images = images.collect::<Vec<_>>();
         let vertex_name = syn::LitStr::new(&self.vertex_entry(), self.entry.span());
         let vertex = shader_entry(isthmus, &vertex_name, true, &images, &payload_name, &interface(true), &quote! {
             #setup

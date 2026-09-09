@@ -4,10 +4,7 @@ mod undergrowth;
 mod vegetation;
 
 use super::{Frame, Program};
-use isthmus::{
-    Float as _,
-    glam::{Vec2, Vec3, vec2, vec3},
-};
+use isthmus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Feature {

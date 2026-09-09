@@ -1,11 +1,8 @@
 use super::{buffer::UploadBuffer, image::ImageCache, surface::SurfaceTarget};
-use crate::{Blend, Image, Program, ResourceData, ShaderData as _, bindings, program::ShaderSpec};
+use crate::{Blend, Image, Program, ResourceData, ShaderData, bindings};
 use core::array::from_fn;
 use std::ops::Range;
-#[cfg(not(target_arch = "wasm32"))]
-use wgpu::util::make_spirv;
 
-#[doc(hidden)]
 pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -27,10 +24,7 @@ impl Gpu {
         queue: wgpu::Queue,
         format: wgpu::TextureFormat,
     ) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        let source = make_spirv(P::CODE);
-        #[cfg(target_arch = "wasm32")]
-        let source = wgpu::ShaderSource::Wgsl(str::from_utf8(P::CODE).expect("build produced invalid WGSL").into());
+        let source = wgpu::ShaderSource::Wgsl(P::CODE.into());
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("isthmus"), source });
         let entries = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|binding| wgpu::BindGroupLayoutEntry {
             binding: binding as u32,
@@ -103,49 +97,34 @@ impl Gpu {
         Self { instance, adapter, device, queue, device_name, format, pipelines, bind_layout, buffers, images }
     }
 
-    pub fn images(&mut self, images: &[&Image]) -> wgpu::BindGroup {
-        self.images.images(&self.device, &self.queue, images)
-    }
-
-    #[doc(hidden)]
-    pub fn capture_buffer<T: crate::ShaderData>(&mut self, buffer: crate::Buffer<'_, T>) -> [u32; 2] {
-        let payload = &mut self.buffers[bindings::PAYLOAD as usize];
-        let range = [
-            u32::try_from(payload.words.len()).expect("payload exceeds u32"),
-            u32::try_from(buffer.values.len()).expect("buffer exceeds u32"),
-        ];
-        for &value in buffer.values {
-            value.append(&mut payload.words);
-        }
-        range
-    }
-
     pub fn begin_frame(&mut self) {
         self.buffers[bindings::DRAWS as usize].words.clear();
         self.buffers[bindings::PAYLOAD as usize].words.clear();
         self.images.retain_live();
     }
 
-    pub(crate) fn emit<S: ShaderSpec>(
+    pub(crate) fn emit(
         &mut self,
         surface: &mut SurfaceTarget,
+        shader: usize,
         vertices: u32,
-        value: S,
-        image: Option<wgpu::BindGroup>,
+        value: impl ShaderData,
+        images: &[&Image],
     ) {
+        let image = (!images.is_empty()).then(|| self.images.images(&self.device, &self.queue, images));
         let payload = value.append(&mut self.buffers[bindings::PAYLOAD as usize].words);
         let draws = &mut self.buffers[bindings::DRAWS as usize];
         let start = payload.append(&mut draws.words);
         let end = start + 1;
         if let Some(previous) = surface.paints.last_mut()
-            && previous.shader == S::INDEX
+            && previous.shader == shader
             && previous.vertices == vertices
             && previous.image == image
             && previous.draws.end == start
         {
             previous.draws.end = end;
         } else {
-            surface.paints.push(Paint { shader: S::INDEX, vertices, draws: start..end, image });
+            surface.paints.push(Paint { shader, vertices, draws: start..end, image });
         }
     }
 

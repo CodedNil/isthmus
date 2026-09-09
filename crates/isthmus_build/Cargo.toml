@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-hex = "0.4.3"
-sha2 = "0.11.0"
+anyhow = "1"
+cargo_metadata = "0.23"
+form_urlencoded = "1"
+naga = { version = "=30.0.1", features = ["spv-in", "wgsl-in", "wgsl-out"] }
+prettyplease = "0.3"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
-syn = { version = "3", features = ["full", "visit", "visit-mut"] }
-naga = { version = "=30.0.1", features = ["spv-in", "wgsl-in", "wgsl-out"] }
 spirv-builder.workspace = true
+syn = { version = "3", features = ["full", "visit", "visit-mut"] }
+toml = "1.1"
 
 [lints]
 workspace = true

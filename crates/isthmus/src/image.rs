@@ -32,9 +32,7 @@ pub struct Image;
 
 #[cfg(not(target_arch = "spirv"))]
 impl Image {
-    /// Creates a straight-alpha RGBA8 image with default linear sampling.
-    /// # Panics
-    /// Panics when either dimension is zero or `pixels` does not contain exactly four bytes per pixel.
+    /// Creates straight-alpha RGBA8 data, requiring nonzero dimensions and exactly four bytes per pixel.
     pub fn rgba8(size: [u32; 2], pixels: impl Into<Arc<[u8]>>) -> Self {
         assert!(size[0] > 0 && size[1] > 0, "image dimensions must be non-zero");
         let pixels = pixels.into();

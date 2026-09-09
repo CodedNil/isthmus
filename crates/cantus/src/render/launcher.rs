@@ -5,17 +5,12 @@ use crate::{
     platform::{self, DesktopApp},
     render::{
         GAP, PADDING, Program, TEXT_COLOR, UiContext,
-        sdf::{deform, presence, refract},
+        sdf::{deform, presence},
     },
 };
 use fend_core::Context;
-use isthmus::{
-    ColorExt as _, Float as _, Image, Quad, Unorm8x4,
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
-    shader,
-};
+use isthmus::prelude::*;
 use isthmus_sdf::{Shape, Text};
-use reqwest::Client;
 use serde::Deserialize;
 use std::{collections::HashMap, error::Error, ops::Range, sync::OnceLock};
 use unicode_segmentation::UnicodeSegmentation;
@@ -29,12 +24,9 @@ pub const MAX_VISIBLE: usize = 8;
 
 /// Side of the square icon tile at the left of every row.
 const ICON_SIZE: f32 = 32.0;
-const BADGE_HEIGHT: f32 = 21.0;
 /// Icons, badge outlines and the magnifier all share one grey.
 const ICON_COLOR: Vec3 = Vec3::splat(0.58);
 const ACCENT_COLOR: Vec3 = vec3(0.44, 0.40, 0.80);
-const ENTER_BADGE_WIDTH: f32 = 27.0;
-const ALTERNATE_BADGE_WIDTH: f32 = 42.0;
 const DETAIL_COLOR: Vec4 = Vec4::new(0.56, 0.63, 0.86, 1.0);
 const MUTED_COLOR: Vec4 = Vec4::new(0.52, 0.55, 0.64, 1.0);
 const CALCULATOR_ICON: u32 = 1;
@@ -76,7 +68,7 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
     if half_width <= 0.0 {
         return Vec4::ZERO;
     }
-    let sample = Shape::rounded_rect(vec2(half_width * 2.0, BADGE_HEIGHT), 6.0).sample_at(point);
+    let sample = Shape::rounded_rect(vec2(half_width * 2.0, 21.0), 6.0).sample_at(point);
     let (body, edge) = (sample.fill(), sample.band(-0.65..0.65));
     let glyph = if shift {
         key_glyph(point + vec2(8.5, 0.0), true).max(key_glyph(point - vec2(7.5, 0.0), false))
@@ -100,11 +92,6 @@ pub struct TextField {
 }
 
 impl TextField {
-    pub fn clear(&mut self) {
-        self.text.clear();
-        self.set_cursor(0, false);
-    }
-
     pub const fn selection(&self) -> Range<usize> {
         if self.cursor < self.anchor { self.cursor..self.anchor } else { self.anchor..self.cursor }
     }
@@ -125,18 +112,9 @@ impl TextField {
     /// Where the caret lands moving one character in `forward`'s direction.
     fn step(&self, forward: bool) -> usize {
         if forward {
-            self.text
-                .grapheme_indices(true)
-                .map(|(offset, _)| offset)
-                .find(|&offset| offset > self.cursor)
-                .unwrap_or(self.text.len())
+            self.cursor + self.text[self.cursor..].graphemes(true).next().map_or(0, str::len)
         } else {
-            self.text
-                .grapheme_indices(true)
-                .map(|(offset, _)| offset)
-                .rev()
-                .find(|&offset| offset < self.cursor)
-                .unwrap_or(0)
+            self.cursor - self.text[..self.cursor].graphemes(true).next_back().map_or(0, str::len)
         }
     }
 
@@ -170,25 +148,9 @@ impl TextField {
     }
 }
 
-#[derive(Clone, Copy)]
-pub enum LauncherKey {
-    Escape,
-    Activate,
-    Up,
-    Down,
-    Backspace,
-    Delete,
-    Left,
-    Right,
-    Home,
-    End,
-    SelectAll,
-    Copy,
-    Cut,
-}
-
+#[derive(Default)]
 pub struct LauncherState {
-    pub open: bool,
+    pub open: bool = Self::ALWAYS_OPEN,
     pub session: u64,
     pub field: TextField,
     entries: Vec<Entry>,
@@ -256,14 +218,10 @@ impl Entry {
 impl LauncherState {
     const ALWAYS_OPEN: bool = cfg!(target_arch = "wasm32");
 
-    pub(crate) fn new(
-        background: &Background,
-        http: &Client,
-        providers: impl IntoIterator<Item = SearchProvider>,
-    ) -> Self {
+    pub(crate) fn new(background: &Background, providers: impl IntoIterator<Item = SearchProvider>) -> Self {
         let mut calc = Context::new();
-        let rates_http = http.clone();
-        background.spawn(async move {
+        let rates_http = background.http.clone();
+        platform::spawn_task(async move {
             #[derive(Deserialize)]
             struct Rates {
                 rates: HashMap<String, f64>,
@@ -293,7 +251,7 @@ impl LauncherState {
         });
         for (index, provider) in providers.iter().enumerate() {
             let icon = provider.config.icon.clone();
-            let http = http.clone();
+            let http = background.http.clone();
             background.spawn_update(async move {
                 let bytes = http.get(icon).send().await.ok()?.error_for_status().ok()?.bytes().await.ok()?;
                 let icon = platform::decode_icon(&bytes)?;
@@ -302,23 +260,14 @@ impl LauncherState {
                 })
             });
         }
-        Self {
-            open: Self::ALWAYS_OPEN,
-            session: 0,
-            field: TextField::default(),
-            entries: Vec::new(),
-            selected: 0,
-            pending_copy: None,
-            calc,
-            apps: Vec::new(),
-            providers,
-        }
+        Self { calc, providers, ..Default::default() }
     }
 
     pub fn toggle(&mut self) {
         self.session = self.session.wrapping_add(1);
         self.open = Self::ALWAYS_OPEN || !self.open;
-        self.field.clear();
+        self.field.text.clear();
+        self.field.set_cursor(0, false);
         self.refresh_matches();
     }
 
@@ -328,28 +277,42 @@ impl LauncherState {
         self.refresh_matches();
     }
 
-    pub(crate) fn key(&mut self, key: LauncherKey, shift: bool) {
+    pub(crate) fn input(&mut self, key: &str, shift: bool, control: bool) -> bool {
+        if !self.open {
+            return false;
+        }
         match key {
-            LauncherKey::Escape => self.open = Self::ALWAYS_OPEN,
-            LauncherKey::Activate => self.activate(self.selected, shift),
-            LauncherKey::Up => self.move_selection(-1),
-            LauncherKey::Down => self.move_selection(1),
-            LauncherKey::Backspace => self.edit(|field| field.erase(false)),
-            LauncherKey::Delete => self.edit(|field| field.erase(true)),
-            LauncherKey::Left => self.field.move_cursor(false, shift),
-            LauncherKey::Right => self.field.move_cursor(true, shift),
-            LauncherKey::Home => self.field.set_cursor(0, shift),
-            LauncherKey::End => self.field.set_cursor(self.field.text.len(), shift),
-            LauncherKey::SelectAll => {
+            "Escape" => self.open = Self::ALWAYS_OPEN,
+            "Enter" => self.activate(self.selected, shift),
+            "ArrowUp" => self.move_selection(-1),
+            "ArrowDown" => self.move_selection(1),
+            "Backspace" => self.edit(|field| field.erase(false)),
+            "Delete" => self.edit(|field| field.erase(true)),
+            "ArrowLeft" => self.field.move_cursor(false, shift),
+            "ArrowRight" => self.field.move_cursor(true, shift),
+            "Home" => self.field.set_cursor(0, shift),
+            "End" => self.field.set_cursor(self.field.text.len(), shift),
+            "a" | "A" if control => {
                 self.field.anchor = 0;
                 self.field.set_cursor(self.field.text.len(), true);
             }
-            LauncherKey::Copy | LauncherKey::Cut => {
+            "c" | "C" | "x" | "X" if control => {
                 self.pending_copy = Some(self.field.text[self.field.selection()].to_owned());
-                if matches!(key, LauncherKey::Cut) {
+                if key.eq_ignore_ascii_case("x") {
                     self.edit(|field| field.insert(""));
                 }
             }
+            _ if !control && key.chars().count() == 1 && !key.chars().any(char::is_control) => {
+                self.edit(|field| field.insert(key));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    pub(crate) fn paste(&mut self, session: u64, text: &str) {
+        if self.open && self.session == session {
+            self.edit(|field| field.insert(&text.replace(['\n', '\r'], " ")));
         }
     }
 
@@ -409,7 +372,8 @@ impl LauncherState {
             None => return,
         }
         self.open = Self::ALWAYS_OPEN;
-        self.field.clear();
+        self.field.text.clear();
+        self.field.set_cursor(0, false);
         self.refresh_matches();
     }
 
@@ -519,8 +483,7 @@ impl LauncherState {
                     surface.glass(color).opacity(0.82)
                 })
         );
-        paint_text(
-            context,
+        context.paint_text(
             quad,
             BACKGROUND_RADIUS as f32,
             line.translated(origin),
@@ -562,8 +525,8 @@ impl LauncherState {
                 edge -= line.width + GAP * 2.0;
                 (badge, line)
             };
-            let (enter_badge, action_line) = badge(Some(entry.action), ENTER_BADGE_WIDTH);
-            let (alternate_badge, alternate_line) = badge(entry.alternate, ALTERNATE_BADGE_WIDTH);
+            let (enter_badge, action_line) = badge(Some(entry.action), 27.0);
+            let (alternate_badge, alternate_line) = badge(entry.alternate, 42.0);
 
             let (name_y, detail_y) =
                 if entry.detail.is_empty() { (ROW_HEIGHT * 0.5, 0.0) } else { (ROW_HEIGHT * 0.34, ROW_HEIGHT * 0.68) };
@@ -629,26 +592,11 @@ impl LauncherState {
                 (action_line, MUTED_COLOR),
                 (alternate_line, MUTED_COLOR),
             ] {
-                paint_text(context, pill, ROW_HEIGHT * 0.5, line.translated(origin), color);
+                context.paint_text(pill, ROW_HEIGHT * 0.5, line.translated(origin), color);
             }
         }
         if let Some(index) = activated {
             self.activate(index, false);
         }
     }
-}
-
-fn paint_text(context: &mut UiContext, quad: Quad, radius: f32, line: Text, color: Vec4) {
-    shader!(
-        context
-            .frame
-            .upload({
-                let quad: Quad;
-                let radius: f32;
-                let line: Text;
-                let text_color: Unorm8x4 = Unorm8x4::from_vec4(color);
-            })
-            .vertex(|frame| refract(Shape::rounded_rect(quad, radius), frame, line.bounds()))
-            .fragment(|_, surface| text_color.to_vec4().opacity(line.sample_at(surface.content).fill()))
-    );
 }
