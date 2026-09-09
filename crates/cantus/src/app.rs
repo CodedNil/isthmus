@@ -8,7 +8,8 @@ use crate::{
 #[cfg(target_os = "linux")]
 use calloop::channel::Sender;
 use isthmus::{Render, SurfaceHandle, glam::Vec2};
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
+use serde::de::DeserializeOwned;
 #[cfg(target_arch = "wasm32")]
 use std::sync::mpsc::Sender;
 use std::{io, time::Duration};
@@ -26,6 +27,10 @@ pub enum View {
 
 pub type Update = Box<dyn FnOnce(&mut CantusApp) + Send>;
 pub type AppUpdater = Sender<Update>;
+
+pub async fn fetch_json<T: DeserializeOwned>(request: RequestBuilder) -> reqwest::Result<T> {
+    request.send().await?.error_for_status()?.json().await
+}
 
 #[derive(Clone)]
 pub struct Background {

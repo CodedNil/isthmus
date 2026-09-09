@@ -38,7 +38,7 @@ pub(super) fn draw(frame: &mut Frame<'_>) {
             .upload({
                 let size: Vec2 = frame.screen_size;
             })
-            .vertex(Quad::new(size * 0.5, size, Vec2::X))
+            .primitive(Quad::new(size * 0.5, size, Vec2::X))
             .fragment(|frame, surface| {
                 let point = (surface.pixel - vec2(size.x * 0.5, 0.0)) / size.y;
                 let uv = surface.pixel / size;
@@ -143,7 +143,7 @@ pub(super) fn water(frame: &mut Frame<'_>) {
             .upload({
                 let size: Vec2 = frame.screen_size;
             })
-            .vertex(Quad::from_min_max(vec2(0.0, size.y * 0.35), size))
+            .primitive(Rect::new(vec2(0.0, size.y * 0.35), size))
             .fragment(|frame, surface| {
                 let point = (surface.pixel - vec2(size.x * 0.5, 0.0)) / size.y;
                 let mask = water_mask(point, 1.0 / size.y);
@@ -179,7 +179,7 @@ pub(super) fn haze(frame: &mut Frame<'_>, layer: f32) {
                 let size: Vec2 = frame.screen_size;
                 let layer: f32;
             })
-            .vertex(Quad::new(size * 0.5, size, Vec2::X))
+            .primitive(Quad::new(size * 0.5, size, Vec2::X))
             .fragment(|frame, surface| {
                 let point = (surface.pixel - vec2(size.x * 0.5, 0.0)) / size.y;
                 let fog = noise(point * vec2(3.0, 8.0) + vec2(frame.time * 0.018 + layer * 13.0, layer * 3.0));
@@ -220,7 +220,7 @@ pub(super) fn falling_leaves(frame: &mut Frame<'_>) {
                         Vec2::from_angle(frame.time * 0.3 + seed + (frame.time * 0.7 + seed).sin() * 0.6),
                     );
                 })
-                .vertex(quad)
+                .primitive(quad)
                 .fragment(|_, surface| {
                     let point = surface.uv * 2.0 - 1.0;
                     let mask = (point.y.abs() - (1.0 - point.x * point.x).max(0.0)).smoothstep(0.2, -0.2);
@@ -248,7 +248,7 @@ pub(super) fn butterflies(frame: &mut Frame<'_>) {
                         Vec2::from_angle((phase * 1.3).sin() * 0.5),
                     );
                 })
-                .vertex(quad)
+                .primitive(quad)
                 .fragment(|frame, surface| {
                     let point = surface.uv * 2.0 - 1.0;
                     let spread = 0.15 + (frame.time * (7.0 + hash(seed) * 2.0) + seed).sin().abs() * 0.85;

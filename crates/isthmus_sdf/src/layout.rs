@@ -1,12 +1,10 @@
-//! CPU font loading, outline preparation, and cached text layout.
-
 use crate::text::{Curve, Glyph, PlacedGlyph, Text, Weight};
 use hashbrown::HashMap;
 use isthmus::{
     F16x2, ResourceData, Resources, ShaderData,
     glam::{Vec2, vec2},
 };
-use kurbo::{PathEl, PathSeg, Point, QuadBez, Rect, Shape as _, cubics_to_quadratic_splines, segments};
+use kurbo::{PathEl, PathSeg, Point, QuadBez, Rect, Shape, cubics_to_quadratic_splines, segments};
 use skrifa::{
     FontRef, GlyphId, MetadataProvider, Tag,
     instance::{LocationRef, Size},
@@ -32,8 +30,8 @@ impl Curve {
 }
 
 impl Outlines {
-    fn glyph(&mut self, face: &FontRef<'_>, weights: &[f32], span: f32, id: u32) -> (u32, Glyph) {
-        if let Some(&glyph) = self.glyphs.get(&id) {
+    fn glyph(&mut self, face: &FontRef<'_>, weights: &[f32], span: f32, font: usize, id: u32) -> (u32, Glyph) {
+        if let Some(&glyph) = self.glyphs.get(&(font, id)) {
             return glyph;
         }
         let outline = face.outline_glyphs().get(GlyphId::new(id));
@@ -88,7 +86,7 @@ impl Outlines {
             curve.append(&mut self.words);
         }
         let offset = glyph.append(&mut self.words);
-        self.glyphs.insert(id, (offset, glyph));
+        self.glyphs.insert((font, id), (offset, glyph));
         (offset, glyph)
     }
 }
@@ -97,7 +95,7 @@ const WGHT: Tag = Tag::new(b"wght");
 
 #[derive(Default)]
 struct Outlines {
-    glyphs: HashMap<u32, (u32, Glyph)>,
+    glyphs: HashMap<(usize, u32), (u32, Glyph)>,
     words: Vec<u32>,
 }
 
@@ -108,8 +106,6 @@ fn weight_locations(face: &FontRef<'_>) -> Vec<f32> {
     let mut weights = vec![axis.min_value(), axis.default_value(), axis.max_value()];
     let steps = ((axis.max_value() - axis.min_value()) / 100.0).ceil() as u32;
     weights.extend((1..steps).map(|step| axis.min_value() + step as f32 * 100.0));
-    weights.sort_by(f32::total_cmp);
-    weights.dedup();
     weights
 }
 
@@ -138,7 +134,7 @@ type RunCache = HashMap<String, HashMap<(u32, u32), (Arc<ShapedLine>, bool)>>;
 
 /// Font outlines, cached text runs, and per-frame glyph placements.
 pub struct TextCache {
-    font: Box<[u8]>,
+    fonts: Vec<Box<[u8]>>,
     weights: Vec<f32>,
     outlines: Outlines,
     runs: RunCache,
@@ -168,19 +164,29 @@ impl TextCache {
         self.place(&shaped, Vec2::ZERO)
     }
 
-    /// Prepares valid font outlines and metrics independently of the GPU backend.
-    pub fn new(font: &[u8]) -> Self {
-        let face = FontRef::new(font).expect("parse font");
-        let metrics = face.metrics(Size::unscaled(), LocationRef::default());
+    /// Uses the first font's line metrics and later fonts for missing characters.
+    pub fn new(fonts: &[&[u8]]) -> Self {
+        let faces: Vec<_> = fonts.iter().map(|font| FontRef::new(font).expect("parse font")).collect();
+        let metrics = faces.first().expect("at least one font").metrics(Size::unscaled(), LocationRef::default());
         let span = metrics.ascent - metrics.descent;
         let baseline = (metrics.ascent + metrics.descent) * 0.5 / span;
-        let weights = weight_locations(&face);
+        let mut weights: Vec<_> = faces.iter().flat_map(weight_locations).collect();
+        weights.sort_by(f32::total_cmp);
+        weights.dedup();
         let mut outlines = Outlines::default();
         (weights.len() as u32).append(&mut outlines.words);
         for &weight in &weights {
             weight.append(&mut outlines.words);
         }
-        Self { font: font.into(), weights, outlines, runs: RunCache::default(), span, baseline, placed: Vec::new() }
+        Self {
+            fonts: fonts.iter().map(|font| (*font).into()).collect(),
+            weights,
+            outlines,
+            runs: RunCache::default(),
+            span: span / f32::from(metrics.units_per_em),
+            baseline,
+            placed: Vec::new(),
+        }
     }
 
     /// Places a cached run with its left advance edge and vertical center at the position.
@@ -219,22 +225,39 @@ impl TextCache {
         if !size.is_finite() || size <= 0.0 {
             return ShapedLine::default();
         }
-        let face = FontRef::new(&self.font).expect("parse font");
-        let location = face.axes().location([(WGHT, weight)]);
-        let metrics = face.glyph_metrics(Size::unscaled(), &location);
-        let charmap = face.charmap();
+        let faces: Vec<_> = self.fonts.iter().map(|font| FontRef::new(font).expect("parse font")).collect();
+        let locations: Vec<_> = faces.iter().map(|face| face.axes().location([(WGHT, weight)])).collect();
+        let fonts: Vec<_> = faces
+            .iter()
+            .zip(&locations)
+            .map(|(face, location)| {
+                (
+                    face.charmap(),
+                    face.glyph_metrics(Size::unscaled(), location),
+                    self.span * f32::from(face.metrics(Size::unscaled(), LocationRef::default()).units_per_em),
+                )
+            })
+            .collect();
         for (text, position) in parts {
             let mut x = position.x / size;
             let y = position.y / size;
             for character in text.chars() {
-                let id = charmap.map(character).unwrap_or_default();
-                let (glyph, data) = self.outlines.glyph(&face, &self.weights, self.span, id.to_u32());
+                if matches!(character, '\u{fe0e}' | '\u{fe0f}') {
+                    continue;
+                }
+                let (font, id) = fonts
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, (charmap, ..))| charmap.map(character).map(|id| (index, id)))
+                    .unwrap_or_default();
+                let (_, metrics, span) = &fonts[font];
+                let (glyph, data) = self.outlines.glyph(&faces[font], &self.weights, *span, font, id.to_u32());
                 if data.count > 0 {
                     min = min.min(vec2(x + data.min.x, y - data.max.y));
                     max = max.max(vec2(x + data.max.x, y - data.min.y));
                     glyphs.push(PlacedGlyph { x, y: -y, glyph, left: x + data.min.x, right: x + data.max.x });
                 }
-                x += metrics.advance_width(id).unwrap_or(0.0) / self.span;
+                x += metrics.advance_width(id).unwrap_or(0.0) / span;
             }
             width = width.max(x * size);
         }

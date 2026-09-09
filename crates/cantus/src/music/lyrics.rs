@@ -1,4 +1,5 @@
 use super::{TRACK_SPACING_MS, Track, enrichment::Fetch, spotify::Spotify};
+use crate::app::fetch_json;
 use isthmus::glam::{FloatExt, vec2};
 use isthmus_sdf::layout::{ShapedLine, TextCache};
 use reqwest::Client;
@@ -21,11 +22,10 @@ pub struct Lyrics {
     segments: Option<Vec<LyricSegment>>,
     pub(crate) lines: [ShapedLine; 2],
     timeline: Vec<(f32, f32)>,
-    pub(crate) span: f32,
 }
 
 impl Lyrics {
-    pub(crate) const SILENCE_SPEED: f32 = 0.035;
+    const SILENCE_SPEED: f32 = 0.035;
     const SONG_GAP: f32 = 96.0;
 
     pub(crate) fn prepare(&mut self, duration_ms: f32, text: &mut TextCache) {
@@ -33,7 +33,6 @@ impl Lyrics {
         segments.retain(|segment| !segment.text.trim().is_empty());
         segments.sort_by(|left, right| left.start_ms.total_cmp(&right.start_ms));
         if segments.is_empty() {
-            *self = Self::default();
             return;
         }
 
@@ -42,9 +41,10 @@ impl Lyrics {
         let mut cursor = 0.0;
         let mut vocal_end = 0.0;
         let space = text.shape(" ", 15.0, 700.0).text.width;
-        for segment in &segments {
+        for segment in &mut segments {
             let silence = (segment.start_ms - vocal_end).max(0.0);
             cursor += silence * Self::SILENCE_SPEED;
+            segment.text = segment.text.replace('🎵', "♪").replace('🎶', "♫");
             let value = segment.text.trim_start();
             let width = text.shape(value, 15.0, 700.0).text.width;
             let position = cursor;
@@ -66,21 +66,20 @@ impl Lyrics {
                 700.0,
             )
         });
-        *self = Self { segments: None, lines, timeline, span: position + Self::SONG_GAP };
+        *self = Self { segments: None, lines, timeline };
+        let end = self.position(duration_ms);
+        self.timeline.retain(|&(at, _)| at < duration_ms);
+        self.timeline.extend([(duration_ms, end), (duration_ms + TRACK_SPACING_MS, position + Self::SONG_GAP)]);
     }
 
-    pub(crate) fn position(&self, time: f32, duration_ms: f32) -> f32 {
-        if time > duration_ms {
-            let end = self.timeline_position(duration_ms);
-            return end.lerp(self.span, ((time - duration_ms) / TRACK_SPACING_MS).clamp(0.0, 1.0));
-        }
-        self.timeline_position(time)
+    pub(crate) fn span(&self, duration_ms: f32) -> f32 {
+        self.timeline.last().map_or((duration_ms + TRACK_SPACING_MS) * Self::SILENCE_SPEED, |&(_, x)| x)
     }
 
-    fn timeline_position(&self, time: f32) -> f32 {
+    pub(crate) fn position(&self, time: f32) -> f32 {
         let upper = self.timeline.partition_point(|&(at, _)| at <= time);
         match (upper.checked_sub(1), self.timeline.get(upper)) {
-            (None, _) => self.timeline.first().map_or(0.0, |&(_, x)| x),
+            (None, _) => self.timeline.first().map_or(time * Self::SILENCE_SPEED, |&(_, x)| x),
             (Some(lower), None) => self.timeline[lower].1,
             (Some(lower), Some(&(t1, x1))) => {
                 let (t0, x0) = self.timeline[lower];
@@ -117,25 +116,17 @@ struct SearchResult {
 }
 
 async fn fetch_precise(http: &Client, query: &Track) -> Option<Vec<LyricSegment>> {
-    let result = http
-        .get(API)
-        .query(&[
-            ("track", query.name.clone()),
-            ("artist", query.artist.clone()),
-            ("album", query.album.clone()),
-            ("duration", (query.duration_ms / 1000).to_string()),
-        ])
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json::<SearchResponse>()
-        .await
-        .ok()?
-        .results
-        .into_iter()
-        .find(|result| result.timing_type == "word")?;
+    let result = fetch_json::<SearchResponse>(http.get(API).query(&[
+        ("track", query.name.clone()),
+        ("artist", query.artist.clone()),
+        ("album", query.album.clone()),
+        ("duration", (query.duration_ms / 1000).to_string()),
+    ]))
+    .await
+    .ok()?
+    .results
+    .into_iter()
+    .find(|result| result.timing_type == "word")?;
     let source = http.get(result.url).send().await.ok()?.error_for_status().ok()?.text().await.ok()?;
     let segments = parse_ttml(&source);
     (!segments.is_empty()).then_some(segments)

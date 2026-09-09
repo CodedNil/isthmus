@@ -1,6 +1,6 @@
 use crate::isthmus_path;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields};
+use syn::{Data, DeriveInput, Member};
 
 pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     let name = &input.ident;
@@ -8,10 +8,7 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     let Data::Struct(data) = &input.data else {
         return syn::Error::new_spanned(input, "ShaderData requires a struct").to_compile_error();
     };
-    let Fields::Named(fields) = &data.fields else {
-        return syn::Error::new_spanned(input, "ShaderData requires named fields").to_compile_error();
-    };
-    for attribute in fields.named.iter().flat_map(|field| &field.attrs) {
+    for attribute in data.fields.iter().flat_map(|field| &field.attrs) {
         let message = match attribute.path().get_ident().map(ToString::to_string).as_deref() {
             Some("shader_data") => "shader_data storage options belong on the struct",
             Some("cfg" | "cfg_attr") => "ShaderData fields must be identical on every target",
@@ -56,26 +53,24 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
             }
         },
     );
-    let fields = fields.named.iter().collect::<Vec<_>>();
+    let fields: Vec<_> = data
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| (field.ident.clone().map_or_else(|| Member::Unnamed(index.into()), Member::Named), field))
+        .collect();
     for group in fields.chunks(if normalized { 2 } else { 1 }) {
-        let first = &group[0].ident;
-        let ty = &group[0].ty;
+        let (first, field) = &group[0];
+        let ty = &field.ty;
         let codec = if normalized { quote!(#isthmus::Unorm16x2) } else { quote!(#ty) };
         let value = if normalized {
-            let second = group.get(1).map_or_else(
-                || quote!(0.0),
-                |field| {
-                    let name = &field.ident;
-                    quote!(self.#name)
-                },
-            );
+            let second = group.get(1).map_or_else(|| quote!(0.0), |(name, _)| quote!(self.#name));
             quote!(#codec::from_vec2(#isthmus::glam::Vec2::new(self.#first, #second)))
         } else {
             quote!(self.#first)
         };
         writes.push(quote!(<#codec as #isthmus::ShaderData>::write(#value, words, offset + #offset);));
-        for (field, component) in group.iter().zip([quote!(x), quote!(y)]) {
-            let name = &field.ident;
+        for ((name, field), component) in group.iter().zip([quote!(x), quote!(y)]) {
             let ty = &field.ty;
             if normalized && !matches!(ty, syn::Type::Path(path) if path.path.is_ident("f32")) {
                 return syn::Error::new_spanned(field, "unorm16 requires normalized f32 fields").to_compile_error();

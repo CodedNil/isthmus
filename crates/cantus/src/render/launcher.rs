@@ -1,16 +1,16 @@
 use crate::{
-    app::{Background, CantusApp},
+    app::{Background, CantusApp, fetch_json},
     config::SearchProvider,
     interaction::key,
     platform::{self, DesktopApp},
     render::{
         GAP, PADDING, Program, TEXT_COLOR, UiContext,
-        sdf::{deform, presence},
+        sdf::{deform, glass, presence},
     },
 };
 use fend_core::Context;
 use isthmus::prelude::*;
-use isthmus_sdf::{Shape, Text};
+use isthmus_sdf::prelude::*;
 use serde::Deserialize;
 use std::{collections::HashMap, error::Error, ops::Range, sync::OnceLock};
 use unicode_segmentation::UnicodeSegmentation;
@@ -27,8 +27,8 @@ const ICON_SIZE: f32 = 32.0;
 /// Icons, badge outlines and the magnifier all share one grey.
 const ICON_COLOR: Vec3 = Vec3::splat(0.58);
 const ACCENT_COLOR: Vec3 = vec3(0.44, 0.40, 0.80);
-const DETAIL_COLOR: Vec4 = Vec4::new(0.56, 0.63, 0.86, 1.0);
-const MUTED_COLOR: Vec4 = Vec4::new(0.52, 0.55, 0.64, 1.0);
+const DETAIL_COLOR: Vec3 = Vec3::new(0.56, 0.63, 0.86);
+const MUTED_COLOR: Vec3 = Vec3::new(0.52, 0.55, 0.64);
 const CALCULATOR_ICON: u32 = 1;
 const SEARCH_ICON: u32 = 2;
 
@@ -40,7 +40,7 @@ fn magnifier_icon(point: Vec2) -> f32 {
     Shape::circle(Vec2::ZERO, 6.2).stroke(2.1).union(Shape::segment(vec2(4.6, 4.6), vec2(8.8, 8.8), 2.1)).fill_at(point)
 }
 
-/// Straight color and coverage of the calculator badge shown beside a fend answer.
+/// Colour of the calculator badge shown beside a fend answer.
 fn calculator_icon(point: Vec2) -> Vec4 {
     let badge = Shape::rounded_rect(Vec2::splat(26.0), 9.0).fill_at(point);
     let equals = Shape::segment(vec2(-4.3, 0.0), vec2(4.3, 0.0), 2.2).fill_at(vec2(point.x, point.y.abs() - 3.1));
@@ -63,7 +63,7 @@ fn key_glyph(point: Vec2, shift: bool) -> f32 {
     }
 }
 
-/// Straight color and coverage of one key badge; `half_width` of 0 leaves the slot empty.
+/// Colour of one key badge; `half_width` of 0 leaves the slot empty.
 fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
     if half_width <= 0.0 {
         return Vec4::ZERO;
@@ -92,8 +92,8 @@ pub struct TextField {
 }
 
 impl TextField {
-    pub const fn selection(&self) -> Range<usize> {
-        if self.cursor < self.anchor { self.cursor..self.anchor } else { self.anchor..self.cursor }
+    pub fn selection(&self) -> Range<usize> {
+        self.cursor.min(self.anchor)..self.cursor.max(self.anchor)
     }
 
     pub fn set_cursor(&mut self, index: usize, select: bool) {
@@ -185,36 +185,6 @@ struct EntryView<'a> {
     alternate: Option<&'a str>,
 }
 
-impl Entry {
-    fn view<'a>(&'a self, launcher: &'a LauncherState) -> EntryView<'a> {
-        match self {
-            Self::App(index) => {
-                let app = &launcher.apps[*index];
-                EntryView {
-                    image: app.icon.as_ref(),
-                    name: &app.name,
-                    detail: &app.comment,
-                    alternate: app.action.as_ref().map(|(label, _)| label.as_str()),
-                    ..Default::default()
-                }
-            }
-            Self::Answer(answer) => {
-                EntryView { icon_kind: CALCULATOR_ICON, name: answer, action: "Copy", ..Default::default() }
-            }
-            Self::Search(index) => {
-                let engine = &launcher.providers[*index];
-                EntryView {
-                    image: engine.icon.as_ref(),
-                    name: &engine.label,
-                    detail: launcher.search_query().1,
-                    action: "Search",
-                    ..Default::default()
-                }
-            }
-        }
-    }
-}
-
 impl LauncherState {
     const ALWAYS_OPEN: bool = cfg!(target_arch = "wasm32");
 
@@ -226,13 +196,7 @@ impl LauncherState {
             struct Rates {
                 rates: HashMap<String, f64>,
             }
-            if let Ok(response) = rates_http
-                .get("https://open.er-api.com/v6/latest/USD")
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-                && let Ok(rates) = response.json::<Rates>().await
-            {
+            if let Ok(rates) = fetch_json::<Rates>(rates_http.get("https://open.er-api.com/v6/latest/USD")).await {
                 let _ = EXCHANGE_RATES.set(rates.rates);
             }
         });
@@ -422,9 +386,9 @@ impl LauncherState {
             return;
         }
         let (origin, size) = self.bounds(context.frame.screen_size);
-        let quad = Quad::from_min_max(origin, origin + size);
-        let panel = Shape::rounded_rect(quad, BACKGROUND_RADIUS as f32);
-        let screen = Quad::from_min_max(Vec2::ZERO, context.frame.screen_size);
+        let rect = Rect::new(origin, origin + size);
+        let panel = Shape::rounded_rect(rect, BACKGROUND_RADIUS as f32);
+        let screen = Rect::new(Vec2::ZERO, context.frame.screen_size);
         context.interaction.input_region(screen);
         let backdrop = context.interaction.interact("launcher-backdrop", Shape::rectangle(screen).difference(panel));
         if !Self::ALWAYS_OPEN && backdrop.clicked {
@@ -432,13 +396,13 @@ impl LauncherState {
             return;
         }
 
-        self.show_search(context, quad);
+        self.show_search(context, rect);
         self.show_entries(context, origin);
     }
 
-    fn show_search(&mut self, context: &mut UiContext, quad: Quad) {
-        let origin = quad.center - quad.size * 0.5;
-        let (left, right) = (PADDING + 34.0, quad.size.x - PADDING);
+    fn show_search(&mut self, context: &mut UiContext, rect: Rect) {
+        let origin = rect.min;
+        let (left, right) = (PADDING + 34.0, rect.size().x - PADDING);
         if self.field.touched {
             self.field.touched = false;
             self.field.blink_start = context.frame.time;
@@ -467,11 +431,11 @@ impl LauncherState {
                 .upload({
                     let caret: Vec2;
                     let selection: Vec2;
-                    let quad: Quad;
+                    let rect: Rect;
                 })
-                .vertex(|frame| deform(Shape::rounded_rect(quad, BACKGROUND_RADIUS as f32), frame))
+                .primitive(|frame| deform(Shape::rounded_rect(rect, BACKGROUND_RADIUS as f32), frame))
                 .fragment(|_, surface| {
-                    let point = quad.uv(surface.content) * quad.size;
+                    let point = surface.content - rect.min;
                     let mut color = Vec3::splat(0.09)
                         .lerp(ICON_COLOR, magnifier_icon(point - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
                     let selection_width = selection.y - selection.x;
@@ -480,14 +444,14 @@ impl LauncherState {
                     color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
                     let caret_mask = Shape::pill(vec2(1.8, 24.0)).fill_at(point - vec2(caret.x, HEADER_HEIGHT * 0.5));
                     color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
-                    surface.glass(color).opacity(0.82)
+                    glass(surface, color) * vec4(1.0, 1.0, 1.0, 0.82)
                 })
         );
         context.paint_text(
-            quad,
+            rect,
             BACKGROUND_RADIUS as f32,
             line.translated(origin),
-            if empty { MUTED_COLOR } else { TEXT_COLOR.extend(1.0) },
+            (if empty { MUTED_COLOR } else { TEXT_COLOR }).extend(1.0),
         );
     }
 
@@ -499,7 +463,7 @@ impl LauncherState {
         let mut activated = None;
         for index in 0..self.entries.len() {
             let y = origin.y + HEADER_HEIGHT + PADDING + index as f32 * (ROW_HEIGHT + GAP);
-            let pill = Quad::from_min_max(vec2(x, y), vec2(x + width, y + ROW_HEIGHT));
+            let pill = Rect::new(vec2(x, y), vec2(x + width, y + ROW_HEIGHT));
             let identity = match &self.entries[index] {
                 Entry::App(index) => key(("app", &self.apps[*index].exec)),
                 Entry::Answer(answer) => key(("answer", answer)),
@@ -512,7 +476,31 @@ impl LauncherState {
             if response.clicked {
                 activated = Some(index);
             }
-            let entry = self.entries[index].view(self);
+            let entry = match &self.entries[index] {
+                Entry::App(index) => {
+                    let app = &self.apps[*index];
+                    EntryView {
+                        image: app.icon.as_ref(),
+                        name: &app.name,
+                        detail: &app.comment,
+                        alternate: app.action.as_ref().map(|(label, _)| label.as_str()),
+                        ..Default::default()
+                    }
+                }
+                Entry::Answer(answer) => {
+                    EntryView { icon_kind: CALCULATOR_ICON, name: answer, action: "Copy", ..Default::default() }
+                }
+                Entry::Search(index) => {
+                    let engine = &self.providers[*index];
+                    EntryView {
+                        image: engine.icon.as_ref(),
+                        name: &engine.label,
+                        detail: self.search_query().1,
+                        action: "Search",
+                        ..Default::default()
+                    }
+                }
+            };
 
             let mut edge = width - ROW_HEIGHT * 0.5;
             let mut badge = |label: Option<&str>, width: f32| {
@@ -531,11 +519,8 @@ impl LauncherState {
             let (name_y, detail_y) =
                 if entry.detail.is_empty() { (ROW_HEIGHT * 0.5, 0.0) } else { (ROW_HEIGHT * 0.34, ROW_HEIGHT * 0.68) };
             let name_line = context.frame.resources.line(entry.name, 16.0, 700.0).translated(vec2(text_left, name_y));
-            let detail_line = if entry.detail.is_empty() {
-                Text::default()
-            } else {
-                context.frame.resources.line(entry.detail, 13.0, 600.0).translated(vec2(text_left, detail_y))
-            };
+            let detail_line =
+                context.frame.resources.line(entry.detail, 13.0, 600.0).translated(vec2(text_left, detail_y));
 
             shader!(
                 context
@@ -544,28 +529,27 @@ impl LauncherState {
                         let icon_kind: u32 = if entry.image.is_some() { 0 } else { entry.icon_kind };
                         let enter_badge: Vec2;
                         let alternate_badge: Vec2;
-                        let pill: Quad;
+                        let pill: Rect;
                     })
-                    .vertex(|frame| deform(Shape::pill(pill), frame))
+                    .primitive(|frame| deform(Shape::pill(pill), frame))
                     .fragment(|_, surface| {
                         let mut color = Vec3::splat(0.15)
                             .lerp(Vec3::splat(0.235), presence(enter_badge.y))
                             .lerp(Vec3::splat(0.3), (surface.bulge / 8.0).min(1.0));
-                        let icon_point = pill.local(surface.pixel) + vec2((pill.size.x - pill.size.y) * 0.5, 0.0);
+                        let icon_point = pill.local(surface.pixel) + vec2((pill.size().x - pill.size().y) * 0.5, 0.0);
                         if icon_kind == CALCULATOR_ICON {
-                            let calculator = calculator_icon(icon_point);
-                            color = color.lerp(calculator.truncate(), calculator.w);
+                            color = source_over(calculator_icon(icon_point), color.extend(1.0)).truncate();
                         } else if icon_kind == SEARCH_ICON {
                             color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
                         }
-                        let point = pill.uv(surface.content) * pill.size;
+                        let point = surface.content - pill.min;
                         let paint_badge = |color: Vec3, badge: Vec2, shift: bool| {
                             let ink = action_badge(point - vec2(badge.x, ROW_HEIGHT * 0.5), badge.y, shift);
-                            color.lerp(ink.truncate(), ink.w)
+                            source_over(ink, color.extend(1.0)).truncate()
                         };
                         color = paint_badge(color, enter_badge, false);
                         color = paint_badge(color, alternate_badge, true);
-                        surface.glass(color).opacity(0.7)
+                        glass(surface, color) * vec4(1.0, 1.0, 1.0, 0.7)
                     })
             );
             if let Some(image) = entry.image {
@@ -574,25 +558,24 @@ impl LauncherState {
                         .frame
                         .upload({
                             let image: &Image;
-                            let quad: Quad = Quad::new(
-                                pill.center - vec2((pill.size.x - pill.size.y) * 0.5, 0.0),
+                            let rect: Rect = Rect::from_center_size(
+                                pill.center() - vec2((pill.size().x - pill.size().y) * 0.5, 0.0),
                                 Vec2::splat(ICON_SIZE),
-                                Vec2::X,
                             );
                         })
-                        .vertex(quad)
+                        .primitive(rect)
                         .fragment(|_, surface| image.sample(surface.uv))
                 );
             }
 
             let origin = vec2(x, y);
             for (line, color) in [
-                (name_line, TEXT_COLOR.extend(1.0)),
+                (name_line, TEXT_COLOR),
                 (detail_line, DETAIL_COLOR),
                 (action_line, MUTED_COLOR),
                 (alternate_line, MUTED_COLOR),
             ] {
-                context.paint_text(pill, ROW_HEIGHT * 0.5, line.translated(origin), color);
+                context.paint_text(pill, ROW_HEIGHT * 0.5, line.translated(origin), color.extend(1.0));
             }
         }
         if let Some(index) = activated {

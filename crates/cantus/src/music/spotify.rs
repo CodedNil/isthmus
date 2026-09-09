@@ -9,7 +9,11 @@ use crate::{
 };
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
-use futures_util::{StreamExt, future::try_join_all};
+use futures_util::{
+    StreamExt,
+    future::{BoxFuture, try_join_all},
+    stream::FuturesUnordered,
+};
 use isthmus::glam::FloatExt;
 use librespot_core::{
     FileId, Session, SessionConfig, SpotifyId, authentication::Credentials, cache::Cache,
@@ -29,7 +33,7 @@ use librespot_protocol::{
     player::{ContextPlayerOptions, PlayerState, ProvidedTrack, Suppressions},
     playlist4_external::{Add, Delta, Item, ListAttributes, ListChanges, Op, Rem, SelectedListContent, op},
 };
-use protobuf::{EnumOrUnknown, Message as _, MessageField};
+use protobuf::{EnumOrUnknown, Message, MessageField};
 use reqwest::{
     Method,
     header::{self, HeaderMap},
@@ -59,42 +63,33 @@ const RATING_PLAYLISTS: [&str; 10] = ["0.5", "1.0", "1.5", "2.0", "2.5", "3.0", 
 
 #[derive(Clone)]
 pub struct Spotify {
-    events: UnboundedSender<WorkerEvent>,
+    commands: UnboundedSender<PlaybackCommand>,
     session: watch::Receiver<Option<Session>>,
 }
 
-enum WorkerEvent {
-    Command(PlaybackCommand),
-    Metadata { generation: u64, requested: Vec<String>, values: HashMap<String, TrackDetails> },
-}
+type Metadata = HashMap<String, metadata::Track>;
 
 impl Spotify {
     pub(super) fn new(config: &Config, updater: &AppUpdater) -> Self {
-        let (events, receiver) = mpsc::unbounded_channel();
+        let (commands, mut receiver) = mpsc::unbounded_channel();
         let (connected_session, session) = watch::channel(None);
-        let worker_events = events.clone();
         let updater = updater.clone();
         let playlist_targets = config.playlists.clone();
         let ratings_enabled = config.ratings_enabled;
         platform::spawn_task(async move {
-            let mut receiver = receiver;
-            let mut generation = 0;
             loop {
                 tokio::select! {
                     () = connected_session.closed() => break,
                     () = async {
-                generation += 1;
                 match connect().await {
                     Ok(spotify) => {
                         connected_session.send_replace(Some(spotify.clone()));
                         if let Err(error) = run_spotify(
                             spotify,
                             &mut receiver,
-                            worker_events.clone(),
                             updater.clone(),
                             playlist_targets.clone(),
                             ratings_enabled,
-                            generation,
                         )
                         .await
                         {
@@ -111,11 +106,11 @@ impl Spotify {
                 }
             }
         });
-        Self { events, session }
+        Self { commands, session }
     }
 
     pub(super) fn command(&self, command: PlaybackCommand) {
-        if self.events.send(WorkerEvent::Command(command)).is_err() {
+        if self.commands.send(command).is_err() {
             warn!("Discarded music command after Spotify worker stopped");
         }
     }
@@ -189,12 +184,10 @@ async fn connect() -> MusicResult<Session> {
 
 async fn run_spotify(
     session: Session,
-    events: &mut UnboundedReceiver<WorkerEvent>,
-    event_tx: UnboundedSender<WorkerEvent>,
+    commands: &mut UnboundedReceiver<PlaybackCommand>,
     updater: AppUpdater,
     playlist_targets: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
     ratings_enabled: bool,
-    generation: u64,
 ) -> MusicResult<()> {
     let dealer = session.dealer();
     let mut connections = dealer.listen_for("hm://pusher/v1/connections", Ok)?;
@@ -204,20 +197,35 @@ async fn run_spotify(
 
     let mut worker = SpotifyWorker {
         session,
-        events: event_tx,
         updater,
         active_device: None,
         playlist_targets,
         playlist_revisions: HashMap::new(),
         ratings_enabled,
         track_metadata: HashMap::new(),
-        queue: None,
-        generation,
+        player: None,
+        pending: FuturesUnordered::new(),
     };
 
     loop {
         tokio::select! {
-            Some(event) = events.recv() => worker.event(event).await,
+            Some(command) = commands.recv() => worker.command(command).await,
+            Some((requested, mut values)) = worker.pending.next() => {
+                    let mut changed = false;
+                    for uri in requested {
+                        if let Entry::Occupied(mut slot) = worker.track_metadata.entry(uri.clone()) {
+                            if let Some(value) = values.remove(&uri) {
+                                slot.insert(Some(value));
+                                changed = true;
+                            } else if slot.get().is_none() {
+                                slot.remove();
+                            }
+                        }
+                    }
+                    if changed {
+                        worker.publish_snapshot(true);
+                    }
+            },
             Some(message) = connections.next() => match message {
                 Ok(message) => {
                     if let Some(connection_id) = message.headers.iter().find_map(|(key, value)| {
@@ -248,57 +256,18 @@ async fn run_spotify(
 
 struct SpotifyWorker {
     session: Session,
-    events: UnboundedSender<WorkerEvent>,
+    pending: FuturesUnordered<BoxFuture<'static, (Vec<String>, Metadata)>>,
     updater: AppUpdater,
     active_device: Option<String>,
     playlist_targets: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
     playlist_revisions: HashMap<PlaylistId, Vec<u8>>,
     ratings_enabled: bool,
     /// `None` marks metadata currently being fetched.
-    track_metadata: HashMap<String, Option<TrackDetails>>,
-    queue: Option<QueueSnapshot>,
-    generation: u64,
-}
-
-#[derive(Clone, Copy)]
-struct PlaybackUpdate {
-    playing: bool,
-    position_ms: f32,
-    rate: f32,
-    observed_at: Instant,
-}
-
-struct QueueSnapshot {
-    tracks: Vec<ProvidedTrack>,
-    current: usize,
-    current_duration_ms: Option<u32>,
-    playback: PlaybackUpdate,
+    track_metadata: HashMap<String, Option<metadata::Track>>,
+    player: Option<PlayerState>,
 }
 
 impl SpotifyWorker {
-    async fn event(&mut self, event: WorkerEvent) {
-        match event {
-            WorkerEvent::Command(command) => self.command(command).await,
-            WorkerEvent::Metadata { generation, requested, mut values } if generation == self.generation => {
-                let mut changed = false;
-                for uri in requested {
-                    if let Entry::Occupied(mut slot) = self.track_metadata.entry(uri.clone()) {
-                        if let Some(value) = values.remove(&uri) {
-                            slot.insert(Some(value));
-                            changed = true;
-                        } else if slot.get().is_none() {
-                            slot.remove();
-                        }
-                    }
-                }
-                if changed {
-                    self.publish_snapshot(true);
-                }
-            }
-            WorkerEvent::Metadata { .. } => {}
-        }
-    }
-
     async fn command(&mut self, command: PlaybackCommand) {
         match command {
             PlaybackCommand::SetPlaying(playing) => {
@@ -318,7 +287,7 @@ impl SpotifyWorker {
         }
     }
 
-    async fn register(&self) -> MusicResult<Cluster> {
+    async fn register(&mut self) -> MusicResult<Cluster> {
         let request = PutStateRequest {
             device: MessageField::some(ConnectDevice {
                 device_info: MessageField::some(DeviceInfo {
@@ -363,76 +332,63 @@ impl SpotifyWorker {
             return;
         };
         self.active_device = (!cluster.active_device_id.is_empty()).then_some(cluster.active_device_id);
-        let playing = player.is_playing && !player.is_paused;
-        let observed_at = Instant::now();
-        let rate = if playing { player.playback_speed.max(0.0) as f32 } else { 0.0 };
-        let current_position = player.prev_tracks.len();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-        let age_ms = now.saturating_sub(player.timestamp).max(0);
-        let position = (player.position_as_of_timestamp.max(0) as f64 + age_ms as f64 * f64::from(rate)) as f32;
-        let mut provided = player.prev_tracks;
-        if let Some(current) = player.track.into_option() {
-            provided.push(current);
-        }
-        provided.extend(player.next_tracks);
-        self.track_metadata.retain(|uri, _| provided.iter().any(|track| track.uri == *uri));
-        self.schedule_metadata(&provided);
-        let current_duration_ms = u32::try_from(player.duration).ok();
-        let rebuild_queue = self.queue.as_ref().is_none_or(|previous| {
-            previous.current != current_position
-                || previous.current_duration_ms != current_duration_ms
-                || previous.tracks != provided
+        let tracks = player.prev_tracks.iter().chain(player.track.as_ref()).chain(&player.next_tracks);
+        self.track_metadata.retain(|uri, _| tracks.clone().any(|track| track.uri == *uri));
+        self.schedule_metadata(tracks);
+        let rebuild_queue = self.player.as_ref().is_none_or(|previous| {
+            previous.prev_tracks != player.prev_tracks
+                || previous.track != player.track
+                || previous.next_tracks != player.next_tracks
+                || previous.duration != player.duration
         });
-        self.queue = Some(QueueSnapshot {
-            tracks: provided,
-            current: current_position,
-            current_duration_ms,
-            playback: PlaybackUpdate { playing, position_ms: position, rate, observed_at },
-        });
+        self.player = Some(player);
         self.publish_snapshot(rebuild_queue);
     }
 
     fn publish_snapshot(&self, rebuild_queue: bool) {
-        let Some(snapshot) = &self.queue else { return };
-        let index = snapshot.tracks[..snapshot.current.min(snapshot.tracks.len())]
-            .iter()
-            .filter(|track| !track.uri.ends_with(":delimiter"))
-            .count();
+        let Some(player) = &self.player else { return };
+        let index = player.prev_tracks.iter().filter(|track| !track.uri.ends_with(":delimiter")).count();
         let queue = rebuild_queue.then(|| {
-            snapshot
-                .tracks
+            player
+                .prev_tracks
                 .iter()
+                .chain(player.track.as_ref())
+                .chain(&player.next_tracks)
                 .enumerate()
                 .filter(|(_, track)| !track.uri.ends_with(":delimiter"))
                 .map(|(provided_index, track)| {
                     track_from_provided(
                         track,
                         self.track_metadata.get(&track.uri).and_then(Option::as_ref),
-                        snapshot.current_duration_ms.filter(|_| provided_index == snapshot.current),
+                        u32::try_from(player.duration).ok().filter(|_| provided_index == player.prev_tracks.len()),
                     )
                 })
                 .collect()
         });
-        let playback = snapshot.playback;
+        let playing = player.is_playing && !player.is_paused;
+        let rate = if playing { player.playback_speed.max(0.0) as f32 } else { 0.0 };
+        let observed_at = Instant::now();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        let age_ms = now.saturating_sub(player.timestamp).max(0);
+        let position_ms = (player.position_as_of_timestamp.max(0) as f64 + age_ms as f64 * f64::from(rate)) as f32;
         send_update(&self.updater, move |app| {
             if let Some(queue) = queue {
-                app.music.replace_queue(queue, index, playback.position_ms, playback.rate, playback.observed_at);
+                app.music.replace_queue(queue, index, position_ms, rate, observed_at);
             } else {
-                app.music.observe(index, playback.position_ms, playback.rate, playback.observed_at);
+                app.music.observe(index, position_ms, rate, observed_at);
             }
-            if playback.playing && !app.music.playing {
+            if playing && !app.music.playing {
                 app.music.last_toggle = Instant::now();
             }
-            app.music.playing = playback.playing;
+            app.music.playing = playing;
             if rebuild_queue {
                 app.refresh_enrichment();
             }
         });
     }
 
-    fn schedule_metadata(&mut self, tracks: &[ProvidedTrack]) {
+    fn schedule_metadata<'a>(&mut self, tracks: impl Iterator<Item = &'a ProvidedTrack>) {
         let requested = tracks
-            .iter()
             .filter(|track| {
                 track.uri.starts_with("spotify:track:")
                     && !track.metadata.contains_key("duration")
@@ -448,15 +404,13 @@ impl SpotifyWorker {
             return;
         }
         let session = self.session.clone();
-        let sender = self.events.clone();
-        let generation = self.generation;
-        tokio::spawn(async move {
+        self.pending.push(Box::pin(async move {
             let metadata = fetch_track_metadata(&session, &requested).await;
-            let _ = sender.send(WorkerEvent::Metadata { generation, requested, values: metadata });
-        });
+            (requested, metadata)
+        }));
     }
 
-    async fn player_command(&self, endpoint: &str, value: Option<u32>) {
+    async fn player_command(&mut self, endpoint: &str, value: Option<u32>) {
         let Some(target) = &self.active_device else { return };
         let mut command = json!({
             "endpoint": endpoint,
@@ -669,7 +623,7 @@ fn playlist_image(attributes: &ListAttributes) -> Option<String> {
         })
 }
 
-async fn fetch_track_metadata(session: &Session, tracks: &[String]) -> HashMap<String, TrackDetails> {
+async fn fetch_track_metadata(session: &Session, tracks: &[String]) -> Metadata {
     let entity_request = tracks
         .iter()
         .map(|uri| EntityRequest {
@@ -693,46 +647,31 @@ async fn fetch_track_metadata(session: &Session, tracks: &[String]) -> HashMap<S
         .flat_map(|array| array.extension_data)
         .filter_map(|data| {
             let bytes = data.extension_data.into_option()?.value;
-            let track = metadata::Track::parse_from_bytes(&bytes).ok()?;
-            Some((data.entity_uri, TrackDetails {
-                name: track.name().to_owned(),
-                artist: track.artist.first().map_or_else(String::new, |artist| artist.name().to_owned()),
-                album: track.album.get_or_default().name().to_owned(),
-                image: track_image_url(&track),
-                duration_ms: u32::try_from(track.duration()).unwrap_or_default(),
-            }))
+            Some((data.entity_uri, metadata::Track::parse_from_bytes(&bytes).ok()?))
         })
         .collect()
 }
 
-struct TrackDetails {
-    name: String,
-    artist: String,
-    album: String,
-    image: Option<String>,
-    duration_ms: u32,
-}
-
 fn track_from_provided(
     track: &ProvidedTrack,
-    track_metadata: Option<&TrackDetails>,
+    track_metadata: Option<&metadata::Track>,
     fallback_duration_ms: Option<u32>,
 ) -> Track {
     let metadata = &track.metadata;
-    let text = |key, fallback: fn(&TrackDetails) -> &String| {
+    let text = |key, fallback: fn(&metadata::Track) -> &str| {
         metadata
             .get(key)
             .filter(|value| !value.is_empty())
             .cloned()
-            .or_else(|| track_metadata.map(fallback).cloned())
+            .or_else(|| track_metadata.map(|track| fallback(track).to_owned()))
             .unwrap_or_default()
     };
     Track {
         id: track.uri.strip_prefix("spotify:track:").and_then(|id| id.parse().ok()),
         uri: track.uri.clone(),
-        name: text("title", |details| &details.name),
-        artist: text("artist_name", |details| &details.artist),
-        album: text("album_title", |details| &details.album),
+        name: text("title", metadata::Track::name),
+        artist: text("artist_name", |track| track.artist.first().map_or("", metadata::Artist::name)),
+        album: text("album_title", |track| track.album.get_or_default().name()),
         image: ["image_url", "image_large_url", "image_xlarge_url"]
             .into_iter()
             .find_map(|key| metadata.get(key).filter(|url| !url.is_empty()))
@@ -740,12 +679,12 @@ fn track_from_provided(
                 url.strip_prefix("spotify:image:")
                     .map_or_else(|| url.clone(), |id| format!("https://i.scdn.co/image/{id}"))
             })
-            .or_else(|| track_metadata.and_then(|details| details.image.clone())),
+            .or_else(|| track_metadata.and_then(track_image_url)),
         duration_ms: metadata
             .get("duration")
             .and_then(|duration| duration.parse().ok())
             .or(fallback_duration_ms)
-            .or_else(|| track_metadata.map(|details| details.duration_ms))
+            .or_else(|| track_metadata.and_then(|track| u32::try_from(track.duration()).ok()))
             .unwrap_or_default(),
         interaction_id: Track::next_interaction_id(),
         runtime: TrackRuntime::default(),

@@ -181,12 +181,12 @@ pub trait ShaderData: Copy {
     fn write(self, words: &mut [u32], offset: usize);
 }
 
-macro_rules! scalar {
-    ($ty:ty, $zero:expr, $decode:expr, $encode:expr) => {
+macro_rules! codec {
+    ($ty:ty, $storage:ty, $zero:expr, $decode:expr, $encode:expr) => {
         impl ShaderData for $ty {
             type View<'a> = Self;
 
-            const WORDS: usize = 1;
+            const WORDS: usize = <$storage>::WORDS;
             const ZERO: Self = $zero;
 
             fn resolve(self, _: ResourceData<'_>) -> Self {
@@ -194,23 +194,48 @@ macro_rules! scalar {
             }
 
             unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
-                // SAFETY: The caller guarantees this word belongs to a complete record.
-                ($decode)(unsafe { *words.index_unchecked(offset) })
+                // SAFETY: The storage codec occupies the same complete record.
+                ($decode)(unsafe { <$storage>::read_unchecked(words, offset) })
             }
 
             fn write(self, words: &mut [u32], offset: usize) {
-                words[offset] = ($encode)(self);
+                ($encode)(self).write(words, offset);
             }
         }
     };
 }
-scalar!(u32, 0, |word| word, |value| value);
-scalar!(i32, 0, |word: u32| word as Self, |value: Self| value as u32);
-scalar!(f32, 0.0, Self::from_bits, Self::to_bits);
-scalar!(bool, false, |word| word != 0, u32::from);
-scalar!(Unorm8x4, Self(0), Self, |value: Self| value.0);
-scalar!(F16x2, Self(0), Self, |value: Self| value.0);
-scalar!(Unorm16x2, Self(0), Self, |value: Self| value.0);
+codec!(i32, u32, 0, |word: u32| word as Self, |value: Self| value as u32);
+codec!(f32, u32, 0.0, Self::from_bits, Self::to_bits);
+codec!(bool, u32, false, |word| word != 0, u32::from);
+codec!(Unorm8x4, u32, Self(0), Self, |value: Self| value.0);
+codec!(F16x2, u32, Self(0), Self, |value: Self| value.0);
+codec!(Unorm16x2, u32, Self(0), Self, |value: Self| value.0);
+codec!(Vec2, [f32; 2], Self::ZERO, Self::from_array, |v: Self| v.to_array());
+codec!(Vec3, [f32; 3], Self::ZERO, Self::from_array, |v: Self| v.to_array());
+codec!(Vec4, [f32; 4], Self::ZERO, Self::from_array, |v: Self| v.to_array());
+codec!(UVec2, [u32; 2], Self::ZERO, Self::from_array, |v: Self| v.to_array());
+codec!(UVec3, [u32; 3], Self::ZERO, Self::from_array, |v: Self| v.to_array());
+codec!(UVec4, [u32; 4], Self::ZERO, Self::from_array, |v: Self| v.to_array());
+
+impl ShaderData for u32 {
+    type View<'a> = Self;
+
+    const WORDS: usize = 1;
+    const ZERO: Self = 0;
+
+    fn resolve(self, _: ResourceData<'_>) -> Self {
+        self
+    }
+
+    unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
+        // SAFETY: The caller guarantees this word belongs to a complete record.
+        unsafe { *words.index_unchecked(offset) }
+    }
+
+    fn write(self, words: &mut [u32], offset: usize) {
+        words[offset] = self;
+    }
+}
 
 impl ShaderData for () {
     type View<'a> = Self;
@@ -252,36 +277,11 @@ impl<T: ShaderData, const N: usize> ShaderData for [T; N] {
     }
 }
 
-macro_rules! vector {
-    ($ty:ty, $scalar:ty, $length:literal, $($field:ident: $index:literal),+) => {
-        impl ShaderData for $ty {
-            type View<'a> = Self;
-            fn resolve(self, _: ResourceData<'_>) -> Self { self }
-            const WORDS: usize = $length;
-            const ZERO: Self = Self::ZERO;
-
-            unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
-                // SAFETY: Each fixed component lies within the caller's complete vector record.
-                unsafe { Self::new($(<$scalar>::read_unchecked(words, offset + $index)),+) }
-            }
-
-            fn write(self, words: &mut [u32], offset: usize) {
-                $(self.$field.write(words, offset + $index);)+
-            }
-        }
-    };
-}
-vector!(Vec2, f32, 2, x: 0, y: 1);
-vector!(Vec3, f32, 3, x: 0, y: 1, z: 2);
-vector!(Vec4, f32, 4, x: 0, y: 1, z: 2, w: 3);
-vector!(UVec2, u32, 2, x: 0, y: 1);
-vector!(UVec3, u32, 3, x: 0, y: 1, z: 2);
-vector!(UVec4, u32, 4, x: 0, y: 1, z: 2, w: 3);
-
 #[doc(hidden)]
 #[derive(Clone, Copy, Default, crate::ShaderData)]
-pub struct FrameData {
+pub struct FrameData<G: ShaderData> {
     pub screen_size: Vec2,
     pub time: f32,
     pub pixel_scale: Vec2,
+    pub globals: G,
 }

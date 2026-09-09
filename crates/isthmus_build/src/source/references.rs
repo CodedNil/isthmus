@@ -59,16 +59,13 @@ impl<'ast> Visit<'ast> for References {
     }
 
     fn visit_block(&mut self, i: &'ast syn::Block) {
-        let scope = self.locals.len();
-        for statement in &i.stmts {
-            if let syn::Stmt::Item(item) = statement
-                && let Some(name) = item_name(item)
-            {
-                self.locals.push(name);
-            }
-        }
-        visit::visit_block(self, i);
-        self.locals.truncate(scope);
+        self.scoped(|this| {
+            this.locals.extend(i.stmts.iter().filter_map(|statement| match statement {
+                syn::Stmt::Item(item) => item_name(item),
+                _ => None,
+            }));
+            visit::visit_block(this, i);
+        });
     }
 
     fn visit_item_fn(&mut self, i: &'ast syn::ItemFn) {
@@ -101,10 +98,10 @@ impl<'ast> Visit<'ast> for References {
 
     fn visit_expr_for_loop(&mut self, i: &'ast syn::ExprForLoop) {
         self.visit_expr(&i.expr);
-        let scope = self.locals.len();
-        self.visit_pat(&i.pat);
-        self.visit_block(&i.body);
-        self.locals.truncate(scope);
+        self.scoped(|this| {
+            this.visit_pat(&i.pat);
+            this.visit_block(&i.body);
+        });
     }
 
     fn visit_arm(&mut self, i: &'ast syn::Arm) {
@@ -117,10 +114,10 @@ impl<'ast> Visit<'ast> for References {
     }
 
     fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
-        let scope = self.locals.len();
-        self.visit_expr(&i.cond);
-        self.visit_block(&i.then_branch);
-        self.locals.truncate(scope);
+        self.scoped(|this| {
+            this.visit_expr(&i.cond);
+            this.visit_block(&i.then_branch);
+        });
         if let Some((_, branch)) = &i.else_branch {
             self.visit_expr(branch);
         }

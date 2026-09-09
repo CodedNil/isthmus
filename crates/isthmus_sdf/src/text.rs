@@ -1,13 +1,11 @@
-//! Vector text geometry and rendering.
-
-use crate::{Sample, Shape};
+use crate::{Sample, Sdf, Shape};
 use core::ops::{Deref, Range};
 #[cfg(target_arch = "spirv")]
-use isthmus::Float as _;
+use isthmus::Float;
 use isthmus::{
-    F16x2, Fragment, Primitive, Program, Quad, ResourceData, ShaderData, Vertex, VertexInput,
+    F16x2, Fragment, Primitive, Program, Rect, ResourceData, ShaderData, Vertex, VertexInput,
     glam::{Vec2, vec2},
-    surface,
+    raster,
 };
 
 #[derive(Clone, Copy, ShaderData)]
@@ -22,10 +20,9 @@ impl Curve {
     }
 }
 
-/// A placed text run; its draw stage supplies glyph data for explicit fragment sampling.
+/// A placed text run with analytic antialiasing and optional outline space.
 #[derive(Clone, Copy, Default, ShaderData)]
 #[shader_data(view = Glyphs<'a>)]
-#[must_use]
 pub struct Text {
     /// Minimum rasterization corner in logical screen coordinates.
     pub min: Vec2,
@@ -50,15 +47,6 @@ impl Text {
     pub const fn outlined(mut self, width: f32) -> Self {
         self.outline = width.max(0.0);
         self
-    }
-
-    /// Returns raster bounds covering all supported font weights and the declared outline.
-    pub fn bounds(self) -> Quad {
-        if self.count == 0 {
-            Quad::new(self.origin, Vec2::splat(-f32::MAX), Vec2::X)
-        } else {
-            Quad::from_min_max(self.min, self.max).expanded(self.outline)
-        }
     }
 
     /// Moves the baseline and rasterization bounds by a logical pixel offset.
@@ -141,20 +129,23 @@ impl Weight {
 }
 
 impl Glyphs<'_> {
-    /// Evaluates the selected weight once; fill and outline masks supply the shader's final alpha.
-    pub fn sample_at(self, point: Vec2) -> Sample {
-        Sample::new(self.distance_at(point), self.line.outline)
-    }
-
     /// Selects a font weight for analytic distance queries.
-    #[must_use]
     pub fn with_weight(self, weight: f32) -> Self {
         let line = Text { prepared_weight: Weight::resolve(self.outlines, weight), ..self.line };
         Self { line, ..self }
     }
+}
 
-    /// Evaluates the analytic glyph distance at a screen position.
-    pub fn distance_at(self, point: Vec2) -> f32 {
+impl Sdf for Glyphs<'_> {
+    fn geometry_bounds(self) -> Rect {
+        if self.count == 0 { Rect::EMPTY } else { Rect::new(self.min, self.max) }
+    }
+
+    fn outline_width(self) -> f32 {
+        self.line.outline
+    }
+
+    fn distance_at(self, point: Vec2) -> f32 {
         let Self { line, placed_glyphs, outlines } = self;
         if line.count == 0 || line.size <= 0.0 {
             return f32::MAX;
@@ -194,7 +185,7 @@ impl Glyphs<'_> {
             };
             let glyph = Glyph::read(outlines, placed.glyph as usize);
             let glyph_point = vec2(line_point.x - placed.x, placed.y - line_point.y);
-            if Shape::rectangle(Quad::from_min_max(glyph.min, glyph.max)).distance_at(glyph_point) < best {
+            if Shape::rectangle(Rect::new(glyph.min, glyph.max)).distance_at(glyph_point) < best {
                 best = best.min(glyph_distance(outlines, glyph.start, glyph.count, weight, glyph_point));
             }
         }
@@ -204,18 +195,19 @@ impl Glyphs<'_> {
 
 impl<P: Program> Primitive<P> for Glyphs<'_> {
     type Outputs = ();
-    type Sample = Self;
+    type Sample = Sample;
 
-    fn vertex_count(self, pixel_size: f32) -> u32 {
-        Primitive::<P>::vertex_count(surface(Some(self.bounds()), |_| ((), 1.0)), pixel_size)
+    fn vertex_count(self) -> u32 {
+        Primitive::<P>::vertex_count(raster(self.bounds(0.0)))
     }
 
     fn vertex(self, input: VertexInput<P>) -> Vertex {
-        surface(Some(self.bounds()), |_| ((), 1.0)).vertex(input)
+        raster(self.bounds(0.0)).vertex(input)
     }
 
-    fn sample(self, _: Fragment, (): ()) -> (Self, f32) {
-        (self, 1.0)
+    fn sample(self, fragment: Fragment, (): ()) -> (Sample, f32) {
+        let sample = self.sample_at(fragment.pixel);
+        (sample, sample.coverage)
     }
 }
 

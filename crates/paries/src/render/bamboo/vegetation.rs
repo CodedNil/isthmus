@@ -39,10 +39,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                 let depth: f32 = plant.depth;
                 let reflected: bool;
             })
-            .vertex({
+            .primitive({
                 let start = if reflected { root } else { top };
                 let end = if reflected { vec2(top.x, root.y * 2.0 - top.y) } else { root };
-                Quad::from_min_max(
+                Rect::new(
                     start.min(end) * size.y + vec2(size.x * 0.5, 0.0),
                     start.max(end) * size.y + vec2(size.x * 0.5, 0.0),
                 )
@@ -128,7 +128,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                     let depth: f32 = plant.depth;
                     let reflected: bool;
                 })
-                .vertex({
+                .primitive({
                     let center = origin + (direction * 0.78 + direction.perp() * 0.35) * reach;
                     Quad::new(
                         (if reflected { vec2(center.x, root.y * 2.0 - center.y) } else { center }) * size.y

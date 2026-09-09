@@ -124,8 +124,8 @@ impl Shader {
         let mut fragment = argument(&mut frame, "fragment")?
             .ok_or_else(|| syn::Error::new_spanned(&frame, "end the shader with .fragment(|frame, fragment| color)"))?;
         let fragment = closure(&mut fragment, 2)?.clone();
-        let mut stage = argument(&mut frame, "vertex")?
-            .ok_or_else(|| syn::Error::new_spanned(&frame, "select .vertex(stage) or .vertex(|frame| stage)"))?;
+        let mut stage = argument(&mut frame, "primitive")?
+            .ok_or_else(|| syn::Error::new_spanned(&frame, "select .primitive(shape) or .primitive(|frame| shape)"))?;
         if !matches!(stage, Expr::Closure(_)) {
             stage = parse_quote!(|_| #stage);
         }
@@ -147,11 +147,11 @@ impl Shader {
             return Err(syn::Error::new_spanned(blend, "expected Blend::Over, Blend::Add or Blend::Replace"));
         };
         if let Expr::MethodCall(call) = &frame
-            && ["blend", "upload", "vertex", "fragment"].iter().any(|name| call.method == *name)
+            && ["blend", "upload", "primitive", "fragment"].iter().any(|name| call.method == *name)
         {
             return Err(syn::Error::new_spanned(
                 call,
-                "shader operations must occur once, in blend/upload/vertex/fragment order",
+                "shader operations must occur once, in blend/upload/primitive/fragment order",
             ));
         }
         let mut outputs = Vec::new();
@@ -343,13 +343,9 @@ impl Shader {
         let setup = quote! {
             type __Program = Program;
             #(#bindings)*
-            // SAFETY: Every surface uploads a complete globals value using this program's codec.
-            let __globals = unsafe {
-                <<__Program as #isthmus::Program>::Globals as #isthmus::ShaderData>::read_unchecked(globals, 0)
-            };
             let __frame = #isthmus::ShaderFrame::<__Program> {
                 time: frame.time, screen_size: frame.screen_size,
-                pixel_size: frame.pixel_scale.max_element(), globals: __globals,
+                pixel_size: frame.pixel_scale.max_element(), globals: frame.globals,
             };
             let __stage = (#stage)(__frame);
         };
@@ -394,13 +390,17 @@ impl Shader {
                 pixel: #isthmus::glam::vec2(pixel.x, pixel.y) * frame.pixel_scale,
                 uv,
                 sample: (),
+                coverage: 1.0,
             };
             let (__sample, __coverage) = #isthmus::Primitive::<__Program>::sample(__stage, __fragment, #read);
-            let #input = #isthmus::Fragment { pixel: __fragment.pixel, uv: __fragment.uv, sample: __sample };
+            let #input = #isthmus::Fragment {
+                pixel: __fragment.pixel, uv: __fragment.uv, sample: __sample, coverage: __coverage,
+            };
             let #frame_input = __frame;
             let color: #isthmus::glam::Vec4 = (|| #body)();
             if __coverage <= 0.0 { #isthmus::spirv_std::arch::kill(); }
-            *out_color = color.truncate().extend(1.0) * (color.w * __coverage);
+            let alpha = color.w * __coverage;
+            *out_color = (color.truncate() * alpha).extend(alpha);
         });
         quote!(#payload #outputs #vertex #fragment)
     }

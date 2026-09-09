@@ -1,5 +1,5 @@
 use super::{
-    ART_SIZE, AudioFeatures, MusicResult, TrackId,
+    ART_SIZE, AudioFeatures, MusicResult, Track, TrackId,
     lyrics::{self, Lyrics},
 };
 use crate::{
@@ -10,6 +10,7 @@ use crate::{
 use arrayvec::ArrayVec;
 use image::{RgbaImage, imageops};
 use isthmus::{Image, Unorm8x4, glam::Vec3};
+use isthmus_sdf::layout::TextCache;
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use reqwest::Client;
 use std::{array, collections::HashMap, hash::Hash, ops::Range, time::Duration};
@@ -95,6 +96,12 @@ impl TrackCache {
 
     pub fn audio(&self, id: Option<TrackId>) -> AudioFeatures {
         id.and_then(|id| self.audio.get(&id)).and_then(Fetch::ready).copied().unwrap_or_default()
+    }
+
+    pub fn lyrics(&mut self, track: &Track, text: &mut TextCache) -> Option<&Lyrics> {
+        let Fetch::Ready(lyrics) = self.lyrics.get_mut(&track.uri)? else { return None };
+        lyrics.prepare(track.duration_ms as f32, text);
+        Some(lyrics)
     }
 }
 
@@ -195,43 +202,29 @@ impl CantusApp {
     }
 }
 
-fn complete_palette(colors: &mut ArrayVec<(Lch, f32), PALETTE_COLORS>) {
-    colors.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let mut index = 1;
-    while index < colors.len() {
-        let (color, weight) = colors[index];
-        if let Some(duplicate) =
-            colors[..index].iter().position(|(other, _)| (color.hue - other.hue).into_degrees().abs() < 20.0)
-        {
-            colors[duplicate].1 += weight;
-            colors.remove(index);
-        } else {
-            index += 1;
-        }
+fn image_palette(image: &RgbaImage) -> [Unorm8x4; PALETTE_COLORS] {
+    let srgb_to_lab = |pixel: &image::Rgba<u8>| {
+        let color: palette::Lab =
+            palette::Srgb::new(f32::from(pixel[0]) / 255.0, f32::from(pixel[1]) / 255.0, f32::from(pixel[2]) / 255.0)
+                .into_color();
+        Vec3::new(color.l, color.a, color.b)
+    };
+    let mut pixels: Vec<Vec3> = image
+        .pixels()
+        .filter(|pixel| {
+            let max = pixel[0].max(pixel[1]).max(pixel[2]);
+            let min = pixel[0].min(pixel[1]).min(pixel[2]);
+            pixel[3] >= 128 && max - min > 30
+        })
+        .map(srgb_to_lab)
+        .collect();
+    let use_harmony = !pixels.is_empty();
+    if !use_harmony {
+        pixels.extend(image.pixels().filter(|pixel| pixel[3] >= 128).map(srgb_to_lab));
     }
-
-    let measured = colors.len();
-    for index in 0..PALETTE_COLORS - measured {
-        let (source, weight) = colors[index % measured];
-        let (lower, upper) = source.analogous();
-        let mut generated = match index {
-            2 if measured == 1 => source.analogous_secondary().0,
-            index if index % 2 == 0 => lower,
-            _ => upper,
-        };
-        generated.chroma = generated.chroma.max(35.0);
-        colors.push((generated, weight * 0.5));
+    if pixels.is_empty() {
+        return [Unorm8x4::default(); PALETTE_COLORS];
     }
-    colors.sort_by(|a, b| a.0.l.total_cmp(&b.0.l));
-}
-
-fn palette_color((color, weight): (Lch, f32), total: f32) -> Unorm8x4 {
-    let rgb: palette::Srgb = color.into_color();
-    let rgb = rgb.clamp();
-    Unorm8x4::from_vec4(Vec3::new(rgb.red, rgb.green, rgb.blue).extend((weight / total).max(1.0 / 255.0)))
-}
-
-fn dominant_colors(pixels: &mut [Vec3]) -> ArrayVec<(Lch, f32), PALETTE_COLORS> {
     let mut buckets = ArrayVec::<Range<usize>, PALETTE_COLORS>::new();
     buckets.push(0..pixels.len());
 
@@ -265,43 +258,48 @@ fn dominant_colors(pixels: &mut [Vec3]) -> ArrayVec<(Lch, f32), PALETTE_COLORS> 
         buckets.push(middle..range.end);
     }
 
-    buckets
+    let mut colors = buckets
         .into_iter()
         .map(|range| {
             let weight = range.len() as f32;
             let mean = pixels[range].iter().copied().sum::<Vec3>() / weight;
             (palette::Lab::new(mean.x, mean.y, mean.z).into_color(), weight)
         })
-        .collect()
-}
-
-fn image_palette(image: &RgbaImage) -> [Unorm8x4; PALETTE_COLORS] {
-    let srgb_to_lab = |pixel: &image::Rgba<u8>| {
-        let color: palette::Lab =
-            palette::Srgb::new(f32::from(pixel[0]) / 255.0, f32::from(pixel[1]) / 255.0, f32::from(pixel[2]) / 255.0)
-                .into_color();
-        Vec3::new(color.l, color.a, color.b)
-    };
-    let mut pixels: Vec<Vec3> = image
-        .pixels()
-        .filter(|pixel| {
-            let max = pixel[0].max(pixel[1]).max(pixel[2]);
-            let min = pixel[0].min(pixel[1]).min(pixel[2]);
-            pixel[3] >= 128 && max - min > 30
-        })
-        .map(srgb_to_lab)
-        .collect();
-    let use_harmony = !pixels.is_empty();
-    if !use_harmony {
-        pixels.extend(image.pixels().filter(|pixel| pixel[3] >= 128).map(srgb_to_lab));
-    }
-    if pixels.is_empty() {
-        return [Unorm8x4::default(); PALETTE_COLORS];
-    }
-    let mut colors = dominant_colors(&mut pixels);
+        .collect::<ArrayVec<(Lch, f32), PALETTE_COLORS>>();
     if use_harmony {
-        complete_palette(&mut colors);
+        colors.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut index = 1;
+        while index < colors.len() {
+            let (color, weight) = colors[index];
+            if let Some(duplicate) =
+                colors[..index].iter().position(|(other, _)| (color.hue - other.hue).into_degrees().abs() < 20.0)
+            {
+                colors[duplicate].1 += weight;
+                colors.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+
+        let measured = colors.len();
+        for index in 0..PALETTE_COLORS - measured {
+            let (source, weight) = colors[index % measured];
+            let (lower, upper) = source.analogous();
+            let mut generated = match index {
+                2 if measured == 1 => source.analogous_secondary().0,
+                index if index % 2 == 0 => lower,
+                _ => upper,
+            };
+            generated.chroma = generated.chroma.max(35.0);
+            colors.push((generated, weight * 0.5));
+        }
+        colors.sort_by(|a, b| a.0.l.total_cmp(&b.0.l));
     }
-    let total = colors.iter().map(|(_, weight)| weight).sum();
-    array::from_fn(|index| palette_color(colors[index % colors.len()], total))
+    let total: f32 = colors.iter().map(|(_, weight)| weight).sum();
+    array::from_fn(|index| {
+        let (color, weight) = colors[index % colors.len()];
+        let rgb: palette::Srgb = color.into_color();
+        let rgb = rgb.clamp();
+        Unorm8x4::from_vec4(Vec3::new(rgb.red, rgb.green, rgb.blue).extend((weight / total).max(1.0 / 255.0)))
+    })
 }

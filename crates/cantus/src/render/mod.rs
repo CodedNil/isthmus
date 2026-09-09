@@ -1,6 +1,6 @@
 use crate::{app::Background, config::Config, interaction::Interaction, music::Music};
 use isthmus::prelude::*;
-use isthmus_sdf::{Shape, Text, layout::TextCache};
+use isthmus_sdf::{layout::TextCache, prelude::*};
 use sdf::refract;
 
 pub mod launcher;
@@ -77,6 +77,12 @@ impl Bar {
             playhead_x: context.config.history_width + context.config.timeline_past_minutes * 60_000.0 * px_per_ms,
             px_per_ms,
         };
+        let drag = context.interaction.drag_motion();
+        music.update_timeline(
+            drag.map_or(0.0, |(offset, _)| offset.x / px_per_ms),
+            drag.is_some(),
+            context.frame.delta_time,
+        );
         if context.config.lyrics_enabled {
             lyrics::show(context, music, layout);
         }
@@ -92,17 +98,17 @@ impl Bar {
 }
 
 impl UiContext<'_> {
-    fn paint_text(&mut self, quad: Quad, radius: f32, line: Text, color: Vec4) {
+    fn paint_text(&mut self, rect: Rect, radius: f32, line: Text, color: Vec4) {
         shader!(
             self.frame
                 .upload({
-                    let quad: Quad;
+                    let rect: Rect;
                     let radius: f32;
                     let line: Text;
-                    let text_color: Unorm8x4 = Unorm8x4::from_vec4(color);
+                    let color: Vec4;
                 })
-                .vertex(|frame| refract(Shape::rounded_rect(quad, radius), frame, line.bounds()))
-                .fragment(|_, surface| text_color.to_vec4().opacity(line.sample_at(surface.content).fill()))
+                .primitive(|frame| refract(Shape::rounded_rect(rect, radius), frame, line))
+                .fragment(|_, _| color)
         );
     }
 }

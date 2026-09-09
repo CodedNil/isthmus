@@ -1,5 +1,3 @@
-//! Browser services and permission-gated geolocation.
-
 use super::DesktopApp;
 use crate::{
     app::{AppUpdater, View, send_update},
@@ -167,7 +165,10 @@ async fn run_web() -> Result<(), String> {
     let (mut gpu, surface) = Renderer::new(
         isthmus::wgpu::SurfaceTarget::Canvas(canvas.clone()),
         [(width * scale).round() as u32, (height * scale).round() as u32],
-        TextCache::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf")),
+        TextCache::new(&[
+            include_bytes!("../../../../assets/NotoSans-Variable.ttf"),
+            include_bytes!("../../../../assets/NotoSansSymbols-Music.ttf"),
+        ]),
     )
     .await
     .map_err(|error| error.to_string())?;

@@ -137,7 +137,6 @@ impl Gpu {
 
     pub(crate) fn draw_surface(&self, pass: &mut wgpu::RenderPass<'_>, surface: &mut SurfaceTarget) {
         let buffers = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|index| match index as u32 {
-            bindings::GLOBALS => &surface.globals,
             bindings::FRAMES => &surface.frame,
             _ => &self.buffers[index],
         });

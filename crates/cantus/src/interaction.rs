@@ -1,6 +1,6 @@
 use crate::render::{HELD_PRESSURE, RIPPLE_COUNT, RipplePulse};
-use isthmus::{Quad, glam::Vec2};
-use isthmus_sdf::Shape;
+use isthmus::{Rect, glam::Vec2};
+use isthmus_sdf::Sdf;
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     mem,
@@ -49,7 +49,7 @@ pub struct Interaction {
     held_seconds: f32,
     previous_held_seconds: f32,
     widgets: Vec<Widget>,
-    pub input_regions: Vec<Quad>,
+    pub input_regions: Vec<Rect>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -116,21 +116,21 @@ impl Interaction {
         self.scroll = 0;
     }
 
-    pub fn interact<S: Fn(Vec2) -> f32 + Copy + 'static>(&mut self, identity: impl Hash, shape: Shape<S>) -> Response {
+    pub fn interact(&mut self, identity: impl Hash, shape: impl Sdf + 'static) -> Response {
         self.interact_with(shape, Active::Widget(key(identity)))
     }
 
-    pub fn drag<S: Fn(Vec2) -> f32 + Copy + 'static>(&mut self, key: u64, shape: Shape<S>) -> Response {
+    pub fn drag(&mut self, key: u64, shape: impl Sdf + 'static) -> Response {
         self.interact_with(shape, Active::Drag(key))
     }
 
-    pub fn pointer_in<S: Fn(Vec2) -> f32 + Copy>(&self, shape: Shape<S>) -> bool {
+    pub fn pointer_in(&self, shape: impl Sdf) -> bool {
         self.pointer().is_some_and(|pointer| shape.contains(pointer))
     }
 
-    pub fn input_region(&mut self, quad: impl Into<Quad>) {
-        if self.enabled {
-            self.input_regions.push(quad.into());
+    pub fn input_region(&mut self, rect: Rect) {
+        if self.enabled && !rect.is_empty() {
+            self.input_regions.push(rect);
         }
     }
 
@@ -203,7 +203,9 @@ impl Interaction {
                 self.pointer = Pointer::Held { position, origin: position, dragging: false };
                 self.hot = self.widgets.iter().rev().find(|widget| (widget.contains)(position)).map(|widget| widget.id);
                 self.active = self.hot;
-                self.events.push(ButtonEvent::Press(position));
+                if self.active.is_some() {
+                    self.events.push(ButtonEvent::Press(position));
+                }
                 self.held_seconds = 0.0;
                 self.previous_held_seconds = 0.0;
             }
@@ -242,7 +244,7 @@ impl Interaction {
             .map(|widget| widget.id)
     }
 
-    fn interact_with<S: Fn(Vec2) -> f32 + Copy + 'static>(&mut self, shape: Shape<S>, id: Active) -> Response {
+    fn interact_with(&mut self, shape: impl Sdf + 'static, id: Active) -> Response {
         if !self.enabled {
             return Response::default();
         }
