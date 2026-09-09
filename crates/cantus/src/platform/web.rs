@@ -10,8 +10,10 @@ use crate::{
 use gloo_events::{EventListener, EventListenerOptions};
 use gloo_render::request_animation_frame;
 use gloo_timers::future::TimeoutFuture;
-use isthmus::glam::vec2;
+use isthmus::{glam::vec2, wgpu::SurfaceTarget};
 use isthmus_sdf::layout::TextCache;
+#[cfg(feature = "paries")]
+use paries::render::{Renderer as WallpaperRenderer, bamboo::Bamboo};
 use std::{
     cell::RefCell,
     future::Future,
@@ -120,7 +122,7 @@ pub fn desktop_apps() -> Vec<DesktopApp> {
     .into_iter()
     .map(|(name, comment)| DesktopApp {
         name: name.into(),
-        exec: Vec::new(),
+        exec: vec![format!("demo:{name}")],
         comment: comment.into(),
         action: None,
         icon: None,
@@ -145,33 +147,42 @@ pub fn trigger_launcher() -> std::io::Result<()> {
 
 pub fn run() {}
 
-async fn run_web() -> Result<(), String> {
+async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
     let window = web_sys::window().ok_or("browser window is unavailable")?;
-    let canvas = window
-        .document()
-        .and_then(|document| document.get_element_by_id("cantus"))
-        .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
-        .ok_or("#cantus is not a canvas")?;
+    let canvas_by_id = |id| {
+        window
+            .document()
+            .and_then(|document| document.get_element_by_id(id))
+            .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .ok_or_else(|| format!("#{id} is not a canvas"))
+    };
+    let canvas = canvas_by_id("cantus")?;
     let (updater, updates) = std::sync::mpsc::channel();
     let app = Rc::new(RefCell::new(crate::app::CantusApp::new(updater)));
-    let logical_size = || {
-        [
+    let dimensions = || {
+        let size = [
             window.inner_width().ok().and_then(|value| value.as_f64()).unwrap_or(1.0) as f32,
             window.inner_height().ok().and_then(|value| value.as_f64()).unwrap_or(1.0) as f32,
-        ]
+        ];
+        (size.into(), size.map(|axis| (axis * window.device_pixel_ratio() as f32).round() as u32))
     };
-    let [width, height] = logical_size();
-    let scale = window.device_pixel_ratio() as f32;
+    let (_, physical) = dimensions();
     let (mut gpu, surface) = Renderer::new(
-        isthmus::wgpu::SurfaceTarget::Canvas(canvas.clone()),
-        [(width * scale).round() as u32, (height * scale).round() as u32],
+        SurfaceTarget::Canvas(canvas.clone()),
+        physical,
         TextCache::new(&[
             include_bytes!("../../../../assets/NotoSans-Variable.ttf"),
             include_bytes!("../../../../assets/NotoSansSymbols-Music.ttf"),
         ]),
     )
-    .await
-    .map_err(|error| error.to_string())?;
+    .await?;
+
+    #[cfg(feature = "paries")]
+    let (mut wallpaper, wallpaper_surface, mut bamboo) = {
+        let (renderer, surface) =
+            WallpaperRenderer::new(SurfaceTarget::Canvas(canvas_by_id("paries")?), physical, ()).await?;
+        (renderer, surface, Bamboo::default())
+    };
 
     let _pointer =
         ["pointerenter", "pointermove", "pointerdown", "pointerup", "pointerleave", "pointercancel"].map(|name| {
@@ -223,14 +234,10 @@ async fn run_web() -> Result<(), String> {
             let mut app = key_app.borrow_mut();
             if event.ctrl_key() && event.key() == "k" {
                 app.launcher.toggle();
-                app.interaction = Default::default();
                 event.prevent_default();
                 return;
             }
             if app.launcher.input(&event.key(), event.shift_key(), event.ctrl_key()) {
-                if !app.launcher.open {
-                    app.interaction = Default::default();
-                }
                 event.prevent_default();
             }
         },
@@ -243,9 +250,6 @@ async fn run_web() -> Result<(), String> {
         move |event| {
             let event = event.unchecked_ref::<web_sys::ClipboardEvent>();
             let mut app = paste_app.borrow_mut();
-            if !app.launcher.open {
-                return;
-            }
             if let Some(data) = event.clipboard_data()
                 && let Ok(text) = data.get_data("text/plain")
             {
@@ -256,33 +260,45 @@ async fn run_web() -> Result<(), String> {
         },
     );
 
+    let mut rendered_at = 0.0;
+    #[cfg(feature = "paries")]
+    let mut wallpaper_at = 0.0;
     loop {
-        let [width, height] = logical_size();
-        let scale = window.device_pixel_ratio() as f32;
-        let physical = [(width * scale).round() as u32, (height * scale).round() as u32];
-        if canvas.width() != physical[0] || canvas.height() != physical[1] {
-            canvas.set_width(physical[0]);
-            canvas.set_height(physical[1]);
-            gpu.resize(surface, physical);
+        let (sender, frame) = oneshot::channel();
+        let _animation = request_animation_frame(move |time| {
+            let _ = sender.send(time);
+        });
+        let Ok(time) = frame.await else { break };
+        // Keep the demo at 60 fps even on high-refresh monitors, without accumulating timing drift.
+        let elapsed = time - rendered_at;
+        if elapsed < 1000.0 / 60.0 {
+            continue;
         }
+        rendered_at = time - elapsed % (1000.0 / 60.0);
+        let (size, physical) = dimensions();
+        gpu.resize(surface, physical);
         {
             let mut app = app.borrow_mut();
             while let Ok(update) = updates.try_recv() {
                 update(&mut app);
             }
+            app.music.advance_demo();
             app.refresh();
+            #[cfg(feature = "paries")]
+            if time - wallpaper_at >= 1000.0 / 30.0 {
+                wallpaper_at = time - (time - wallpaper_at) % (1000.0 / 30.0);
+                wallpaper.resize(wallpaper_surface, physical);
+                wallpaper.render(|render| {
+                    render.surface(wallpaper_surface, size, (), |mut frame| bamboo.show(&mut frame));
+                })?;
+            }
             gpu.render(|render| {
-                app.draw(render, surface, vec2(width, height), View::Combined);
-            })
-            .map_err(|error| error.to_string())?;
+                app.draw(render, surface, size, View { bar: true, launcher: true });
+            })?;
             if let Some(text) = app.launcher.pending_copy.take() {
                 let _ = window.navigator().clipboard().write_text(&text);
             }
         }
-        let (sender, frame) = oneshot::channel();
-        let _animation = request_animation_frame(move |_| {
-            let _ = sender.send(());
-        });
-        let _ = frame.await;
     }
+    Ok(())
 }

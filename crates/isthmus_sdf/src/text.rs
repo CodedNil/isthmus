@@ -9,8 +9,7 @@ use isthmus::{
 };
 
 #[derive(Clone, Copy, ShaderData)]
-#[doc(hidden)]
-pub struct Curve {
+pub(crate) struct Curve {
     pub(super) points: [F16x2; 3],
 }
 
@@ -78,8 +77,8 @@ impl Text {
     }
 }
 
+/// A text run resolved against the glyph and outline buffers, ready for SDF sampling.
 #[derive(Clone, Copy)]
-#[doc(hidden)]
 pub struct Glyphs<'a> {
     pub line: Text,
     pub placed_glyphs: &'a [u32],
@@ -212,8 +211,7 @@ impl<P: Program> Primitive<P> for Glyphs<'_> {
 }
 
 #[derive(Clone, Copy, ShaderData)]
-#[doc(hidden)]
-pub struct Glyph {
+pub(crate) struct Glyph {
     pub(super) min: Vec2,
     pub(super) max: Vec2,
     pub(super) start: u32,
@@ -221,8 +219,7 @@ pub struct Glyph {
 }
 
 #[derive(Clone, Copy, PartialEq, ShaderData)]
-#[doc(hidden)]
-pub struct PlacedGlyph {
+pub(crate) struct PlacedGlyph {
     pub x: f32,
     pub y: f32,
     pub glyph: u32,
@@ -250,7 +247,6 @@ fn quadratic_roots(a: f32, b: f32, c: f32) -> [f32; 2] {
     [q / a, c / q]
 }
 
-#[expect(clippy::manual_range_contains, reason = "Range::contains does not lower through Rust-GPU")]
 #[inline(never)]
 fn curve_winding(start: Vec2, control: Vec2, end: Vec2, point: Vec2) -> i32 {
     let a = start.y - 2.0 * control.y + end.y;
@@ -261,7 +257,7 @@ fn curve_winding(start: Vec2, control: Vec2, end: Vec2, point: Vec2) -> i32 {
     }
     let crossing = |t: f32| {
         let direction = 2.0 * a * t + b;
-        let crosses = if direction > 0.0 { t >= 0.0 && t < 1.0 } else { t > 0.0 && t <= 1.0 };
+        let crosses = if direction > 0.0 { (0.0..1.0).contains(&t) } else { t > 0.0 && t <= 1.0 };
         if crosses && quadratic(start, control, end, t).x > point.x {
             if direction > 0.0 {
                 1

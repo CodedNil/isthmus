@@ -38,6 +38,7 @@ enum Active {
 
 #[derive(Default)]
 pub struct Interaction {
+    /// Set once per surface draw: inactive surfaces render without registering or receiving input.
     pub enabled: bool = true,
     pointer: Pointer = Pointer::Outside(Vec2::ZERO),
     pressure: f32,

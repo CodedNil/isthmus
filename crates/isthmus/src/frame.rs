@@ -1,5 +1,5 @@
 use crate::{
-    Fragment, Primitive, Program, ShaderFrame,
+    Buffer, Fragment, Image, Primitive, Program, ShaderData, ShaderFrame,
     backend::{gpu::Gpu, surface::SurfaceTarget},
     bindings,
 };
@@ -28,7 +28,7 @@ impl<P: Program> Frame<'_, P> {
     }
 
     #[doc(hidden)]
-    pub fn capture_buffer<T: crate::ShaderData>(&mut self, buffer: crate::Buffer<'_, T>) -> [u32; 2] {
+    pub fn capture_buffer<T: ShaderData>(&mut self, buffer: Buffer<'_, T>) -> [u32; 2] {
         let payload = &mut self.gpu.buffers[bindings::PAYLOAD as usize];
         let range = [
             u32::try_from(payload.words.len()).expect("payload exceeds u32"),
@@ -56,7 +56,7 @@ impl<P: Program> Frame<'_, P> {
     }
 
     #[doc(hidden)]
-    pub fn record(&mut self, shader: usize, vertices: u32, value: impl crate::ShaderData, images: &[&crate::Image]) {
+    pub fn record(&mut self, shader: usize, vertices: u32, value: impl ShaderData, images: &[&Image]) {
         self.gpu.emit(self.surface, shader, vertices, value, images);
     }
 }

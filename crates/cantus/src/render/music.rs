@@ -125,7 +125,7 @@ impl MusicView {
             && let Some((index, position_ms)) = playhead_track
         {
             let track = &music.queue[index];
-            if track.id.is_some() {
+            if track.duration_ms > 0 {
                 music.seek(index, track.duration_ms, position_ms / track.duration_ms as f32);
             }
         }
@@ -237,13 +237,15 @@ impl MusicView {
             let shape = music_shape(pill, icon_supports);
             let bounds = shape.bounds(0.0);
             let (min, max) = (bounds.min, bounds.max);
+            // Halve the search interval until it is at most half a pixel wide.
+            let steps = bounds.size().x.max(1.0).log2().ceil() as u32;
             for y in min.y.floor() as i32..max.y.ceil() as i32 {
                 let point = vec2(pill.center().x, y as f32 + 0.5);
                 if !shape.contains(point) {
                     continue;
                 }
                 let (mut inside, mut outside) = (0.0, bounds.size().x * 0.5);
-                while outside - inside > 0.5 {
+                for _ in 0..steps {
                     let middle = (inside + outside) * 0.5;
                     if shape.contains(point + vec2(middle, 0.0)) {
                         inside = middle;
@@ -255,9 +257,8 @@ impl MusicView {
             }
             let body = context.interaction.drag(track.interaction_id, shape);
             let mut hovered = body.hovered;
-            if body.clicked && track.id.is_some() {
+            if body.clicked && track.duration_ms > 0 {
                 let fraction = if layout.natural_start + track.duration_ms as f32 * bar.px_per_ms <= history_width
-                    || track.duration_ms == 0
                     || layout.queue_index == music.timeline.index && mouse_pos.x <= x + pill.size().x * 0.05
                 {
                     0.0

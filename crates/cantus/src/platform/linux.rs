@@ -686,6 +686,13 @@ impl Drop for WaylandSurface {
 }
 
 impl LayerShellApp {
+    fn bar_height(&self) -> f32 {
+        let config = &self.cantus.config;
+        let extension = (f32::from(config.weathertime_enabled) * weathertime::EXTENSION)
+            .max(if config.lyrics_enabled { lyrics::height(&self.cantus.music) } else { 0.0 });
+        config.height + PANEL_START + extension + PANEL_OVERFLOW
+    }
+
     fn create_surface(&self, kind: SurfaceKind, qhandle: &QueueHandle<Self>) -> WaylandSurface {
         let launcher = matches!(kind, SurfaceKind::Launcher);
         let config = &self.cantus.config;
@@ -719,12 +726,7 @@ impl LayerShellApp {
                     }
                 },
         );
-        let extension = if config.weathertime_enabled {
-            weathertime::EXTENSION
-        } else {
-            f32::from(config.lyrics_enabled) * lyrics::EXTENSION
-        };
-        let height = if launcher { 0.0 } else { config.height + PANEL_START + extension + PANEL_OVERFLOW };
+        let height = if launcher { 0.0 } else { self.bar_height() };
         layer.set_size(0, height as u32);
         layer.set_exclusive_zone(if launcher {
             0
@@ -801,6 +803,13 @@ impl LayerShellApp {
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
         self.sync_launcher_surface(qhandle);
+        let height = self.bar_height() as u32;
+        if let Some(surface) = &self.surfaces[0]
+            && surface.size.y as u32 != height
+        {
+            surface.layer.set_size(0, height);
+            surface.native.wl.commit();
+        }
         if self.frame_callback.is_some()
             || self.surfaces[0].is_none()
             || self.surfaces.iter().flatten().any(|surface| !surface.configured)
@@ -833,12 +842,10 @@ impl LayerShellApp {
         if let Err(error) = self.gpu.as_mut().unwrap().render(|render| {
             for (index, surface) in self.surfaces.iter().enumerate() {
                 if let Some(surface) = surface {
-                    self.cantus.draw(
-                        render,
-                        surface.gpu.unwrap(),
-                        surface.size,
-                        if index == 0 { View::Bar } else { View::Launcher },
-                    );
+                    self.cantus.draw(render, surface.gpu.unwrap(), surface.size, View {
+                        bar: index == 0,
+                        launcher: index != 0,
+                    });
                 }
             }
         }) {

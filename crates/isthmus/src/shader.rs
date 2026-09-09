@@ -46,7 +46,7 @@ pub struct Vertex<T = ()> {
 }
 
 impl Vertex {
-    #[doc(hidden)]
+    /// Attaches inter-stage outputs to this vertex.
     pub const fn with<T>(self, outputs: T) -> Vertex<T> {
         Vertex { position: self.position, uv: self.uv, outputs }
     }
@@ -74,7 +74,7 @@ pub struct Surface<F> {
 }
 
 /// Pairs conservative bounds with a shader returning prepared data and coverage.
-pub fn surface<F>(bounds: Rect, sample: F) -> Surface<F> {
+pub const fn surface<F>(bounds: Rect, sample: F) -> Surface<F> {
     Surface { bounds, sample }
 }
 

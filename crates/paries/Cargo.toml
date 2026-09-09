@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 isthmus = { path = "../isthmus" }
 
-[target.'cfg(not(target_arch = "spirv"))'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 pollster = "1.0.1"
 raw-window-handle = "0.6.2"
 wayland-backend = { version = "0.3.17", features = ["rwh_06", "client_system"] }

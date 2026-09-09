@@ -18,11 +18,9 @@ use tracing_subscriber::{Layer, filter::Targets, fmt, layer::SubscriberExt, util
 use web_time::Instant;
 
 #[derive(Clone, Copy)]
-#[expect(dead_code, reason = "native and browser hosts select different views")]
-pub enum View {
-    Bar,
-    Launcher,
-    Combined,
+pub struct View {
+    pub bar: bool,
+    pub launcher: bool,
 }
 
 pub type Update = Box<dyn FnOnce(&mut CantusApp) + Send>;
@@ -99,14 +97,11 @@ impl CantusApp {
         screen_size: Vec2,
         view: View,
     ) {
-        let bar = !matches!(view, View::Launcher);
-        let launcher = !matches!(view, View::Bar);
-        let launcher_open = self.launcher.open;
-        let owns_input = if launcher_open { launcher } else { bar };
+        let owns_input = if self.launcher.open { view.launcher } else { view.bar };
+        self.interaction.enabled = owns_input;
         if owns_input {
             self.interaction.begin_frame(render.delta_time, render.time);
         }
-        self.interaction.enabled = owns_input;
         let globals = Globals {
             pointer: self.interaction.mouse_pos(),
             pressure: self.interaction.pressure(),
@@ -115,22 +110,16 @@ impl CantusApp {
         };
         render.surface(surface, screen_size, globals, |frame| {
             let mut context = UiContext { frame, config: &self.config, interaction: &mut self.interaction };
-            context.interaction.enabled = !self.launcher.open;
-            if bar {
+            if view.bar {
                 self.bar.show(&mut context, &mut self.music);
             }
-            if launcher {
-                context.interaction.enabled = true;
+            if view.launcher {
                 self.launcher.show(&mut context);
             }
-            context.interaction.enabled = true;
-            if owns_input {
-                context.interaction.end_frame();
-            }
-            if launcher_open != self.launcher.open {
-                *context.interaction = Interaction::default();
-            }
         });
+        if owns_input {
+            self.interaction.end_frame();
+        }
     }
 }
 

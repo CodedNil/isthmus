@@ -1,0 +1,386 @@
+[
+  {
+    "id": "71PmZqBXH0RUETqxpwlV0w",
+    "name": "Style",
+    "artist": "Taylor Swift",
+    "album": "1989 (Deluxe Edition)",
+    "duration_ms": 231000,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/a7/98/d8/a798d867-344d-2bf2-fbfe-d2d1412dcef8/14UMDIM03793.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.786,
+      "danceability": 0.598,
+      "acousticness": 0.00256,
+      "tempo": 95.021,
+      "valence": 0.456,
+      "instrumentalness": 0.00143
+    }
+  },
+  {
+    "id": "3hUxzQpSfdDqwM3ZTFQY0K",
+    "name": "august",
+    "artist": "Taylor Swift",
+    "album": "folklore",
+    "duration_ms": 261923,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/7c/04/ba/7c04ba17-2ff8-21b3-0ac0-7d141f86e924/20UMGIM64216.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.623,
+      "danceability": 0.532,
+      "acousticness": 0.538,
+      "tempo": 89.937,
+      "valence": 0.403,
+      "instrumentalness": 7.28e-05
+    }
+  },
+  {
+    "id": "7ne4VBA60CxGM75vw0EYad",
+    "name": "That’s So True",
+    "artist": "Gracie Abrams",
+    "album": "The Secret of Us (Deluxe)",
+    "duration_ms": 166300,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/d2/f8/99/d2f89987-d2a5-45a5-1746-c0841c7e9843/24UM1IM17286.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.808,
+      "danceability": 0.554,
+      "acousticness": 0.214,
+      "tempo": 108.548,
+      "valence": 0.372,
+      "instrumentalness": 0
+    }
+  },
+  {
+    "id": "51rfRCiUSvxXlCSCfIztBy",
+    "name": "I Love You, I'm Sorry",
+    "artist": "Gracie Abrams",
+    "album": "The Secret of Us",
+    "duration_ms": 157139,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/2a/3a/f3/2a3af30e-04e3-37f0-0d2e-5303d72f7229/24UMGIM43488.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.406,
+      "danceability": 0.53,
+      "acousticness": 0.656,
+      "tempo": 115.94,
+      "valence": 0.338,
+      "instrumentalness": 0
+    }
+  },
+  {
+    "id": "6z3o8dAIjtnkXFNErciWHS",
+    "name": "The Walls Are Way Too Thin",
+    "artist": "Holly Humberstone",
+    "album": "The Walls Are Way Too Thin - EP",
+    "duration_ms": 221933,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/63/fe/bd/63febdb9-1dd6-9348-4af9-8e0fb663827b/21UMGIM39677.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.574,
+      "danceability": 0.764,
+      "acousticness": 0.508,
+      "tempo": 122.803,
+      "valence": 0.609,
+      "instrumentalness": 0
+    }
+  },
+  {
+    "id": "58VF5ob7qRB3yUzOYEAhyf",
+    "name": "Lost The Breakup",
+    "artist": "Maisie Peters",
+    "album": "Lost The Breakup - Single",
+    "duration_ms": 189423,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/27/eb/8a/27eb8ab4-ad22-c6c6-d646-7202afaa1a97/5054197644436.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.884,
+      "danceability": 0.593,
+      "acousticness": 0.0351,
+      "tempo": 147.092,
+      "valence": 0.607,
+      "instrumentalness": 5.54e-06
+    }
+  },
+  {
+    "id": "0ftA4eiNTY5DHlL5SOfaAv",
+    "name": "Primadonna",
+    "artist": "Marina and The Diamonds",
+    "album": "Electra Heart (Deluxe Version)",
+    "duration_ms": 221075,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/4b/dc/88/4bdc8837-8831-9277-a89c-db947c21ea36/825646580118.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.689,
+      "danceability": 0.66,
+      "acousticness": 0.091,
+      "tempo": 127.979,
+      "valence": 0.427,
+      "instrumentalness": 0
+    }
+  },
+  {
+    "id": "0FS7B5o3QyvOD8eWjnbLoO",
+    "name": "Run Away with Me",
+    "artist": "Carly Rae Jepsen",
+    "album": "E•MO•TION",
+    "duration_ms": 251327,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/8e/b9/9b/8eb99b2a-f730-0df5-3c2c-4175d57cd84d/15UMGIM31527.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.7,
+      "danceability": 0.561,
+      "acousticness": 0.0168,
+      "tempo": 119.015,
+      "valence": 0.298,
+      "instrumentalness": 5.43e-05
+    }
+  },
+  {
+    "id": "5rqQv5jUcg58xsi1nuZDl9",
+    "name": "Falling Asleep at the Wheel",
+    "artist": "Holly Humberstone",
+    "album": "Falling Asleep at the Wheel - EP (Apple Music Up Next Film Edition)",
+    "duration_ms": 203248,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/99/86/e9/9986e981-fd33-f7be-e6b5-827de2685b34/5060726324977.png/300x300bb.jpg",
+    "audio": {
+      "energy": 0.626,
+      "danceability": 0.662,
+      "acousticness": 0.736,
+      "tempo": 121.828,
+      "valence": 0.321,
+      "instrumentalness": 0
+    }
+  },
+  {
+    "id": "2ls70nUDfjzm1lSRDuKxmw",
+    "name": "Blank Space",
+    "artist": "Taylor Swift",
+    "album": "1989 (Deluxe Edition)",
+    "duration_ms": 231827,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/a7/98/d8/a798d867-344d-2bf2-fbfe-d2d1412dcef8/14UMDIM03793.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.678,
+      "danceability": 0.752,
+      "acousticness": 0.085,
+      "tempo": 96.009,
+      "valence": 0.583,
+      "instrumentalness": 1.64e-06
+    }
+  },
+  {
+    "id": "4wtwnG5mxuFcKNVPGBi6hK",
+    "name": "He Said She Said",
+    "artist": "CHVRCHES",
+    "album": "Screen Violence",
+    "duration_ms": 189385,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/22/27/55/222755ea-c652-807f-e95f-7a0812265dc9/5056167164074.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.619,
+      "danceability": 0.577,
+      "acousticness": 0.0317,
+      "tempo": 126.915,
+      "valence": 0.297,
+      "instrumentalness": 0.000154
+    }
+  },
+  {
+    "id": "75Xur1uT892l0A6ypOxrhw",
+    "name": "Jellyfish",
+    "artist": "Sigrid",
+    "album": "Jellyfish - Single",
+    "duration_ms": 186436,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/2c/21/51/2c215100-a4aa-58d5-8d24-9a18e65be3f7/25UMGIM48718.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.874,
+      "danceability": 0.472,
+      "acousticness": 0.00892,
+      "tempo": 131.926,
+      "valence": 0.793,
+      "instrumentalness": 0.00872
+    }
+  },
+  {
+    "id": "6EFBcGR6chnBv9rmSN0ObX",
+    "name": "The Little Mess You Made",
+    "artist": "The Favors, FINNEAS & Ashe",
+    "album": "The Dream",
+    "duration_ms": 201284,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/32/59/71/32597154-2d4d-158e-fe5b-64ac24de72de/25UMGIM73476.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.466,
+      "danceability": 0.661,
+      "acousticness": 0.0271,
+      "tempo": 108.064,
+      "valence": 0.367,
+      "instrumentalness": 3.31e-05
+    }
+  },
+  {
+    "id": "3fVnlF4pGqWI9flVENcT28",
+    "name": "Wildest Dreams",
+    "artist": "Taylor Swift",
+    "album": "1989",
+    "duration_ms": 220433,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/32/1d/8e/321d8e9e-d806-b545-fd30-5c7aef575abc/14UMGIM34829.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.664,
+      "danceability": 0.553,
+      "acousticness": 0.0709,
+      "tempo": 140.06,
+      "valence": 0.467,
+      "instrumentalness": 0.0056
+    }
+  },
+  {
+    "id": "1BxfuPKGuaTgP7aM0Bbdwr",
+    "name": "Cruel Summer",
+    "artist": "Taylor Swift",
+    "album": "Lover",
+    "duration_ms": 178426,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/49/3d/ab/493dab54-f920-9043-6181-80993b8116c9/19UMGIM53909.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.702,
+      "danceability": 0.552,
+      "acousticness": 0.117,
+      "tempo": 169.994,
+      "valence": 0.564,
+      "instrumentalness": 2.06e-05
+    }
+  },
+  {
+    "id": "003vvx7Niy0yvhvHt4a68B",
+    "name": "Mr. Brightside",
+    "artist": "The Killers",
+    "album": "Hot Fuss",
+    "duration_ms": 222973,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/07/1a/5a/071a5aee-6e42-060c-35b9-6a6e45b9ea59/06UMGIM10441.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.911,
+      "danceability": 0.352,
+      "acousticness": 0.00121,
+      "tempo": 148.033,
+      "valence": 0.236,
+      "instrumentalness": 0
+    }
+  },
+  {
+    "id": "6dOtVTDdiauQNBQEDOtlAB",
+    "name": "BIRDS OF A FEATHER",
+    "artist": "Billie Eilish",
+    "album": "HIT ME HARD AND SOFT",
+    "duration_ms": 210373,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/92/9f/69/929f69f1-9977-3a44-d674-11f70c852d1b/24UMGIM36186.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.507,
+      "danceability": 0.747,
+      "acousticness": 0.2,
+      "tempo": 104.978,
+      "valence": 0.438,
+      "instrumentalness": 0.0608
+    }
+  },
+  {
+    "id": "0dyiHoYbYjYaOEXLpmzQZG",
+    "name": "Supercut",
+    "artist": "Lorde",
+    "album": "Melodrama",
+    "duration_ms": 277506,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/8d/0d/15/8d0d1532-493b-52ec-6a29-a239ced6931b/17UMGIM81023.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.442,
+      "danceability": 0.587,
+      "acousticness": 0.225,
+      "tempo": 124.881,
+      "valence": 0.158,
+      "instrumentalness": 2.72e-05
+    }
+  },
+  {
+    "id": "0ofHAoxe9vBkTCp2UQIavz",
+    "name": "Dreams",
+    "artist": "Fleetwood Mac",
+    "album": "Rumours",
+    "duration_ms": 257800,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/4d/13/ba/4d13bac3-d3d5-7581-2c74-034219eadf2b/081227970949.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.492,
+      "danceability": 0.828,
+      "acousticness": 0.0644,
+      "tempo": 120.151,
+      "valence": 0.789,
+      "instrumentalness": 0.00428
+    }
+  },
+  {
+    "id": "76JKIsdKrAfWUMjaA0u7v5",
+    "name": "Too Sweet",
+    "artist": "Hozier",
+    "album": "Unheard - EP",
+    "duration_ms": 251424,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/75/43/b9/7543b9da-b57f-4378-7eaf-1e02b49f5cc5/24UMGIM21983.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.62,
+      "danceability": 0.741,
+      "acousticness": 0.0295,
+      "tempo": 117.038,
+      "valence": 0.934,
+      "instrumentalness": 0.000809
+    }
+  },
+  {
+    "id": "0WbMK4wrZ1wFSty9F7FCgu",
+    "name": "Good Luck, Babe!",
+    "artist": "Chappell Roan",
+    "album": "Good Luck, Babe! - Single",
+    "duration_ms": 218424,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/29/a7/c4/29a7c478-351d-25eb-a116-3e68118cdab8/24UMGIM31246.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.582,
+      "danceability": 0.7,
+      "acousticness": 0.0502,
+      "tempo": 116.712,
+      "valence": 0.785,
+      "instrumentalness": 0
+    }
+  },
+  {
+    "id": "2gtXTwsH6QuJufwOQbsu5c",
+    "name": "Enchanted",
+    "artist": "Taylor Swift",
+    "album": "Speak Now",
+    "duration_ms": 352200,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/a3/a1/1b/a3a11bc2-ffd0-0deb-c91d-6dfef7e97848/10UMGIM28124.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.618,
+      "danceability": 0.535,
+      "acousticness": 0.0716,
+      "tempo": 81.975,
+      "valence": 0.228,
+      "instrumentalness": 0.000388
+    }
+  },
+  {
+    "id": "46NGAvL695VnbcSeTmQWmM",
+    "name": "Sparks Fly",
+    "artist": "Taylor Swift",
+    "album": "Speak Now",
+    "duration_ms": 260947,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/a3/a1/1b/a3a11bc2-ffd0-0deb-c91d-6dfef7e97848/10UMGIM28124.rgb.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.785,
+      "danceability": 0.608,
+      "acousticness": 0.0387,
+      "tempo": 114.985,
+      "valence": 0.376,
+      "instrumentalness": 0
+    }
+  },
+  {
+    "id": "0w5Bdu51Ka25Pf3hojsKHh",
+    "name": "Hard Times",
+    "artist": "Paramore",
+    "album": "After Laughter",
+    "duration_ms": 182695,
+    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/e6/6f/17/e66f179c-599d-c7fd-fafe-bc792e2b5993/075679897121.jpg/300x300bb.jpg",
+    "audio": {
+      "energy": 0.818,
+      "danceability": 0.695,
+      "acousticness": 0.00647,
+      "tempo": 119.965,
+      "valence": 0.916,
+      "instrumentalness": 4.87e-06
+    }
+  }
+]

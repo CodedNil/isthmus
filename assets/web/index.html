@@ -9,7 +9,7 @@
     <style>
         html,
         body,
-        #cantus {
+        canvas {
             width: 100%;
             height: 100%;
             margin: 0;
@@ -21,12 +21,21 @@
         }
 
         #cantus {
+            position: relative;
             display: block;
+            touch-action: none;
+        }
+
+        #paries {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
         }
     </style>
 </head>
 
 <body>
+    <canvas id="paries"></canvas>
     <canvas id="cantus"></canvas>
     <script type="module">
         import init from "./cantus.js";
