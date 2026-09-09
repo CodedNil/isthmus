@@ -2,11 +2,10 @@
 
 use super::DesktopApp;
 use crate::{
-    app::{AppUpdater, Background, send_update},
+    app::{AppUpdater, View, send_update},
     interaction::InputEvent,
     render::{
         Renderer,
-        launcher::LauncherKey,
         status::{AudioMonitor, ProcessorSample, SystemSample},
     },
 };
@@ -28,10 +27,8 @@ use web_time::Instant;
 
 pub trait Task = Future + 'static;
 
-impl Background {
-    pub(crate) fn spawn(&self, task: impl Task<Output = ()>) {
-        wasm_bindgen_futures::spawn_local(task);
-    }
+pub fn spawn_task(task: impl Task<Output = ()>) {
+    wasm_bindgen_futures::spawn_local(task);
 }
 
 /// Entry point used by the generated browser glue.
@@ -94,7 +91,7 @@ pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
     });
 }
 
-pub fn start_location_monitor(_background: &Background, updates: UnboundedSender<[f32; 2]>) {
+pub fn start_location_monitor(updates: UnboundedSender<[f32; 2]>) {
     let Some(geolocation) = web_sys::window().and_then(|window| window.navigator().geolocation().ok()) else {
         return;
     };
@@ -112,7 +109,7 @@ pub async fn sleep(duration: Duration) {
 
 pub fn set_volume(_volume: f32) {}
 
-pub fn run_power_action(_background: &Background, _action: usize) {}
+pub fn run_power_action(_action: super::PowerAction) {}
 
 pub fn desktop_apps() -> Vec<DesktopApp> {
     [
@@ -141,9 +138,8 @@ pub fn open_url(url: &str) {
     }
 }
 
-pub fn start_launcher_listener(_background: &Background, _updater: &AppUpdater) {}
+pub fn start_launcher_listener(_updater: &AppUpdater) {}
 
-/// # Errors
 /// Returns an error when a native Cantus instance cannot be reached.
 pub fn trigger_launcher() -> std::io::Result<()> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Cantus launcher triggering requires a native session"))
@@ -158,7 +154,8 @@ async fn run_web() -> Result<(), String> {
         .and_then(|document| document.get_element_by_id("cantus"))
         .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
         .ok_or("#cantus is not a canvas")?;
-    let app = Rc::new(RefCell::new(crate::app::CantusApp::default()));
+    let (updater, updates) = std::sync::mpsc::channel();
+    let app = Rc::new(RefCell::new(crate::app::CantusApp::new(updater)));
     let logical_size = || {
         [
             window.inner_width().ok().and_then(|value| value.as_f64()).unwrap_or(1.0) as f32,
@@ -168,7 +165,7 @@ async fn run_web() -> Result<(), String> {
     let [width, height] = logical_size();
     let scale = window.device_pixel_ratio() as f32;
     let (mut gpu, surface) = Renderer::new(
-        canvas.clone(),
+        isthmus::wgpu::SurfaceTarget::Canvas(canvas.clone()),
         [(width * scale).round() as u32, (height * scale).round() as u32],
         TextCache::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf")),
     )
@@ -229,34 +226,11 @@ async fn run_web() -> Result<(), String> {
                 event.prevent_default();
                 return;
             }
-            if !app.launcher.open {
-                return;
-            }
-            let command = match event.key().as_str() {
-                "Escape" => Some(LauncherKey::Escape),
-                "Enter" => Some(LauncherKey::Activate),
-                "ArrowUp" => Some(LauncherKey::Up),
-                "ArrowDown" => Some(LauncherKey::Down),
-                "Backspace" => Some(LauncherKey::Backspace),
-                "Delete" => Some(LauncherKey::Delete),
-                "ArrowLeft" => Some(LauncherKey::Left),
-                "ArrowRight" => Some(LauncherKey::Right),
-                "Home" => Some(LauncherKey::Home),
-                "End" => Some(LauncherKey::End),
-                "a" if event.ctrl_key() => Some(LauncherKey::SelectAll),
-                "c" if event.ctrl_key() => Some(LauncherKey::Copy),
-                "x" if event.ctrl_key() => Some(LauncherKey::Cut),
-                _ => None,
-            };
-            if let Some(command) = command {
-                app.launcher.key(command, event.shift_key());
+            if app.launcher.input(&event.key(), event.shift_key(), event.ctrl_key()) {
                 if !app.launcher.open {
                     app.interaction = Default::default();
                 }
                 event.prevent_default();
-            } else if !event.ctrl_key() && event.key().chars().count() == 1 {
-                let value = event.key();
-                app.launcher.edit(|field| field.insert(&value));
             }
         },
     );
@@ -275,7 +249,8 @@ async fn run_web() -> Result<(), String> {
                 && let Ok(text) = data.get_data("text/plain")
             {
                 event.prevent_default();
-                app.launcher.edit(|field| field.insert(&text.replace(['\n', '\r'], " ")));
+                let session = app.launcher.session;
+                app.launcher.paste(session, &text);
             }
         },
     );
@@ -291,9 +266,12 @@ async fn run_web() -> Result<(), String> {
         }
         {
             let mut app = app.borrow_mut();
-            app.apply_pending_updates();
+            while let Ok(update) = updates.try_recv() {
+                update(&mut app);
+            }
+            app.refresh();
             gpu.render(|render| {
-                app.draw(render, surface, vec2(width, height), true, true);
+                app.draw(render, surface, vec2(width, height), View::Combined);
             })
             .map_err(|error| error.to_string())?;
             if let Some(text) = app.launcher.pending_copy.take() {

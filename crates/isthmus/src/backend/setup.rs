@@ -1,13 +1,9 @@
 use super::{gpu::Gpu, surface::SurfaceTarget};
 use crate::Program;
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 /// A failure while selecting a GPU or creating a presentation surface.
 #[derive(Debug, thiserror::Error)]
 pub enum SetupError {
-    /// Native display or window handles could not be obtained.
-    #[error(transparent)]
-    Handle(#[from] raw_window_handle::HandleError),
     /// No suitable GPU adapter could be selected.
     #[error("GPU adapter error: {0}")]
     Adapter(#[from] wgpu::RequestAdapterError),
@@ -23,89 +19,39 @@ pub enum SetupError {
     /// An additional surface requires a different render target format.
     #[error("replacement surface is incompatible")]
     IncompatibleSurface,
-    /// A shader requires more image bindings than the device supports.
-    #[error("shader captures {required} images but this device supports {supported}")]
-    ImageLimit {
-        /// Largest image capture count among the program's shaders.
-        required: usize,
-        /// Maximum image bindings supported by the device.
-        supported: u32,
-    },
 }
 
-pub(super) unsafe fn create_surface(
-    instance: &wgpu::Instance,
-    source: &(impl HasDisplayHandle + HasWindowHandle),
-) -> Result<wgpu::Surface<'static>, SetupError> {
-    // SAFETY: The caller keeps both raw handles alive for the returned surface.
-    unsafe {
-        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(source.display_handle()?.as_raw()),
-            raw_window_handle: source.window_handle()?.as_raw(),
-        })
-    }
-    .map_err(Into::into)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) unsafe fn new<P: Program>(
-    source: &(impl HasDisplayHandle + HasWindowHandle),
-    size: [u32; 2],
-) -> Result<(Gpu, SurfaceTarget), SetupError> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-    // SAFETY: The caller keeps both native handles alive for the returned surface.
-    let surface = unsafe { create_surface(&instance, source) }?;
-    pollster::block_on(finish::<P>(instance, surface, size, wgpu::PowerPreference::HighPerformance))
-}
-
-#[cfg(target_arch = "wasm32")]
 pub(super) async fn new<P: Program>(
-    canvas: web_sys::HtmlCanvasElement,
-    size: [u32; 2],
+    source: impl Into<wgpu::SurfaceTarget<'static>>,
+    [width, height]: [u32; 2],
 ) -> Result<(Gpu, SurfaceTarget), SetupError> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::BROWSER_WEBGPU,
+        backends: wgpu::Backends::VULKAN | wgpu::Backends::BROWSER_WEBGPU,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))?;
-    finish::<P>(instance, surface, size, wgpu::PowerPreference::None).await
-}
-
-async fn finish<P: Program>(
-    instance: wgpu::Instance,
-    surface: wgpu::Surface<'static>,
-    [width, height]: [u32; 2],
-    power_preference: wgpu::PowerPreference,
-) -> Result<(Gpu, SurfaceTarget), SetupError> {
+    let surface = instance.create_surface(source)?;
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference,
+            power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             ..Default::default()
         })
         .await?;
+    let images = u32::try_from(P::SHADERS.iter().map(|entry| entry.images).max().unwrap_or(0)).unwrap_or(u32::MAX);
+    let mut limits = wgpu::Limits::default().using_resolution(adapter.limits());
+    limits.max_sampled_textures_per_shader_stage = limits.max_sampled_textures_per_shader_stage.max(images);
+    limits.max_samplers_per_shader_stage = limits.max_samplers_per_shader_stage.max(images);
+    limits.max_bindings_per_bind_group = limits.max_bindings_per_bind_group.max(images.saturating_mul(2));
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("isthmus"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+            required_limits: limits,
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         })
         .await?;
-    let limits = device.limits();
-    let required = P::SHADERS.iter().map(|entry| entry.images).max().unwrap_or(0);
-    let supported = limits
-        .max_sampled_textures_per_shader_stage
-        .min(limits.max_samplers_per_shader_stage)
-        .min(limits.max_bindings_per_bind_group / 2);
-    if required > supported as usize {
-        return Err(SetupError::ImageLimit { required, supported });
-    }
-    let config = configure_surface(&adapter, &surface, width, height)?;
+    let config = configure_surface(&adapter, &surface, [width, height], None)?;
     let gpu = Gpu::new::<P>(instance, adapter, device, queue, config.format);
     let target = SurfaceTarget::from_raw(&gpu.device, surface, config);
     Ok((gpu, target))
@@ -114,18 +60,19 @@ async fn finish<P: Program>(
 pub(super) fn configure_surface(
     adapter: &wgpu::Adapter,
     surface: &wgpu::Surface<'static>,
-    width: u32,
-    height: u32,
+    [width, height]: [u32; 2],
+    format: Option<wgpu::TextureFormat>,
 ) -> Result<wgpu::SurfaceConfiguration, SetupError> {
     let caps = surface.get_capabilities(adapter);
-    let format = caps
-        .formats
-        .iter()
-        .copied()
-        .find(|format| *format == wgpu::TextureFormat::Bgra8Unorm)
-        .or_else(|| caps.formats.iter().copied().find(|format| *format == wgpu::TextureFormat::Rgba8Unorm))
-        .or_else(|| caps.formats.first().copied())
-        .ok_or(SetupError::UnsupportedSurface)?;
+    let format = match format {
+        Some(format) if !caps.formats.contains(&format) => return Err(SetupError::IncompatibleSurface),
+        Some(format) => format,
+        None => [wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureFormat::Rgba8Unorm]
+            .into_iter()
+            .find(|format| caps.formats.contains(format))
+            .or_else(|| caps.formats.first().copied())
+            .ok_or(SetupError::UnsupportedSurface)?,
+    };
     let alpha_mode =
         [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::Auto, wgpu::CompositeAlphaMode::Opaque]
             .into_iter()

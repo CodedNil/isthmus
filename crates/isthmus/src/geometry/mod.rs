@@ -3,7 +3,6 @@ pub mod triangle;
 
 use crate::{Fragment, Primitive, Program, Vertex, VertexInput};
 use glam::Vec2;
-use spirv_std::arch::IndexUnchecked;
 
 impl<P: Program, const N: usize> Primitive<P> for [Vec2; N] {
     type Outputs = ();
@@ -21,12 +20,7 @@ impl<P: Program, const N: usize> Primitive<P> for [Vec2; N] {
     }
 
     fn vertex(self, input: VertexInput<P>) -> Vertex {
-        let pixel = if (input.index as usize) < N {
-            // SAFETY: The vertex index is within the array.
-            unsafe { *self.index_unchecked(input.index as usize) }
-        } else {
-            Vec2::ZERO
-        };
+        let pixel = if (input.index as usize) < N { self[input.index as usize] } else { Vec2::ZERO };
         input.project(pixel, pixel)
     }
 }

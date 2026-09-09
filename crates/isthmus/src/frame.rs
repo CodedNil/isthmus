@@ -1,7 +1,7 @@
 use crate::{
     Fragment, Primitive, Program, ShaderFrame,
     backend::{gpu::Gpu, surface::SurfaceTarget},
-    program::ShaderSpec,
+    bindings,
 };
 
 /// Immediate-mode drawing context for one surface in the current frame.
@@ -17,12 +17,29 @@ pub struct Frame<'a, P: Program> {
     pub globals: P::Globals,
     /// Shared application resources for this frame.
     pub resources: &'a mut P::Resources,
-    #[doc(hidden)]
-    pub gpu: &'a mut Gpu,
+    pub(crate) gpu: &'a mut Gpu,
     pub(crate) surface: &'a mut SurfaceTarget,
 }
 
 impl<P: Program> Frame<'_, P> {
+    #[doc(hidden)]
+    pub const fn reborrow(&mut self) -> &mut Self {
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn capture_buffer<T: crate::ShaderData>(&mut self, buffer: crate::Buffer<'_, T>) -> [u32; 2] {
+        let payload = &mut self.gpu.buffers[bindings::PAYLOAD as usize];
+        let range = [
+            u32::try_from(payload.words.len()).expect("payload exceeds u32"),
+            u32::try_from(buffer.values.len()).expect("buffer exceeds u32"),
+        ];
+        for &value in buffer.values {
+            value.append(&mut payload.words);
+        }
+        range
+    }
+
     #[doc(hidden)]
     pub fn prepare<S: Primitive<P>>(
         &self,
@@ -39,14 +56,7 @@ impl<P: Program> Frame<'_, P> {
     }
 
     #[doc(hidden)]
-    /// # Safety
-    /// The generated shader must reconstruct this geometry and consume this payload layout.
-    pub unsafe fn record<S: ShaderSpec<Program = P>>(
-        &mut self,
-        vertices: u32,
-        value: S,
-        images: Option<wgpu::BindGroup>,
-    ) {
-        self.gpu.emit(self.surface, vertices, value, images);
+    pub fn record(&mut self, shader: usize, vertices: u32, value: impl crate::ShaderData, images: &[&crate::Image]) {
+        self.gpu.emit(self.surface, shader, vertices, value, images);
     }
 }

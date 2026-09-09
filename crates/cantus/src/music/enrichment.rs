@@ -1,36 +1,24 @@
-use super::{ART_SIZE, AudioFeatures, MusicResult, TrackId, lyrics::Lyrics};
+use super::{
+    ART_SIZE, AudioFeatures, MusicResult, TrackId,
+    lyrics::{self, Lyrics},
+};
 use crate::{
     app::{Background, CantusApp},
+    platform::Task,
     render::music::PALETTE_COLORS,
 };
 use arrayvec::ArrayVec;
-use futures_util::future::join_all;
 use image::{RgbaImage, imageops};
 use isthmus::{Image, Unorm8x4, glam::Vec3};
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use reqwest::Client;
-use std::{array, collections::HashMap, ops::Range, time::Duration};
+use std::{array, collections::HashMap, hash::Hash, ops::Range, time::Duration};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::spawn_blocking;
 use tracing::warn;
 use web_time::Instant;
 
 const RETRY_DELAY: Duration = Duration::from_secs(30);
-#[derive(Clone)]
-pub struct Enrichment {
-    pub(crate) background: Background,
-    pub(crate) http: Client,
-}
-
-impl Enrichment {
-    pub(crate) fn new(background: Background) -> Self {
-        let client = Client::builder();
-        #[cfg(not(target_arch = "wasm32"))]
-        let client = client.timeout(Duration::from_secs(15));
-        Self { background, http: client.build().expect("failed to construct HTTP client") }
-    }
-}
-
 pub enum Fetch<T> {
     Missing(Instant),
     Fetching,
@@ -65,19 +53,37 @@ impl<T> Fetch<T> {
     }
 }
 
+impl Background {
+    fn fetch<K: Eq + Hash + Send + 'static, T: Send + 'static>(
+        &self,
+        key: K,
+        task: impl Task<Output = Fetch<T>>,
+        cache: fn(&mut TrackCache) -> &mut HashMap<K, Fetch<T>>,
+    ) {
+        self.spawn_update(async move {
+            let result = task.await;
+            Some(move |app: &mut CantusApp| {
+                if let Some(slot @ Fetch::Fetching) = cache(&mut app.music.resources).get_mut(&key) {
+                    *slot = result;
+                }
+            })
+        });
+    }
+}
+
 pub struct AlbumArt {
     pub image: Image,
     palette: [Unorm8x4; PALETTE_COLORS],
 }
 
 #[derive(Default)]
-pub struct Resources {
+pub struct TrackCache {
     pub art: HashMap<String, Fetch<AlbumArt>>,
     pub audio: HashMap<TrackId, Fetch<AudioFeatures>>,
     pub lyrics: HashMap<String, Fetch<Lyrics>>,
 }
 
-impl Resources {
+impl TrackCache {
     pub fn art(&self, url: Option<&str>) -> Option<&AlbumArt> {
         url.and_then(|url| self.art.get(url)).and_then(Fetch::ready)
     }
@@ -145,39 +151,33 @@ impl CantusApp {
             for track in &music.queue[start..end] {
                 if !track.name.trim().is_empty() && resources.lyrics.entry(track.uri.clone()).or_default().request(now)
                 {
-                    self.enrichment.request_lyrics(track.clone(), music.spotify.clone());
+                    let (track, spotify, http) = (track.clone(), music.spotify.clone(), self.background.http.clone());
+                    self.background.fetch(
+                        track.uri.clone(),
+                        async move { lyrics::fetch(&track, &http, &spotify).await },
+                        |cache| &mut cache.lyrics,
+                    );
                 }
             }
         }
-        let audio: Vec<_> = music
+        for id in music
             .queue
             .iter()
             .filter_map(|track| track.id)
             .filter(|id| resources.audio.entry(*id).or_default().request(now))
-            .collect();
-        if !audio.is_empty() {
+        {
             let spotify = music.spotify.clone();
-            self.enrichment.background.spawn_update(async move {
-                let features = join_all(audio.into_iter().map(|id| {
-                    let spotify = &spotify;
-                    async move {
-                        let features = spotify
-                            .audio_features(id)
-                            .await
-                            .inspect_err(|error| warn!(%error, %id, "Failed to fetch Spotify audio features"))
-                            .ok();
-                        (id, features)
-                    }
-                }))
-                .await;
-                Some(move |app: &mut Self| {
-                    for (id, features) in features {
-                        if let Some(slot @ Fetch::Fetching) = app.music.resources.audio.get_mut(&id) {
-                            *slot = features.map_or_else(Fetch::retry, Fetch::Ready);
-                        }
-                    }
-                })
-            });
+            self.background.fetch(
+                id,
+                async move {
+                    spotify
+                        .audio_features(id)
+                        .await
+                        .inspect_err(|error| warn!(%error, %id, "Failed to fetch Spotify audio features"))
+                        .map_or_else(|_| Fetch::retry(), Fetch::Ready)
+                },
+                |cache| &mut cache.audio,
+            );
         }
         for url in music
             .queue
@@ -189,15 +189,8 @@ impl CantusApp {
                 continue;
             }
             let url = url.clone();
-            let http = self.enrichment.http.clone();
-            self.enrichment.background.spawn_update(async move {
-                let state = fetch_art(&http, &url).await;
-                Some(move |app: &mut Self| {
-                    if let Some(slot @ Fetch::Fetching) = app.music.resources.art.get_mut(&url) {
-                        *slot = state;
-                    }
-                })
-            });
+            let http = self.background.http.clone();
+            self.background.fetch(url.clone(), async move { fetch_art(&http, &url).await }, |cache| &mut cache.art);
         }
     }
 }

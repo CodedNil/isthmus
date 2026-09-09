@@ -3,8 +3,9 @@ use super::{
     lyrics::LyricSegment,
 };
 use crate::{
-    app::{AppUpdater, Background, send_update},
+    app::{AppUpdater, send_update},
     config::{self, Config, MAX_PLAYLIST_TARGETS},
+    platform,
 };
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
@@ -68,17 +69,20 @@ enum WorkerEvent {
 }
 
 impl Spotify {
-    pub(super) fn new(config: &Config, updater: &AppUpdater, background: &Background) -> Self {
+    pub(super) fn new(config: &Config, updater: &AppUpdater) -> Self {
         let (events, receiver) = mpsc::unbounded_channel();
         let (connected_session, session) = watch::channel(None);
         let worker_events = events.clone();
         let updater = updater.clone();
         let playlist_targets = config.playlists.clone();
         let ratings_enabled = config.ratings_enabled;
-        background.spawn(async move {
+        platform::spawn_task(async move {
             let mut receiver = receiver;
             let mut generation = 0;
             loop {
+                tokio::select! {
+                    () = connected_session.closed() => break,
+                    () = async {
                 generation += 1;
                 match connect().await {
                     Ok(spotify) => {
@@ -103,6 +107,8 @@ impl Spotify {
                     }
                 }
                 sleep(Duration::from_secs(5)).await;
+                    } => {}
+                }
             }
         });
         Self { events, session }
@@ -203,9 +209,9 @@ async fn run_spotify(
         active_device: None,
         playlist_targets,
         playlist_revisions: HashMap::new(),
+        ratings_enabled,
         track_metadata: HashMap::new(),
         queue: None,
-        ratings_enabled,
         generation,
     };
 
@@ -247,10 +253,10 @@ struct SpotifyWorker {
     active_device: Option<String>,
     playlist_targets: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
     playlist_revisions: HashMap<PlaylistId, Vec<u8>>,
+    ratings_enabled: bool,
     /// `None` marks metadata currently being fetched.
     track_metadata: HashMap<String, Option<TrackDetails>>,
     queue: Option<QueueSnapshot>,
-    ratings_enabled: bool,
     generation: u64,
 }
 
@@ -305,7 +311,9 @@ impl SpotifyWorker {
                 }
             }
             PlaybackCommand::UpdateLibrary { track_id, playlists, liked } => {
-                self.update_library(track_id, &playlists, liked).await;
+                if let Err(error) = self.update_library(track_id, &playlists, liked).await {
+                    warn!(%error, "Spotify library update failed");
+                }
             }
         }
     }
@@ -471,41 +479,48 @@ impl SpotifyWorker {
         let result: MusicResult<_> = async {
             compressed.write_all(&body)?;
             let body = compressed.finish()?;
-            let mut headers = HeaderMap::new();
-            headers.insert("x-spotify-connection-id", self.session.connection_id().parse()?);
-            headers.insert(header::CONTENT_TYPE, "application/json".parse()?);
-            headers.insert(header::CONTENT_ENCODING, "gzip".parse()?);
             let path = format!("/connect-state/v1/player/command/from/{}/to/{target}", self.session.device_id());
-            Ok(self.session.spclient().request(&Method::POST, &path, Some(headers), Some(&body)).await?)
+            connected_request(&self.session, &path, "application/json", Some("gzip"), &body).await
         }
         .await;
         if let Err(error) = result {
             error!(%error, %endpoint, "Spotify player command failed");
         }
     }
+}
 
-    async fn request_connected_json(&self, path: &str, body: serde_json::Value) -> MusicResult<()> {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, "application/json".parse()?);
-        headers.insert("x-spotify-connection-id", self.session.connection_id().parse()?);
-        let body = serde_json::to_string(&body)?;
-        self.session.spclient().request_as_json(&Method::POST, path, Some(headers), Some(&body)).await?;
-        Ok(())
+async fn connected_request(
+    session: &Session,
+    path: &str,
+    content_type: &'static str,
+    encoding: Option<&'static str>,
+    body: &[u8],
+) -> MusicResult<()> {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, content_type.parse()?);
+    headers.insert("x-spotify-connection-id", session.connection_id().parse()?);
+    if let Some(encoding) = encoding {
+        headers.insert(header::CONTENT_ENCODING, encoding.parse()?);
     }
-
-    async fn request_connected_proto<T: protobuf::Message>(&self, path: &str, message: &T) -> MusicResult<()> {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, "application/x-protobuf".parse()?);
-        headers.insert("x-spotify-connection-id", self.session.connection_id().parse()?);
-        self.session.spclient().request(&Method::POST, path, Some(headers), Some(&message.write_to_bytes()?)).await?;
-        Ok(())
-    }
+    session.spclient().request(&Method::POST, path, Some(headers), Some(body)).await?;
+    Ok(())
 }
 
 impl SpotifyWorker {
-    async fn update_library(&mut self, track_id: TrackId, changes: &[(PlaylistId, bool)], liked: Option<bool>) {
+    async fn refresh_playlists(&mut self) {
+        if let Err(error) = self.load_playlists().await {
+            warn!(%error, "Spotify library refresh failed");
+        }
+    }
+
+    async fn update_library(
+        &mut self,
+        track_id: TrackId,
+        playlists: &[(PlaylistId, bool)],
+        liked: Option<bool>,
+    ) -> MusicResult<()> {
         let uri = format!("spotify:track:{track_id}");
-        for &(playlist_id, add) in changes {
+        for &(playlist_id, add) in playlists {
             let Some(revision) = self.playlist_revisions.get(&playlist_id).cloned() else {
                 warn!(%playlist_id, "Spotify playlist is not loaded");
                 continue;
@@ -530,8 +545,14 @@ impl SpotifyWorker {
                 want_resulting_revisions: Some(true),
                 ..Default::default()
             };
-            if let Err(error) =
-                self.request_connected_proto(&format!("/playlist/v2/playlist/{playlist_id}/changes"), &request).await
+            if let Err(error) = connected_request(
+                &self.session,
+                &format!("/playlist/v2/playlist/{playlist_id}/changes"),
+                "application/x-protobuf",
+                None,
+                &request.write_to_bytes()?,
+            )
+            .await
             {
                 error!(%error, %playlist_id, "Failed to update Spotify playlist");
             }
@@ -546,20 +567,20 @@ impl SpotifyWorker {
                     "is_removed": !should_like,
                 }],
             });
-            if let Err(error) = self.request_connected_json("/collection/v2/write?market=from_token", body).await {
+            if let Err(error) = connected_request(
+                &self.session,
+                "/collection/v2/write?market=from_token",
+                "application/json",
+                None,
+                &serde_json::to_vec(&body)?,
+            )
+            .await
+            {
                 error!(%error, %track_id, "Failed to update Spotify library");
             }
         }
 
-        if !changes.is_empty() || liked.is_some() {
-            self.refresh_playlists().await;
-        }
-    }
-
-    async fn refresh_playlists(&mut self) {
-        if let Err(error) = self.load_playlists().await {
-            warn!(%error, "Failed to refresh Spotify playlists");
-        }
+        self.load_playlists().await
     }
 
     async fn load_playlists(&mut self) -> MusicResult<()> {
@@ -672,7 +693,14 @@ async fn fetch_track_metadata(session: &Session, tracks: &[String]) -> HashMap<S
         .flat_map(|array| array.extension_data)
         .filter_map(|data| {
             let bytes = data.extension_data.into_option()?.value;
-            Some((data.entity_uri, TrackDetails::from_spotify(&metadata::Track::parse_from_bytes(&bytes).ok()?)))
+            let track = metadata::Track::parse_from_bytes(&bytes).ok()?;
+            Some((data.entity_uri, TrackDetails {
+                name: track.name().to_owned(),
+                artist: track.artist.first().map_or_else(String::new, |artist| artist.name().to_owned()),
+                album: track.album.get_or_default().name().to_owned(),
+                image: track_image_url(&track),
+                duration_ms: u32::try_from(track.duration()).unwrap_or_default(),
+            }))
         })
         .collect()
 }
@@ -683,18 +711,6 @@ struct TrackDetails {
     album: String,
     image: Option<String>,
     duration_ms: u32,
-}
-
-impl TrackDetails {
-    fn from_spotify(track: &metadata::Track) -> Self {
-        Self {
-            name: track.name().to_owned(),
-            artist: track.artist.first().map_or_else(String::new, |artist| artist.name().to_owned()),
-            album: track.album.get_or_default().name().to_owned(),
-            image: track_image_url(track),
-            duration_ms: u32::try_from(track.duration()).unwrap_or_default(),
-        }
-    }
 }
 
 fn track_from_provided(

@@ -20,11 +20,9 @@ impl UploadBuffer {
         })
     }
 
-    pub fn upload<T: ShaderData>(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, values: &[T]) {
-        self.words.resize(values.len() * T::WORDS, 0);
-        for (index, value) in values.iter().enumerate() {
-            value.write(&mut self.words, index * T::WORDS);
-        }
+    pub fn upload<T: ShaderData>(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, value: T) {
+        self.words.resize(T::WORDS, 0);
+        value.write(&mut self.words, 0);
         self.flush(device, queue);
     }
 
@@ -38,25 +36,28 @@ impl UploadBuffer {
 
     /// Uploads the new suffix of an immutable, append-only resource arena.
     pub fn upload_appended(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, words: &[u32]) {
+        assert!(words.len() >= self.uploaded, "persistent resources must be append-only");
         if words.len() == self.uploaded {
             return;
         }
-        let size = words.len() as u64 * 4;
-        if self.buffer.size() < size {
-            self.buffer = Self::allocate(device, size.next_power_of_two());
-            self.uploaded = 0;
-        }
+        self.grow(device, words.len());
         queue.write_buffer(&self.buffer, self.uploaded as u64 * 4, bytemuck::cast_slice(&words[self.uploaded..]));
         self.uploaded = words.len();
     }
 
     pub fn flush(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.grow(device, self.words.len());
         let bytes = bytemuck::cast_slice(&self.words);
-        if self.buffer.size() < bytes.len() as u64 {
-            self.buffer = Self::allocate(device, (bytes.len() as u64).next_power_of_two());
-        }
         if !bytes.is_empty() {
             queue.write_buffer(&self.buffer, 0, bytes);
+        }
+    }
+
+    fn grow(&mut self, device: &wgpu::Device, words: usize) {
+        let size = words as u64 * 4;
+        if self.buffer.size() < size {
+            self.buffer = Self::allocate(device, size.next_power_of_two());
+            self.uploaded = 0;
         }
     }
 }

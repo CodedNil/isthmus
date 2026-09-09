@@ -14,19 +14,11 @@ glam = { workspace = true, features = ["libm"] }
 bytemuck.workspace = true
 glam = { workspace = true, features = ["std"] }
 half = { version = "2.7.1", default-features = false }
-raw-window-handle.workspace = true
-smallvec.workspace = true
 slotmap = "1.1.1"
+smallvec.workspace = true
 thiserror = "2.0.20"
 web-time = "1.1.0"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-pollster.workspace = true
-wgpu = { workspace = true, features = ["std", "vulkan", "spirv"] }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wgpu = { workspace = true, features = ["std", "webgpu", "wgsl"] }
-web-sys = { version = "0.3.105", features = ["HtmlCanvasElement"] }
+wgpu = { workspace = true, features = ["std", "vulkan", "webgpu", "wgsl"] }
 
 [lints]
 workspace = true

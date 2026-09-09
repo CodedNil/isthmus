@@ -1,20 +1,16 @@
 use crate::{
     music::{
         Music, Track,
-        enrichment::{Fetch, Resources},
+        enrichment::{Fetch, TrackCache},
         lyrics::Lyrics,
     },
     render::{BarLayout, PANEL_START, Program, UiContext},
 };
-use isthmus::{
-    ColorExt as _, Float as _,
-    glam::{Vec4, vec2},
-    shader,
-};
+use isthmus::prelude::*;
 use isthmus_sdf::{Text, layout::TextCache};
 
 pub const EXTENSION: f32 = 10.0;
-const SHADOW_REACH: f32 = 4.0;
+const SHADOW_REACH: f32 = 3.0;
 const LYRIC_COLOR: Vec4 = Vec4::new(0.94, 0.94, 0.94, 1.0);
 const BACKGROUND_LYRIC_COLOR: Vec4 = Vec4::new(0.72, 0.86, 1.0, 1.0);
 
@@ -22,12 +18,12 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     let Some((index, progress_ms)) = music.timeline.span_at_playhead(&music.queue) else {
         return;
     };
-    let prepare = |track: &Track, resources: &mut Resources, text: &mut TextCache| {
+    let prepare = |track: &Track, resources: &mut TrackCache, text: &mut TextCache| {
         if let Some(Fetch::Ready(lyrics)) = resources.lyrics.get_mut(&track.uri) {
             lyrics.prepare(track.duration_ms as f32, text);
         }
     };
-    let span = |track: &Track, resources: &Resources| {
+    let span = |track: &Track, resources: &TrackCache| {
         resources
             .lyrics
             .get(&track.uri)
@@ -83,8 +79,8 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                         let color = if lyric_layer == 0 { LYRIC_COLOR } else { BACKGROUND_LYRIC_COLOR };
                         color
                             .opacity(sample.fill())
-                            .over(Vec4::new(0.0, 0.0, 0.0, shadow))
-                            .opacity(ahead.smoothstep(-100.0, 0.0))
+                            .over(Vec3::splat(0.2).extend(shadow))
+                            .opacity((ahead.smoothstep(-10.0, 5.0) + 0.5).min(1.0))
                     })
             );
         }

@@ -2,98 +2,86 @@
 name = "cantus"
 version = "0.8.0"
 edition = "2024"
-default-run = "cantus"
-
-[[bin]]
-name = "cantus"
-path = "src/main.rs"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-resvg = { version = "0.48.1", default-features = false, features = [
-    "raster-images",
-] }
-isthmus = { path = "../isthmus" }
-isthmus_sdf = { path = "../isthmus_sdf" }
-bytemuck.workspace = true
-reqwest = { version = "0.12.28", default-features = false, features = [
-    "json",
-    "rustls-tls-webpki-roots",
-] }
-tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
 arrayvec = { version = "0.7.8", features = ["serde"] }
-smallvec.workspace = true
-unicode-segmentation = "1.13.3"
-tracing = { version = "0.1.44", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3.23", default-features = false, features = [
-    "fmt",
-    "smallvec",
-    "tracing-log",
-] }
-roxmltree = "0.21.1"
+bytemuck.workspace = true
+fastrand = "2.5.0"
 fend-core = "1.5.8"
+form_urlencoded = "1.2.2"
+futures-util = "0.3.34"
 image = { version = "0.25.10", default-features = false, features = [
     "ico",
     "jpeg",
     "png",
 ] }
-palette = { version = "0.7.7", default-features = false, features = ["std"] }
-raw-window-handle.workspace = true
-serde.workspace = true
-serde_json = "1.0.151"
-toml = "1.1.5"
-form_urlencoded = "1.2.2"
-futures-util = "0.3.34"
-fastrand = "2.5.0"
+isthmus = { path = "../isthmus" }
+isthmus_sdf = { path = "../isthmus_sdf" }
 jiff = { version = "0.2.35", default-features = false, features = [
     "serde",
     "std",
     "tz-system",
     "tzdb-bundle-always",
 ] }
+palette = { version = "0.7.7", default-features = false, features = ["std"] }
+reqwest = { version = "0.12.28", default-features = false, features = [
+    "json",
+    "rustls-tls-webpki-roots",
+] }
+resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
+roxmltree = "0.21.1"
+serde_json = "1.0.151"
+serde.workspace = true
+smallvec.workspace = true
+tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
+toml = "1.1.5"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+    "fmt",
+    "smallvec",
+    "tracing-log",
+] }
+unicode-segmentation = "1.13.3"
 web-time = "1.1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "location"] }
-schemars = { version = "1.2.2", features = ["arrayvec07", "preserve_order"] }
-zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
-librespot-protocol = "0.8.0"
-librespot-core = { version = "0.8.0", default-features = false, features = [
-    "rustls-tls-webpki-roots",
-] }
-librespot-metadata = { version = "0.8.0", default-features = false, features = [
-    "rustls-tls-webpki-roots",
-] }
-librespot-oauth = { version = "0.8.0", default-features = false, features = [
-    "rustls-tls-webpki-roots",
-] }
-protobuf = "3.7.2"
-wayland-client = { version = "0.31.15", default-features = false, features = [
-    "system",
-] }
-wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
-wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
-xkbcommon = { version = "0.9.0", default-features = false, features = [
-    "wayland",
-] }
-tokio = { version = "1.53.1", features = ["net", "rt-multi-thread"] }
+calloop = "0.14"
+calloop-wayland-source = "0.4.1"
 flate2 = "1.1.10"
 freedesktop-desktop-entry = { version = "0.8.2", default-features = false }
 freedesktop-icons = "0.4.0"
+librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-metadata = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-oauth = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-protocol = "0.8.0"
 microfft = { version = "0.6.0", default-features = false, features = [
     "size-1024",
     "std",
 ] }
 nvml-wrapper = "0.13.0"
+pollster = "1.0.1"
+protobuf = "3.7.2"
+raw-window-handle = "0.6.2"
+schemars = { version = "1.2.2", features = ["arrayvec07", "preserve_order"] }
+tokio = { version = "1.53.1", features = ["net", "rt-multi-thread"] }
+wayland-backend = { version = "0.3.17", features = ["rwh_06", "client_system"] }
+wayland-client = { version = "0.31.15", default-features = false, features = ["system"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+xkbcommon = { version = "0.9.0", default-features = false }
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen-futures = "0.4.78"
 gloo-events = "0.3.0"
 gloo-render = "0.3.0"
 gloo-timers = { version = "0.4.0", features = ["futures"] }
+jiff = { version = "0.2.35", default-features = false, features = ["js"] }
 wasm-bindgen = "0.2.128"
+wasm-bindgen-futures = "0.4.78"
 web-sys = { version = "0.3.105", features = [
     "console",
     "Clipboard",
@@ -112,12 +100,11 @@ web-sys = { version = "0.3.105", features = [
     "Window",
     "WheelEvent",
 ] }
-jiff = { version = "0.2.35", default-features = false, features = ["js"] }
 
 [build-dependencies]
+isthmus-build = { path = "../isthmus_build" }
 # librespot-core 0.8's vergen-gitcl build dependency is incompatible with vergen 9.1.
 vergen = { version = "=9.0.6", default-features = false }
-isthmus-build = { path = "../isthmus_build" }
 
 [lints]
 workspace = true

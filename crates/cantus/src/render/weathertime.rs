@@ -1,6 +1,7 @@
 use crate::{
     app::Background,
     config::MAX_WORLD_CLOCKS,
+    platform,
     render::{
         GAP, PANEL_START, Program, TEXT_COLOR, UNIT, UiContext,
         sdf::{VISIBLE_ALPHA, deform, fbm, hash, refract, sample_deformation},
@@ -8,36 +9,25 @@ use crate::{
 };
 use arrayvec::{ArrayString, ArrayVec};
 use core::f32::consts::PI;
-use isthmus::{
-    ColorExt as _, Float as _, Quad, ShaderData, Unorm8x4,
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
-    shader,
-};
+use isthmus::prelude::*;
 use isthmus_sdf::{Shape, Text};
 use jiff::{
     Span, Timestamp, Zoned,
     civil::{DateTime, Time},
     tz::{Offset, TimeZone},
 };
-use reqwest::Client;
 use std::{array::from_fn, fmt::Write};
 use tracing::warn;
 
-const TEXT_OUTLINE: f32 = 0.8;
 /// Number of conditions shown in the hourly forecast row.
 const HOURLY_FORECASTS: usize = 6;
 /// Hours between adjacent conditions in the hourly forecast row.
 const HOURLY_STEP_HOURS: usize = 4;
-const DAILY_FORECASTS: usize = 5;
 pub const WIDTH: f32 = UNIT * 77.0;
 pub const EXTENSION: f32 = UNIT * 61.0;
 const FORECAST_X: f32 = WIDTH + GAP;
 
 const WEEKDAY_COUNT: usize = 7;
-const GRID_CELLS: usize = WEEKDAY_COUNT * 6;
-const GRID_ROW_HEIGHT: f32 = UNIT * 6.0;
-const GRID_TOP_Y: f32 = UNIT * 24.0;
-const WEEKDAY_Y: f32 = UNIT * 17.0;
 const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
 const WEEKDAYS: [&str; WEEKDAY_COUNT] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const ORDINALS: [&str; 10] = ["th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"];
@@ -76,7 +66,7 @@ fn grid_cell(index: usize) -> Vec2 {
     let column_width = WIDTH / WEEKDAY_COUNT as f32;
     vec2(
         (index % WEEKDAY_COUNT) as f32 * column_width + column_width * 0.5,
-        GRID_TOP_Y + (index / WEEKDAY_COUNT) as f32 * GRID_ROW_HEIGHT,
+        UNIT * (24.0 + (index / WEEKDAY_COUNT) as f32 * 6.0),
     )
 }
 
@@ -114,7 +104,10 @@ fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
 }
 
 /// One layer; `kind` is a literal at every call site, so the tables below fold away.
-fn precipitation(p: Vec2, time: f32, kind: i32, strength: f32) -> Vec4 {
+fn precipitation(background: Vec3, p: Vec2, time: f32, kind: i32, strength: f32) -> Vec3 {
+    if strength <= VISIBLE_ALPHA {
+        return background;
+    }
     let rain = kind == 0;
     let snow = kind == 1;
     let (velocity, cell_size, radius, density, trail) = if rain {
@@ -138,7 +131,7 @@ fn precipitation(p: Vec2, time: f32, kind: i32, strength: f32) -> Vec4 {
     } else {
         vec3(0.75, 0.86, 0.94)
     };
-    color.extend((particle * strength * if snow { 0.92 } else { 0.7 }).saturate())
+    background.lerp(color, (particle * strength * if snow { 0.92 } else { 0.7 }).saturate())
 }
 
 /// Daylight, blue-hour and twilight palette weights for a sun height.
@@ -179,18 +172,9 @@ pub fn scene(time: f32, cloud_scale: f32, p: Vec2, width: f32, phase: Vec3, weat
     }
 
     color = color.lerp(vec3(0.1, 0.17, 0.25), weather.rain * 0.2);
-    if weather.rain > VISIBLE_ALPHA {
-        let particle = precipitation(p, time, 0, weather.rain);
-        color = color.lerp(particle.truncate(), particle.w);
-    }
-    if weather.snow > VISIBLE_ALPHA {
-        let particle = precipitation(p, time, 1, weather.snow);
-        color = color.lerp(particle.truncate(), particle.w);
-    }
-    if weather.hail > VISIBLE_ALPHA {
-        let particle = precipitation(p, time, 2, weather.hail);
-        color = color.lerp(particle.truncate(), particle.w);
-    }
+    color = precipitation(color, p, time, 0, weather.rain);
+    color = precipitation(color, p, time, 1, weather.snow);
+    color = precipitation(color, p, time, 2, weather.hail);
 
     let flash = (time * 2.7).sin().smoothstep(0.92, 1.0) * weather.lightning;
     color = color.lerp(vec3(0.65, 0.74, 0.96), flash * 0.55);
@@ -224,7 +208,7 @@ pub struct WeatherPanel {
     utc_offset: Option<Offset>,
     details: String,
     hourly: [ForecastItem; HOURLY_FORECASTS],
-    daily: [ForecastItem; DAILY_FORECASTS],
+    daily: [ForecastItem; 5],
     timezones: ArrayVec<WorldClock, MAX_WORLD_CLOCKS>,
     month_offset: i32,
     month_hover: f32,
@@ -250,8 +234,6 @@ mod monitor {
     use tracing::warn;
 
     const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
-    const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
-    const RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
     #[derive(Deserialize)]
     pub(super) struct Forecast {
@@ -343,9 +325,10 @@ mod monitor {
         99 => "Thunderstorm Heavy Hail" { rain: 0.85, lightning: 1.0, hail: 1.0 };
     }
 
-    pub(super) async fn run(http: Client, timezones: Vec<String>, background: Background) {
+    pub(super) async fn run(timezones: Vec<String>, background: Background) {
+        let http = &background.http;
         let (location_tx, mut locations_rx) = mpsc::unbounded_channel();
-        platform::start_location_monitor(&background, location_tx);
+        platform::start_location_monitor(location_tx);
         let timezones: Vec<_> =
             once(TimeZone::system().iana_name().map(str::to_owned)).chain(timezones.into_iter().map(Some)).collect();
         let mut locations = vec![None; timezones.len()];
@@ -355,7 +338,6 @@ mod monitor {
             }
             join_all(timezones.iter().zip(&mut locations).filter_map(|(timezone, slot)| {
                 let timezone = timezone.as_ref().filter(|_| slot.is_none())?;
-                let http = &http;
                 Some(async move {
                     *slot = geocode(http, timezone)
                         .await
@@ -370,7 +352,7 @@ mod monitor {
                 .filter_map(|(index, &location)| location.map(|point| (index, point)))
                 .collect::<Vec<_>>();
             let mut retry = ready.len() != locations.len();
-            let forecasts: Vec<_> = match fetch(&http, &ready).await {
+            let forecasts: Vec<_> = match fetch(http, &ready).await {
                 Ok(results) => ready.into_iter().zip(results).map(|((index, _), forecast)| (index, forecast)).collect(),
                 Err(error) => {
                     retry = true;
@@ -389,7 +371,7 @@ mod monitor {
             {
                 break;
             }
-            let interval = if retry { RETRY_INTERVAL } else { REFRESH_INTERVAL };
+            let interval = if retry { Duration::from_secs(30) } else { Duration::from_mins(15) };
             tokio::select! {
                 () = platform::sleep(interval) => {}
                 Some(location) = locations_rx.recv() => locations[0] = Some(location),
@@ -499,7 +481,7 @@ mod monitor {
     }
 }
 impl WeatherPanel {
-    pub(crate) fn new(timezones: &[String], background: &Background, http: Client) -> Self {
+    pub(crate) fn new(timezones: &[String], background: &Background) -> Self {
         let mut forecast_timezones = Vec::with_capacity(timezones.len());
         let timezones: ArrayVec<_, MAX_WORLD_CLOCKS> = timezones
             .iter()
@@ -515,7 +497,7 @@ impl WeatherPanel {
                 })
             })
             .collect();
-        background.spawn(monitor::run(http, forecast_timezones, background.clone()));
+        platform::spawn_task(monitor::run(forecast_timezones, background.clone()));
         Self { timezones, details: "Weather unavailable".into(), ..Default::default() }
     }
 
@@ -593,7 +575,7 @@ impl WeatherPanel {
                 .upload({
                     let pill: Quad;
                     let expansion: f32 = self.expansion.smoothstep(0.0, 1.0);
-                    let line: Text = line.outlined(TEXT_OUTLINE);
+                    let line: Text = line.outlined(0.8);
                     let text_color: Unorm8x4 = Unorm8x4::from_vec4(color);
                     let clip: bool;
                 })
@@ -765,7 +747,7 @@ impl WeatherPanel {
         self.paint_text(context, line, pill, TEXT_COLOR.extend(reveal), true);
 
         for (column, weekday) in WEEKDAYS.iter().enumerate() {
-            let position = Vec2::new(grid_cell(column).x, WEEKDAY_Y);
+            let position = Vec2::new(grid_cell(column).x, UNIT * 17.0);
             let line = context.frame.resources.line(weekday, 14.0, 700.0).centered(origin + position);
             self.paint_text(
                 context,
@@ -777,7 +759,7 @@ impl WeatherPanel {
         }
 
         let grid_start = month.saturating_sub(Span::new().days(month.weekday().to_monday_zero_offset()));
-        for index in 0..GRID_CELLS {
+        for index in 0..WEEKDAY_COUNT * 6 {
             let date = grid_start.saturating_add(Span::new().days(index as i64));
             let mut label = ArrayString::<2>::new();
             write!(label, "{}", date.day()).unwrap();

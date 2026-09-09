@@ -36,16 +36,15 @@ pub fn program(input: TokenStream) -> TokenStream {
         Err(error) => return error.to_compile_error().into(),
     };
     let isthmus = isthmus_path();
-    let shared = syntax::program(&isthmus);
+    let shared = syntax::program();
     quote! {
         #shared
-        // SAFETY: The build generates this program's metadata and validates its shader module together.
-        unsafe impl #isthmus::Program for Program {
+        impl #isthmus::Program for Program {
             type Globals = #globals;
             type Resources = #resources;
             const SHADERS: &'static [#isthmus::__private::ShaderEntry] =
                 include!(concat!(env!("OUT_DIR"), "/isthmus.manifest.rs"));
-            const CODE: &'static [u8] = include_bytes!(env!("ISTHMUS_SHADER_PATH"));
+            const CODE: &'static str = include_str!(concat!(env!("OUT_DIR"), "/isthmus.wgsl"));
         }
         /// Drawing context for this shader program.
         pub type Frame<'a> = #isthmus::Frame<'a, Program>;
@@ -55,13 +54,13 @@ pub fn program(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Declares captures, a vertex stage, and `.fragment(|frame, fragment| ...)` with primitive-specific fragment data.
+/// Draws inline Rust: `shader!(frame.upload({ typed captures }).vertex(stage).fragment(shader))`.
 #[proc_macro]
 pub fn shader(input: TokenStream) -> TokenStream {
     let span = proc_macro2::Span::call_site();
     let location = span.start();
     let file = proc_macro::Span::call_site().file();
-    syntax::shader::Shader::parse(input.into(), &file, location.line, location.column)
+    syntax::shader::Shader::parse(input.into(), &file, location.line, location.column, &isthmus_path())
         .map_or_else(|error| error.to_compile_error(), |shader| shader.host(&isthmus_path()))
         .into()
 }

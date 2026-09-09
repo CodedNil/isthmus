@@ -11,18 +11,13 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     let Fields::Named(fields) = &data.fields else {
         return syn::Error::new_spanned(input, "ShaderData requires named fields").to_compile_error();
     };
-    if let Some(field) =
-        fields.named.iter().find(|field| field.attrs.iter().any(|attr| attr.path().is_ident("shader_data")))
-    {
-        return syn::Error::new_spanned(field, "shader_data storage options belong on the struct").to_compile_error();
-    }
-    if let Some(field) = fields
-        .named
-        .iter()
-        .find(|field| field.attrs.iter().any(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr")))
-    {
-        return syn::Error::new_spanned(field, "ShaderData fields must be identical on every target")
-            .to_compile_error();
+    for attribute in fields.named.iter().flat_map(|field| &field.attrs) {
+        let message = match attribute.path().get_ident().map(ToString::to_string).as_deref() {
+            Some("shader_data") => "shader_data storage options belong on the struct",
+            Some("cfg" | "cfg_attr") => "ShaderData fields must be identical on every target",
+            _ => continue,
+        };
+        return syn::Error::new_spanned(attribute, message).to_compile_error();
     }
     let mut generics = input.generics.clone();
     for parameter in generics.type_params_mut() {

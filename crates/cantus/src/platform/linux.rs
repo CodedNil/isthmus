@@ -1,15 +1,17 @@
 use crate::{
-    app::{AppUpdater, Background, CantusApp, send_update},
+    app::{AppUpdater, CantusApp, View, send_update},
     config,
     interaction::{InputEvent, Interaction},
+    platform::STATUS_SAMPLE_INTERVAL,
     render::{
         PANEL_START, Renderer,
-        launcher::{BACKGROUND_RADIUS, LauncherKey},
+        launcher::BACKGROUND_RADIUS,
         lyrics,
         status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
         weathertime,
     },
 };
+use calloop::{EventLoop, channel};
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
 use futures_util::StreamExt;
 use isthmus::{
@@ -20,18 +22,19 @@ use isthmus_sdf::layout::TextCache;
 use microfft::real::rfft_1024;
 use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
 use raw_window_handle::{
-    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
-    WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WaylandWindowHandle, WindowHandle,
 };
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     env,
-    ffi::c_void,
     fs::{self, File},
     future::Future,
     io::{self, Read, Write},
-    os::{fd::AsFd, unix::net::UnixDatagram},
+    os::{
+        fd::AsFd,
+        unix::{fs::FileExt, net::UnixDatagram},
+    },
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     ptr::NonNull,
@@ -45,7 +48,9 @@ use std::{
 use tokio::{net, runtime, sync::mpsc::UnboundedSender, task::spawn_blocking};
 use tracing::warn;
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop, event_created_child,
+    Connection, Dispatch, Proxy, QueueHandle, WEnum,
+    backend::Backend,
+    delegate_noop, event_created_child,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
         wl_callback::{self, WlCallback},
@@ -92,17 +97,13 @@ const TEXT_MIME: &str = "text/plain;charset=utf-8";
 
 pub trait Task = Future + Send + 'static;
 
-impl Background {
-    pub(crate) fn spawn(&self, task: impl Task<Output = ()>) {
-        self.runtime.spawn(task);
-    }
+pub fn spawn_task(task: impl Task<Output = ()>) {
+    tokio::spawn(task);
 }
 
 fn spawn_thread(name: &'static str, job: impl FnOnce() + Send + 'static) {
     thread::Builder::new().name(name.into()).spawn(job).expect("failed to spawn background thread");
 }
-
-use super::STATUS_SAMPLE_INTERVAL;
 
 pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
     let volume = Arc::clone(&audio);
@@ -111,8 +112,8 @@ pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
     spawn_thread("cantus-system-status", move || monitor_status(&updates));
 }
 
-pub fn start_location_monitor(background: &Background, updates: UnboundedSender<[f32; 2]>) {
-    background.spawn(async move {
+pub fn start_location_monitor(updates: UnboundedSender<[f32; 2]>) {
+    spawn_task(async move {
         if let Err(error) = stream_location(&updates).await {
             warn!(%error, "Location portal unavailable");
         }
@@ -127,9 +128,12 @@ pub fn set_volume(volume: f32) {
 }
 
 /// Calls logind directly, which is what `systemctl poweroff` does under the hood.
-pub fn run_power_action(background: &Background, action: usize) {
-    let method = ["PowerOff", "Reboot"][action];
-    background.spawn(async move {
+pub fn run_power_action(action: super::PowerAction) {
+    let method = match action {
+        super::PowerAction::PowerOff => "PowerOff",
+        super::PowerAction::Reboot => "Reboot",
+    };
+    spawn_task(async move {
         let result: Result<(), zbus::Error> = async {
             zbus::Connection::system()
                 .await?
@@ -210,7 +214,7 @@ pub fn open_url(url: &str) {
     }
 }
 
-pub fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
+pub fn start_launcher_listener(updater: &AppUpdater) {
     let path = launcher_socket_path();
     if UnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)).is_ok() {
         warn!(?path, "Another Cantus instance owns the launcher socket");
@@ -218,7 +222,7 @@ pub fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
     }
     let _ = fs::remove_file(&path);
     let updater = updater.clone();
-    background.spawn(async move {
+    spawn_task(async move {
         let socket = match net::UnixDatagram::bind(&path) {
             Ok(socket) => socket,
             Err(error) => {
@@ -236,7 +240,6 @@ pub fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
     });
 }
 
-/// # Errors
 /// Returns an error when a native Cantus instance cannot be reached.
 pub fn trigger_launcher() -> io::Result<()> {
     let path = launcher_socket_path();
@@ -247,10 +250,6 @@ pub fn trigger_launcher() -> io::Result<()> {
 }
 
 /// Runs the Wayland application event loop.
-///
-/// # Panics
-///
-/// Panics when required Wayland globals or rendering resources cannot be initialized.
 pub fn run() {
     let runtime = runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -270,16 +269,17 @@ pub fn run() {
     let layer_shell: ZwlrLayerShellV1 = globals.bind(&qhandle, 4..=4, ()).expect("Missing zwlr_layer_shell_v1");
     let seat: WlSeat = globals.bind(&qhandle, 8..=9, ()).expect("Missing wl_seat v8");
 
+    let (sender, updates) = channel::channel();
     let mut app = LayerShellApp {
         compositor,
         layer_shell,
-        display_handle: NonNull::new(connection.backend().display_ptr().cast()).expect("Wayland display pointer"),
+        connection: connection.clone(),
         clipboard: {
             let manager: WlDataDeviceManager = globals.bind(&qhandle, 3..=3, ()).expect("Missing clipboard manager v3");
             let device = manager.get_data_device(&seat, &qhandle, ());
             (manager, device)
         },
-        cantus: CantusApp::default(),
+        cantus: CantusApp::new(sender),
         scaling: (
             globals.bind(&qhandle, 1..=1, ()).expect("Missing wp_viewporter"),
             globals.bind(&qhandle, 1..=1, ()).expect("Missing wp_fractional_scale_manager_v1"),
@@ -302,11 +302,36 @@ pub fn run() {
     app.surfaces[SurfaceKind::Bar as usize] = Some(app.create_surface(SurfaceKind::Bar, &qhandle));
     connection.flush().expect("Failed to flush initial commit");
 
+    let mut event_loop = EventLoop::try_new().expect("failed to create event loop");
+    calloop_wayland_source::WaylandSource::new(connection, event_queue)
+        .insert(event_loop.handle())
+        .expect("failed to register Wayland events");
+    event_loop
+        .handle()
+        .insert_source(updates, |event, (), app: &mut LayerShellApp| {
+            if let channel::Event::Msg(update) = event {
+                update(&mut app.cantus);
+            }
+        })
+        .expect("failed to register background updates");
     while !app.should_exit {
-        if let Err(error) = event_queue.blocking_dispatch(&mut app) {
+        let deadline = app.repeat.map_or(app.cantus.next_enrichment, |(_, next)| next.min(app.cantus.next_enrichment));
+        if let Err(error) = event_loop.dispatch(deadline.saturating_duration_since(Instant::now()), &mut app) {
             warn!(%error, "Wayland connection closed");
             break;
         }
+        if !app.cantus.launcher.open {
+            app.repeat = None;
+        }
+        let now = Instant::now();
+        if let Some((keycode, next)) = app.repeat
+            && next <= now
+        {
+            app.repeat = Some((keycode, now + app.repeat_interval));
+            handle_launcher_key(&mut app, keycode);
+        }
+        app.cantus.refresh();
+        app.try_render_frame(&qhandle);
     }
 }
 
@@ -574,85 +599,24 @@ fn capture_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) -> io::Result<()
     )
 }
 
-#[derive(Clone, Copy)]
 struct NativeSurface {
-    display: NonNull<c_void>,
-    window: NonNull<c_void>,
+    backend: Backend,
+    wl: WlSurface,
 }
-
 impl HasDisplayHandle for NativeSurface {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        let handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(self.display));
-        // SAFETY: LayerShellApp owns the Wayland connection that supplied this live display pointer.
-        Ok(unsafe { DisplayHandle::borrow_raw(handle) })
+        self.backend.display_handle()
     }
 }
-
 impl HasWindowHandle for NativeSurface {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(self.window));
-        // SAFETY: LayerShellApp owns the live wl_surface represented by this pointer.
-        Ok(unsafe { WindowHandle::borrow_raw(handle) })
+        let pointer = NonNull::new(self.wl.id().as_ptr().cast()).ok_or(HandleError::Unavailable)?;
+        // SAFETY: The wl_surface and its display remain alive until this owner is dropped.
+        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Wayland(WaylandWindowHandle::new(pointer))) })
     }
 }
-
-struct LayerShellApp {
-    // Drop GPU surfaces before destroying the Wayland proxies.
-    gpu: Option<Renderer> = None,
-    cantus: CantusApp,
-
-    should_exit: bool = false,
-
-    compositor: WlCompositor,
-    layer_shell: ZwlrLayerShellV1,
-    pointer: Option<WlPointer> = None,
-    keyboard: Option<WlKeyboard> = None,
-    xkb_state: Option<xkb::State> = None,
-    /// Repeat timing advertised by the compositor; zero disables repetition.
-    repeat_delay: Duration = Duration::ZERO,
-    repeat_interval: Duration = Duration::ZERO,
-    /// The held key waiting to repeat and when it next fires, pumped each frame.
-    repeat: Option<(xkb::Keycode, Instant)> = None,
-    /// Latest keyboard serial, which the compositor requires to claim the selection.
-    key_serial: u32 = 0,
-    clipboard: (WlDataDeviceManager, WlDataDevice),
-    /// The selection offer to read on paste, kept only while it advertises text.
-    selection: Option<WlDataOffer> = None,
-    output: Option<WlOutput> = None,
-    frame_callback: Option<WlCallback> = None,
-    display_handle: NonNull<c_void>,
-    surfaces: [Option<WaylandSurface>; 2] = [None, None],
-    scaling: (WpViewporter, WpFractionalScaleManagerV1),
-    background_manager: Option<ExtBackgroundEffectManagerV1>,
-}
-
-#[derive(Clone, Copy)]
-enum SurfaceKind {
-    Bar,
-    Launcher,
-}
-
-struct WaylandSurface {
-    wl: WlSurface,
-    layer: ZwlrLayerSurfaceV1,
-    viewport: WpViewport,
-    fractional: WpFractionalScaleV1,
-    effect: Option<ExtBackgroundEffectSurfaceV1>,
-    size: Vec2,
-    scale: f32,
-    configured: bool,
-    gpu: Option<SurfaceHandle>,
-    blur_bounds: Option<(Vec2, Vec2)>,
-}
-
-impl Drop for WaylandSurface {
+impl Drop for NativeSurface {
     fn drop(&mut self) {
-        self.layer.destroy();
-        self.viewport.destroy();
-        self.fractional.destroy();
-        if let Some(effect) = &self.effect {
-            effect.destroy();
-        }
         self.wl.destroy();
     }
 }
@@ -675,18 +639,66 @@ macro_rules! dispatch {
     };
 }
 
-impl LayerShellApp {
-    fn bar_surface_height(&self) -> f32 {
-        let extension = if self.cantus.config.weathertime_enabled {
-            weathertime::EXTENSION
-        } else if self.cantus.config.lyrics_enabled {
-            lyrics::EXTENSION
-        } else {
-            0.0
-        } + PANEL_OVERFLOW;
-        self.cantus.config.height + PANEL_START + extension
-    }
+struct LayerShellApp {
+    gpu: Option<Renderer> = None,
+    cantus: CantusApp,
 
+    should_exit: bool = false,
+
+    compositor: WlCompositor,
+    layer_shell: ZwlrLayerShellV1,
+    pointer: Option<WlPointer> = None,
+    keyboard: Option<WlKeyboard> = None,
+    xkb_state: Option<xkb::State> = None,
+    /// Repeat timing advertised by the compositor; zero disables repetition.
+    repeat_delay: Duration = Duration::ZERO,
+    repeat_interval: Duration = Duration::ZERO,
+    /// The held key waiting to repeat and when it next fires.
+    repeat: Option<(xkb::Keycode, Instant)> = None,
+    /// Latest keyboard serial, which the compositor requires to claim the selection.
+    key_serial: u32 = 0,
+    clipboard: (WlDataDeviceManager, WlDataDevice),
+    /// The selection offer to read on paste, kept only while it advertises text.
+    selection: Option<WlDataOffer> = None,
+    output: Option<WlOutput> = None,
+    frame_callback: Option<WlCallback> = None,
+    connection: Connection,
+    surfaces: [Option<WaylandSurface>; 2] = [None, None],
+    scaling: (WpViewporter, WpFractionalScaleManagerV1),
+    background_manager: Option<ExtBackgroundEffectManagerV1>,
+}
+
+#[derive(Clone, Copy)]
+enum SurfaceKind {
+    Bar,
+    Launcher,
+}
+
+struct WaylandSurface {
+    native: Arc<NativeSurface>,
+    layer: ZwlrLayerSurfaceV1,
+    fractional: WpFractionalScaleV1,
+    viewport: WpViewport,
+    effect: Option<ExtBackgroundEffectSurfaceV1>,
+    size: Vec2,
+    scale: f32,
+    configured: bool,
+    gpu: Option<SurfaceHandle>,
+    blur_bounds: Option<(Vec2, Vec2)>,
+}
+
+impl Drop for WaylandSurface {
+    fn drop(&mut self) {
+        self.layer.destroy();
+        self.fractional.destroy();
+        self.viewport.destroy();
+        if let Some(effect) = &self.effect {
+            effect.destroy();
+        }
+    }
+}
+
+impl LayerShellApp {
     fn create_surface(&self, kind: SurfaceKind, qhandle: &QueueHandle<Self>) -> WaylandSurface {
         let launcher = matches!(kind, SurfaceKind::Launcher);
         let config = &self.cantus.config;
@@ -720,7 +732,12 @@ impl LayerShellApp {
                     }
                 },
         );
-        let height = if launcher { 0.0 } else { self.bar_surface_height() };
+        let extension = if config.weathertime_enabled {
+            weathertime::EXTENSION
+        } else {
+            f32::from(config.lyrics_enabled) * lyrics::EXTENSION
+        };
+        let height = if launcher { 0.0 } else { config.height + PANEL_START + extension + PANEL_OVERFLOW };
         layer.set_size(0, height as u32);
         layer.set_exclusive_zone(if launcher {
             0
@@ -733,33 +750,22 @@ impl LayerShellApp {
             KeyboardInteractivity::None
         });
         let surface = WaylandSurface {
+            effect: self.background_manager.as_ref().map(|manager| manager.get_background_effect(&wl, qhandle, ())),
             viewport: self.scaling.0.get_viewport(&wl, qhandle, ()),
             fractional: self.scaling.1.get_fractional_scale(&wl, qhandle, kind),
-            effect: self.background_manager.as_ref().map(|manager| manager.get_background_effect(&wl, qhandle, ())),
-            wl,
             layer,
+            native: Arc::new(NativeSurface { backend: self.connection.backend(), wl }),
             size: vec2(0.0, height),
             scale: 1.0,
             configured: false,
             gpu: None,
             blur_bounds: None,
         };
-        surface.wl.commit();
+        surface.native.wl.commit();
         surface
     }
 
     /// Re-fires the held key for as long as it stays down, once the initial delay has passed.
-    fn pump_key_repeat(&mut self) {
-        let now = Instant::now();
-        while let Some((keycode, next)) = self.repeat
-            && next <= now
-            && self.cantus.launcher.open
-        {
-            self.repeat = Some((keycode, next + self.repeat_interval));
-            handle_launcher_key(self, keycode);
-        }
-    }
-
     /// Reads clipboard data off the event loop so this client can also serve its own selection.
     fn paste(&self) -> Option<()> {
         let offer = self
@@ -771,18 +777,16 @@ impl LayerShellApp {
         offer.receive(TEXT_MIME.to_owned(), writer.as_fd());
         drop(writer); // Close the local write end so the reader can reach EOF.
         Connection::from_backend(offer.backend().upgrade()?).flush().ok()?;
-        self.cantus.enrichment.background.spawn_update(async move {
+        self.cantus.background.spawn_update(async move {
             let text = spawn_blocking(move || {
                 let mut text = String::new();
-                reader.read_to_string(&mut text).map(|_| text.replace(['\n', '\r'], " "))
+                reader.read_to_string(&mut text).map(|_| text)
             })
             .await
             .ok()?
             .ok()?;
             Some(move |app: &mut CantusApp| {
-                if app.launcher.open && app.launcher.session == session {
-                    app.launcher.edit(|field| field.insert(&text));
-                }
+                app.launcher.paste(session, &text);
             })
         });
         Some(())
@@ -810,8 +814,6 @@ impl LayerShellApp {
     }
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
-        self.pump_key_repeat();
-        self.cantus.apply_pending_updates();
         self.sync_launcher_surface(qhandle);
         if self.frame_callback.is_some()
             || self.surfaces[0].is_none()
@@ -820,21 +822,14 @@ impl LayerShellApp {
             return;
         }
         for surface in self.surfaces.iter_mut().flatten() {
-            let native = NativeSurface {
-                display: self.display_handle,
-                window: NonNull::new(surface.wl.id().as_ptr().cast()).expect("Wayland surface pointer"),
-            };
-            let size = (surface.size * surface.scale).round().to_array().map(|size| size as u32);
             surface.viewport.set_destination(surface.size.x as i32, surface.size.y as i32);
+            let size = (surface.size * surface.scale).to_array().map(|size| size.round().max(1.0) as u32);
             if self.gpu.is_none() {
-                // SAFETY: The renderer is dropped before the owned Wayland surfaces.
-                let (gpu, handle) = unsafe {
-                    Renderer::new(
-                        &native,
-                        size,
-                        TextCache::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf")),
-                    )
-                }
+                let (gpu, handle) = pollster::block_on(Renderer::new(
+                    Arc::clone(&surface.native),
+                    size,
+                    TextCache::new(include_bytes!("../../../../assets/NotoSans-Variable.ttf")),
+                ))
                 .expect("failed to initialize renderer");
                 tracing::info!("Using GPU device: {}", gpu.device_name());
                 self.gpu = Some(gpu);
@@ -842,33 +837,24 @@ impl LayerShellApp {
             }
             let gpu = self.gpu.as_mut().unwrap();
             let handle = *surface.gpu.get_or_insert_with(|| {
-                // SAFETY: The GPU surface is removed before the Wayland surface is destroyed.
-                unsafe { gpu.add_surface(&native, size) }.expect("incompatible surface")
+                gpu.add_surface(Arc::clone(&surface.native), size).expect("incompatible surface")
             });
             gpu.resize(handle, size);
         }
         if let Err(error) = self.gpu.as_mut().unwrap().render(|render| {
             for (index, surface) in self.surfaces.iter().enumerate() {
                 if let Some(surface) = surface {
-                    self.cantus.draw(render, surface.gpu.unwrap(), surface.size, index == 0, index == 1);
+                    self.cantus.draw(
+                        render,
+                        surface.gpu.unwrap(),
+                        surface.size,
+                        if index == 0 { View::Bar } else { View::Launcher },
+                    );
                 }
             }
         }) {
             tracing::error!(%error, "Could not render frame");
         }
-        self.update_input_region(qhandle);
-        self.update_blur_region(qhandle);
-        self.frame_callback = Some(self.active_surface().wl.frame(qhandle, ()));
-        self.active_surface().wl.commit();
-        if let Some(text) = self.cantus.launcher.pending_copy.take() {
-            let source = self.clipboard.0.create_data_source(qhandle, Arc::<str>::from(text));
-            source.offer(TEXT_MIME.to_owned());
-            self.clipboard.1.set_selection(Some(&source), self.key_serial);
-        }
-    }
-
-    fn update_input_region(&mut self, qhandle: &QueueHandle<Self>) {
-        let wl_surface = self.active_surface().wl.clone();
         let region = self.compositor.create_region(qhandle, ());
         for quad in self.cantus.interaction.input_regions.drain(..) {
             let (min, max) = quad.extents();
@@ -876,8 +862,16 @@ impl LayerShellApp {
             let size = max.ceil() - min;
             region.add(min.x as i32, min.y as i32, size.x as i32, size.y as i32);
         }
-        wl_surface.set_input_region(Some(&region));
+        self.active_surface().native.wl.set_input_region(Some(&region));
         region.destroy();
+        self.update_blur_region(qhandle);
+        self.frame_callback = Some(self.active_surface().native.wl.frame(qhandle, ()));
+        self.active_surface().native.wl.commit();
+        if let Some(text) = self.cantus.launcher.pending_copy.take() {
+            let source = self.clipboard.0.create_data_source(qhandle, Arc::<str>::from(text));
+            source.offer(TEXT_MIME.to_owned());
+            self.clipboard.1.set_selection(Some(&source), self.key_serial);
+        }
     }
 
     fn update_blur_region(&mut self, qhandle: &QueueHandle<Self>) {
@@ -908,7 +902,7 @@ impl LayerShellApp {
     }
 }
 
-dispatch!(ZwlrLayerSurfaceV1, SurfaceKind, kind, |state, proxy, event, qhandle| {
+dispatch!(ZwlrLayerSurfaceV1, SurfaceKind, kind, |state, proxy, event, _qhandle| {
     let Some(surface) = state.surfaces[*kind as usize].as_mut().filter(|surface| surface.layer == *proxy) else {
         return;
     };
@@ -932,25 +926,22 @@ dispatch!(ZwlrLayerSurfaceV1, SurfaceKind, kind, |state, proxy, event, qhandle| 
         }
         _ => return,
     }
-    state.try_render_frame(qhandle);
 });
 
-dispatch!(WlCallback, |state, proxy, event, qhandle| {
+dispatch!(WlCallback, |state, proxy, event, _qhandle| {
     if matches!(event, wl_callback::Event::Done { .. })
         && state.frame_callback.as_ref().is_some_and(|callback| callback.id() == proxy.id())
     {
         state.frame_callback = None;
-        state.try_render_frame(qhandle);
     }
 });
 
-dispatch!(WpFractionalScaleV1, SurfaceKind, kind, |state, proxy, event, qhandle| {
+dispatch!(WpFractionalScaleV1, SurfaceKind, kind, |state, proxy, event, _qhandle| {
     if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event
         && let Some(surface) = state.surfaces[*kind as usize].as_mut()
         && surface.fractional == *proxy
     {
         surface.scale = scale as f32 / 120.0;
-        state.try_render_frame(qhandle);
     }
 });
 
@@ -1036,17 +1027,24 @@ dispatch!(WlKeyboard, |state, _proxy, event, _qhandle| {
     match event {
         wl_keyboard::Event::Keymap { format: WEnum::Value(KeymapFormat::XkbV1), fd, size } => {
             let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-            // SAFETY: Wayland supplied fd and size for an XKB keymap in the declared format.
-            let keymap = unsafe {
-                xkb::Keymap::new_from_fd(
-                    &context,
-                    fd,
-                    size as usize,
-                    xkb::KEYMAP_FORMAT_TEXT_V1,
-                    xkb::KEYMAP_COMPILE_NO_FLAGS,
-                )
-            };
-            state.xkb_state = keymap.ok().flatten().map(|keymap| xkb::State::new(&keymap));
+            let mut bytes = vec![0; size as usize];
+            state.xkb_state = File::from(fd)
+                .read_exact_at(&mut bytes, 0)
+                .inspect_err(|error| warn!(%error, "Failed to read keyboard keymap"))
+                .ok()
+                .and_then(|()| String::from_utf8(bytes).ok())
+                .and_then(|text| {
+                    xkb::Keymap::new_from_string(
+                        &context,
+                        text,
+                        xkb::KEYMAP_FORMAT_TEXT_V1,
+                        xkb::KEYMAP_COMPILE_NO_FLAGS,
+                    )
+                })
+                .map(|keymap| xkb::State::new(&keymap));
+            if state.xkb_state.is_none() {
+                warn!("Keyboard keymap could not be loaded");
+            }
         }
         wl_keyboard::Event::Modifiers { mods_depressed, mods_latched, mods_locked, group, .. } => {
             if let Some(xkb_state) = &mut state.xkb_state {
@@ -1099,34 +1097,28 @@ fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
     }
     let shift = xkb_state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE);
     let control = xkb_state.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE);
-    let character = sym.key_char();
-    // Held control turns `key_char` into a control code, so the shortcuts read the keysym instead.
-    let letter = char::from_u32(sym.raw()).filter(char::is_ascii_alphabetic).map(|letter| letter.to_ascii_lowercase());
-
-    if control && letter == Some('v') {
-        state.paste();
-        return;
-    }
+    let mut text = [0; 4];
     let key = match sym.raw() {
-        xkb::keysyms::KEY_Escape => Some(LauncherKey::Escape),
-        xkb::keysyms::KEY_Return | xkb::keysyms::KEY_KP_Enter => Some(LauncherKey::Activate),
-        xkb::keysyms::KEY_Up => Some(LauncherKey::Up),
-        xkb::keysyms::KEY_Down => Some(LauncherKey::Down),
-        xkb::keysyms::KEY_BackSpace => Some(LauncherKey::Backspace),
-        xkb::keysyms::KEY_Delete => Some(LauncherKey::Delete),
-        xkb::keysyms::KEY_Left => Some(LauncherKey::Left),
-        xkb::keysyms::KEY_Right => Some(LauncherKey::Right),
-        xkb::keysyms::KEY_Home => Some(LauncherKey::Home),
-        xkb::keysyms::KEY_End => Some(LauncherKey::End),
-        _ if control && letter == Some('a') => Some(LauncherKey::SelectAll),
-        _ if control && letter == Some('c') => Some(LauncherKey::Copy),
-        _ if control && letter == Some('x') => Some(LauncherKey::Cut),
-        _ => None,
+        xkb::keysyms::KEY_Escape => "Escape",
+        xkb::keysyms::KEY_Return | xkb::keysyms::KEY_KP_Enter => "Enter",
+        xkb::keysyms::KEY_Up => "ArrowUp",
+        xkb::keysyms::KEY_Down => "ArrowDown",
+        xkb::keysyms::KEY_BackSpace => "Backspace",
+        xkb::keysyms::KEY_Delete => "Delete",
+        xkb::keysyms::KEY_Left => "ArrowLeft",
+        xkb::keysyms::KEY_Right => "ArrowRight",
+        xkb::keysyms::KEY_Home => "Home",
+        xkb::keysyms::KEY_End => "End",
+        _ => {
+            let character = if control { char::from_u32(sym.raw()).filter(char::is_ascii) } else { sym.key_char() };
+            let Some(character) = character else { return };
+            character.encode_utf8(&mut text)
+        }
     };
-    if let Some(key) = key {
-        state.cantus.launcher.key(key, shift);
-    } else if let Some(typed) = character.filter(|typed| !typed.is_control() && !control) {
-        state.cantus.launcher.edit(|field| field.insert(typed.encode_utf8(&mut [0u8; 4])));
+    if control && key.eq_ignore_ascii_case("v") {
+        state.paste();
+    } else {
+        state.cantus.launcher.input(key, shift, control);
     }
 }
 
@@ -1134,10 +1126,10 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
     if state.gpu.is_none() {
         return;
     }
-    let surface_id = state.active_surface().wl.id();
+    let surface = Arc::clone(&state.active_surface().native);
     let interaction = &mut state.cantus.interaction;
     match event {
-        wl_pointer::Event::Enter { surface: wl_surface, surface_x, surface_y, .. } if surface_id == wl_surface.id() => {
+        wl_pointer::Event::Enter { surface: wl_surface, surface_x, surface_y, .. } if surface.wl == wl_surface => {
             interaction.apply(InputEvent::Enter(vec2(surface_x as f32, surface_y as f32)));
         }
         wl_pointer::Event::Motion { surface_x, surface_y, .. } => {

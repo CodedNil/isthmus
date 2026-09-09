@@ -1,10 +1,5 @@
 use super::{Frame, Program, atmosphere, daylight, hash, noise, pigment, wash, wind};
-use isthmus::{
-    Blend, Float as _, Quad,
-    glam::{Vec2, vec2, vec3},
-    shader,
-    spirv_std::arch::kill,
-};
+use isthmus::{prelude::*, spirv_std::arch::kill};
 
 pub(super) fn river(y: f32) -> Vec2 {
     let depth = ((y - 0.42) / 0.58).max(0.0);

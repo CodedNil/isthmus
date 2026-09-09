@@ -1,9 +1,4 @@
-use super::{
-    TRACK_SPACING_MS, Track,
-    enrichment::{Enrichment, Fetch},
-    spotify::Spotify,
-};
-use crate::app::CantusApp;
+use super::{TRACK_SPACING_MS, Track, enrichment::Fetch, spotify::Spotify};
 use isthmus::glam::{FloatExt, vec2};
 use isthmus_sdf::layout::{ShapedLine, TextCache};
 use reqwest::Client;
@@ -95,24 +90,7 @@ impl Lyrics {
     }
 }
 
-impl Enrichment {
-    pub(super) fn request_lyrics(&self, request: Track, spotify: Spotify) {
-        let http = self.http.clone();
-        self.background.spawn_update(async move {
-            let uri = request.uri.clone();
-            let result = fetch(&request, &http, &spotify).await;
-            Some(move |app: &mut CantusApp| {
-                if let Some(slot @ Fetch::Fetching) = app.music.resources.lyrics.get_mut(&uri) {
-                    *slot = result
-                        .map(|segments| Lyrics { segments: Some(segments), ..Default::default() })
-                        .map_or_else(|()| Fetch::retry(), Fetch::Ready);
-                }
-            })
-        });
-    }
-}
-
-async fn fetch(request: &Track, http: &Client, spotify: &Spotify) -> Result<Vec<LyricSegment>, ()> {
+pub(super) async fn fetch(request: &Track, http: &Client, spotify: &Spotify) -> Fetch<Lyrics> {
     let result = match fetch_precise(http, request).await {
         Some(segments) => Ok(segments),
         None => match request.id {
@@ -120,9 +98,10 @@ async fn fetch(request: &Track, http: &Client, spotify: &Spotify) -> Result<Vec<
             None => Ok(Vec::new()),
         },
     };
-    result.map_err(|error| {
-        warn!(%error, track = request.name, "Failed to fetch lyrics");
-    })
+    result
+        .inspect_err(|error| warn!(%error, track = request.name, "Failed to fetch lyrics"))
+        .map(|segments| Lyrics { segments: Some(segments), ..Default::default() })
+        .map_or_else(|_| Fetch::retry(), Fetch::Ready)
 }
 
 #[derive(Deserialize)]

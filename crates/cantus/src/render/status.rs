@@ -9,12 +9,8 @@ use crate::{
 };
 use arrayvec::ArrayString;
 use core::f32::consts::TAU;
-use isthmus::{
-    Buffer, ColorExt as _, Float as _, Quad, Unorm16x2,
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
-    shader,
-};
-use isthmus_sdf::{Shape, Text};
+use isthmus::prelude::*;
+use isthmus_sdf::Shape;
 use std::{
     fmt::Write,
     sync::{
@@ -53,6 +49,7 @@ pub struct AudioMonitor {
     pub spectrum: [AtomicU32; AUDIO_SPECTRUM_BANDS],
 }
 
+#[derive(Default)]
 pub struct StatusPanel {
     /// Battery charge magnitude, negated while charging.
     battery_level: Option<f32>,
@@ -63,7 +60,6 @@ pub struct StatusPanel {
     processors: [ProcessorStatus; 2],
     action_hover: [f32; 2],
     audio_monitor: Arc<AudioMonitor>,
-    background: Background,
 }
 
 #[derive(Clone, Copy)]
@@ -87,17 +83,9 @@ impl StatusPanel {
     }
 
     pub(crate) fn new(background: &Background) -> Self {
-        let audio_monitor = Arc::<AudioMonitor>::default();
-        platform::start_status_monitor(background.updater.clone(), Arc::clone(&audio_monitor));
-        Self {
-            battery_level: None,
-            audio_spectrum: Default::default(),
-            history_scroll: 0.0,
-            processors: Default::default(),
-            action_hover: [0.0; 2],
-            audio_monitor,
-            background: background.clone(),
-        }
+        let panel = Self::default();
+        platform::start_status_monitor(background.updater.clone(), Arc::clone(&panel.audio_monitor));
+        panel
     }
 
     pub(crate) fn record(&mut self, update: SystemSample) {
@@ -213,21 +201,13 @@ impl StatusPanel {
                         surface.glass(color)
                     })
             );
-            shader!(
-                context
-                    .frame
-                    .upload({
-                        let pill_quad: Quad;
-                        let line: Text = context
-                            .frame
-                            .resources
-                            .line(&label, 11.0, 700.0)
-                            .fit(GAP + 5.0, center - half_width..center + half_width)
-                            .translated(vec2(x, PANEL_START));
-                    })
-                    .vertex(|frame| refract(Shape::pill(pill_quad), frame, line.bounds()))
-                    .fragment(|_, surface| TEXT_COLOR.extend(line.sample_at(surface.content).fill()))
-            );
+            let line = context
+                .frame
+                .resources
+                .line(&label, 11.0, 700.0)
+                .fit(GAP + 5.0, center - half_width..center + half_width)
+                .translated(vec2(x, PANEL_START));
+            context.paint_text(pill_quad, pill_quad.size.y * 0.5, line, TEXT_COLOR.extend(1.0));
             cursor += GRAPH_WIDTH + GAP;
         }
 
@@ -328,7 +308,11 @@ impl StatusPanel {
             self.action_hover[action] =
                 self.action_hover[action].move_towards(f32::from(response.hovered), context.frame.delta_time / 0.12);
             if response.hovered && response.held_for(1.5) {
-                platform::run_power_action(&self.background, action);
+                platform::run_power_action(if action == 0 {
+                    platform::PowerAction::PowerOff
+                } else {
+                    platform::PowerAction::Reboot
+                });
             }
             shader!(
                 context

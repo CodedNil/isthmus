@@ -1,29 +1,35 @@
 use crate::{
     config::{self, Config},
     interaction::Interaction,
-    music::{Music, enrichment::Enrichment},
+    music::Music,
     platform::{self, Task},
     render::{Bar, Globals, Program, UiContext, launcher::LauncherState},
 };
+#[cfg(target_os = "linux")]
+use calloop::channel::Sender;
 use isthmus::{Render, SurfaceHandle, glam::Vec2};
-use std::{
-    io,
-    sync::mpsc::{self, Sender},
-    time::Duration,
-};
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::runtime::Handle;
+use reqwest::Client;
+#[cfg(target_arch = "wasm32")]
+use std::sync::mpsc::Sender;
+use std::{io, time::Duration};
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{Layer, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use web_time::Instant;
+
+#[derive(Clone, Copy)]
+#[expect(dead_code, reason = "native and browser hosts select different views")]
+pub enum View {
+    Bar,
+    Launcher,
+    Combined,
+}
 
 pub type Update = Box<dyn FnOnce(&mut CantusApp) + Send>;
 pub type AppUpdater = Sender<Update>;
 
 #[derive(Clone)]
 pub struct Background {
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) runtime: Handle,
+    pub(crate) http: Client,
     pub(crate) updater: AppUpdater,
 }
 
@@ -35,17 +41,9 @@ pub fn run() {
 }
 
 impl Background {
-    fn new(updater: &AppUpdater) -> Self {
-        Self {
-            #[cfg(not(target_arch = "wasm32"))]
-            runtime: Handle::current(),
-            updater: updater.clone(),
-        }
-    }
-
     pub(crate) fn spawn_update<F: FnOnce(&mut CantusApp) + Send + 'static>(&self, task: impl Task<Output = Option<F>>) {
         let updater = self.updater.clone();
-        self.spawn(async move {
+        platform::spawn_task(async move {
             if let Some(event) = task.await {
                 let _ = updater.send(Box::new(event));
             }
@@ -57,38 +55,32 @@ pub struct CantusApp {
     pub(crate) music: Music,
     pub(crate) launcher: LauncherState,
     pub(crate) bar: Bar,
-    pub(crate) app_updates: mpsc::Receiver<Update>,
     pub(crate) config: Config,
-    pub(crate) enrichment: Enrichment,
+    pub(crate) background: Background,
     pub(crate) interaction: Interaction,
-    next_enrichment: Instant,
+    pub(crate) next_enrichment: Instant,
 }
 
-impl Default for CantusApp {
-    fn default() -> Self {
-        let (updater, app_updates) = mpsc::channel();
-        let background = Background::new(&updater);
-        let enrichment = Enrichment::new(background.clone());
+impl CantusApp {
+    pub(crate) fn new(updater: AppUpdater) -> Self {
+        let http = Client::builder();
+        #[cfg(not(target_arch = "wasm32"))]
+        let http = http.timeout(Duration::from_secs(15));
+        let background = Background { updater, http: http.build().expect("failed to construct HTTP client") };
         let config = config::load();
-        platform::start_launcher_listener(&background, &updater);
+        platform::start_launcher_listener(&background.updater);
         Self {
-            launcher: LauncherState::new(&background, &enrichment.http, config.search_providers.iter().cloned()),
-            bar: Bar::new(&config, &background, &enrichment),
-            app_updates,
-            enrichment,
-            music: Music::spotify(&config, &updater, &background),
+            launcher: LauncherState::new(&background, config.search_providers.iter().cloned()),
+            bar: Bar::new(&config, &background),
+            music: Music::spotify(&config, &background.updater),
+            background,
             interaction: Interaction::default(),
             next_enrichment: Instant::now(),
             config,
         }
     }
-}
 
-impl CantusApp {
-    pub(crate) fn apply_pending_updates(&mut self) {
-        while let Ok(update) = self.app_updates.try_recv() {
-            update(self);
-        }
+    pub(crate) fn refresh(&mut self) {
         if Instant::now() >= self.next_enrichment {
             self.next_enrichment = Instant::now() + Duration::from_secs(1);
             self.refresh_enrichment();
@@ -100,9 +92,10 @@ impl CantusApp {
         render: &mut Render<'_, Program>,
         surface: SurfaceHandle,
         screen_size: Vec2,
-        bar: bool,
-        launcher: bool,
+        view: View,
     ) {
+        let bar = !matches!(view, View::Launcher);
+        let launcher = !matches!(view, View::Bar);
         let launcher_open = self.launcher.open;
         let owns_input = if launcher_open { launcher } else { bar };
         if owns_input {

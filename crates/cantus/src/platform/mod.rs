@@ -7,19 +7,19 @@ use resvg::{
 };
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "linux")]
-use linux as backend;
-
-#[cfg(target_arch = "wasm32")]
-mod web;
+#[cfg_attr(target_os = "linux", path = "linux.rs")]
+#[cfg_attr(target_arch = "wasm32", path = "web.rs")]
+mod backend;
 pub use backend::{
-    Task, desktop_apps, open_url, run, run_power_action, set_volume, sleep, spawn, start_launcher_listener,
+    Task, desktop_apps, open_url, run, run_power_action, set_volume, sleep, spawn, spawn_task, start_launcher_listener,
     start_location_monitor, start_status_monitor, trigger_launcher,
 };
-#[cfg(target_arch = "wasm32")]
-use web as backend;
+
+#[derive(Clone, Copy)]
+pub enum PowerAction {
+    PowerOff,
+    Reboot,
+}
 
 pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 

@@ -39,10 +39,6 @@ impl<'ast> Visit<'ast> for References {
     fn visit_expr_path(&mut self, i: &'ast syn::ExprPath) {
         if i.path.get_ident().is_none_or(|name| !self.locals.contains(&name.to_string())) {
             self.visit_path(&i.path);
-        } else {
-            for segment in &i.path.segments {
-                self.visit_path_arguments(&segment.arguments);
-            }
         }
         if i.path.segments.len() > 1 {
             self.methods.insert(i.path.segments.last().expect("path has segments").ident.to_string());
