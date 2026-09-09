@@ -237,7 +237,7 @@ impl<P: Program> Primitive<P> for Triangle {
     }
 }
 
-fn corner(index: u32) -> Vec2 {
+const fn corner(index: u32) -> Vec2 {
     vec2((index & 1) as f32, (index >> 1) as f32)
 }
 

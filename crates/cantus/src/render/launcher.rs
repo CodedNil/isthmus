@@ -388,12 +388,15 @@ impl LauncherState {
         let (origin, size) = self.bounds(context.frame.screen_size);
         let rect = Rect::new(origin, origin + size);
         let panel = Shape::rounded_rect(rect, BACKGROUND_RADIUS as f32);
-        let screen = Rect::new(Vec2::ZERO, context.frame.screen_size);
-        context.interaction.input_region(screen);
-        let backdrop = context.interaction.interact("launcher-backdrop", Shape::rectangle(screen).difference(panel));
-        if !Self::ALWAYS_OPEN && backdrop.clicked {
-            self.open = false;
-            return;
+        if !Self::ALWAYS_OPEN {
+            let screen = Rect::new(Vec2::ZERO, context.frame.screen_size);
+            context.interaction.input_region(screen);
+            let backdrop =
+                context.interaction.interact("launcher-backdrop", Shape::rectangle(screen).difference(panel));
+            if backdrop.clicked {
+                self.open = false;
+                return;
+            }
         }
 
         self.show_search(context, rect);

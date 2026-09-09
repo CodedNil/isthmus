@@ -132,11 +132,9 @@ impl Spotify {
                 let next_start_ms = lines.get(index + 1).and_then(|next| next.start_time_ms.parse().ok());
                 let estimated_end = start_ms + line.words.chars().count().max(10) as f32 * 100.0;
                 Some(LyricSegment {
-                    start_ms,
-                    end_ms: next_start_ms.map_or(estimated_end, |next| estimated_end.min(next)),
-                    text: line.words.clone(),
-                    background: false,
-                    break_after: true,
+                    time: start_ms..next_start_ms.map_or(estimated_end, |next| estimated_end.min(next)),
+                    text: format!("{} ", line.words),
+                    channel: 0,
                 })
             })
             .collect())
@@ -232,7 +230,7 @@ async fn run_spotify(
                         key.eq_ignore_ascii_case("Spotify-Connection-Id").then_some(value)
                     }) {
                         worker.session.set_connection_id(connection_id);
-                        match worker.register().await {
+                        match SpotifyWorker::register(&worker.session).await {
                             Ok(cluster) => worker.update_cluster(cluster),
                             Err(error) => error!(%error, "Failed to register Spotify observer"),
                         }
@@ -269,25 +267,25 @@ struct SpotifyWorker {
 
 impl SpotifyWorker {
     async fn command(&mut self, command: PlaybackCommand) {
-        match command {
-            PlaybackCommand::SetPlaying(playing) => {
-                self.player_command(if playing { "resume" } else { "pause" }, None).await;
-            }
-            PlaybackCommand::Seek(position_ms) => self.player_command("seek_to", Some(position_ms)).await,
+        let (endpoint, value, count) = match command {
+            PlaybackCommand::SetPlaying(playing) => (if playing { "resume" } else { "pause" }, None, 1),
+            PlaybackCommand::Seek(position_ms) => ("seek_to", Some(position_ms), 1),
             PlaybackCommand::Skip(count) => {
-                for _ in 0..count.unsigned_abs() {
-                    self.player_command(if count > 0 { "skip_next" } else { "skip_prev" }, None).await;
-                }
+                (if count > 0 { "skip_next" } else { "skip_prev" }, None, count.unsigned_abs())
             }
             PlaybackCommand::UpdateLibrary { track_id, playlists, liked } => {
                 if let Err(error) = self.update_library(track_id, &playlists, liked).await {
                     warn!(%error, "Spotify library update failed");
                 }
+                return;
             }
+        };
+        for _ in 0..count {
+            Self::player_command(&self.session, self.active_device.as_deref(), endpoint, value).await;
         }
     }
 
-    async fn register(&mut self) -> MusicResult<Cluster> {
+    async fn register(session: &Session) -> MusicResult<Cluster> {
         let request = PutStateRequest {
             device: MessageField::some(ConnectDevice {
                 device_info: MessageField::some(DeviceInfo {
@@ -304,12 +302,12 @@ impl SpotifyWorker {
                         ..Default::default()
                     }),
                     device_type: EnumOrUnknown::new(DeviceType::OBSERVER),
-                    device_id: self.session.device_id().into(),
+                    device_id: session.device_id().into(),
                     client_id: CLIENT_ID.into(),
                     ..Default::default()
                 }),
                 player_state: MessageField::some(PlayerState {
-                    session_id: self.session.session_id(),
+                    session_id: session.session_id(),
                     playback_speed: 1.0,
                     options: MessageField::some(ContextPlayerOptions::default()),
                     suppressions: MessageField::some(Suppressions::default()),
@@ -322,7 +320,7 @@ impl SpotifyWorker {
             client_side_timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
             ..Default::default()
         };
-        let bytes = self.session.spclient().put_connect_state_request(&request).await?;
+        let bytes = session.spclient().put_connect_state_request(&request).await?;
         Ok(Cluster::parse_from_bytes(&bytes)?)
     }
 
@@ -410,8 +408,8 @@ impl SpotifyWorker {
         }));
     }
 
-    async fn player_command(&mut self, endpoint: &str, value: Option<u32>) {
-        let Some(target) = &self.active_device else { return };
+    async fn player_command(session: &Session, target: Option<&str>, endpoint: &str, value: Option<u32>) {
+        let Some(target) = target else { return };
         let mut command = json!({
             "endpoint": endpoint,
             "options": {
@@ -433,8 +431,8 @@ impl SpotifyWorker {
         let result: MusicResult<_> = async {
             compressed.write_all(&body)?;
             let body = compressed.finish()?;
-            let path = format!("/connect-state/v1/player/command/from/{}/to/{target}", self.session.device_id());
-            connected_request(&self.session, &path, "application/json", Some("gzip"), &body).await
+            let path = format!("/connect-state/v1/player/command/from/{}/to/{target}", session.device_id());
+            connected_request(session, &path, "application/json", Some("gzip"), &body).await
         }
         .await;
         if let Err(error) = result {

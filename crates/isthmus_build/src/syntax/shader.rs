@@ -338,7 +338,8 @@ impl Shader {
                 })),
             };
             let annotation = (capture.kind == CaptureKind::Buffer).then(|| quote!(: #ty));
-            quote!(#[allow(unused_variables)] let #name #annotation = #value;)
+            // Captures can be used by only one stage; both stages share this setup.
+            quote!(let #name #annotation = #value; let _ = &#name;)
         });
         let setup = quote! {
             type __Program = Program;

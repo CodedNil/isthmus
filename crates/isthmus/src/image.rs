@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 /// Filtering and addressing for a sampled image; linear clamping is the default.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-#[repr(usize)]
 pub enum Sampling {
     #[default]
     /// Linear filtering with coordinates clamped to the image edges.
@@ -85,7 +84,6 @@ impl Image {
     }
 }
 
-#[doc(hidden)]
 pub struct ShaderImage<'a> {
     image: &'a Image2d,
     sampler: Sampler,

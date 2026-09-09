@@ -67,18 +67,24 @@ pub(super) fn configure_surface(
     let format = match format {
         Some(format) if !caps.formats.contains(&format) => return Err(SetupError::IncompatibleSurface),
         Some(format) => format,
-        None => [wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureFormat::Rgba8Unorm]
-            .into_iter()
-            .find(|format| caps.formats.contains(format))
+        None => caps
+            .formats
+            .iter()
+            .copied()
+            .find(|format| matches!(format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm))
             .or_else(|| caps.formats.first().copied())
             .ok_or(SetupError::UnsupportedSurface)?,
     };
-    let alpha_mode =
+    // WebGPU supports premultiplied canvases, although wgpu's web capabilities only list Opaque.
+    let alpha_mode = if cfg!(target_arch = "wasm32") {
+        wgpu::CompositeAlphaMode::PreMultiplied
+    } else {
         [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::Auto, wgpu::CompositeAlphaMode::Opaque]
             .into_iter()
             .find(|mode| caps.alpha_modes.contains(mode))
             .or_else(|| caps.alpha_modes.first().copied())
-            .ok_or(SetupError::UnsupportedSurface)?;
+            .ok_or(SetupError::UnsupportedSurface)?
+    };
     Ok(wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format,

@@ -1,5 +1,6 @@
 use crate::ResourceData;
 use glam::{UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
+use isthmus_macros::ShaderData;
 use spirv_std::arch::IndexUnchecked;
 
 /// A borrowed array capture; shaders decode only the elements they read.
@@ -40,7 +41,7 @@ impl<'a, T: ShaderData> Buffer<'a, T> {
     }
 
     #[cfg(target_arch = "spirv")]
-    #[doc(hidden)]
+    /// Decodes a generated buffer capture from its payload offset and element count.
     pub fn from_words(words: &'a [u32], range: [u32; 2]) -> Self {
         Self { words, range, marker: core::marker::PhantomData }
     }
@@ -250,7 +251,6 @@ impl ShaderData for () {
     fn write(self, _: &mut [u32], _: usize) {}
 }
 
-#[expect(clippy::needless_range_loop, reason = "Rust-GPU cannot lower the array slice iterators")]
 impl<T: ShaderData, const N: usize> ShaderData for [T; N] {
     type View<'a> = Self;
 
@@ -261,6 +261,7 @@ impl<T: ShaderData, const N: usize> ShaderData for [T; N] {
         self
     }
 
+    #[expect(clippy::needless_range_loop, reason = "Rust-GPU cannot lower the array slice iterators")]
     unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
         let mut values = Self::ZERO;
         for index in 0..N {
@@ -271,15 +272,14 @@ impl<T: ShaderData, const N: usize> ShaderData for [T; N] {
     }
 
     fn write(self, words: &mut [u32], offset: usize) {
-        for index in 0..N {
-            self[index].write(words, offset + index * T::WORDS);
+        for (index, value) in self.into_iter().enumerate() {
+            value.write(words, offset + index * T::WORDS);
         }
     }
 }
 
-#[doc(hidden)]
-#[derive(Clone, Copy, Default, crate::ShaderData)]
-pub struct FrameData<G: ShaderData> {
+#[derive(Clone, Copy, Default, ShaderData)]
+pub struct FrameData<G> {
     pub screen_size: Vec2,
     pub time: f32,
     pub pixel_scale: Vec2,

@@ -156,7 +156,11 @@ impl CantusApp {
             let start = music.timeline.index.saturating_sub(1).min(music.queue.len());
             let end = music.timeline.index.saturating_add(3).min(music.queue.len());
             for track in &music.queue[start..end] {
-                if !track.name.trim().is_empty() && resources.lyrics.entry(track.uri.clone()).or_default().request(now)
+                // Queue titles can arrive before the artist and duration metadata.
+                if !track.name.trim().is_empty()
+                    && !track.artist.trim().is_empty()
+                    && track.duration_ms > 0
+                    && resources.lyrics.entry(track.uri.clone()).or_default().request(now)
                 {
                     let (track, spotify, http) = (track.clone(), music.spotify.clone(), self.background.http.clone());
                     self.background.fetch(

@@ -76,6 +76,7 @@ xkbcommon = { version = "0.9.0", default-features = false }
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+paries = { path = "../paries", optional = true }
 gloo-events = "0.3.0"
 gloo-render = "0.3.0"
 gloo-timers = { version = "0.4.0", features = ["futures"] }
