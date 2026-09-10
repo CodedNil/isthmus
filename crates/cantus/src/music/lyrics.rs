@@ -177,7 +177,7 @@ pub(super) async fn fetch(track: &Track, http: &Client, spotify: &Spotify) -> Fe
             }
         }
         if let Some(id) = track.id {
-            provider = "Spotify fallback";
+            provider = "Spotify";
             return spotify.lyrics(id).await;
         }
         Ok(Vec::new())
@@ -187,7 +187,7 @@ pub(super) async fn fetch(track: &Track, http: &Client, spotify: &Spotify) -> Fe
     match result {
         Ok(pending) => {
             if !pending.is_empty() {
-                info!("Lyrics loaded from {provider} for \"{}\" by {}", track.name, track.artist);
+                info!("Lyrics from {provider} for \"{}\" by {}", track.name, track.artist);
             }
             Fetch::Ready(Lyrics {
                 channels: pending.iter().map(|s| (s.channel, Channel::default())).collect(),

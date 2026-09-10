@@ -8,13 +8,20 @@ use crate::{
 #[cfg(target_os = "linux")]
 use calloop::channel::Sender;
 use isthmus::{Render, SurfaceHandle, glam::Vec2};
+use jiff::Zoned;
 use reqwest::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
 #[cfg(target_arch = "wasm32")]
 use std::sync::mpsc::Sender;
-use std::{io, time::Duration};
+use std::{fmt::Result as FmtResult, io, time::Duration};
 use tracing::{Level, level_filters::LevelFilter};
-use tracing_subscriber::{Layer, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    Layer,
+    filter::Targets,
+    fmt::{self, format::Writer},
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+};
 use web_time::Instant;
 
 #[derive(Clone, Copy)]
@@ -36,9 +43,21 @@ pub struct Background {
     pub(crate) updater: AppUpdater,
 }
 
+fn log_time(writer: &mut Writer<'_>) -> FmtResult {
+    write!(writer, "{}", Zoned::now().strftime("%H:%M:%S%.3f"))
+}
+
 pub fn run() {
     let filter = Targets::new().with_default(LevelFilter::WARN).with_target("cantus", Level::INFO);
-    tracing_subscriber::registry().with(fmt::layer().with_writer(io::stderr).with_filter(filter)).init();
+    tracing_subscriber::registry()
+        .with(
+            fmt::layer()
+                .with_target(false)
+                .with_timer(log_time as fn(&mut Writer<'_>) -> FmtResult)
+                .with_writer(io::stderr)
+                .with_filter(filter),
+        )
+        .init();
 
     platform::run();
 }

@@ -87,7 +87,7 @@ impl Spotify {
     }
 }
 
-// Apple catalog metadata and Spotify audio features captured on 2026-09-09.
+// Apple/Spotify catalog metadata and Spotify audio features captured on 2026-09-10.
 // Tempo stays in BPM in the fixture and is normalized on loading, as in the native provider.
 #[derive(serde::Deserialize)]
 struct DemoTrack {
