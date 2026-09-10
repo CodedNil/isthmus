@@ -45,7 +45,6 @@ unicode-segmentation = "1.13.3"
 web-time = "1.1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.13.13", features = ["location"] }
 calloop = "0.14"
 calloop-wayland-source = "0.4.1"
 flate2 = "1.1.10"

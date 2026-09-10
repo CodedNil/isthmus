@@ -28,6 +28,7 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     env,
+    error::Error,
     fs::{self, File},
     future::Future,
     io::{self, Read, Write},
@@ -45,7 +46,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tokio::{net, runtime, sync::mpsc::UnboundedSender, task::spawn_blocking};
+use tokio::{net, runtime, task::spawn_blocking};
 use tracing::warn;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
@@ -110,14 +111,6 @@ pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
     spawn_thread("cantus-audio-playback", move || monitor_playback(&audio.spectrum));
     spawn_thread("cantus-audio-volume", move || monitor_volume(&volume.volume));
     spawn_thread("cantus-system-status", move || monitor_status(&updates));
-}
-
-pub fn start_location_monitor(updates: UnboundedSender<[f32; 2]>) {
-    spawn_task(async move {
-        if let Err(error) = stream_location(&updates).await {
-            warn!(%error, "Location portal unavailable");
-        }
-    });
 }
 
 pub fn set_volume(volume: f32) {
@@ -335,18 +328,59 @@ pub fn run() {
     }
 }
 
-async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), ashpd::Error> {
-    use ashpd::desktop::location::{Accuracy, CreateSessionOptions, LocationProxy, StartOptions};
-    let location = LocationProxy::new().await?;
-    let session = location.create_session(CreateSessionOptions::default().set_accuracy(Accuracy::City)).await?;
-    let mut updates = location.receive_location_updated().await?;
-    location.start(&session, None, StartOptions::default()).await?.response()?;
+pub async fn current_location() -> Result<[f32; 2], Box<dyn Error + Send + Sync>> {
+    use zbus::{
+        proxy::CacheProperties,
+        zvariant::{OwnedObjectPath, OwnedValue, Value},
+    };
+
+    // A dedicated connection releases portal requests and sessions on every exit path.
+    let connection = zbus::Connection::session().await?;
+    let proxy = |path: OwnedObjectPath, interface: &'static str| {
+        let connection = &connection;
+        async move {
+            zbus::proxy::Builder::new(connection)
+                .destination("org.freedesktop.portal.Desktop")?
+                .path(path)?
+                .interface(interface)?
+                .cache_properties(CacheProperties::No)
+                .build()
+                .await
+        }
+    };
+    let location: zbus::Proxy<'_> =
+        proxy(OwnedObjectPath::try_from("/org/freedesktop/portal/desktop")?, "org.freedesktop.portal.Location").await?;
+    let token = "cantus";
+    let options = HashMap::from([("session_handle_token", Value::from(token)), ("accuracy", Value::from(2u32))]);
+    let session: OwnedObjectPath = location.call("CreateSession", &(options,)).await?;
+    let mut updates = location.receive_signal("LocationUpdated").await?;
+
+    // Subscribe before Start: the response can arrive before the method returns.
+    let name = connection.unique_name().ok_or("Session bus has no unique name")?.as_str()[1..].replace('.', "_");
+    let path = OwnedObjectPath::try_from(format!("/org/freedesktop/portal/desktop/request/{name}/{token}"))?;
+    let request = proxy(path.clone(), "org.freedesktop.portal.Request").await?;
+    let mut responses = request.receive_signal("Response").await?;
+    let options = HashMap::from([("handle_token", Value::from(token))]);
+    let handle: OwnedObjectPath = location.call("Start", &(&session, "", options)).await?;
+    if handle != path {
+        return Err("Location portal returned an unexpected request handle".into());
+    }
+    let response = responses.next().await.ok_or("Location portal closed before responding")?;
+    let (status, _): (u32, HashMap<String, OwnedValue>) = response.body().deserialize()?;
+    if status != 0 {
+        return Err(
+            format!("Location request was {}", if status == 1 { "cancelled" } else { "denied or failed" }).into()
+        );
+    }
     while let Some(update) = updates.next().await {
-        if sender.send([update.latitude() as f32, update.longitude() as f32]).is_err() {
-            break;
+        let (handle, values): (OwnedObjectPath, HashMap<String, OwnedValue>) = update.body().deserialize()?;
+        if handle == session {
+            let latitude = f64::try_from(values.get("Latitude").ok_or("Location has no latitude")?)?;
+            let longitude = f64::try_from(values.get("Longitude").ok_or("Location has no longitude")?)?;
+            return Ok([latitude as f32, longitude as f32]);
         }
     }
-    session.close().await
+    Err("Location portal closed before providing a position".into())
 }
 
 fn launcher_socket_path() -> PathBuf {
