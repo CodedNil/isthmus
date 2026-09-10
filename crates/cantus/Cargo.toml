@@ -22,7 +22,6 @@ isthmus = { path = "../isthmus" }
 isthmus_sdf = { path = "../isthmus_sdf" }
 jiff = { version = "0.2.35", default-features = false, features = [
     "serde",
-    "std",
     "tz-system",
     "tzdb-bundle-always",
 ] }
@@ -31,7 +30,9 @@ reqwest = { version = "0.12.28", default-features = false, features = [
     "json",
     "rustls-tls-webpki-roots",
 ] }
-resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
+resvg = { version = "0.48.1", default-features = false, features = [
+    "raster-images",
+] }
 roxmltree = "0.21.1"
 serde_json = "1.0.151"
 serde.workspace = true
@@ -39,24 +40,26 @@ smallvec.workspace = true
 tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
 toml = "1.1.5"
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3.23", default-features = false, features = [
-    "fmt",
-    "smallvec",
-    "tracing-log",
-] }
+tracing-subscriber = "0.3.23"
 unicode-segmentation = "1.13.3"
 web-time = "1.1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "location"] }
+ashpd = { version = "0.13.13", features = ["location"] }
 calloop = "0.14"
 calloop-wayland-source = "0.4.1"
 flate2 = "1.1.10"
 freedesktop-desktop-entry = { version = "0.8.2", default-features = false }
 freedesktop-icons = "0.4.0"
-librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
-librespot-metadata = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
-librespot-oauth = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-core = { version = "0.8.0", default-features = false, features = [
+    "rustls-tls-webpki-roots",
+] }
+librespot-metadata = { version = "0.8.0", default-features = false, features = [
+    "rustls-tls-webpki-roots",
+] }
+librespot-oauth = { version = "0.8.0", default-features = false, features = [
+    "rustls-tls-webpki-roots",
+] }
 librespot-protocol = "0.8.0"
 microfft = { version = "0.6.0", default-features = false, features = [
     "size-1024",
@@ -69,7 +72,7 @@ raw-window-handle = "0.6.2"
 schemars = { version = "1.2.2", features = ["arrayvec07", "preserve_order"] }
 tokio = { version = "1.53.1", features = ["net", "rt-multi-thread"] }
 wayland-backend = { version = "0.3.17", features = ["rwh_06", "client_system"] }
-wayland-client = { version = "0.31.15", default-features = false, features = ["system"] }
+wayland-client = { version = "0.31.15", features = ["system"] }
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 xkbcommon = { version = "0.9.0", default-features = false }
@@ -90,8 +93,6 @@ web-sys = { version = "0.3.105", features = [
     "DataTransfer",
     "Coordinates",
     "Document",
-    "EventTarget",
-    "Event",
     "Geolocation",
     "HtmlCanvasElement",
     "KeyboardEvent",
@@ -105,7 +106,7 @@ web-sys = { version = "0.3.105", features = [
 [build-dependencies]
 isthmus-build = { path = "../isthmus_build" }
 # librespot-core 0.8's vergen-gitcl build dependency is incompatible with vergen 9.1.
-vergen = { version = "=9.0.6", default-features = false }
+vergen = "=9.0.6"
 
 [lints]
 workspace = true

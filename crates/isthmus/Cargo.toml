@@ -13,7 +13,7 @@ glam = { workspace = true, features = ["libm"] }
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
 bytemuck.workspace = true
 glam = { workspace = true, features = ["std"] }
-half = { version = "2.7.1", default-features = false }
+half = "2.7.1"
 slotmap = "1.1.1"
 smallvec.workspace = true
 thiserror = "2.0.20"
