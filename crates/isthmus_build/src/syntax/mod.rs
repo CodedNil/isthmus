@@ -2,13 +2,12 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::punctuated::Punctuated;
+use syn::{parse::Parser, punctuated::Punctuated};
 
 #[path = "../../../isthmus/src/bindings.rs"]
 pub mod bindings;
 
 pub fn program_types(tokens: TokenStream2) -> syn::Result<(syn::Type, syn::Type)> {
-    use syn::parse::Parser;
     let types = Punctuated::<syn::Type, syn::Token![,]>::parse_terminated.parse2(tokens)?;
     if types.len() > 2 {
         return Err(syn::Error::new_spanned(types, "expected globals and optional resources type"));
@@ -26,6 +25,10 @@ pub fn program() -> TokenStream2 {
 }
 
 pub mod shader;
+
+fn image_names(name: &syn::Ident) -> (syn::Ident, syn::Ident) {
+    (format_ident!("__isthmus_image_{name}"), format_ident!("__isthmus_sampler_{name}"))
+}
 
 fn shader_entry(
     isthmus: &TokenStream2,
@@ -62,8 +65,7 @@ fn shader_entry(
     let image_resources = images.iter().enumerate().map(|(index, name)| {
         let image_binding = index as u32 * 2;
         let sampler_binding = image_binding + 1;
-        let image = format_ident!("__isthmus_image_{name}");
-        let sampler = format_ident!("__isthmus_sampler_{name}");
+        let (image, sampler) = image_names(name);
         quote! {
             #[spirv(descriptor_set = 1, binding = #image_binding)]
             #image: &#isthmus::spirv_std::image::Image2d,

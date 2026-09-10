@@ -1,3 +1,7 @@
+pub use backend::{
+    Task, current_location, desktop_apps, open_url, run, run_power_action, set_volume, sleep, spawn, spawn_task,
+    start_launcher_listener, start_status_monitor, trigger_launcher,
+};
 use image::imageops::FilterType;
 use isthmus::Image;
 use resvg::{
@@ -10,10 +14,6 @@ use std::time::Duration;
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
 #[cfg_attr(target_arch = "wasm32", path = "web.rs")]
 mod backend;
-pub use backend::{
-    Task, current_location, desktop_apps, open_url, run, run_power_action, set_volume, sleep, spawn, spawn_task,
-    start_launcher_listener, start_status_monitor, trigger_launcher,
-};
 
 #[derive(Clone, Copy)]
 pub enum PowerAction {

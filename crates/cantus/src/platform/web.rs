@@ -1,4 +1,4 @@
-use super::DesktopApp;
+use super::{DesktopApp, STATUS_SAMPLE_INTERVAL};
 use crate::{
     app::{AppUpdater, View, send_update},
     interaction::InputEvent,
@@ -70,8 +70,6 @@ fn sample_audio(time: f32, audio: &AudioMonitor) {
         band.store((0.18 + phase.sin().abs() * 0.62).to_bits(), Ordering::Relaxed);
     }
 }
-
-use super::STATUS_SAMPLE_INTERVAL;
 
 pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
     let start = Instant::now();

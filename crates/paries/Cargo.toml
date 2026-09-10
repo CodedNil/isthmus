@@ -7,12 +7,11 @@ edition = "2024"
 isthmus = { path = "../isthmus" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-pollster = "1.0.1"
-raw-window-handle = "0.6.2"
-wayland-backend = { version = "0.3.17", features = ["rwh_06", "client_system"] }
-wayland-client = { version = "0.31.15", features = ["system"] }
-wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+wayland-backend = { version = "0.3.17", features = ["rwh_06"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+pollster = "1.0.1"
+wayland-client = { version = "0.31.15", features = ["system"] }
 
 [build-dependencies]
 isthmus-build = { path = "../isthmus_build" }

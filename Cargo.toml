@@ -42,6 +42,7 @@ cast_possible_wrap = "allow"
 suboptimal_flops = "allow"
 
 absolute_paths = "warn"
+arbitrary_source_item_ordering = "warn"
 allow_attributes_without_reason = "warn"
 assertions_on_result_states = "warn"
 clone_on_ref_ptr = "warn"

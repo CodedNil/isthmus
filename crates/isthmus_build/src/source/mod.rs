@@ -1,4 +1,3 @@
-mod references;
 use crate::syntax::{program, program_types, shader::Shader};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, quote};
@@ -13,6 +12,8 @@ use syn::{
     punctuated::Punctuated,
     visit::{self, Visit},
 };
+
+mod references;
 
 pub struct Generated {
     pub source: String,

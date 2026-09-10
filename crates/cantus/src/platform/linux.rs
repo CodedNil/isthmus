@@ -17,13 +17,14 @@ use futures_util::StreamExt;
 use isthmus::{
     SurfaceHandle,
     glam::{FloatExt, Vec2, vec2},
+    wgpu::rwh::{
+        DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WaylandWindowHandle,
+        WindowHandle,
+    },
 };
 use isthmus_sdf::layout::TextCache;
 use microfft::real::rfft_1024;
 use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
-use raw_window_handle::{
-    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WaylandWindowHandle, WindowHandle,
-};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -31,35 +32,30 @@ use std::{
     error::Error,
     fs::{self, File},
     future::Future,
-    io::{self, Read, Write},
-    os::{
-        fd::AsFd,
-        unix::{fs::FileExt, net::UnixDatagram},
-    },
+    io::{self, Read},
+    os::unix::{fs::FileExt, net::UnixDatagram},
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     ptr::NonNull,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicU32, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
 };
-use tokio::{net, runtime, task::spawn_blocking};
+pub use tokio::time::sleep;
+use tokio::{net, runtime, sync::oneshot};
 use tracing::warn;
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle, WEnum,
+    Connection, Proxy, QueueHandle, WEnum,
     backend::Backend,
-    delegate_noop, event_created_child,
+    delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
         wl_callback::{self, WlCallback},
         wl_compositor::WlCompositor,
-        wl_data_device::{self, WlDataDevice},
-        wl_data_device_manager::WlDataDeviceManager,
-        wl_data_offer::{self, WlDataOffer},
-        wl_data_source::{self, WlDataSource},
         wl_keyboard::{self, KeyState, KeymapFormat, WlKeyboard},
         wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
@@ -87,6 +83,54 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 use xkbcommon::xkb;
+use zbus::{
+    proxy::CacheProperties,
+    zvariant::{OwnedObjectPath, OwnedValue, Value as DbusValue},
+};
+
+macro_rules! dispatch {
+    ($app:ty, $proxy:ty, |$state:ident, $object:ident, $value:ident, $queue:ident| $body:block) => {
+        dispatch!($app, $proxy, (), _data, |$state, $object, $value, $queue| $body);
+    };
+    ($app:ty, $proxy:ty, $data_type:ty, $data:ident,
+        |$state:ident, $object:ident, $value:ident, $queue:ident| $body:block) => {
+        impl wayland_client::Dispatch<$proxy, $data_type> for $app {
+            fn event(
+                $state: &mut Self,
+                $object: &$proxy,
+                $value: <$proxy as wayland_client::Proxy>::Event,
+                $data: &$data_type,
+                _conn: &wayland_client::Connection,
+                $queue: &wayland_client::QueueHandle<Self>,
+            ) $body
+        }
+    };
+}
+
+struct NativeSurface {
+    backend: Backend,
+    wl: WlSurface,
+}
+
+impl HasDisplayHandle for NativeSurface {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        self.backend.display_handle()
+    }
+}
+
+impl HasWindowHandle for NativeSurface {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        let pointer = NonNull::new(self.wl.id().as_ptr().cast()).ok_or(HandleError::Unavailable)?;
+        // SAFETY: The wl_surface and its display remain alive until this owner is dropped.
+        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Wayland(WaylandWindowHandle::new(pointer))) })
+    }
+}
+
+impl Drop for NativeSurface {
+    fn drop(&mut self) {
+        self.wl.destroy();
+    }
+}
 
 const PANEL_OVERFLOW: f32 = 16.0;
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
@@ -94,7 +138,6 @@ const AUDIO_WINDOW_SIZE: usize = 1024;
 const AUDIO_BAND_EDGES: [f32; AUDIO_SPECTRUM_BANDS + 1] =
     [60.0, 120.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 12_000.0];
 const LAUNCHER_SOCKET_NAME: &str = "cantus-launcher.sock";
-const TEXT_MIME: &str = "text/plain;charset=utf-8";
 
 pub trait Task = Future + Send + 'static;
 
@@ -258,25 +301,17 @@ pub fn run() {
     let (globals, mut event_queue) =
         registry_queue_init::<LayerShellApp>(&connection).expect("Failed to read Wayland registry");
     let qhandle = event_queue.handle();
-    let compositor: WlCompositor = globals.bind(&qhandle, 6..=7, ()).expect("Missing wl_compositor v6");
-    let layer_shell: ZwlrLayerShellV1 = globals.bind(&qhandle, 4..=4, ()).expect("Missing zwlr_layer_shell_v1");
-    let seat: WlSeat = globals.bind(&qhandle, 8..=9, ()).expect("Missing wl_seat v8");
+    let _seat: WlSeat = globals.bind(&qhandle, 8..=9, ()).expect("Missing wl_seat v8");
 
     let (sender, updates) = channel::channel();
     let mut app = LayerShellApp {
-        compositor,
-        layer_shell,
-        connection: connection.clone(),
-        clipboard: {
-            let manager: WlDataDeviceManager = globals.bind(&qhandle, 3..=3, ()).expect("Missing clipboard manager v3");
-            let device = manager.get_data_device(&seat, &qhandle, ());
-            (manager, device)
-        },
+        compositor: globals.bind(&qhandle, 6..=7, ()).expect("missing wl_compositor v6"),
+        shell: globals.bind(&qhandle, 4..=4, ()).expect("missing zwlr_layer_shell_v1"),
+        viewporter: globals.bind(&qhandle, 1..=1, ()).expect("missing wp_viewporter"),
+        fractional: globals.bind(&qhandle, 1..=1, ()).expect("missing wp_fractional_scale_manager_v1"),
+        backend: connection.backend(),
+        clipboard: Clipboard::new(connection.clone()),
         cantus: CantusApp::new(sender),
-        scaling: (
-            globals.bind(&qhandle, 1..=1, ()).expect("Missing wp_viewporter"),
-            globals.bind(&qhandle, 1..=1, ()).expect("Missing wp_fractional_scale_manager_v1"),
-        ),
         background_manager: globals.bind(&qhandle, 1..=1, ()).ok(),
         ..
     };
@@ -329,12 +364,6 @@ pub fn run() {
 }
 
 pub async fn current_location() -> Result<[f32; 2], Box<dyn Error + Send + Sync>> {
-    use zbus::{
-        proxy::CacheProperties,
-        zvariant::{OwnedObjectPath, OwnedValue, Value},
-    };
-
-    // A dedicated connection releases portal requests and sessions on every exit path.
     let connection = zbus::Connection::session().await?;
     let proxy = |path: OwnedObjectPath, interface: &'static str| {
         let connection = &connection;
@@ -351,7 +380,8 @@ pub async fn current_location() -> Result<[f32; 2], Box<dyn Error + Send + Sync>
     let location: zbus::Proxy<'_> =
         proxy(OwnedObjectPath::try_from("/org/freedesktop/portal/desktop")?, "org.freedesktop.portal.Location").await?;
     let token = "cantus";
-    let options = HashMap::from([("session_handle_token", Value::from(token)), ("accuracy", Value::from(2u32))]);
+    let options =
+        HashMap::from([("session_handle_token", DbusValue::from(token)), ("accuracy", DbusValue::from(2u32))]);
     let session: OwnedObjectPath = location.call("CreateSession", &(options,)).await?;
     let mut updates = location.receive_signal("LocationUpdated").await?;
 
@@ -360,7 +390,7 @@ pub async fn current_location() -> Result<[f32; 2], Box<dyn Error + Send + Sync>
     let path = OwnedObjectPath::try_from(format!("/org/freedesktop/portal/desktop/request/{name}/{token}"))?;
     let request = proxy(path.clone(), "org.freedesktop.portal.Request").await?;
     let mut responses = request.receive_signal("Response").await?;
-    let options = HashMap::from([("handle_token", Value::from(token))]);
+    let options = HashMap::from([("handle_token", DbusValue::from(token))]);
     let handle: OwnedObjectPath = location.call("Start", &(&session, "", options)).await?;
     if handle != path {
         return Err("Location portal returned an unexpected request handle".into());
@@ -620,44 +650,47 @@ fn capture_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) -> io::Result<()
     )
 }
 
-struct NativeSurface {
-    backend: Backend,
-    wl: WlSurface,
+struct Selection {
+    inner: smithay_clipboard::Clipboard,
+    _connection: Connection,
 }
-impl HasDisplayHandle for NativeSurface {
-    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        self.backend.display_handle()
-    }
-}
-impl HasWindowHandle for NativeSurface {
-    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let pointer = NonNull::new(self.wl.id().as_ptr().cast()).ok_or(HandleError::Unavailable)?;
-        // SAFETY: The wl_surface and its display remain alive until this owner is dropped.
-        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Wayland(WaylandWindowHandle::new(pointer))) })
-    }
-}
-impl Drop for NativeSurface {
-    fn drop(&mut self) {
-        self.wl.destroy();
+
+impl Selection {
+    fn new(connection: Connection) -> Self {
+        // SAFETY: Fields drop in order, keeping the display alive until the clipboard worker exits.
+        let inner = unsafe { smithay_clipboard::Clipboard::new(connection.backend().display_ptr().cast()) };
+        Self { inner, _connection: connection }
     }
 }
 
-macro_rules! dispatch {
-    ($proxy:ty, |$state:ident, $object:ident, $value:ident, $queue:ident| $body:block) => {
-        dispatch!($proxy, (), _data, |$state, $object, $value, $queue| $body);
-    };
-    ($proxy:ty, $data_type:ty, $data:ident, |$state:ident, $object:ident, $value:ident, $queue:ident| $body:block) => {
-        impl Dispatch<$proxy, $data_type> for LayerShellApp {
-            fn event(
-                $state: &mut Self,
-                $object: &$proxy,
-                $value: <$proxy as Proxy>::Event,
-                $data: &$data_type,
-                _conn: &Connection,
-                $queue: &QueueHandle<Self>,
-            ) $body
-        }
-    };
+struct Clipboard {
+    writer: Selection,
+    reads: mpsc::Sender<oneshot::Sender<io::Result<String>>>,
+}
+
+impl Clipboard {
+    fn new(connection: Connection) -> Self {
+        let writer = Selection::new(connection.clone());
+        let (reads, requests) = mpsc::channel::<oneshot::Sender<io::Result<String>>>();
+        spawn_thread("cantus-clipboard", move || {
+            let reader = Selection::new(connection);
+            for reply in requests {
+                let _ = reply.send(reader.inner.load());
+            }
+        });
+        Self { writer, reads }
+    }
+
+    fn load(&self) -> oneshot::Receiver<io::Result<String>> {
+        let (reply, result) = oneshot::channel();
+        let _ = self.reads.send(reply);
+        result
+    }
+
+    fn store(&self, text: String) {
+        // A slow selection transfer must not hold up a new copy/cut operation.
+        self.writer.inner.store(text);
+    }
 }
 
 struct LayerShellApp {
@@ -667,7 +700,10 @@ struct LayerShellApp {
     should_exit: bool = false,
 
     compositor: WlCompositor,
-    layer_shell: ZwlrLayerShellV1,
+    shell: ZwlrLayerShellV1,
+    viewporter: WpViewporter,
+    fractional: WpFractionalScaleManagerV1,
+    backend: Backend,
     pointer: Option<WlPointer> = None,
     keyboard: Option<WlKeyboard> = None,
     xkb_state: Option<xkb::State> = None,
@@ -676,16 +712,10 @@ struct LayerShellApp {
     repeat_interval: Duration = Duration::ZERO,
     /// The held key waiting to repeat and when it next fires.
     repeat: Option<(xkb::Keycode, Instant)> = None,
-    /// Latest keyboard serial, which the compositor requires to claim the selection.
-    key_serial: u32 = 0,
-    clipboard: (WlDataDeviceManager, WlDataDevice),
-    /// The selection offer to read on paste, kept only while it advertises text.
-    selection: Option<WlDataOffer> = None,
+    clipboard: Clipboard,
     output: Option<WlOutput> = None,
     frame_callback: Option<WlCallback> = None,
-    connection: Connection,
     surfaces: [Option<WaylandSurface>; 2] = [None, None],
-    scaling: (WpViewporter, WpFractionalScaleManagerV1),
     background_manager: Option<ExtBackgroundEffectManagerV1>,
 }
 
@@ -700,22 +730,21 @@ struct WaylandSurface {
     layer: ZwlrLayerSurfaceV1,
     fractional: WpFractionalScaleV1,
     viewport: WpViewport,
-    effect: Option<ExtBackgroundEffectSurfaceV1>,
     size: Vec2,
     scale: f32,
-    configured: bool,
+    effect: Option<ExtBackgroundEffectSurfaceV1>,
     gpu: Option<SurfaceHandle>,
     blur_bounds: Option<(Vec2, Vec2)>,
 }
 
 impl Drop for WaylandSurface {
     fn drop(&mut self) {
-        self.layer.destroy();
-        self.fractional.destroy();
-        self.viewport.destroy();
         if let Some(effect) = &self.effect {
             effect.destroy();
         }
+        self.layer.destroy();
+        self.fractional.destroy();
+        self.viewport.destroy();
     }
 }
 
@@ -730,8 +759,9 @@ impl LayerShellApp {
     fn create_surface(&self, kind: SurfaceKind, qhandle: &QueueHandle<Self>) -> WaylandSurface {
         let launcher = matches!(kind, SurfaceKind::Launcher);
         let config = &self.cantus.config;
+        let height = if launcher { 0.0 } else { self.bar_height() };
         let wl = self.compositor.create_surface(qhandle, kind);
-        let layer = self.layer_shell.get_layer_surface(
+        let layer = self.shell.get_layer_surface(
             &wl,
             if launcher { None } else { self.output.as_ref() },
             if launcher {
@@ -760,7 +790,6 @@ impl LayerShellApp {
                     }
                 },
         );
-        let height = if launcher { 0.0 } else { self.bar_height() };
         layer.set_size(0, height as u32);
         layer.set_exclusive_zone(if launcher {
             0
@@ -774,13 +803,12 @@ impl LayerShellApp {
         });
         let surface = WaylandSurface {
             effect: self.background_manager.as_ref().map(|manager| manager.get_background_effect(&wl, qhandle, ())),
-            viewport: self.scaling.0.get_viewport(&wl, qhandle, ()),
-            fractional: self.scaling.1.get_fractional_scale(&wl, qhandle, kind),
+            viewport: self.viewporter.get_viewport(&wl, qhandle, ()),
+            fractional: self.fractional.get_fractional_scale(&wl, qhandle, kind),
+            native: Arc::new(NativeSurface { backend: self.backend.clone(), wl }),
             layer,
-            native: Arc::new(NativeSurface { backend: self.connection.backend(), wl }),
             size: vec2(0.0, height),
             scale: 1.0,
-            configured: false,
             gpu: None,
             blur_bounds: None,
         };
@@ -788,30 +816,13 @@ impl LayerShellApp {
         surface
     }
 
-    /// Reads clipboard data off the event loop so this client can also serve its own selection.
-    fn paste(&self) -> Option<()> {
-        let offer = self
-            .selection
-            .as_ref()
-            .filter(|offer| offer.data::<AtomicBool>().is_some_and(|text| text.load(Ordering::Relaxed)))?;
+    fn paste(&self) {
         let session = self.cantus.launcher.session;
-        let (mut reader, writer) = io::pipe().ok()?;
-        offer.receive(TEXT_MIME.to_owned(), writer.as_fd());
-        drop(writer); // Close the local write end so the reader can reach EOF.
-        Connection::from_backend(offer.backend().upgrade()?).flush().ok()?;
+        let text = self.clipboard.load();
         self.cantus.background.spawn_update(async move {
-            let text = spawn_blocking(move || {
-                let mut text = String::new();
-                reader.read_to_string(&mut text).map(|_| text)
-            })
-            .await
-            .ok()?
-            .ok()?;
-            Some(move |app: &mut CantusApp| {
-                app.launcher.paste(session, &text);
-            })
+            let text = text.await.ok()?.ok()?;
+            Some(move |app: &mut CantusApp| app.launcher.paste(session, &text))
         });
-        Some(())
     }
 
     fn active_surface(&self) -> &WaylandSurface {
@@ -846,7 +857,7 @@ impl LayerShellApp {
         }
         if self.frame_callback.is_some()
             || self.surfaces[0].is_none()
-            || self.surfaces.iter().flatten().any(|surface| !surface.configured)
+            || self.surfaces.iter().flatten().any(|surface| surface.size.min_element() <= 0.0)
         {
             return;
         }
@@ -897,9 +908,7 @@ impl LayerShellApp {
         self.frame_callback = Some(self.active_surface().native.wl.frame(qhandle, ()));
         self.active_surface().native.wl.commit();
         if let Some(text) = self.cantus.launcher.pending_copy.take() {
-            let source = self.clipboard.0.create_data_source(qhandle, Arc::<str>::from(text));
-            source.offer(TEXT_MIME.to_owned());
-            self.clipboard.1.set_selection(Some(&source), self.key_serial);
+            self.clipboard.store(text);
         }
     }
 
@@ -931,20 +940,20 @@ impl LayerShellApp {
     }
 }
 
-dispatch!(ZwlrLayerSurfaceV1, SurfaceKind, kind, |state, proxy, event, _qhandle| {
+dispatch!(LayerShellApp, ZwlrLayerSurfaceV1, SurfaceKind, kind, |state, proxy, event, _qhandle| {
     let Some(surface) = state.surfaces[*kind as usize].as_mut().filter(|surface| surface.layer == *proxy) else {
         return;
     };
     match event {
         zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
-            proxy.ack_configure(serial);
+            surface.layer.ack_configure(serial);
+            // Zero leaves the corresponding dimension to the client.
             if width > 0 {
                 surface.size.x = width as f32;
             }
             if height > 0 {
                 surface.size.y = height as f32;
             }
-            surface.configured = surface.size.min_element() > 0.0;
         }
         zwlr_layer_surface_v1::Event::Closed => {
             if matches!(kind, SurfaceKind::Bar) {
@@ -957,7 +966,7 @@ dispatch!(ZwlrLayerSurfaceV1, SurfaceKind, kind, |state, proxy, event, _qhandle|
     }
 });
 
-dispatch!(WlCallback, |state, proxy, event, _qhandle| {
+dispatch!(LayerShellApp, WlCallback, |state, proxy, event, _qhandle| {
     if matches!(event, wl_callback::Event::Done { .. })
         && state.frame_callback.as_ref().is_some_and(|callback| callback.id() == proxy.id())
     {
@@ -965,7 +974,7 @@ dispatch!(WlCallback, |state, proxy, event, _qhandle| {
     }
 });
 
-dispatch!(WpFractionalScaleV1, SurfaceKind, kind, |state, proxy, event, _qhandle| {
+dispatch!(LayerShellApp, WpFractionalScaleV1, SurfaceKind, kind, |state, proxy, event, _qhandle| {
     if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event
         && let Some(surface) = state.surfaces[*kind as usize].as_mut()
         && surface.fractional == *proxy
@@ -974,7 +983,7 @@ dispatch!(WpFractionalScaleV1, SurfaceKind, kind, |state, proxy, event, _qhandle
     }
 });
 
-dispatch!(WlOutput, |state, proxy, event, _qhandle| {
+dispatch!(LayerShellApp, WlOutput, |state, proxy, event, _qhandle| {
     let Some(monitor) = &state.cantus.config.monitor else { return };
     match event {
         wl_output::Event::Name { name } | wl_output::Event::Description { description: name }
@@ -986,7 +995,7 @@ dispatch!(WlOutput, |state, proxy, event, _qhandle| {
     }
 });
 
-dispatch!(WlSeat, |state, proxy, event, qhandle| {
+dispatch!(LayerShellApp, WlSeat, |state, proxy, event, qhandle| {
     if let wl_seat::Event::Capabilities { capabilities } = event
         && let WEnum::Value(caps) = capabilities
     {
@@ -1007,52 +1016,7 @@ dispatch!(WlSeat, |state, proxy, event, qhandle| {
     }
 });
 
-impl Dispatch<WlDataDevice, ()> for LayerShellApp {
-    event_created_child!(Self, WlDataDevice, [
-        wl_data_device::EVT_DATA_OFFER_OPCODE => (WlDataOffer, AtomicBool::new(false)),
-    ]);
-
-    fn event(
-        state: &mut Self,
-        _proxy: &WlDataDevice,
-        event: wl_data_device::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        if let wl_data_device::Event::Selection { id } = event {
-            if let Some(stale) = state.selection.take() {
-                stale.destroy();
-            }
-            state.selection = id;
-        }
-    }
-}
-
-dispatch!(WlDataOffer, AtomicBool, text, |_state, _proxy, event, _qhandle| {
-    if let wl_data_offer::Event::Offer { mime_type } = event
-        && mime_type == TEXT_MIME
-    {
-        text.store(true, Ordering::Relaxed);
-    }
-});
-
-dispatch!(WlDataSource, Arc<str>, text, |_state, proxy, event, _qhandle| {
-    match event {
-        wl_data_source::Event::Send { fd, .. } => {
-            let text = Arc::clone(text);
-            spawn_thread("cantus-clipboard", move || {
-                if let Err(error) = File::from(fd).write_all(text.as_bytes()) {
-                    warn!(%error, "Failed to serve the clipboard selection");
-                }
-            });
-        }
-        wl_data_source::Event::Cancelled => proxy.destroy(),
-        _ => {}
-    }
-});
-
-dispatch!(WlKeyboard, |state, _proxy, event, _qhandle| {
+dispatch!(LayerShellApp, WlKeyboard, |state, _proxy, event, _qhandle| {
     match event {
         wl_keyboard::Event::Keymap { format: WEnum::Value(KeymapFormat::XkbV1), fd, size } => {
             let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
@@ -1087,9 +1051,8 @@ dispatch!(WlKeyboard, |state, _proxy, event, _qhandle| {
             state.repeat = None;
         }
         wl_keyboard::Event::Leave { .. } => state.repeat = None,
-        wl_keyboard::Event::Key { serial, key, state: WEnum::Value(key_state), .. } => {
+        wl_keyboard::Event::Key { key, state: WEnum::Value(key_state), .. } => {
             let keycode = xkb::Keycode::new(key + 8);
-            state.key_serial = serial;
             if key_state == KeyState::Pressed {
                 // Modifiers are marked as non-repeating by the keymap, so they never latch here.
                 let repeats =
@@ -1119,7 +1082,7 @@ fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
         return;
     };
     let sym = xkb_state.key_get_one_sym(keycode);
-    if !state.surfaces[1].as_ref().is_some_and(|surface| surface.configured)
+    if !state.surfaces[1].as_ref().is_some_and(|surface| surface.size.min_element() > 0.0)
         && matches!(sym.raw(), xkb::keysyms::KEY_Return | xkb::keysyms::KEY_KP_Enter)
     {
         return;
@@ -1151,7 +1114,7 @@ fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
     }
 }
 
-dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
+dispatch!(LayerShellApp, WlPointer, |state, _proxy, event, _qhandle| {
     if state.gpu.is_none() {
         return;
     }
@@ -1181,18 +1144,15 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
     interaction.apply(input);
 });
 
-dispatch!(WlRegistry, GlobalListContents, _globals, |_state, _proxy, _event, _qhandle| {});
+dispatch!(LayerShellApp, WlRegistry, GlobalListContents, _globals, |_state, _proxy, _event, _qhandle| {});
 
-delegate_noop!(LayerShellApp: ignore ZwlrLayerShellV1);
-delegate_noop!(LayerShellApp: ignore WpFractionalScaleManagerV1);
-delegate_noop!(LayerShellApp: ignore WpViewporter);
-delegate_noop!(LayerShellApp: ignore WpViewport);
-delegate_noop!(LayerShellApp: ignore WlCompositor);
 delegate_noop!(LayerShellApp: ignore WlRegion);
-delegate_noop!(LayerShellApp: ignore WlDataDeviceManager);
 delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectManagerV1);
 delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectSurfaceV1);
 
-dispatch!(WlSurface, SurfaceKind, _kind, |_state, _proxy, _event, _qhandle| {});
-
-pub use tokio::time::sleep;
+delegate_noop!(LayerShellApp: ignore WlCompositor);
+delegate_noop!(LayerShellApp: ignore ZwlrLayerShellV1);
+delegate_noop!(LayerShellApp: ignore WpViewporter);
+delegate_noop!(LayerShellApp: ignore WpViewport);
+delegate_noop!(LayerShellApp: ignore WpFractionalScaleManagerV1);
+dispatch!(LayerShellApp, WlSurface, SurfaceKind, _data, |_state, _proxy, _event, _queue| {});

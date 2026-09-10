@@ -1,5 +1,6 @@
 use crate::{app::AppUpdater, config::Config, render::music::AudioFeatures};
 use arrayvec::ArrayString;
+use enrichment::TrackCache;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
@@ -13,7 +14,6 @@ pub mod enrichment;
 pub mod lyrics;
 #[cfg_attr(target_arch = "wasm32", path = "web.rs")]
 mod spotify;
-use enrichment::TrackCache;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
