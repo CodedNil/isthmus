@@ -1,8 +1,7 @@
 use super::{MusicResult, TRACK_SPACING_MS, Track, enrichment::Fetch, spotify::Spotify};
-use crate::app::fetch_json;
 use isthmus::glam::{FloatExt, Vec2, Vec4, vec2, vec4};
 use isthmus_sdf::layout::{ShapedLine, TextCache};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use roxmltree::{Document, Node};
 use std::{collections::BTreeMap, iter::once, mem, ops::Range, sync::Arc};
 use tracing::{info, warn};
@@ -151,43 +150,56 @@ impl Lyrics {
     }
 }
 
-pub(super) async fn fetch(request: &Track, http: &Client, spotify: &Spotify) -> Fetch<Lyrics> {
-    let (provider, result) = match (fetch_precise(http, request).await, request.id) {
-        (Ok(Some(segments)), _) => ("Apple Music via lyrics-api.binimum.org", Ok(segments)),
-        (Ok(None), Some(id)) => ("Spotify fallback", spotify.lyrics(id).await),
-        (Ok(None), None) => ("none", Ok(Vec::new())),
-        (Err(error), _) => ("Apple Music via lyrics-api.binimum.org", Err(error)),
-    };
-    result
-        .inspect(|segments| {
-            info!(track = request.name, artist = request.artist, provider, segments = segments.len(), "Lyrics loaded");
-        })
-        .inspect_err(|error| warn!(%error, track = request.name, provider, "Failed to fetch lyrics"))
-        .map(|pending| Lyrics {
-            channels: pending.iter().map(|s| (s.channel, Channel::default())).collect(),
-            pending,
-            ..Default::default()
-        })
-        .map_or_else(|_| Fetch::retry(), Fetch::Ready)
-}
-
-async fn fetch_precise(http: &Client, query: &Track) -> MusicResult<Option<Vec<LyricSegment>>> {
-    let response = fetch_json::<serde_json::Value>(http.get("https://lyrics-api.binimum.org/").query(&[
-        ("track", query.name.clone()),
-        ("artist", query.artist.clone()),
-        ("album", query.album.clone()),
-        ("duration", (query.duration_ms / 1000).to_string()),
-    ]))
-    .await?;
-    let results = response["results"].as_array().ok_or("Lyrics search response has no results array")?;
-    let Some(result) = results.iter().find(|result| result["timing_type"] == "word") else { return Ok(None) };
-    let url = result["lyricsUrl"].as_str().ok_or("Lyrics search result has no URL")?;
-    let source = http.get(url).send().await?.error_for_status()?.text().await?;
-    let segments = parse_ttml(&source);
-    if segments.is_empty() {
-        return Err("Lyrics document has no usable timed text".into());
+pub(super) async fn fetch(track: &Track, http: &Client, spotify: &Spotify) -> Fetch<Lyrics> {
+    let mut provider = "Apple Music";
+    let result: MusicResult<Vec<LyricSegment>> = async {
+        let response = http
+            .get("https://lyrics-api.binimum.org/")
+            .query(&[
+                ("track", track.name.as_str()),
+                ("artist", track.artist.as_str()),
+                ("album", track.album.as_str()),
+                ("duration", &(track.duration_ms / 1000).to_string()),
+            ])
+            .send()
+            .await?;
+        if response.status() != StatusCode::NOT_FOUND {
+            let response = response.error_for_status()?.json::<serde_json::Value>().await?;
+            let results = response["results"].as_array().ok_or("Lyrics search response has no results array")?;
+            if let Some(result) = results.iter().find(|result| result["timing_type"] == "word") {
+                let url = result["lyricsUrl"].as_str().ok_or("Lyrics search result has no URL")?;
+                let source = http.get(url).send().await?.error_for_status()?.text().await?;
+                let segments = parse_ttml(&source);
+                if segments.is_empty() {
+                    return Err("Lyrics document has no usable timed text".into());
+                }
+                return Ok(segments);
+            }
+        }
+        if let Some(id) = track.id {
+            provider = "Spotify fallback";
+            return spotify.lyrics(id).await;
+        }
+        Ok(Vec::new())
     }
-    Ok(Some(segments))
+    .await;
+
+    match result {
+        Ok(pending) => {
+            if !pending.is_empty() {
+                info!("Lyrics loaded from {provider} for \"{}\" by {}", track.name, track.artist);
+            }
+            Fetch::Ready(Lyrics {
+                channels: pending.iter().map(|s| (s.channel, Channel::default())).collect(),
+                pending,
+                ..Default::default()
+            })
+        }
+        Err(error) => {
+            warn!("Failed to fetch lyrics from {provider} for \"{}\" by {}: {error}", track.name, track.artist);
+            Fetch::retry()
+        }
+    }
 }
 
 fn time(value: &str) -> Option<f32> {

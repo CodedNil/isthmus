@@ -432,7 +432,7 @@ impl SpotifyWorker {
             compressed.write_all(&body)?;
             let body = compressed.finish()?;
             let path = format!("/connect-state/v1/player/command/from/{}/to/{target}", session.device_id());
-            connected_request(session, &path, "application/json", Some("gzip"), &body).await
+            connected_request(session, &path, Some("gzip"), &body).await
         }
         .await;
         if let Err(error) = result {
@@ -444,12 +444,11 @@ impl SpotifyWorker {
 async fn connected_request(
     session: &Session,
     path: &str,
-    content_type: &'static str,
     encoding: Option<&'static str>,
     body: &[u8],
 ) -> MusicResult<()> {
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, content_type.parse()?);
+    headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
     headers.insert("x-spotify-connection-id", session.connection_id().parse()?);
     if let Some(encoding) = encoding {
         headers.insert(header::CONTENT_ENCODING, encoding.parse()?);
@@ -497,14 +496,18 @@ impl SpotifyWorker {
                 want_resulting_revisions: Some(true),
                 ..Default::default()
             };
-            if let Err(error) = connected_request(
-                &self.session,
-                &format!("/playlist/v2/playlist/{playlist_id}/changes"),
-                "application/x-protobuf",
-                None,
-                &request.write_to_bytes()?,
-            )
-            .await
+            let mut headers = HeaderMap::new();
+            headers.insert("x-spotify-connection-id", self.session.connection_id().parse()?);
+            if let Err(error) = self
+                .session
+                .spclient()
+                .request_with_protobuf(
+                    &Method::POST,
+                    &format!("/playlist/v2/playlist/{playlist_id}/changes"),
+                    Some(headers),
+                    &request,
+                )
+                .await
             {
                 error!(%error, %playlist_id, "Failed to update Spotify playlist");
             }
@@ -522,7 +525,6 @@ impl SpotifyWorker {
             if let Err(error) = connected_request(
                 &self.session,
                 "/collection/v2/write?market=from_token",
-                "application/json",
                 None,
                 &serde_json::to_vec(&body)?,
             )
