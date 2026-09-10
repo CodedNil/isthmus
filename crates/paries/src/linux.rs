@@ -1,7 +1,11 @@
 use crate::render::{Renderer, bamboo::Bamboo};
-use isthmus::{SurfaceHandle, glam::vec2};
-use raw_window_handle::{
-    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WaylandWindowHandle, WindowHandle,
+use isthmus::{
+    SurfaceHandle,
+    glam::Vec2,
+    wgpu::rwh::{
+        DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WaylandWindowHandle,
+        WindowHandle,
+    },
 };
 use std::{
     collections::BTreeMap,
@@ -10,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle,
+    Connection, Proxy, QueueHandle,
     backend::Backend,
     delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
@@ -32,21 +36,36 @@ use wayland_protocols::wp::{
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
-    zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
+    zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
 };
 
-type OutputId = u32;
-const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+macro_rules! dispatch {
+    ($app:ty, $proxy:ty, $data_type:ty, $data:ident,
+        |$state:ident, $object:ident, $value:ident, $queue:ident| $body:block) => {
+        impl wayland_client::Dispatch<$proxy, $data_type> for $app {
+            fn event(
+                $state: &mut Self,
+                $object: &$proxy,
+                $value: <$proxy as wayland_client::Proxy>::Event,
+                $data: &$data_type,
+                _conn: &wayland_client::Connection,
+                $queue: &wayland_client::QueueHandle<Self>,
+            ) $body
+        }
+    };
+}
 
 struct NativeSurface {
     backend: Backend,
     wl: WlSurface,
 }
+
 impl HasDisplayHandle for NativeSurface {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
         self.backend.display_handle()
     }
 }
+
 impl HasWindowHandle for NativeSurface {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
         let pointer = NonNull::new(self.wl.id().as_ptr().cast()).ok_or(HandleError::Unavailable)?;
@@ -54,29 +73,15 @@ impl HasWindowHandle for NativeSurface {
         Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Wayland(WaylandWindowHandle::new(pointer))) })
     }
 }
+
 impl Drop for NativeSurface {
     fn drop(&mut self) {
         self.wl.destroy();
     }
 }
 
-macro_rules! dispatch {
-    ($proxy:ty, |$state:ident, $object:ident, $value:ident, $queue:ident| $body:block) => {
-        dispatch!($proxy, (), _data, |$state, $object, $value, $queue| $body);
-    };
-    ($proxy:ty, $data_type:ty, $data:ident, |$state:ident, $object:ident, $value:ident, $queue:ident| $body:block) => {
-        impl Dispatch<$proxy, $data_type> for Wallpaper {
-            fn event(
-                $state: &mut Self,
-                $object: &$proxy,
-                $value: <$proxy as Proxy>::Event,
-                $data: &$data_type,
-                _conn: &Connection,
-                $queue: &QueueHandle<Self>,
-            ) $body
-        }
-    };
-}
+type OutputId = u32;
+const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
 struct OutputSurface {
     output: WlOutput,
@@ -84,25 +89,19 @@ struct OutputSurface {
     layer: ZwlrLayerSurfaceV1,
     fractional: WpFractionalScaleV1,
     viewport: WpViewport,
+    size: Vec2,
+    scale: f32,
     frame_callback: Option<WlCallback>,
     render_surface: Option<SurfaceHandle>,
-    logical_size: [u32; 2],
-    scale: f32,
     last_render: Option<Instant>,
 }
 
-impl Drop for OutputSurface {
-    fn drop(&mut self) {
-        self.layer.destroy();
-        self.fractional.destroy();
-        self.viewport.destroy();
-    }
-}
 struct Wallpaper {
     compositor: WlCompositor,
-    layer_shell: ZwlrLayerShellV1,
-    connection: Connection,
-    scaling: (WpViewporter, WpFractionalScaleManagerV1),
+    shell: ZwlrLayerShellV1,
+    viewporter: WpViewporter,
+    fractional: WpFractionalScaleManagerV1,
+    backend: Backend,
     renderer: Option<Renderer>,
     bamboo: Bamboo,
     outputs: BTreeMap<OutputId, OutputSurface>,
@@ -114,31 +113,25 @@ impl Wallpaper {
             return;
         }
         let wl = self.compositor.create_surface(qhandle, id);
-        let layer = self.layer_shell.get_layer_surface(
-            &wl,
-            Some(&output),
-            Layer::Background,
-            format!("paries-{id}"),
-            qhandle,
-            id,
-        );
+        let layer =
+            self.shell.get_layer_surface(&wl, Some(&output), Layer::Background, format!("paries-{id}"), qhandle, id);
         layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
-        layer.set_exclusive_zone(0);
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         let input = self.compositor.create_region(qhandle, ());
         wl.set_input_region(Some(&input));
         input.destroy();
+        let viewport = self.viewporter.get_viewport(&wl, qhandle, ());
+        let fractional = self.fractional.get_fractional_scale(&wl, qhandle, id);
         wl.commit();
         self.outputs.insert(id, OutputSurface {
             output,
-            viewport: self.scaling.0.get_viewport(&wl, qhandle, ()),
-            fractional: self.scaling.1.get_fractional_scale(&wl, qhandle, id),
+            viewport,
+            fractional,
+            native: Arc::new(NativeSurface { backend: self.backend.clone(), wl }),
             layer,
-            native: Arc::new(NativeSurface { backend: self.connection.backend(), wl }),
+            size: Vec2::ZERO,
+            scale: 1.0,
             frame_callback: None,
             render_surface: None,
-            logical_size: [0; 2],
-            scale: 1.0,
             last_render: None,
         });
     }
@@ -155,16 +148,15 @@ impl Wallpaper {
 
     fn draw(&mut self, id: OutputId, qhandle: &QueueHandle<Self>) {
         let Some(output) = self.outputs.get_mut(&id) else { return };
-        if output.logical_size.contains(&0) {
+        if output.size.min_element() <= 0.0 {
             return;
         }
         if output.last_render.is_some_and(|last| last.elapsed() < FRAME_INTERVAL) {
             output.request_frame(id, qhandle);
             return;
         }
-        let logical = output.logical_size;
-        output.viewport.set_destination(logical[0] as i32, logical[1] as i32);
-        let size = logical.map(|size| (size as f32 * output.scale).round().max(1.0) as u32);
+        output.viewport.set_destination(output.size.x as i32, output.size.y as i32);
+        let size = (output.size * output.scale).to_array().map(|size| size.round().max(1.0) as u32);
         if output.render_surface.is_none() {
             let render_surface = if let Some(renderer) = &mut self.renderer {
                 renderer
@@ -183,7 +175,7 @@ impl Wallpaper {
         let renderer = self.renderer.as_mut().unwrap();
         renderer.resize(render_surface, size);
         if let Err(error) = renderer.render(|render| {
-            render.surface(render_surface, vec2(logical[0] as f32, logical[1] as f32), (), |mut frame| {
+            render.surface(render_surface, output.size, (), |mut frame| {
                 self.bamboo.show(&mut frame);
             });
         }) {
@@ -208,16 +200,12 @@ pub fn run() {
     let connection = Connection::connect_to_env().expect("failed to connect to Wayland");
     let (globals, mut events) = registry_queue_init::<Wallpaper>(&connection).expect("failed to read Wayland globals");
     let qhandle = events.handle();
-    let compositor = globals.bind(&qhandle, 6..=7, ()).expect("missing wl_compositor");
-    let layer_shell = globals.bind(&qhandle, 4..=4, ()).expect("missing zwlr_layer_shell_v1");
     let mut app = Wallpaper {
-        compositor,
-        layer_shell,
-        connection: connection.clone(),
-        scaling: (
-            globals.bind(&qhandle, 1..=1, ()).expect("missing wp_viewporter"),
-            globals.bind(&qhandle, 1..=1, ()).expect("missing wp_fractional_scale_manager_v1"),
-        ),
+        compositor: globals.bind(&qhandle, 6..=7, ()).expect("missing wl_compositor v6"),
+        shell: globals.bind(&qhandle, 4..=4, ()).expect("missing zwlr_layer_shell_v1"),
+        viewporter: globals.bind(&qhandle, 1..=1, ()).expect("missing wp_viewporter"),
+        fractional: globals.bind(&qhandle, 1..=1, ()).expect("missing wp_fractional_scale_manager_v1"),
+        backend: connection.backend(),
         renderer: None,
         bamboo: Bamboo::default(),
         outputs: BTreeMap::new(),
@@ -236,19 +224,23 @@ pub fn run() {
     }
 }
 
-dispatch!(ZwlrLayerSurfaceV1, OutputId, data, |state, proxy, event, qhandle| {
+dispatch!(Wallpaper, ZwlrLayerSurfaceV1, OutputId, data, |state, _proxy, event, qhandle| {
     match event {
         zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
-            proxy.ack_configure(serial);
             if let Some(output) = state.outputs.get_mut(data) {
-                let first = output.logical_size.contains(&0);
-                if width > 0 && height > 0 {
-                    output.logical_size = [width, height];
+                let first = output.size.min_element() <= 0.0;
+                output.layer.ack_configure(serial);
+                // Zero leaves the corresponding dimension to the client.
+                if width > 0 {
+                    output.size.x = width as f32;
+                }
+                if height > 0 {
+                    output.size.y = height as f32;
                 }
                 if first {
                     eprintln!(
                         "Configured output {} at {}x{} scale {}",
-                        data, output.logical_size[0], output.logical_size[1], output.scale
+                        data, output.size.x, output.size.y, output.scale
                     );
                 }
             }
@@ -259,7 +251,7 @@ dispatch!(ZwlrLayerSurfaceV1, OutputId, data, |state, proxy, event, qhandle| {
     }
 });
 
-dispatch!(WlCallback, OutputId, data, |state, proxy, event, qhandle| {
+dispatch!(Wallpaper, WlCallback, OutputId, data, |state, proxy, event, qhandle| {
     if matches!(event, wl_callback::Event::Done { .. })
         && let Some(output) = state.outputs.get_mut(data)
         && output.frame_callback.as_ref().is_some_and(|callback| callback.id() == proxy.id())
@@ -269,7 +261,7 @@ dispatch!(WlCallback, OutputId, data, |state, proxy, event, qhandle| {
     }
 });
 
-dispatch!(WpFractionalScaleV1, OutputId, data, |state, proxy, event, queue| {
+dispatch!(Wallpaper, WpFractionalScaleV1, OutputId, data, |state, proxy, event, queue| {
     if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event
         && let Some(output) = state.outputs.get_mut(data)
         && output.fractional == *proxy
@@ -278,12 +270,9 @@ dispatch!(WpFractionalScaleV1, OutputId, data, |state, proxy, event, queue| {
         state.draw(*data, queue);
     }
 });
-dispatch!(WlOutput, OutputId, _data, |_state, _proxy, _event, _queue| {});
-delegate_noop!(Wallpaper: ignore WpViewporter);
-delegate_noop!(Wallpaper: ignore WpViewport);
-delegate_noop!(Wallpaper: ignore WpFractionalScaleManagerV1);
+dispatch!(Wallpaper, WlOutput, OutputId, _data, |_state, _proxy, _event, _queue| {});
 
-dispatch!(WlRegistry, GlobalListContents, _data, |state, proxy, event, qhandle| {
+dispatch!(Wallpaper, WlRegistry, GlobalListContents, _data, |state, proxy, event, qhandle| {
     match event {
         wl_registry::Event::Global { name, interface, version } if interface == "wl_output" => {
             assert!(version >= 4, "missing wl_output v4");
@@ -295,7 +284,18 @@ dispatch!(WlRegistry, GlobalListContents, _data, |state, proxy, event, qhandle| 
     }
 });
 
-dispatch!(WlSurface, OutputId, _data, |_state, _proxy, _event, _queue| {});
 delegate_noop!(Wallpaper: ignore WlCompositor);
-delegate_noop!(Wallpaper: ignore WlRegion);
 delegate_noop!(Wallpaper: ignore ZwlrLayerShellV1);
+delegate_noop!(Wallpaper: ignore WpViewporter);
+delegate_noop!(Wallpaper: ignore WpViewport);
+delegate_noop!(Wallpaper: ignore WpFractionalScaleManagerV1);
+dispatch!(Wallpaper, WlSurface, OutputId, _data, |_state, _proxy, _event, _queue| {});
+delegate_noop!(Wallpaper: ignore WlRegion);
+
+impl Drop for OutputSurface {
+    fn drop(&mut self) {
+        self.layer.destroy();
+        self.fractional.destroy();
+        self.viewport.destroy();
+    }
+}

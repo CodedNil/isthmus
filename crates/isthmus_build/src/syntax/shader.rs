@@ -1,4 +1,4 @@
-use super::shader_entry;
+use super::{image_names, shader_entry};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Expr, Ident, Pat, Stmt, Type, parse_quote, spanned::Spanned, token::Move};
@@ -185,10 +185,7 @@ impl Shader {
                 }
             }
         }
-        let inputs = captures.iter().map(|binding| {
-            let (name, ty) = (&binding.name, &binding.ty);
-            quote!(#name: #ty)
-        });
+        let inputs = captures.iter().map(|Binding { name, ty, .. }| quote!(#name: #ty));
         let declaration = parse_quote!(|#(#inputs),*| {
             let _: Program;
             #stage;
@@ -243,10 +240,7 @@ impl Shader {
                 && let Expr::Block(body) = &mut *vertex.body
             {
                 let tail = body.block.stmts.pop().unwrap();
-                let fields = self.outputs.iter().map(|output| {
-                    let name = &output.name;
-                    quote!(#name: #name.0)
-                });
+                let fields = self.outputs.iter().map(|Output { name, .. }| quote!(#name: #name.0));
                 let tail = match tail {
                     Stmt::Expr(expr, None) => expr,
                     other => parse_quote!({ #other }),
@@ -259,10 +253,7 @@ impl Shader {
         let input = factory.inputs.first().unwrap();
         let typed: syn::ExprClosure = parse_quote!(|#input: #isthmus::ShaderFrame<Program>| {});
         factory.inputs = typed.inputs;
-        let fields = self.outputs.iter().map(|output| {
-            let (name, ty) = (&output.name, &output.ty);
-            quote!(pub #name: #ty)
-        });
+        let fields = self.outputs.iter().map(|Output { name, ty, .. }| quote!(pub #name: #ty));
         let declaration = if self.outputs.is_empty() {
             quote!()
         } else {
@@ -274,10 +265,7 @@ impl Shader {
     pub fn host(&self, isthmus: &TokenStream) -> TokenStream {
         let (frame, fragment, blend, entry) = (&self.frame, &self.fragment, &self.blend, &self.entry);
         let variant = &blend.segments.last().unwrap().ident;
-        let bindings = self.captures.iter().map(|binding| {
-            let (name, ty, value) = (&binding.name, &binding.ty, &binding.value);
-            quote!(let #name: #ty = #value;)
-        });
+        let bindings = self.captures.iter().map(|Binding { name, ty, value, .. }| quote!(let #name: #ty = #value;));
         let views = self.captures.iter().filter(|capture| capture.kind == CaptureKind::Data).map(|capture| {
             let name = &capture.name;
             quote!(let #name = #isthmus::ShaderData::resolve(
@@ -324,12 +312,10 @@ impl Shader {
         let frame_input = self.fragment.inputs.first().unwrap();
         let input = &self.fragment.inputs[1];
         let body = &self.fragment.body;
-        let bindings = self.captures.iter().map(|capture| {
-            let (name, ty) = (&capture.name, &capture.ty);
-            let value = match capture.kind {
+        let bindings = self.captures.iter().map(|Binding { name, ty, kind, .. }| {
+            let value = match kind {
                 CaptureKind::Image => {
-                    let (image, sampler) =
-                        (format_ident!("__isthmus_image_{name}"), format_ident!("__isthmus_sampler_{name}"));
+                    let (image, sampler) = image_names(name);
                     quote!(#isthmus::__private::ShaderImage::new(#image, *#sampler))
                 }
                 CaptureKind::Buffer => quote!(#isthmus::Buffer::from_words(payload, _instance.#name)),
@@ -337,7 +323,7 @@ impl Shader {
                     transient: _transient, persistent: _persistent,
                 })),
             };
-            let annotation = (capture.kind == CaptureKind::Buffer).then(|| quote!(: #ty));
+            let annotation = (*kind == CaptureKind::Buffer).then(|| quote!(: #ty));
             // Captures can be used by only one stage; both stages share this setup.
             quote!(let #name #annotation = #value; let _ = &#name;)
         });
@@ -361,19 +347,16 @@ impl Shader {
             });
             quote!(#(#fields)*)
         };
-        let writes = self.outputs.iter().map(|output| {
-            let name = &output.name;
-            let varying = format_ident!("__varying_{name}");
-            quote!(*#varying = vertex.outputs.#name;)
-        });
-        let reads = self.outputs.iter().map(|output| {
-            let name = &output.name;
-            let varying = format_ident!("__varying_{name}");
-            quote!(#name: #varying)
-        });
+        let (writes, reads): (Vec<_>, Vec<_>) = self
+            .outputs
+            .iter()
+            .map(|Output { name, .. }| {
+                let varying = format_ident!("__varying_{name}");
+                (quote!(*#varying = vertex.outputs.#name;), quote!(#name: #varying))
+            })
+            .unzip();
         let read = if self.outputs.is_empty() { quote!(()) } else { quote!(#data { #(#reads),* }) };
-        let images = self.images();
-        let images = images.collect::<Vec<_>>();
+        let images = self.images().collect::<Vec<_>>();
         let vertex_name = syn::LitStr::new(&self.vertex_entry(), self.entry.span());
         let vertex = shader_entry(isthmus, &vertex_name, true, &images, &payload_name, &interface(true), &quote! {
             #setup

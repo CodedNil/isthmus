@@ -4,7 +4,30 @@
 
 extern crate self as isthmus;
 
+pub use data::{Buffer, F16x2, ShaderData, Unorm8x4, Unorm16x2};
+pub use geometry::{Quad, Rect, Triangle};
+pub use glam;
+pub use image::{Image, Sampling};
+pub use isthmus_macros::{ShaderData, program, shader};
+pub use program::{Blend, Program};
+pub use resources::ResourceData;
+pub use shader::{
+    Flat, Fragment, Paint, Primitive, ShaderFrame, Smooth, Surface, Vertex, VertexInput, Vertices, raster, source_over,
+    surface, vertices,
+};
+pub use spirv_std;
 use spirv_std::num_traits;
+#[cfg(not(target_arch = "spirv"))]
+pub use {
+    backend::{
+        renderer::{Render, RenderError, Renderer},
+        setup::SetupError,
+        surface::SurfaceHandle,
+    },
+    frame::Frame,
+    resources::Resources,
+    wgpu,
+};
 
 #[cfg(not(target_arch = "spirv"))]
 mod bindings;
@@ -19,30 +42,6 @@ mod shader;
 
 #[cfg(not(target_arch = "spirv"))]
 mod backend;
-
-pub use data::{Buffer, F16x2, ShaderData, Unorm8x4, Unorm16x2};
-pub use geometry::{Quad, Rect, Triangle};
-pub use glam;
-pub use image::{Image, Sampling};
-pub use isthmus_macros::{ShaderData, program, shader};
-pub use program::{Blend, Program};
-pub use resources::ResourceData;
-pub use shader::{
-    Flat, Fragment, Paint, Primitive, ShaderFrame, Smooth, Surface, Vertex, VertexInput, Vertices, raster, source_over,
-    surface, vertices,
-};
-pub use spirv_std;
-#[cfg(not(target_arch = "spirv"))]
-pub use {
-    backend::{
-        renderer::{Render, RenderError, Renderer},
-        setup::SetupError,
-        surface::SurfaceHandle,
-    },
-    frame::Frame,
-    resources::Resources,
-    wgpu,
-};
 
 /// Floating-point math and interpolation available on both host and shader targets.
 pub trait Float = glam::FloatExt + num_traits::Float;

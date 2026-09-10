@@ -10,7 +10,7 @@ proc-macro = true
 proc-macro-crate = "3"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
-syn = { version = "3", features = ["full", "visit-mut"] }
+syn = { version = "3", features = ["full"] }
 
 [lints]
 workspace = true

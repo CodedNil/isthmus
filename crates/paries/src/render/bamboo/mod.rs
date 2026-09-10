@@ -1,10 +1,10 @@
+use super::{Frame, Program};
+use isthmus::prelude::*;
+
 mod habitat;
 mod landscape;
 mod undergrowth;
 mod vegetation;
-
-use super::{Frame, Program};
-use isthmus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Feature {
