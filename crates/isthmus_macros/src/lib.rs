@@ -41,7 +41,6 @@ pub fn program(input: TokenStream) -> TokenStream {
             type Resources = #resources;
             const SHADERS: &'static [#isthmus::__private::ShaderEntry] =
                 include!(concat!(env!("OUT_DIR"), "/isthmus.manifest.rs"));
-            const CODE: &'static str = include_str!(concat!(env!("OUT_DIR"), "/isthmus.wgsl"));
         }
         /// Drawing context for this shader program.
         pub type Frame<'a> = #isthmus::Frame<'a, Program>;

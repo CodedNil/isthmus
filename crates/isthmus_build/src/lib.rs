@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use cargo_metadata::{CargoOpt, DependencyKind, MetadataCommand};
 use naga::{
     back::wgsl::{WriterFlags, write_string},
+    compact::{KeepUnused, compact},
     front::{spv, wgsl},
     valid::{Capabilities, ValidationFlags, Validator},
 };
@@ -140,21 +141,26 @@ pub fn build(source: &str) -> Result<()> {
     // Packed half floats use core WGSL operations without requiring the f16 extension.
     let mut validator =
         Validator::new(ValidationFlags::all(), Capabilities::default() | Capabilities::SHADER_FLOAT16_IN_FLOAT32);
-    let info = validator.validate(&reflected)?;
-    // Tint rejects Naga's rounded decimal spelling of the largest finite float.
-    let wgsl =
-        write_string(&reflected, &info, WriterFlags::empty())?.replace(&format!("{}f", f32::MAX), "0x1.fffffep+127f");
-    // Preserve SPIR-V derivatives when WGSL cannot prove control-flow uniformity.
-    let wgsl = format!("diagnostic(warning, derivative_uniformity);\n{wgsl}");
-    let translated = wgsl::parse_str(&wgsl)?;
-    validator.validate(&translated)?;
-    for entry in generated.shaders.iter().flat_map(|shader| [shader.entry.value(), shader.vertex_entry()]) {
-        if !translated.entry_points.iter().any(|other| other.name == entry) {
-            bail!("shader entry {entry} was not exported");
-        }
-    }
+    validator.validate(&reflected)?;
     let output = env::var("OUT_DIR")?;
     let output = Path::new(&output);
+    // A single entry point lets wgpu skip runtime pruning and revalidation for each stage.
+    for name in generated.shaders.iter().flat_map(|shader| [shader.vertex_entry(), shader.entry.value()]) {
+        let mut module = reflected.clone();
+        module.entry_points.retain(|entry| entry.name == name);
+        if module.entry_points.is_empty() {
+            bail!("shader entry {name} was not exported");
+        }
+        compact(&mut module, KeepUnused::No);
+        let info = validator.validate(&module)?;
+        // Tint rejects Naga's rounded decimal spelling of the largest finite float.
+        let code =
+            write_string(&module, &info, WriterFlags::empty())?.replace(&format!("{}f", f32::MAX), "0x1.fffffep+127f");
+        // Preserve SPIR-V derivatives when WGSL cannot prove control-flow uniformity.
+        let code = format!("diagnostic(warning, derivative_uniformity);\n{code}");
+        validator.validate(&wgsl::parse_str(&code)?)?;
+        write_if_changed(&output.join(format!("{name}.wgsl")), &code)?;
+    }
     let entries = generated.shaders.iter().map(syntax::shader::Shader::metadata);
     write_if_changed(
         &output.join("isthmus.manifest.rs"),
@@ -163,8 +169,7 @@ pub fn build(source: &str) -> Result<()> {
             &[#(#entries),*]
         })
         .to_string(),
-    )?;
-    write_if_changed(&output.join("isthmus.wgsl"), &wgsl)
+    )
 }
 
 fn write_if_changed(path: &Path, contents: &str) -> Result<()> {

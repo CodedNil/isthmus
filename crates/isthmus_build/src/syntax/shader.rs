@@ -214,7 +214,13 @@ impl Shader {
         let (name, vertex) = (&self.entry, self.vertex_entry());
         let blend = &self.blend.segments.last().unwrap().ident;
         let images = self.images().count();
-        quote!(ShaderEntry { name: #name, vertex: #vertex, blend: Blend::#blend, images: #images })
+        quote!(ShaderEntry {
+            name: #name, blend: Blend::#blend, images: #images,
+            code: [
+                include_str!(concat!(env!("OUT_DIR"), "/", #vertex, ".wgsl")),
+                include_str!(concat!(env!("OUT_DIR"), "/", #name, ".wgsl")),
+            ],
+        })
     }
 
     fn payload(&self, isthmus: &TokenStream, name: &Ident) -> TokenStream {

@@ -45,6 +45,9 @@ impl Spotify {
             let mut index = music.timeline.index;
             let mut position = music.timeline.position_now();
             match command {
+                PlaybackCommand::PlayPlaylist(id) => {
+                    tracing::debug!(?id, "Playlist playback is unavailable in the demo")
+                }
                 PlaybackCommand::SetPlaying(playing) => music.playing = playing,
                 PlaybackCommand::Seek(milliseconds) => position = milliseconds as f32,
                 PlaybackCommand::Skip(offset) => {
