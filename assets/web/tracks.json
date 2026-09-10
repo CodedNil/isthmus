@@ -2,10 +2,14 @@
   {
     "id": "75Xur1uT892l0A6ypOxrhw",
     "name": "Jellyfish",
-    "artist": "Sigrid",
-    "album": "Jellyfish - Single",
-    "duration_ms": 186436,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/2c/21/51/2c215100-a4aa-58d5-8d24-9a18e65be3f7/25UMGIM48718.rgb.jpg/300x300bb.jpg",
+    "original_title": "Jellyfish",
+    "artists": [
+      "Sigrid"
+    ],
+    "album": "Jellyfish",
+    "duration_ms": 186435,
+    "image": "https://i.scdn.co/image/ab67616d00004851232ba3e80376f1dfefe7b2ec",
+    "uri": "spotify:track:75Xur1uT892l0A6ypOxrhw",
     "audio": {
       "energy": 0.874,
       "danceability": 0.472,
@@ -18,10 +22,14 @@
   {
     "id": "3aUfWeMesfVs2niopKjNxV",
     "name": "Clearest Blue",
-    "artist": "CHVRCHES",
+    "original_title": "Clearest Blue",
+    "artists": [
+      "CHVRCHES"
+    ],
     "album": "Every Open Eye",
-    "duration_ms": 233762,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music128/v4/85/d4/14/85d41434-0d80-b0b2-e64b-4e34515e0020/00602547476388.rgb.jpg/300x300bb.jpg",
+    "duration_ms": 233769,
+    "image": "https://i.scdn.co/image/ab67616d00004851f1b4b8e3219fa23bf218d457",
+    "uri": "spotify:track:3aUfWeMesfVs2niopKjNxV",
     "audio": {
       "energy": 0.832,
       "danceability": 0.641,
@@ -34,10 +42,14 @@
   {
     "id": "3aVyHFxRkf8lSjhWdJ68AW",
     "name": "Just Another Girl",
-    "artist": "The Killers",
+    "original_title": "Just Another Girl",
+    "artists": [
+      "The Killers"
+    ],
     "album": "Direct Hits",
     "duration_ms": 262000,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/11/64/9c/11649c80-2066-dba8-77a9-df7eecae26c1/17UM1IM06937.rgb.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d0000485148488c2eee5727efc30bf657",
+    "uri": "spotify:track:3aVyHFxRkf8lSjhWdJ68AW",
     "audio": {
       "energy": 0.778,
       "danceability": 0.547,
@@ -50,10 +62,14 @@
   {
     "id": "4bDlONk2X1TMBHKaf8tjCn",
     "name": "Minibar",
-    "artist": "Gracie Abrams",
+    "original_title": "Minibar",
+    "artists": [
+      "Gracie Abrams"
+    ],
     "album": "Daughter from Hell",
     "duration_ms": 120340,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/4f/13/47/4f1347cf-9564-e8b6-523a-386202f4d265/26UMGIM54147.rgb.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d0000485199bc33b47a0a67fd50783055",
+    "uri": "spotify:track:4bDlONk2X1TMBHKaf8tjCn",
     "audio": {
       "energy": 0.813,
       "danceability": 0.668,
@@ -66,10 +82,14 @@
   {
     "id": "4UwqOWDpdeIDVQDuKT6iza",
     "name": "You Are In Love (Taylor's Version)",
-    "artist": "Taylor Swift",
+    "original_title": "You Are In Love (Taylor's Version)",
+    "artists": [
+      "Taylor Swift"
+    ],
     "album": "1989 (Taylor's Version)",
     "duration_ms": 267389,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/11/a6/80/11a680e6-2e48-08fa-5e87-3f18e838d31f/23UM1IM11868.rgb.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d000048514110bfab1185fdfc9dfc2cf0",
+    "uri": "spotify:track:4UwqOWDpdeIDVQDuKT6iza",
     "audio": {
       "energy": 0.509,
       "danceability": 0.554,
@@ -81,11 +101,16 @@
   },
   {
     "id": "4ABYxlb92WBIjHu7TIKmml",
-    "name": "Castles Crumbling (Taylor's Version) (From The Vault) [feat. Hayley Williams]",
-    "artist": "Taylor Swift",
+    "name": "Castles Crumbling (feat. Hayley Williams) (Taylor’s Version) (From The Vault)",
+    "original_title": "Castles Crumbling",
+    "artists": [
+      "Taylor Swift",
+      "Hayley Williams"
+    ],
     "album": "Speak Now (Taylor's Version)",
     "duration_ms": 306062,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/9f/3c/0a/9f3c0a60-f9e0-a34e-60e5-0be1f182896b/23UMGIM63932.rgb.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d000048510b04da4f224b51ff86e0a481",
+    "uri": "spotify:track:4ABYxlb92WBIjHu7TIKmml",
     "audio": {
       "energy": 0.565,
       "danceability": 0.578,
@@ -98,10 +123,14 @@
   {
     "id": "6FRKxwDHTDGr1lqQ0SEprH",
     "name": "Favourite Daughter",
-    "artist": "Lorde",
+    "original_title": "Favourite Daughter",
+    "artists": [
+      "Lorde"
+    ],
     "album": "Virgin",
     "duration_ms": 208696,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/72/3c/07/723c07a7-4ff6-b052-927d-6997fff13676/25UMGIM60545.rgb.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d0000485123d41bf736920a032e222a78",
+    "uri": "spotify:track:6FRKxwDHTDGr1lqQ0SEprH",
     "audio": {
       "energy": 0.481,
       "danceability": 0.735,
@@ -114,10 +143,15 @@
   {
     "id": "22WFoPT9VIJlZ0VcJVkCpm",
     "name": "Every Girl You've Ever Loved (feat. Naomi Campbell)",
-    "artist": "Miley Cyrus",
+    "original_title": "Every Girl You've Ever Loved",
+    "artists": [
+      "Miley Cyrus",
+      "Naomi Campbell"
+    ],
     "album": "Something Beautiful",
     "duration_ms": 318249,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/be/b1/63/beb16362-169d-b53f-7186-eccf028d7830/196872959222.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d000048510ae6f06706ab3a955844e9a0",
+    "uri": "spotify:track:22WFoPT9VIJlZ0VcJVkCpm",
     "audio": {
       "energy": 0.896,
       "danceability": 0.498,
@@ -129,11 +163,15 @@
   },
   {
     "id": "1yjY7rpaAQvKwpdUliHx0d",
-    "name": "Still Into You",
-    "artist": "Paramore",
+    "name": "Still into You",
+    "original_title": "Still into You",
+    "artists": [
+      "Paramore"
+    ],
     "album": "Paramore",
-    "duration_ms": 216019,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/97/c9/45/97c945f7-3612-03f9-0bb7-fd68e277ae6f/075679955210.jpg/300x300bb.jpg",
+    "duration_ms": 216013,
+    "image": "https://i.scdn.co/image/ab67616d00004851532033d0d90736f661c13d35",
+    "uri": "spotify:track:1yjY7rpaAQvKwpdUliHx0d",
     "audio": {
       "energy": 0.923,
       "danceability": 0.602,
@@ -146,10 +184,14 @@
   {
     "id": "2MMRI8uTYajusqfb8Fmcbl",
     "name": "White Horse",
-    "artist": "Taylor Swift",
-    "album": "Fearless (International Version)",
+    "original_title": "White Horse",
+    "artists": [
+      "Taylor Swift"
+    ],
+    "album": "Fearless",
     "duration_ms": 233560,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/fd/d5/21/fdd5219e-a9ce-27a8-0ee4-e2da1cc55cc0/09UMGIM02385.rgb.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d00004851d64d6965aa3a1db711888dff",
+    "uri": "spotify:track:2MMRI8uTYajusqfb8Fmcbl",
     "audio": {
       "energy": 0.342,
       "danceability": 0.587,
@@ -162,10 +204,16 @@
   {
     "id": "6EFBcGR6chnBv9rmSN0ObX",
     "name": "The Little Mess You Made",
-    "artist": "The Favors, FINNEAS & Ashe",
-    "album": "The Dream",
+    "original_title": "The Little Mess You Made",
+    "artists": [
+      "The Favors",
+      "FINNEAS",
+      "Ashe"
+    ],
+    "album": "The Little Mess You Made",
     "duration_ms": 201284,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/32/59/71/32597154-2d4d-158e-fe5b-64ac24de72de/25UMGIM73476.rgb.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d000048510f29b5ac40226d632017ade0",
+    "uri": "spotify:track:6EFBcGR6chnBv9rmSN0ObX",
     "audio": {
       "energy": 0.466,
       "danceability": 0.661,
@@ -178,10 +226,14 @@
   {
     "id": "3fVnlF4pGqWI9flVENcT28",
     "name": "Wildest Dreams",
-    "artist": "Taylor Swift",
+    "original_title": "Wildest Dreams",
+    "artists": [
+      "Taylor Swift"
+    ],
     "album": "1989",
-    "duration_ms": 220433,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/32/1d/8e/321d8e9e-d806-b545-fd30-5c7aef575abc/14UMGIM34829.rgb.jpg/300x300bb.jpg",
+    "duration_ms": 220440,
+    "image": "https://i.scdn.co/image/ab67616d00004851b7e976d2b35c767f9012cb72",
+    "uri": "spotify:track:3fVnlF4pGqWI9flVENcT28",
     "audio": {
       "energy": 0.664,
       "danceability": 0.553,
@@ -194,10 +246,14 @@
   {
     "id": "6y4UahfKxl2IClrjbwzzkF",
     "name": "Begin Again",
-    "artist": "Taylor Swift",
+    "original_title": "Begin Again",
+    "artists": [
+      "Taylor Swift"
+    ],
     "album": "Red",
-    "duration_ms": 237600,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/25/0d/7e/250d7e42-3a2f-19ac-f865-f1e04a4a1f97/12UMDIM01007.rgb.jpg/300x300bb.jpg",
+    "duration_ms": 239426,
+    "image": "https://i.scdn.co/image/ab67616d000048513da04f5d266b8c0d0e6935f8",
+    "uri": "spotify:track:6y4UahfKxl2IClrjbwzzkF",
     "audio": {
       "energy": 0.53,
       "danceability": 0.522,
@@ -210,10 +266,14 @@
   {
     "id": "0ftA4eiNTY5DHlL5SOfaAv",
     "name": "Primadonna",
-    "artist": "Marina and The Diamonds",
-    "album": "Electra Heart (Deluxe Version)",
+    "original_title": "Primadonna",
+    "artists": [
+      "MARINA"
+    ],
+    "album": "Bad Bitch Energy",
     "duration_ms": 221075,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/4b/dc/88/4bdc8837-8831-9277-a89c-db947c21ea36/825646580118.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d00004851eea00c5e58f359d3ff1f3b61",
+    "uri": "spotify:track:0ftA4eiNTY5DHlL5SOfaAv",
     "audio": {
       "energy": 0.689,
       "danceability": 0.66,
@@ -226,10 +286,14 @@
   {
     "id": "2YjKcFQ1vYFhQPgsmCOjss",
     "name": "Haunted",
-    "artist": "Taylor Swift",
+    "original_title": "Haunted",
+    "artists": [
+      "Taylor Swift"
+    ],
     "album": "Speak Now",
-    "duration_ms": 242080,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/d4/23/57/d423579f-24f7-5c82-ed10-fbfd21ceef25/10UMDIM00487.rgb.jpg/300x300bb.jpg",
+    "duration_ms": 242093,
+    "image": "https://i.scdn.co/image/ab67616d00004851d0eae3c1661a96570f0ca7bd",
+    "uri": "spotify:track:2YjKcFQ1vYFhQPgsmCOjss",
     "audio": {
       "energy": 0.944,
       "danceability": 0.434,
@@ -242,10 +306,14 @@
   {
     "id": "6ZwVl8oPsraGB177TNEzaX",
     "name": "I Knew It, I Knew You - Piano Version (From \"Toy Story 5\")",
-    "artist": "Taylor Swift",
+    "original_title": "I Knew It, I Knew You",
+    "artists": [
+      "Taylor Swift"
+    ],
     "album": "I Knew It, I Knew You (From \"Toy Story 5\")",
     "duration_ms": 190199,
-    "image": "https://image-cdn-ak.spotifycdn.com/image/ab67616d00001e02e8852f06eca817333d20e60b",
+    "image": "https://i.scdn.co/image/ab67616d00004851e8852f06eca817333d20e60b",
+    "uri": "spotify:track:6ZwVl8oPsraGB177TNEzaX",
     "audio": {
       "energy": 0.136,
       "danceability": 0.616,
@@ -257,11 +325,15 @@
   },
   {
     "id": "7p8wAUDFBSWPMh2KxfUDQk",
-    "name": "Jar of Hearts",
-    "artist": "Christina Perri",
-    "album": "Lovestrong.",
+    "name": "jar of hearts",
+    "original_title": "jar of hearts",
+    "artists": [
+      "Christina Perri"
+    ],
+    "album": "lovestrong.",
     "duration_ms": 246587,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/a9/f1/e3/a9f1e388-dc38-898b-9b50-0e4531785d92/mzi.zidabqot.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d00004851603a5fede652c2d00b79d5f0",
+    "uri": "spotify:track:7p8wAUDFBSWPMh2KxfUDQk",
     "audio": {
       "energy": 0.348,
       "danceability": 0.349,
@@ -273,11 +345,15 @@
   },
   {
     "id": "6lanRgr6wXibZr8KgzXxBl",
-    "name": "A Thousand Years",
-    "artist": "Christina Perri",
-    "album": "The Twilight Saga: Breaking Dawn - Pt. 1 (Original Motion Picture Soundtrack)",
+    "name": "a thousand years",
+    "original_title": "a thousand years",
+    "artists": [
+      "Christina Perri"
+    ],
+    "album": "a thousand years",
     "duration_ms": 285120,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/c9/6e/21/c96e2143-8f84-2ea5-0528-37205f7d5c6d/mzi.jdvbfvnj.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d000048513dea4a2ccd58ad1f8e4dbb03",
+    "uri": "spotify:track:6lanRgr6wXibZr8KgzXxBl",
     "audio": {
       "energy": 0.407,
       "danceability": 0.421,
@@ -290,10 +366,15 @@
   {
     "id": "5bUcjB7nT5sDHw3nMPpC1z",
     "name": "If You Let Me (with Marcus Mumford)",
-    "artist": "Maisie Peters",
+    "original_title": "If You Let Me",
+    "artists": [
+      "Maisie Peters",
+      "Marcus Mumford"
+    ],
     "album": "Florescence",
-    "duration_ms": 193907,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/30/84/c9/3084c970-113a-d134-94e6-9e7af00624b7/5026854103372.jpg/300x300bb.jpg",
+    "duration_ms": 193906,
+    "image": "https://i.scdn.co/image/ab67616d00004851a89e013166461305e0365218",
+    "uri": "spotify:track:5bUcjB7nT5sDHw3nMPpC1z",
     "audio": {
       "energy": 0.271,
       "danceability": 0.56,
@@ -306,10 +387,14 @@
   {
     "id": "0gZGUAO42F1HmzZWHNPGAu",
     "name": "Risk",
-    "artist": "Gracie Abrams",
+    "original_title": "Risk",
+    "artists": [
+      "Gracie Abrams"
+    ],
     "album": "The Secret of Us",
-    "duration_ms": 191567,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/52/9a/a7/529aa76f-5d60-cd81-9eb0-0eb521de861d/24UMGIM43968.rgb.jpg/300x300bb.jpg",
+    "duration_ms": 191586,
+    "image": "https://i.scdn.co/image/ab67616d000048516e2101520787791370f4a96b",
+    "uri": "spotify:track:0gZGUAO42F1HmzZWHNPGAu",
     "audio": {
       "energy": 0.496,
       "danceability": 0.716,
@@ -322,10 +407,15 @@
   {
     "id": "0hhzNPE68LWLfgZwdpxVdR",
     "name": "us. (feat. Taylor Swift)",
-    "artist": "Gracie Abrams",
-    "album": "The Secret of Us (Deluxe)",
-    "duration_ms": 242856,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/d2/f8/99/d2f89987-d2a5-45a5-1746-c0841c7e9843/24UM1IM17286.rgb.jpg/300x300bb.jpg",
+    "original_title": "us.",
+    "artists": [
+      "Gracie Abrams",
+      "Taylor Swift"
+    ],
+    "album": "The Secret of Us",
+    "duration_ms": 242666,
+    "image": "https://i.scdn.co/image/ab67616d000048516e2101520787791370f4a96b",
+    "uri": "spotify:track:0hhzNPE68LWLfgZwdpxVdR",
     "audio": {
       "energy": 0.553,
       "danceability": 0.533,
@@ -337,11 +427,15 @@
   },
   {
     "id": "0FS7B5o3QyvOD8eWjnbLoO",
-    "name": "Run Away with Me",
-    "artist": "Carly Rae Jepsen",
-    "album": "E•MO•TION",
+    "name": "Run Away With Me",
+    "original_title": "Run Away With Me",
+    "artists": [
+      "Carly Rae Jepsen"
+    ],
+    "album": "Emotion (Deluxe Expanded Edition)",
     "duration_ms": 251327,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/8e/b9/9b/8eb99b2a-f730-0df5-3c2c-4175d57cd84d/15UMGIM31527.rgb.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d000048515708b3925c13b1b8d6fac466",
+    "uri": "spotify:track:0FS7B5o3QyvOD8eWjnbLoO",
     "audio": {
       "energy": 0.7,
       "danceability": 0.561,
@@ -354,10 +448,14 @@
   {
     "id": "4k6BM0DDYEfdHYVezjukjC",
     "name": "Night Sky",
-    "artist": "CHVRCHES",
-    "album": "The Bones of What You Believe",
+    "original_title": "Night Sky",
+    "artists": [
+      "CHVRCHES"
+    ],
+    "album": "The Bones Of What You Believe (Deluxe Edition)",
     "duration_ms": 231093,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/8f/aa/f2/8faaf24a-45bf-bb7e-5886-349997eee2e7/13UAAIM08344.rgb.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d000048510a1a5484fc2a55a6ebc6c83d",
+    "uri": "spotify:track:4k6BM0DDYEfdHYVezjukjC",
     "audio": {
       "energy": 0.763,
       "danceability": 0.613,
@@ -369,11 +467,16 @@
   },
   {
     "id": "5bM4kIqjyKPZXPTrZrElkY",
-    "name": "back in time (feat. Ben Rector)",
-    "artist": "Christina Perri",
+    "name": "back in time (feat. ben rector)",
+    "original_title": "back in time",
+    "artists": [
+      "Christina Perri",
+      "Ben Rector"
+    ],
     "album": "a lighter shade of blue",
-    "duration_ms": 236375,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/8f/0f/a1/8f0fa166-68ec-fc7c-bf66-abcde9374df8/075679755452.jpg/300x300bb.jpg",
+    "duration_ms": 236374,
+    "image": "https://i.scdn.co/image/ab67616d000048511247544b03f8f97ab08b933e",
+    "uri": "spotify:track:5bM4kIqjyKPZXPTrZrElkY",
     "audio": {
       "energy": 0.26,
       "danceability": 0.652,
@@ -386,10 +489,14 @@
   {
     "id": "0rjGD5jVtVbj131wDsfbJG",
     "name": "White Noise",
-    "artist": "Holly Humberstone",
+    "original_title": "White Noise",
+    "artists": [
+      "Holly Humberstone"
+    ],
     "album": "Cruel World",
     "duration_ms": 225985,
-    "image": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/64/bb/a0/64bba0b1-ed9b-c471-e01d-df99ba95c514/25UM2IM01991.rgb.jpg/300x300bb.jpg",
+    "image": "https://i.scdn.co/image/ab67616d000048511f5858d030d755897f007d1c",
+    "uri": "spotify:track:0rjGD5jVtVbj131wDsfbJG",
     "audio": {
       "energy": 0.842,
       "danceability": 0.68,

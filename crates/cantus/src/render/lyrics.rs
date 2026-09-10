@@ -5,13 +5,15 @@ use crate::{
 use isthmus::prelude::*;
 use isthmus_sdf::prelude::*;
 
-pub const EXTENSION: f32 = 10.0;
+pub const EXTENSION: f32 = 17.0;
 const SHADOW_REACH: f32 = 3.0;
-const ROW_SPACING: f32 = 20.0;
+const ROW_SPACING: f32 = 12.0;
+const GROUP_COLOR: Vec3 = vec3(1.00, 0.72, 0.79); // rose, reserved for groups
+const SECTION_SHADOW: f32 = 5.0;
 const CHANNEL_COLORS: [Vec3; 3] = [
     TEXT_COLOR,
     vec3(0.66, 0.82, 1.00), // blue
-    vec3(1.00, 0.72, 0.79), // rose
+    vec3(0.76, 0.94, 0.69), // sage
 ];
 
 #[cfg(target_os = "linux")]
@@ -60,23 +62,42 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
             break;
         }
         let lyrics = music.resources.lyrics(track, context.frame.resources).unwrap_or(&silence);
+        let baseline = PANEL_START + context.config.height + EXTENSION;
+        for section in &lyrics.sections {
+            let start = x + lyrics.position(section.time.start, track.duration_ms as f32);
+            let label = context.frame.resources.shape(&section.text, 10.0, f32::MAX);
+            let origin = vec2(start, baseline - 11.0);
+            shader!(
+                context
+                    .frame
+                    .upload({
+                        let line: Text = context.frame.resources.place(&label, origin).outlined(SECTION_SHADOW);
+                    })
+                    .primitive(line)
+                    .fragment(|_, surface| {
+                        let shadow = (-surface.distance.max(0.0) * 0.7).exp() * 0.3;
+                        surface.paint(TEXT_COLOR.extend(0.9), Vec3::splat(0.2).extend(shadow))
+                    })
+            );
+        }
         let mut bends = Vec::new();
-        for (row, channel) in lyrics.channels.values().enumerate() {
-            let color = CHANNEL_COLORS[row % CHANNEL_COLORS.len()];
+        for (row, channel) in lyrics.channels.iter().enumerate() {
+            let color = channel.singer.map_or(GROUP_COLOR, |singer| CHANNEL_COLORS[singer % CHANNEL_COLORS.len()]);
             for run in channel
                 .runs
                 .iter()
                 .skip_while(|run| x + run.x.end < screen.start)
                 .take_while(|run| x + run.x.start <= screen.end)
             {
-                let left = run.left(time, layout.playhead_x - x);
+                // Slide inside the shared cell so the sung fraction stays under the playhead.
+                let sung = ((time - run.time.start) / (run.time.end - run.time.start)).clamp(0.0, 1.0) * run.width;
+                let left = run.x.start
+                    + (layout.playhead_x - x - run.x.start - sung)
+                        .clamp(0.0, (run.x.end - run.x.start - run.width).max(0.0));
                 if x + left + run.width < screen.start || x + left > screen.end {
                     continue;
                 }
-                let origin = vec2(
-                    x + left - run.line.text.min.x.min(0.0) * run.scale,
-                    PANEL_START + context.config.height + EXTENSION,
-                );
+                let origin = vec2(x + left - run.line.text.min.x.min(0.0) * run.scale, baseline);
                 let bounds = Rect::new(
                     origin + run.line.text.min * vec2(run.scale, 1.0),
                     origin + run.line.text.max * vec2(run.scale, 1.0) + vec2(0.0, row as f32 * ROW_SPACING),

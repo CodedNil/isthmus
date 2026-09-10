@@ -83,7 +83,7 @@ impl Response {
 impl Interaction {
     pub fn begin_frame(&mut self, delta_time: f32, time: f32) {
         self.input_regions.clear();
-        self.hot = self.pointer().and_then(|pointer| self.hit_test(pointer));
+        self.hot = self.pointer().and_then(|pointer| self.hover_target(pointer));
         self.widgets.clear();
         self.previous_held_seconds = self.held_seconds;
         if self.down() {
@@ -177,7 +177,7 @@ impl Interaction {
                 self.apply(InputEvent::Motion(position));
             }
             InputEvent::Motion(position) => {
-                self.hot = self.hit_test(position);
+                self.hot = self.hover_target(position);
                 if matches!(self.active, Some(Active::Widget(_))) && self.hot.is_none() {
                     self.apply(InputEvent::Cancel);
                 }
@@ -202,7 +202,7 @@ impl Interaction {
             InputEvent::Press => {
                 let position = self.mouse_pos();
                 self.pointer = Pointer::Held { position, origin: position, dragging: false };
-                self.hot = self.widgets.iter().rev().find(|widget| (widget.contains)(position)).map(|widget| widget.id);
+                self.hot = self.hit_test(position);
                 self.active = self.hot;
                 if self.active.is_some() {
                     self.events.push(ButtonEvent::Press(position));
@@ -213,8 +213,7 @@ impl Interaction {
             InputEvent::Release => {
                 if let Pointer::Held { origin, dragging, position } = self.pointer
                     && let Some(id) = self.active.take()
-                    && (matches!(id, Active::Drag(_))
-                        || self.widgets.iter().any(|widget| widget.id == id && (widget.contains)(position)))
+                    && (matches!(id, Active::Drag(_)) || self.hit_test(position) == Some(id))
                 {
                     self.events.push(ButtonEvent::Release {
                         id,
@@ -225,7 +224,7 @@ impl Interaction {
                 }
                 let position = self.mouse_pos();
                 self.pointer = Pointer::Hovering(position);
-                self.hot = self.hit_test(position);
+                self.hot = self.hover_target(position);
             }
             InputEvent::Cancel => {
                 self.pointer = Pointer::Hovering(self.mouse_pos());
@@ -238,11 +237,11 @@ impl Interaction {
     }
 
     fn hit_test(&self, point: Vec2) -> Option<Active> {
-        self.widgets
-            .iter()
-            .rev()
-            .find(|widget| (!self.down() || self.active == Some(widget.id)) && (widget.contains)(point))
-            .map(|widget| widget.id)
+        self.widgets.iter().rev().find(|widget| (widget.contains)(point)).map(|widget| widget.id)
+    }
+
+    fn hover_target(&self, point: Vec2) -> Option<Active> {
+        self.hit_test(point).filter(|id| !self.down() || self.active == Some(*id))
     }
 
     fn interact_with(&mut self, shape: impl Sdf + 'static, id: Active) -> Response {

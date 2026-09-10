@@ -12,8 +12,7 @@ use image::{RgbaImage, imageops};
 use isthmus::{Image, Unorm8x4, glam::Vec3};
 use isthmus_sdf::layout::TextCache;
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
-use reqwest::Client;
-use std::{array, collections::HashMap, hash::Hash, ops::Range, time::Duration};
+use std::{array, collections::HashMap, fmt::Display, hash::Hash, ops::Range, time::Duration};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::spawn_blocking;
 use tracing::warn;
@@ -33,10 +32,6 @@ impl<T> Default for Fetch<T> {
 }
 
 impl<T> Fetch<T> {
-    pub fn retry() -> Self {
-        Self::Missing(Instant::now() + RETRY_DELAY)
-    }
-
     pub fn request(&mut self, now: Instant) -> bool {
         let Self::Missing(retry_at) = self else { return false };
         if *retry_at > now {
@@ -55,14 +50,20 @@ impl<T> Fetch<T> {
 }
 
 impl Background {
-    fn fetch<K: Eq + Hash + Send + 'static, T: Send + 'static>(
+    fn fetch<K: Eq + Hash + Display + Send + 'static, T: Send + 'static>(
         &self,
         key: K,
-        task: impl Task<Output = Fetch<T>>,
+        task: impl Task<Output = MusicResult<T>>,
         cache: fn(&mut TrackCache) -> &mut HashMap<K, Fetch<T>>,
     ) {
         self.spawn_update(async move {
-            let result = task.await;
+            let result = match task.await {
+                Ok(value) => Fetch::Ready(value),
+                Err(error) => {
+                    warn!(%error, %key, "Failed to fetch music resource");
+                    Fetch::Missing(Instant::now() + RETRY_DELAY)
+                }
+            };
             Some(move |app: &mut CantusApp| {
                 if let Some(slot @ Fetch::Fetching) = cache(&mut app.music.resources).get_mut(&key) {
                     *slot = result;
@@ -105,25 +106,6 @@ impl TrackCache {
     }
 }
 
-async fn fetch_art(http: &Client, url: &str) -> Fetch<AlbumArt> {
-    let result: MusicResult<_> = async {
-        let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
-        #[cfg(not(target_arch = "wasm32"))]
-        let art = spawn_blocking(move || decode_art(&bytes)).await??;
-        #[cfg(target_arch = "wasm32")]
-        let art = decode_art(&bytes)?;
-        Ok(art)
-    }
-    .await;
-    match result {
-        Ok(art) => Fetch::Ready(art),
-        Err(error) => {
-            warn!(%error, %url, "Failed to load image");
-            Fetch::retry()
-        }
-    }
-}
-
 fn decode_art(bytes: &[u8]) -> Result<AlbumArt, image::ImageError> {
     let image = image::load_from_memory(bytes)?;
     let image = if image.width() > ART_SIZE || image.height() > ART_SIZE {
@@ -158,7 +140,7 @@ impl CantusApp {
             for track in &music.queue[start..end] {
                 // Queue titles can arrive before the artist and duration metadata.
                 if !track.name.trim().is_empty()
-                    && !track.artist.trim().is_empty()
+                    && !track.primary_artist().trim().is_empty()
                     && track.duration_ms > 0
                     && resources.lyrics.entry(track.uri.clone()).or_default().request(now)
                 {
@@ -181,11 +163,17 @@ impl CantusApp {
             self.background.fetch(
                 id,
                 async move {
-                    spotify
-                        .audio_features(id)
-                        .await
-                        .inspect_err(|error| warn!(%error, %id, "Failed to fetch Spotify audio features"))
-                        .map_or_else(|_| Fetch::retry(), Fetch::Ready)
+                    let path = super::audio_features_path(id);
+                    let response = spotify.get_json(&path).await?;
+                    let features: AudioFeatures = serde_json::from_slice(response.as_ref())?;
+                    Ok(AudioFeatures {
+                        energy: features.energy.clamp(0.0, 1.0),
+                        danceability: features.danceability.clamp(0.0, 1.0),
+                        acousticness: features.acousticness.clamp(0.0, 1.0),
+                        tempo: (features.tempo / 300.0).clamp(0.0, 1.0),
+                        valence: features.valence.clamp(0.0, 1.0),
+                        instrumentalness: features.instrumentalness.clamp(0.0, 1.0),
+                    })
                 },
                 |cache| &mut cache.audio,
             );
@@ -201,7 +189,18 @@ impl CantusApp {
             }
             let url = url.clone();
             let http = self.background.http.clone();
-            self.background.fetch(url.clone(), async move { fetch_art(&http, &url).await }, |cache| &mut cache.art);
+            self.background.fetch(
+                url.clone(),
+                async move {
+                    let bytes = http.get(&url).send().await?.error_for_status()?.bytes().await?;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let art = spawn_blocking(move || decode_art(&bytes)).await??;
+                    #[cfg(target_arch = "wasm32")]
+                    let art = decode_art(&bytes)?;
+                    Ok(art)
+                },
+                |cache| &mut cache.art,
+            );
         }
     }
 }

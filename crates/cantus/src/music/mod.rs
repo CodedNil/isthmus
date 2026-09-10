@@ -1,6 +1,7 @@
 use crate::{app::AppUpdater, config::Config, render::music::AudioFeatures};
 use arrayvec::ArrayString;
 use enrichment::TrackCache;
+use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
@@ -21,6 +22,10 @@ pub type MusicResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 pub const ART_SIZE: u32 = 128;
 pub const TRACK_SPACING_MS: f32 = 4000.0;
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn audio_features_path(id: TrackId) -> String {
+    format!("/audio-attributes/v1/audio-features/{id}?format=json")
+}
 
 pub struct Music {
     pub resources: TrackCache,
@@ -59,10 +64,6 @@ pub struct Timeline {
 impl Timeline {
     pub fn position_now(&self) -> f32 {
         self.position_ms + self.observed_at.elapsed().as_secs_f32() * 1000.0 * self.rate
-    }
-
-    pub fn track_at_playhead(&self, queue: &[Track]) -> Option<(usize, f32)> {
-        self.span_at_playhead(queue).filter(|(index, elapsed)| *elapsed < queue[*index].duration_ms as f32)
     }
 
     /// Returns the queue item covering the playhead, including its trailing spacing.
@@ -193,16 +194,20 @@ impl Music {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize)]
 pub struct Track {
     pub id: Option<TrackId>,
+    #[serde(default)]
     pub uri: String,
     pub name: String,
-    pub artist: String,
+    pub original_title: Option<String>,
+    pub artists: Vec<String>,
     pub album: String,
     pub image: Option<String>,
     pub duration_ms: u32,
+    #[serde(skip, default = "Track::next_interaction_id")]
     pub(crate) interaction_id: u64,
+    #[serde(skip)]
     pub runtime: TrackRuntime,
 }
 
@@ -214,6 +219,14 @@ pub struct TrackRuntime {
 }
 
 impl Track {
+    pub fn compact_title(&self) -> &str {
+        self.original_title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or(&self.name)
+    }
+
+    pub fn primary_artist(&self) -> &str {
+        self.artists.first().map_or("", String::as_str)
+    }
+
     fn next_interaction_id() -> u64 {
         NEXT_QUEUE_ID.fetch_add(1, Ordering::Relaxed)
     }

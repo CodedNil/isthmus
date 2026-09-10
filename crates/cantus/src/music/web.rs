@@ -1,4 +1,4 @@
-use super::{AudioFeatures, MusicResult, PlaybackCommand, Track, TrackId, TrackRuntime, lyrics::LyricSegment};
+use super::{MusicResult, PlaybackCommand, Track, TrackId, lyrics::Lyrics};
 use crate::{
     app::{AppUpdater, send_update},
     config::Config,
@@ -13,39 +13,30 @@ use web_time::Instant;
 #[derive(Clone)]
 pub struct Spotify {
     updater: AppUpdater,
-    audio: Arc<HashMap<TrackId, AudioFeatures>>,
+    responses: Arc<HashMap<String, Box<serde_json::value::RawValue>>>,
 }
 
 impl Spotify {
     pub(super) fn new(_config: &Config, updater: &AppUpdater) -> Self {
-        let tracks: Vec<DemoTrack> = serde_json::from_str(include_str!("../../../../assets/web/tracks.json"))
+        let tracks: Vec<FixtureTrack> = serde_json::from_str(include_str!("../../../../assets/web/tracks.json"))
             .unwrap_or_else(|error| {
-                tracing::error!(%error, "Invalid bundled demo tracks");
+                tracing::error!(%error, "Invalid bundled Spotify tracks");
                 Vec::new()
             });
-        let mut audio = HashMap::new();
         let mut queue = Vec::new();
-        for mut track in tracks {
-            track.audio.tempo /= 300.0;
-            audio.insert(track.id, track.audio);
-            queue.push(Track {
-                id: Some(track.id),
-                uri: format!("spotify:track:{}", track.id),
-                name: track.name,
-                artist: track.artist,
-                album: track.album,
-                image: Some(track.image),
-                duration_ms: track.duration_ms,
-                interaction_id: Track::next_interaction_id(),
-                runtime: TrackRuntime::default(),
-            });
+        let mut responses = HashMap::new();
+        for FixtureTrack { track, audio } in tracks {
+            if let Some(id) = track.id {
+                responses.insert(super::audio_features_path(id), audio);
+            }
+            queue.push(track);
         }
         fastrand::shuffle(&mut queue);
         send_update(updater, move |app| {
             app.music.replace_queue(queue, 3, 42_000.0, 1.0, Instant::now());
             app.music.playing = true;
         });
-        Self { updater: updater.clone(), audio: Arc::new(audio) }
+        Self { updater: updater.clone(), responses: Arc::new(responses) }
     }
 
     pub(super) fn command(&self, command: PlaybackCommand) {
@@ -78,26 +69,24 @@ impl Spotify {
         });
     }
 
-    pub(super) fn lyrics(&self, _track_id: TrackId) -> Ready<MusicResult<Vec<LyricSegment>>> {
-        ready(Ok(Vec::new()))
+    pub(super) fn lyrics(&self, _track_id: TrackId) -> Ready<MusicResult<Lyrics>> {
+        ready(Ok(Lyrics::default()))
     }
 
-    pub(super) fn audio_features(&self, track_id: TrackId) -> Ready<MusicResult<AudioFeatures>> {
-        ready(self.audio.get(&track_id).copied().ok_or_else(|| "Unknown demo track".into()))
+    pub(super) async fn get_json(&self, path: &str) -> MusicResult<&str> {
+        self.responses
+            .get(path)
+            .map(|response| response.get())
+            .ok_or_else(|| format!("No demo Spotify response for {path}").into())
     }
 }
 
-// Apple/Spotify catalog metadata and Spotify audio features captured on 2026-09-10.
-// Tempo stays in BPM in the fixture and is normalized on loading, as in the native provider.
+/// Track metadata and its Spotify audio response stay together in the fixture.
 #[derive(serde::Deserialize)]
-struct DemoTrack {
-    id: TrackId,
-    name: String,
-    artist: String,
-    album: String,
-    image: String,
-    duration_ms: u32,
-    audio: AudioFeatures,
+struct FixtureTrack {
+    #[serde(flatten)]
+    track: Track,
+    audio: Box<serde_json::value::RawValue>,
 }
 
 impl super::Music {
