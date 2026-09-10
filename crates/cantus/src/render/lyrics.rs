@@ -8,14 +8,10 @@ use isthmus_sdf::prelude::*;
 pub const EXTENSION: f32 = 10.0;
 const SHADOW_REACH: f32 = 3.0;
 const ROW_SPACING: f32 = 20.0;
-const CHANNEL_COLORS: [Vec3; 7] = [
+const CHANNEL_COLORS: [Vec3; 3] = [
     TEXT_COLOR,
-    vec3(0.84, 0.87, 0.91), // blue
-    vec3(0.89, 0.84, 0.85), // rose
-    vec3(0.84, 0.89, 0.86), // sage
-    vec3(0.88, 0.85, 0.91), // lavender
-    vec3(0.91, 0.88, 0.83), // sand
-    vec3(0.83, 0.89, 0.89), // teal
+    vec3(0.66, 0.82, 1.00), // blue
+    vec3(1.00, 0.72, 0.79), // rose
 ];
 
 #[cfg(target_os = "linux")]
@@ -65,8 +61,8 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         }
         let lyrics = music.resources.lyrics(track, context.frame.resources).unwrap_or(&silence);
         let mut bends = Vec::new();
-        for (row, (&id, channel)) in lyrics.channels.iter().enumerate() {
-            let color = CHANNEL_COLORS[id % CHANNEL_COLORS.len()];
+        for (row, channel) in lyrics.channels.values().enumerate() {
+            let color = CHANNEL_COLORS[row % CHANNEL_COLORS.len()];
             for run in channel
                 .runs
                 .iter()
