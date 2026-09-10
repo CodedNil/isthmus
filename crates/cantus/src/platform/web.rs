@@ -21,8 +21,8 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
-use tokio::sync::{mpsc::UnboundedSender, oneshot};
-use wasm_bindgen::{JsCast, closure::Closure};
+use tokio::sync::oneshot;
+use wasm_bindgen::JsCast;
 use web_time::Instant;
 
 pub trait Task = Future + 'static;
@@ -91,16 +91,21 @@ pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
     });
 }
 
-pub fn start_location_monitor(updates: UnboundedSender<[f32; 2]>) {
-    let Some(geolocation) = web_sys::window().and_then(|window| window.navigator().geolocation().ok()) else {
-        return;
-    };
-    let success = Closure::once(move |position: web_sys::Position| {
-        let coordinates = position.coords();
-        let _ = updates.send([coordinates.latitude() as f32, coordinates.longitude() as f32]);
+pub async fn current_location() -> Result<[f32; 2], Box<dyn std::error::Error + Send + Sync>> {
+    let geolocation = web_sys::window()
+        .and_then(|window| window.navigator().geolocation().ok())
+        .ok_or("Browser geolocation is unavailable")?;
+    let promise = web_sys::js_sys::Promise::new(&mut |resolve, reject| {
+        if let Err(error) = geolocation.get_current_position_with_error_callback(&resolve, Some(&reject)) {
+            let _ = reject.call1(&wasm_bindgen::JsValue::UNDEFINED, &error);
+        }
     });
-    let _ = geolocation.get_current_position(success.as_ref().unchecked_ref());
-    success.forget();
+    let position = wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(|error| format!("Browser geolocation failed: {error:?}"))?
+        .unchecked_into::<web_sys::Position>();
+    let coordinates = position.coords();
+    Ok([coordinates.latitude() as f32, coordinates.longitude() as f32])
 }
 
 pub async fn sleep(duration: Duration) {

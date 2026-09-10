@@ -11,8 +11,8 @@ use std::time::Duration;
 #[cfg_attr(target_arch = "wasm32", path = "web.rs")]
 mod backend;
 pub use backend::{
-    Task, desktop_apps, open_url, run, run_power_action, set_volume, sleep, spawn, spawn_task, start_launcher_listener,
-    start_location_monitor, start_status_monitor, trigger_launcher,
+    Task, current_location, desktop_apps, open_url, run, run_power_action, set_volume, sleep, spawn, spawn_task,
+    start_launcher_listener, start_status_monitor, trigger_launcher,
 };
 
 #[derive(Clone, Copy)]

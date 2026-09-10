@@ -230,7 +230,6 @@ mod monitor {
     use reqwest::Client;
     use serde::Deserialize;
     use std::{array::from_fn, iter::once, time::Duration};
-    use tokio::sync::mpsc;
     use tracing::warn;
 
     const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
@@ -327,15 +326,16 @@ mod monitor {
 
     pub(super) async fn run(timezones: Vec<String>, background: Background) {
         let http = &background.http;
-        let (location_tx, mut locations_rx) = mpsc::unbounded_channel();
-        platform::start_location_monitor(location_tx);
         let timezones: Vec<_> =
             once(TimeZone::system().iana_name().map(str::to_owned)).chain(timezones.into_iter().map(Some)).collect();
         let mut locations = vec![None; timezones.len()];
+        locations[0] = tokio::select! {
+            result = platform::current_location() => result
+                .inspect_err(|error| warn!(%error, "Could not determine local weather location; using timezone"))
+                .ok(),
+            () = platform::sleep(Duration::from_secs(10)) => None,
+        };
         loop {
-            while let Ok(location) = locations_rx.try_recv() {
-                locations[0] = Some(location);
-            }
             join_all(timezones.iter().zip(&mut locations).filter_map(|(timezone, slot)| {
                 let timezone = timezone.as_ref().filter(|_| slot.is_none())?;
                 Some(async move {
@@ -372,10 +372,7 @@ mod monitor {
                 break;
             }
             let interval = if retry { Duration::from_secs(30) } else { Duration::from_mins(15) };
-            tokio::select! {
-                () = platform::sleep(interval) => {}
-                Some(location) = locations_rx.recv() => locations[0] = Some(location),
-            }
+            platform::sleep(interval).await;
         }
     }
 
