@@ -154,6 +154,10 @@ impl Music {
         self.spotify.command(PlaybackCommand::SetPlaying(playing));
     }
 
+    pub(crate) fn play_playlist(&self, id: Option<PlaylistId>) {
+        self.spotify.command(PlaybackCommand::PlayPlaylist(id));
+    }
+
     pub(crate) fn rate_track(&self, track_id: TrackId, rating: u8) {
         self.spotify.command(PlaybackCommand::UpdateLibrary {
             track_id,
@@ -244,6 +248,7 @@ pub struct CondensedPlaylist {
 }
 
 enum PlaybackCommand {
+    PlayPlaylist(Option<PlaylistId>),
     SetPlaying(bool),
     Seek(u32),
     Skip(i8),

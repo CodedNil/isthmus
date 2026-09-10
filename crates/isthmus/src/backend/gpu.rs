@@ -24,8 +24,6 @@ impl Gpu {
         queue: wgpu::Queue,
         format: wgpu::TextureFormat,
     ) -> Self {
-        let source = wgpu::ShaderSource::Wgsl(P::CODE.into());
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("isthmus"), source });
         let entries = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|binding| wgpu::BindGroupLayoutEntry {
             binding: binding as u32,
             visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -54,6 +52,12 @@ impl Gpu {
         let pipelines = P::SHADERS
             .iter()
             .map(|entry| {
+                let [vertex, fragment] = entry.code.map(|code| {
+                    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some(entry.name),
+                        source: wgpu::ShaderSource::Wgsl(code.into()),
+                    })
+                });
                 let blend = match entry.blend {
                     Blend::Over => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     Blend::Replace => None,
@@ -70,14 +74,14 @@ impl Gpu {
                     label: Some(entry.name),
                     layout: Some(&layouts[entry.images]),
                     vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some(entry.vertex),
+                        module: &vertex,
+                        entry_point: None,
                         buffers: &[],
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some(entry.name),
+                        module: &fragment,
+                        entry_point: None,
                         targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
                     }),

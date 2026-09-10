@@ -8,9 +8,6 @@ pub trait Program: Copy + 'static {
     /// Shared host resources used by this program's captured handles.
     type Resources: crate::Resources;
     #[cfg(not(target_arch = "spirv"))]
-    /// Compiled shader module embedded by the program macro.
-    const CODE: &'static str;
-    #[cfg(not(target_arch = "spirv"))]
     /// Generated shader entry points and pipeline state.
     const SHADERS: &'static [ShaderEntry];
 }
@@ -30,8 +27,8 @@ pub enum Blend {
 #[cfg(not(target_arch = "spirv"))]
 /// Generated entry points and resource requirements for one shader pipeline.
 pub struct ShaderEntry {
-    /// Vertex entry point name.
-    pub vertex: &'static str,
+    /// Vertex and fragment WGSL, each containing only its stage's dependencies.
+    pub code: [&'static str; 2],
     /// Fragment entry point name.
     pub name: &'static str,
     /// Color blending mode.

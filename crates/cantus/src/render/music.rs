@@ -13,7 +13,7 @@ use isthmus::{prelude::*, spirv_std::arch::kill};
 use isthmus_sdf::prelude::*;
 use serde::Deserialize;
 use smallvec::SmallVec;
-use std::sync::LazyLock;
+use std::{iter, sync::LazyLock};
 
 /// Number of colors extracted from album artwork.
 pub const PALETTE_COLORS: usize = 4;
@@ -71,6 +71,7 @@ pub struct MusicView {
     bar_split: f32,
     icon_presence: f32,
     icon_morph: f32,
+    playlist_hover: Vec<f32>,
 }
 
 #[derive(Clone, Copy)]
@@ -114,10 +115,66 @@ fn caustics(p: Vec2, time: f32, seed: f32, audio: AudioFeatures) -> f32 {
 
 impl MusicView {
     pub fn show(&mut self, context: &mut UiContext, music: &mut Music, bar: BarLayout) {
-        if music.queue.is_empty() {
-            return;
+        let mut burst = false;
+        let playlists = music.playlists.iter().filter(|playlist| playlist.rating_index.is_none());
+        let count = playlists.clone().count();
+        let show_playlists = context.config.ratings_enabled || count > 0;
+        let button_size = (context.config.height + PRIMARY_SUPPORT_DEPTH) / 3.0;
+        let tracks_left = if show_playlists { (count + 1).div_ceil(3) as f32 * button_size + GAP * 2.0 } else { 0.0 };
+        if show_playlists {
+            self.playlist_hover.resize(count + 1, 0.0);
+            let mut icons = SmallVec::<[_; 8]>::new();
+            for (index, playlist) in iter::once(None).chain(playlists.map(Some)).enumerate() {
+                let center = vec2(
+                    GAP + (index / 3) as f32 * button_size + button_size * 0.5,
+                    PANEL_START + ((index % 3) as f32 + 0.5) * button_size,
+                );
+                let rect = Rect::from_center_size(center, Vec2::splat(button_size - 2.0));
+                let response = context
+                    .interaction
+                    .interact(("play-playlist", playlist.map(|playlist| playlist.id)), Shape::rectangle(rect));
+                context.interaction.input_region(rect);
+                if response.clicked {
+                    music.play_playlist(playlist.map(|playlist| playlist.id));
+                    burst = true;
+                }
+                let hover = &mut self.playlist_hover[index];
+                *hover = hover.move_towards(f32::from(response.hovered), context.frame.delta_time.min(0.1) / 0.18);
+                icons.push((playlist, rect, hover.smoothstep(0.0, 1.0)));
+            }
+            icons.sort_by(|a, b| a.2.total_cmp(&b.2));
+            for (playlist, rect, hover) in icons {
+                let rect = rect.expanded((button_size - 2.0) * hover * 0.3);
+                shader!(
+                    context
+                        .frame
+                        .upload({
+                            let rect: Rect;
+                            let liked: bool = playlist.is_none();
+                            let hover: f32;
+                            let image: &Image = playlist
+                                .and_then(|playlist| music.resources.art(playlist.image_url.as_deref()))
+                                .map_or(&*EMPTY_ART, |art| &art.image);
+                        })
+                        .primitive(Shape::rounded_rect(rect, 3.0))
+                        .fragment(|_, surface| {
+                            let uv = rect.uv(surface.pixel);
+                            let texture = image.sample(uv);
+                            let background = vec3(0.3, 0.2, 0.65).lerp(vec3(0.65, 0.8, 0.7), uv.y);
+                            let color = if liked {
+                                let p = (uv - vec2(0.5, 0.43)) * vec2(2.0, -2.0);
+                                let heart = vec2(p.x.abs(), p.y);
+                                let distance = (heart - vec2(0.23, 0.0)).length() - 0.3;
+                                let tip = (heart.x - heart.y * 0.75 - 0.35).max(heart.y);
+                                background.lerp(Vec3::ONE, 1.0 - distance.min(tip).smoothstep(-0.02, 0.02))
+                            } else {
+                                background.lerp(texture.truncate(), texture.w)
+                            };
+                            (color * (1.0 + hover * 0.2)).extend(1.0)
+                        })
+                );
+            }
         }
-
         let drag = context.interaction.drag_motion();
 
         let playhead_track = music
@@ -140,10 +197,11 @@ impl MusicView {
         let mut start_ms = music.timeline.queue_start_ms + music.queue.iter().map(Track::queue_span_ms).sum::<f32>();
         let mut next_left = None;
         let mut visible = SmallVec::<[TrackLayout; 16]>::new();
-        for (queue_index, track) in music.queue.iter().enumerate().rev() {
+        for (queue_index, track) in music.queue.iter_mut().enumerate().rev() {
             start_ms -= track.queue_span_ms();
             let natural_start = bar.playhead_x + start_ms * bar.px_per_ms;
             if natural_start >= future_end {
+                track.runtime.track_expansion = 0.0;
                 continue;
             }
             let end = natural_start + (track.duration_ms as f32 * bar.px_per_ms - trim).max(0.0);
@@ -164,9 +222,21 @@ impl MusicView {
 
         visible.sort_by_key(|layout| music.queue[layout.queue_index].runtime.track_expansion.to_bits());
 
+        let playhead_index = playhead_track.map(|(index, _)| index);
+        if !music.queue.is_empty()
+            && !visible.iter().any(|layout| Some(layout.queue_index) == playhead_index && layout.right > tracks_left)
+        {
+            self.show_playhead(context, music, bar.playhead_x);
+        }
+
         for layout in visible {
             let track = &mut music.queue[layout.queue_index];
-            let opacity = (future_end - layout.natural_start).smoothstep(0.0, panel_height);
+            if layout.right <= tracks_left {
+                track.runtime.track_expansion = 0.0;
+                continue;
+            }
+            let opacity = (future_end - layout.natural_start).smoothstep(0.0, panel_height)
+                * (layout.right - tracks_left).smoothstep(0.0, panel_height);
             let mut width = layout.width.max(panel_height);
             let mut x = layout.right - width;
             let expansion = track.runtime.track_expansion.smoothstep(0.0, 1.0);
@@ -196,14 +266,16 @@ impl MusicView {
             if let Some(lines) = &track_text {
                 let target = lines.iter().map(|(_, full)| full.text.width).fold(0.0, f32::max) + panel_height + 26.0;
                 let extra_width = (target - width).max(0.0) * expansion;
-                x -= extra_width * 0.5;
+                let anchor = if Some(layout.queue_index) == playhead_index {
+                    ((bar.playhead_x - x) / width).saturate()
+                } else {
+                    0.5
+                };
+                x -= extra_width * anchor;
                 width += extra_width;
-                width = width.min(future_end);
-                x = x.clamp(0.0, future_end - width);
             }
-            if x + width <= 0.0 {
-                continue;
-            }
+            width = width.min((future_end - tracks_left).max(0.0));
+            x = x.clamp(tracks_left, (future_end - width).max(tracks_left));
             let mut playlist_icons = SmallVec::<[usize; 8]>::new();
             let mut primary_count = 0;
             let mut rating = (context.config.ratings_enabled && track.id.is_some()).then_some(0);
@@ -292,7 +364,6 @@ impl MusicView {
                     if alpha <= 0.0 {
                         continue;
                     }
-                    let alpha = alpha * opacity;
                     let center = vec2(
                         pill.center().x + (icon - (count - 1.0).max(0.0) * 0.5) * ICON_SPACING * spread,
                         PANEL_START + panel_height * 0.975 - 1.0 + f32::from(secondary) * ICON_SPACING * spread,
@@ -311,6 +382,7 @@ impl MusicView {
                 }
             }
             let pointer_active = f32::from(hovered);
+            let opacity = if hovered { 1.0 } else { opacity.lerp(1.0, expansion) };
 
             shader!(
                 context
@@ -431,9 +503,9 @@ impl MusicView {
                 }
             }
 
-            let mut burst = false;
             if let Some(track_id) = track.id {
                 for (slot, playlist, secondary, is_star, alpha, center, response) in icons {
+                    let alpha = alpha * opacity;
                     let mouse_distance = center.distance(mouse_pos);
                     let proximity = mouse_distance.smoothstep(ICON_WIDTH * 2.5, ICON_WIDTH * 0.25)
                         * mouse_pressure.clamp(0.0, 1.0)
@@ -494,24 +566,13 @@ impl MusicView {
                     );
                 }
             }
-            if burst {
-                for particle in
-                    self.particles.iter_mut().filter(|particle| particle.expires_at <= context.frame.time).take(20)
-                {
-                    *particle = Particle {
-                        origin: mouse_pos,
-                        velocity: Vec2::from_angle(fastrand::f32() * TAU) * (30.0 + fastrand::f32() * 20.0),
-                        spawned_at: context.frame.time,
-                        expires_at: context.frame.time + 0.5 + fastrand::f32(),
-                        color: vec3(1.0, 0.843, 0.196),
-                        ..
-                    };
-                }
-            }
             track.runtime.track_expansion = track
                 .runtime
                 .track_expansion
                 .move_towards(f32::from(hovered), context.frame.delta_time.min(0.1) / 0.16);
+            if Some(layout.queue_index) == playhead_index {
+                self.show_playhead(context, music, bar.playhead_x);
+            }
         }
         if let Some((index, duration_ms, fraction)) = seek_action {
             music.seek(index, duration_ms, fraction);
@@ -523,8 +584,21 @@ impl MusicView {
             music.toggle_playlist(track_id, playlist_id);
         }
 
+        if burst {
+            for particle in
+                self.particles.iter_mut().filter(|particle| particle.expires_at <= context.frame.time).take(20)
+            {
+                *particle = Particle {
+                    origin: mouse_pos,
+                    velocity: Vec2::from_angle(fastrand::f32() * TAU) * (30.0 + fastrand::f32() * 20.0),
+                    spawned_at: context.frame.time,
+                    expires_at: context.frame.time + 0.5 + fastrand::f32(),
+                    color: vec3(1.0, 0.843, 0.196),
+                    ..
+                };
+            }
+        }
         self.show_particles(context, music, bar, playhead_track.map(|(index, _)| &music.queue[index]));
-        self.show_playhead(context, music, bar.playhead_x);
     }
 
     fn show_particles(&mut self, context: &mut UiContext, music: &Music, bar: BarLayout, track: Option<&Track>) {

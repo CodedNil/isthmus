@@ -42,7 +42,7 @@ use reqwest::{
 use serde_json::json;
 use std::{
     collections::{HashMap, hash_map::Entry},
-    io::{self, Write},
+    io,
     path::PathBuf,
     str,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -252,11 +252,30 @@ struct SpotifyWorker {
 
 impl SpotifyWorker {
     async fn command(&mut self, command: PlaybackCommand) {
-        let (endpoint, value, count) = match command {
-            PlaybackCommand::SetPlaying(playing) => (if playing { "resume" } else { "pause" }, None, 1),
-            PlaybackCommand::Seek(position_ms) => ("seek_to", Some(position_ms), 1),
-            PlaybackCommand::Skip(count) => {
-                (if count > 0 { "skip_next" } else { "skip_prev" }, None, count.unsigned_abs())
+        let mut count = 1;
+        let mut command = match command {
+            PlaybackCommand::PlayPlaylist(id) => {
+                let uri = id.map_or_else(
+                    || format!("spotify:user:{}:collection", self.session.username()),
+                    |id| format!("spotify:playlist:{id}"),
+                );
+                json!({
+                    "endpoint": "play",
+                    "context": { "uri": uri, "url": format!("context://{uri}") },
+                    "play_origin": { "feature_identifier": "cantus" },
+                    "options": {
+                        "initially_paused": false,
+                        "player_options_override": { "shuffling_context": true },
+                    },
+                })
+            }
+            PlaybackCommand::SetPlaying(playing) => {
+                json!({ "endpoint": if playing { "resume" } else { "pause" } })
+            }
+            PlaybackCommand::Seek(position_ms) => json!({ "endpoint": "seek_to", "value": position_ms }),
+            PlaybackCommand::Skip(offset) => {
+                count = offset.unsigned_abs();
+                json!({ "endpoint": if offset > 0 { "skip_next" } else { "skip_prev" } })
             }
             PlaybackCommand::UpdateLibrary { track_id, playlists, liked } => {
                 if let Err(error) = self.update_library(track_id, &playlists, liked).await {
@@ -265,8 +284,29 @@ impl SpotifyWorker {
                 return;
             }
         };
+        for option in ["override_restrictions", "only_for_local_device", "system_initiated"] {
+            command["options"][option] = false.into();
+        }
+        command["logging_params"] = json!({});
+        let Some(target) = &self.active_device else { return };
+        let path = format!("/connect-state/v1/player/command/from/{}/to/{target}", self.session.device_id());
         for _ in 0..count {
-            Self::player_command(&self.session, self.active_device.as_deref(), endpoint, value).await;
+            let result: MusicResult<_> = async {
+                let mut compressed = GzEncoder::new(Vec::new(), Compression::fast());
+                serde_json::to_writer(
+                    &mut compressed,
+                    &json!({
+                        "command": command,
+                        "connection_type": "wlan",
+                        "intent_id": format!("{:032x}", fastrand::u128(..)),
+                    }),
+                )?;
+                connected_request(&self.session, &path, Some("gzip"), &compressed.finish()?).await
+            }
+            .await;
+            if let Err(error) = result {
+                error!(%error, endpoint = %command["endpoint"], "Spotify player command failed");
+            }
         }
     }
 
@@ -390,38 +430,6 @@ impl SpotifyWorker {
             let metadata = fetch_track_metadata(&session, &requested).await;
             (requested, metadata)
         }));
-    }
-
-    async fn player_command(session: &Session, target: Option<&str>, endpoint: &str, value: Option<u32>) {
-        let Some(target) = target else { return };
-        let mut command = json!({
-            "endpoint": endpoint,
-            "options": {
-                "override_restrictions": false,
-                "only_for_local_device": false,
-                "system_initiated": false,
-            },
-        });
-        if let Some(value) = value {
-            command["value"] = value.into();
-        }
-        let body = serde_json::to_vec(&json!({
-            "command": command,
-            "connection_type": "wlan",
-            "intent_id": format!("{:032x}", fastrand::u128(..)),
-        }))
-        .unwrap_or_default();
-        let mut compressed = GzEncoder::new(Vec::new(), Compression::fast());
-        let result: MusicResult<_> = async {
-            compressed.write_all(&body)?;
-            let body = compressed.finish()?;
-            let path = format!("/connect-state/v1/player/command/from/{}/to/{target}", session.device_id());
-            connected_request(session, &path, Some("gzip"), &body).await
-        }
-        .await;
-        if let Err(error) = result {
-            error!(%error, %endpoint, "Spotify player command failed");
-        }
     }
 }
 
