@@ -232,7 +232,7 @@ pub fn spawn(command: &[String]) {
         return;
     };
     if let Err(error) = Command::new("systemd-run")
-        .args(["--user", "--collect", "--quiet", "--"])
+        .args(["--user", "--collect", "--quiet", "--property=ExitType=cgroup", "--"])
         .arg(program)
         .args(args)
         .stdin(Stdio::null())

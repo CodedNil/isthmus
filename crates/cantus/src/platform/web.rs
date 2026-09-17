@@ -12,8 +12,6 @@ use gloo_render::request_animation_frame;
 use gloo_timers::future::TimeoutFuture;
 use isthmus::{glam::vec2, wgpu::SurfaceTarget};
 use isthmus_sdf::layout::TextCache;
-#[cfg(feature = "paries")]
-use paries::render::{Renderer as WallpaperRenderer, bamboo::Bamboo};
 use std::{
     cell::RefCell,
     future::Future,
@@ -180,13 +178,6 @@ async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    #[cfg(feature = "paries")]
-    let (mut wallpaper, wallpaper_surface, mut bamboo) = {
-        let (renderer, surface) =
-            WallpaperRenderer::new(SurfaceTarget::Canvas(canvas_by_id("paries")?), physical, ()).await?;
-        (renderer, surface, Bamboo::default())
-    };
-
     let _pointer =
         ["pointerenter", "pointermove", "pointerdown", "pointerup", "pointerleave", "pointercancel"].map(|name| {
             let app = Rc::clone(&app);
@@ -264,8 +255,6 @@ async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut rendered_at = 0.0;
-    #[cfg(feature = "paries")]
-    let mut wallpaper_at = 0.0;
     loop {
         let (sender, frame) = oneshot::channel();
         let _animation = request_animation_frame(move |time| {
@@ -287,14 +276,6 @@ async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
             }
             app.music.advance_demo();
             app.refresh();
-            #[cfg(feature = "paries")]
-            if time - wallpaper_at >= 1000.0 / 30.0 {
-                wallpaper_at = time - (time - wallpaper_at) % (1000.0 / 30.0);
-                wallpaper.resize(wallpaper_surface, physical);
-                wallpaper.render(|render| {
-                    render.surface(wallpaper_surface, size, (), |mut frame| bamboo.show(&mut frame));
-                })?;
-            }
             gpu.render(|render| {
                 app.draw(render, surface, size, View { bar: true, launcher: true });
             })?;
