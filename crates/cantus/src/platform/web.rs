@@ -261,7 +261,6 @@ async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
             let _ = sender.send(time);
         });
         let Ok(time) = frame.await else { break };
-        // Keep the demo at 60 fps even on high-refresh monitors, without accumulating timing drift.
         let elapsed = time - rendered_at;
         if elapsed < 1000.0 / 60.0 {
             continue;

@@ -144,7 +144,6 @@ pub fn hash(p: Vec2) -> Vec2 {
     vec2(value.x as f32, value.y as f32) * 2.328_306_4e-10
 }
 
-// Keep this shared to avoid duplicating its noise graph in every shader entry point.
 #[inline(never)]
 pub fn simplex_noise(p: Vec2) -> f32 {
     const K1: f32 = 0.366_025_42;

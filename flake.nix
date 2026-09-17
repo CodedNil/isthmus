@@ -32,7 +32,7 @@ rec {
         wireplumber
       ];
       runtimeLibraryPath = "${lib.makeLibraryPath runtimeLibraries}:/run/opengl-driver/lib";
-      rust = pkgs.rust-bin.nightly."2026-05-22".default.override {
+      rust = pkgs.rust-bin.nightly."2026-07-03".default.override {
         extensions = [
           "clippy"
           "rustfmt"
@@ -58,7 +58,7 @@ rec {
               (rustPlatform.importCargoLock {
                 lockFile = ./Cargo.lock;
                 outputHashes = {
-                  "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-M3/puV8CnGDp4I4C/F4lrH/Dfbs6Lj4T4j4vwdBMzrU=";
+                  "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-OL8FIC3YOuH5Xkfee1alGKl6V43jlGaPXS08EOga/W0=";
                 };
               })
               (rustPlatform.importCargoLock {
@@ -85,11 +85,7 @@ rec {
             mold
           ];
           buildInputs = runtimeLibraries;
-          disallowedRequisites = [ rust ];
-          # Source paths in panic messages otherwise retain the entire toolchain.
-          postFixup = ''
-            ${pkgs.removeReferencesTo}/bin/remove-references-to -t ${rust} "$out/bin/.${pname}-wrapped"
-          '';
+          RUSTFLAGS = "--remap-path-prefix=${rust}=/rustc";
           postInstall = ''
             wrapProgram "$out/bin/${pname}" \
               --set LD_LIBRARY_PATH "${runtimeLibraryPath}" \
@@ -115,6 +111,7 @@ rec {
           just
           nixfmt
           spirv-tools
+          wasm-bindgen-cli
           pipewire
           wireplumber
         ];
@@ -144,8 +141,8 @@ rec {
 
               package = lib.mkOption {
                 type = lib.types.package;
-                default = self.packages.${system}.cantus;
-                defaultText = lib.literalExpression "inputs.${pname}.packages.${system}.${pname}";
+                default = self.packages.${pkgs.system}.cantus;
+                defaultText = lib.literalExpression "inputs.${pname}.packages.${pkgs.system}.${pname}";
                 description = "Cantus package to install.";
               };
 

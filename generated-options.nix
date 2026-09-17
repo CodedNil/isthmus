@@ -39,11 +39,6 @@
     default = builtins.fromJSON "1.5";
     description = "How many minutes before the current time to display in the timeline.";
   };
-  history_width = lib.mkOption {
-    type = lib.types.number;
-    default = builtins.fromJSON "100.0";
-    description = "The width in logical pixels on the left where previous tracks are displayed.";
-  };
   playlists = lib.mkOption {
     type = lib.types.addCheck (lib.types.listOf (lib.types.str)) (xs: builtins.length xs <= 8);
     default = builtins.fromJSON "[]";

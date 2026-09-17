@@ -1,7 +1,7 @@
 use crate::{
     music::{Music, TRACK_SPACING_MS, Track},
     render::{
-        BarLayout, GAP, PANEL_START, Program, TEXT_COLOR, UiContext,
+        BarLayout, GAP, HISTORY_WIDTH, PANEL_START, Program, TEXT_COLOR, UiContext,
         sdf::{deform, glass, hash, refract, simplex_noise},
     },
 };
@@ -26,7 +26,7 @@ const PRIMARY_SUPPORT_DEPTH: f32 = 7.0;
 /// Height added below the first icon row for other playlists.
 const SECONDARY_SUPPORT_DEPTH: f32 = 18.0;
 /// Space reserved for each collapsed history track, excluding its gap.
-const HISTORY_WIDTH: f32 = 10.0;
+const HISTORY_TRACK_WIDTH: f32 = 10.0;
 /// Transparent texture used while artwork is unavailable and for rating icons.
 static EMPTY_ART: LazyLock<Image> = LazyLock::new(|| Image::rgba8([1, 1], vec![0; 4]));
 
@@ -125,9 +125,10 @@ impl MusicView {
             self.playlist_hover.resize(count + 1, 0.0);
             let mut icons = SmallVec::<[_; 8]>::new();
             for (index, playlist) in iter::once(None).chain(playlists.map(Some)).enumerate() {
+                let rows = (count + 1 - index / 3 * 3).min(3);
                 let center = vec2(
                     GAP + (index / 3) as f32 * button_size + button_size * 0.5,
-                    PANEL_START + ((index % 3) as f32 + 0.5) * button_size,
+                    PANEL_START + ((index % 3) as f32 + 0.5 + (3 - rows) as f32 * 0.5) * button_size,
                 );
                 let rect = Rect::from_center_size(center, Vec2::splat(button_size - 2.0));
                 let response = context
@@ -190,8 +191,8 @@ impl MusicView {
             }
         }
 
-        let (history_width, panel_height) = (context.config.history_width, context.config.height);
-        let future_end = history_width + context.config.timeline_future_minutes * 60_000.0 * bar.px_per_ms;
+        let panel_height = context.config.height;
+        let future_end = HISTORY_WIDTH + context.config.timeline_future_minutes * 60_000.0 * bar.px_per_ms;
         let gap = GAP.max(TRACK_SPACING_MS * bar.px_per_ms);
         let trim = gap - TRACK_SPACING_MS * bar.px_per_ms;
         let mut start_ms = music.timeline.queue_start_ms + music.queue.iter().map(Track::queue_span_ms).sum::<f32>();
@@ -205,10 +206,10 @@ impl MusicView {
                 continue;
             }
             let end = natural_start + (track.duration_ms as f32 * bar.px_per_ms - trim).max(0.0);
-            let gap = if end <= history_width { gap } else { gap.min(track.queue_span_ms() * bar.px_per_ms) };
-            let clipped = end.min(future_end) - natural_start.max(history_width);
-            let width = clipped.max(if natural_start < history_width { HISTORY_WIDTH } else { 0.0 });
-            let right = next_left.map_or_else(|| end.clamp(history_width, future_end), |left: f32| left - gap);
+            let gap = if end <= HISTORY_WIDTH { gap } else { gap.min(track.queue_span_ms() * bar.px_per_ms) };
+            let clipped = end.min(future_end) - natural_start.max(HISTORY_WIDTH);
+            let width = clipped.max(if natural_start < HISTORY_WIDTH { HISTORY_TRACK_WIDTH } else { 0.0 });
+            let right = next_left.map_or_else(|| end.clamp(HISTORY_WIDTH, future_end), |left: f32| left - gap);
             visible.push(TrackLayout { queue_index, start_ms, natural_start, width, right });
             next_left = Some(right - width);
         }
@@ -335,7 +336,7 @@ impl MusicView {
             let body = context.interaction.drag(track.interaction_id, shape);
             let mut hovered = body.hovered;
             if body.clicked && track.duration_ms > 0 {
-                let fraction = if layout.natural_start + track.duration_ms as f32 * bar.px_per_ms <= history_width
+                let fraction = if layout.natural_start + track.duration_ms as f32 * bar.px_per_ms <= HISTORY_WIDTH
                     || layout.queue_index == music.timeline.index && mouse_pos.x <= x + pill.size().x * 0.05
                 {
                     0.0
@@ -347,6 +348,22 @@ impl MusicView {
 
             let mut icons = Vec::new();
             if track.id.is_some() {
+                // Resolve the hovered star before drawing any icon. Otherwise the stars before
+                // the pointer use the stored rating while later stars use the hovered rating.
+                // That makes a hover over (for example) 4.5/5 leave the first two stars filled.
+                if stars > 0 {
+                    let count = primary_icons;
+                    for slot in 0..stars {
+                        let icon = slot as f32 * star_alpha;
+                        let center = vec2(
+                            pill.center().x + (icon - (count - 1.0).max(0.0) * 0.5) * ICON_SPACING,
+                            PANEL_START + panel_height * 0.975 - 1.0,
+                        );
+                        if center.distance(mouse_pos) <= ICON_WIDTH * 0.5 {
+                            rating = Some(slot as i32 * 2 + 1 + i32::from(mouse_pos.x >= center.x));
+                        }
+                    }
+                }
                 for slot in 0..stars + primary_count + secondary_count {
                     let playlist_slot = slot.saturating_sub(stars);
                     let is_star = slot < stars;

@@ -10,6 +10,9 @@ pub mod sdf;
 pub mod status;
 pub mod weathertime;
 
+/// Space for playlist buttons and compact history tracks, in logical pixels.
+pub const HISTORY_WIDTH: f32 = 200.0;
+
 pub const TEXT_COLOR: Vec3 = Vec3::splat(0.94);
 /// Gap between the top of the surface and the top of the bar.
 pub const PANEL_START: f32 = 6.0;
@@ -67,14 +70,14 @@ impl Bar {
 
     pub fn show(&mut self, context: &mut UiContext, music: &mut Music) {
         let status_width = self.status.as_ref().map_or(0.0, |status| status.width() + GAP);
-        let reserved = context.config.history_width
+        let reserved = HISTORY_WIDTH
             + GAP
             + f32::from(context.config.weathertime_enabled) * (weathertime::WIDTH + GAP)
             + status_width;
         let px_per_ms =
             (context.frame.screen_size.x - reserved).max(84.0) / (context.config.timeline_future_minutes * 60_000.0);
         let layout = BarLayout {
-            playhead_x: context.config.history_width + context.config.timeline_past_minutes * 60_000.0 * px_per_ms,
+            playhead_x: HISTORY_WIDTH + context.config.timeline_past_minutes * 60_000.0 * px_per_ms,
             px_per_ms,
         };
         let drag = context.interaction.drag_motion();
