@@ -1,11 +1,8 @@
-use super::{
-    ART_SIZE, AudioFeatures, MusicResult, Track, TrackId,
-    lyrics::{self, Lyrics},
-};
+use super::{ART_SIZE, AudioFeatures, MusicResult, Track, TrackId, lyrics};
 use crate::{
     app::{Background, CantusApp},
     platform::Task,
-    render::music::PALETTE_COLORS,
+    render::{lyrics::PreparedLyrics, music::PALETTE_COLORS},
 };
 use arrayvec::ArrayVec;
 use image::{RgbaImage, imageops};
@@ -32,6 +29,16 @@ impl<T> Default for Fetch<T> {
 }
 
 impl<T> Fetch<T> {
+    fn from_result(result: MusicResult<T>, key: impl Display) -> Self {
+        match result {
+            Ok(value) => Self::Ready(value),
+            Err(error) => {
+                warn!(%error, %key, "Failed to fetch music resource");
+                Self::Missing(Instant::now() + RETRY_DELAY)
+            }
+        }
+    }
+
     pub fn request(&mut self, now: Instant) -> bool {
         let Self::Missing(retry_at) = self else { return false };
         if *retry_at > now {
@@ -57,13 +64,7 @@ impl Background {
         cache: fn(&mut TrackCache) -> &mut HashMap<K, Fetch<T>>,
     ) {
         self.spawn_update(async move {
-            let result = match task.await {
-                Ok(value) => Fetch::Ready(value),
-                Err(error) => {
-                    warn!(%error, %key, "Failed to fetch music resource");
-                    Fetch::Missing(Instant::now() + RETRY_DELAY)
-                }
-            };
+            let result = Fetch::from_result(task.await, &key);
             Some(move |app: &mut CantusApp| {
                 if let Some(slot @ Fetch::Fetching) = cache(&mut app.music.resources).get_mut(&key) {
                     *slot = result;
@@ -82,7 +83,8 @@ pub struct AlbumArt {
 pub struct TrackCache {
     pub art: HashMap<String, Fetch<AlbumArt>>,
     pub audio: HashMap<TrackId, Fetch<AudioFeatures>>,
-    pub lyrics: HashMap<String, Fetch<Lyrics>>,
+    pub lyrics: HashMap<String, Fetch<PreparedLyrics>>,
+    pub lyrics_session: Option<lyrics::Session> = Some(lyrics::Session::new()),
 }
 
 impl TrackCache {
@@ -99,7 +101,7 @@ impl TrackCache {
         id.and_then(|id| self.audio.get(&id)).and_then(Fetch::ready).copied().unwrap_or_default()
     }
 
-    pub fn lyrics(&mut self, track: &Track, text: &mut TextCache) -> Option<&Lyrics> {
+    pub fn lyrics(&mut self, track: &Track, text: &mut TextCache) -> Option<&PreparedLyrics> {
         let Fetch::Ready(lyrics) = self.lyrics.get_mut(&track.uri)? else { return None };
         lyrics.prepare(track.duration_ms as f32, text);
         Some(lyrics)
@@ -134,23 +136,36 @@ impl CantusApp {
         resources
             .lyrics
             .retain(|uri, state| matches!(state, Fetch::Fetching) || music.queue.iter().any(|track| &track.uri == uri));
-        if self.config.lyrics_enabled {
+        if self.config.lyrics_enabled && resources.lyrics_session.is_some() {
             let start = music.timeline.index.saturating_sub(1).min(music.queue.len());
+            let current = music.timeline.index.min(music.queue.len());
             let end = music.timeline.index.saturating_add(3).min(music.queue.len());
-            for track in &music.queue[start..end] {
-                // Queue titles can arrive before the artist and duration metadata.
-                if !track.name.trim().is_empty()
-                    && !track.primary_artist().trim().is_empty()
-                    && track.duration_ms > 0
-                    && resources.lyrics.entry(track.uri.clone()).or_default().request(now)
-                {
-                    let (track, spotify, http) = (track.clone(), music.spotify.clone(), self.background.http.clone());
-                    self.background.fetch(
-                        track.uri.clone(),
-                        async move { lyrics::fetch(&track, &http, &spotify).await },
-                        |cache| &mut cache.lyrics,
-                    );
-                }
+            let track = music.queue[current..end]
+                .iter()
+                .chain(&music.queue[start..current])
+                .find(|track| {
+                    // Queue titles can arrive before the artist and duration metadata.
+                    !track.name.trim().is_empty()
+                        && !track.primary_artist().trim().is_empty()
+                        && track.duration_ms > 0
+                        && resources.lyrics.entry(track.uri.clone()).or_default().request(now)
+                })
+                .cloned();
+            if let Some(track) = track
+                && let Some(mut session) = resources.lyrics_session.take()
+            {
+                let http = self.background.http.clone();
+                self.background.spawn_update(async move {
+                    let result = lyrics::fetch(&track, &http, &mut session).await.map(PreparedLyrics::new);
+                    let result = Fetch::from_result(result, track.compact_title());
+                    Some(move |app: &mut Self| {
+                        let resources = &mut app.music.resources;
+                        resources.lyrics_session = Some(session);
+                        if let Some(slot @ Fetch::Fetching) = resources.lyrics.get_mut(&track.uri) {
+                            *slot = result;
+                        }
+                    })
+                });
             }
         }
         for id in music

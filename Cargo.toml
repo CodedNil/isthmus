@@ -15,8 +15,8 @@ bytemuck = "1.25.2"
 glam = { version = "0.33.7", default-features = false, features = ["u32"] }
 serde = { version = "1.0.229", features = ["derive"] }
 smallvec = "1.16.0"
-spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
-spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "e6394e08eb3356083b12f732a01906f8e49f7c4a" }
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "e6394e08eb3356083b12f732a01906f8e49f7c4a" }
 wgpu = { version = "30.0.1", default-features = false }
 
 [workspace.lints.rust]
@@ -113,3 +113,6 @@ codegen-units = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.dev.package.cantus]
+codegen-units = 16

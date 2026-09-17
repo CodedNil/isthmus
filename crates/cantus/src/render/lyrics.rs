@@ -1,12 +1,18 @@
 use crate::{
-    music::{Music, lyrics::Lyrics},
+    music::{Music, TRACK_SPACING_MS, lyrics::Lyrics},
     render::{BarLayout, PANEL_START, Program, TEXT_COLOR, UiContext},
 };
 use isthmus::prelude::*;
-use isthmus_sdf::prelude::*;
+use isthmus_sdf::{
+    layout::{ShapedLine, TextCache},
+    prelude::*,
+};
+use std::{ops::Range, sync::Arc};
 
 pub const EXTENSION: f32 = 17.0;
 const SHADOW_REACH: f32 = 3.0;
+const GLOW_REACH: f32 = 6.0;
+const LANE_BLEND: f32 = 48.0;
 const ROW_SPACING: f32 = 12.0;
 const GROUP_COLOR: Vec3 = vec3(1.00, 0.72, 0.79); // rose, reserved for groups
 const SECTION_SHADOW: f32 = 5.0;
@@ -16,6 +22,173 @@ const CHANNEL_COLORS: [Vec3; 3] = [
     vec3(0.76, 0.94, 0.69), // sage
 ];
 
+#[derive(Default)]
+pub struct PreparedLyrics {
+    source: Lyrics,
+    channels: Vec<Channel>,
+    // Time, position and velocity at each timing boundary.
+    scroll: Vec<Vec3>,
+    prepared_duration: Option<f32>,
+}
+
+struct Channel {
+    singer: Option<usize>,
+    runs: Vec<Run>,
+    bands: Vec<Vec4>,
+}
+
+struct Run {
+    time: Range<f32>,
+    x: f32,
+    width: f32,
+    line: Arc<ShapedLine>,
+    scale: f32,
+}
+
+impl PreparedLyrics {
+    const SILENCE_SPEED: f32 = 0.035;
+
+    pub fn new(source: Lyrics) -> Self {
+        Self { source, ..Default::default() }
+    }
+
+    pub(crate) fn prepare(&mut self, duration: f32, text: &mut TextCache) {
+        if self.prepared_duration == Some(duration) {
+            return;
+        }
+        self.prepared_duration = Some(duration);
+        if !duration.is_finite() || duration <= 0.0 {
+            self.channels.clear();
+            self.scroll.clear();
+            return;
+        }
+        // Leave visible air between words even with their dark readability outlines.
+        let space = text.shape(" ", 15.0, 700.0).text.width.max(6.0);
+        let mut channels = Vec::new();
+        for source in &mut self.source.channels {
+            let mut channel = Channel { singer: source.singer, runs: Vec::new(), bands: Vec::new() };
+            let segments = &mut source.segments;
+            segments.retain(|s| s.time.start.is_finite() && s.time.end.is_finite() && !s.text.trim().is_empty());
+            segments.sort_by(|a, b| a.time.start.total_cmp(&b.time.start));
+            segments.dedup_by(|b, a| {
+                if !a.time.start.total_cmp(&b.time.start).is_eq() {
+                    return false;
+                }
+                a.text.push_str(&b.text);
+                a.time.end = a.time.end.max(b.time.end);
+                true
+            });
+            for (index, segment) in segments.iter().enumerate() {
+                let next = segments.get(index + 1);
+                let value = segment.text.replace('🎵', "♪").replace('🎶', "♫");
+                let line = text.shape(value.trim(), 15.0, 700.0);
+                let bounds = line.text;
+                let start = segment.time.start.clamp(0.0, duration);
+                let end =
+                    segment.time.end.clamp(start, next.map_or(duration, |s| s.time.start.min(duration)).max(start));
+                if bounds.count == 0 || end <= start {
+                    continue;
+                }
+                // Time the separator with the word so adjacent runs meet without a scrolling jump.
+                let separated = value.ends_with(char::is_whitespace)
+                    || next.is_some_and(|s| s.text.starts_with(char::is_whitespace));
+                let width = (bounds.width.max(bounds.max.x) - bounds.min.x.min(0.0)) + space * f32::from(separated);
+                channel.runs.push(Run { time: start..end, x: 0.0, width, line, scale: 1.0 });
+            }
+            channels.push(channel);
+        }
+        channels.retain(|channel| !channel.runs.is_empty());
+        // Compare fragments with this track's typical pace, retaining supplied syllable boundaries.
+        let mut pace: Vec<_> = channels
+            .iter()
+            .flat_map(|c| &c.runs)
+            .map(|r| (r.time.end - r.time.start) / r.line.text.width.max(1.0))
+            .collect();
+        pace.sort_by(f32::total_cmp);
+        let typical = pace.get(pace.len() / 2).copied().unwrap_or(1.0);
+        for run in channels.iter_mut().flat_map(|c| &mut c.runs) {
+            let bounds = run.line.text;
+            let held = (run.time.end - run.time.start) / bounds.width.max(1.0) / typical;
+            run.scale = 1.0 + ((held - 1.0) * 0.25).clamp(0.0, 0.25);
+            run.width += (bounds.width.max(bounds.max.x) - bounds.min.x.min(0.0)) * (run.scale - 1.0);
+        }
+        // A shared scroll speed reserves enough space for the fastest simultaneous voice.
+        let mut times = vec![0.0, duration];
+        times.extend(channels.iter().flat_map(|c| &c.runs).flat_map(|run| [run.time.start, run.time.end]));
+        times.sort_by(f32::total_cmp);
+        times.dedup_by(|a, b| a.total_cmp(b).is_eq());
+        self.scroll = vec![Vec3::ZERO];
+        let mut x = 0.0;
+        for pair in times.windows(2) {
+            let speed = channels
+                .iter()
+                .filter_map(|channel| {
+                    let runs = &channel.runs;
+                    let next = runs.partition_point(|r| r.time.start <= pair[0]);
+                    let run = runs[..next].last()?;
+                    (run.time.end > pair[0]).then_some(run.width / (run.time.end - run.time.start))
+                })
+                .reduce(f32::max)
+                .unwrap_or(Self::SILENCE_SPEED);
+            x += (pair[1] - pair[0]) * speed;
+            self.scroll.push(vec3(pair[1], x, 0.0));
+        }
+        // Harmonic tangents make velocity continuous without overshooting timing anchors.
+        let speeds: Vec<_> = self.scroll.windows(2).map(|p| (p[1].y - p[0].y) / (p[1].x - p[0].x)).collect();
+        for (i, point) in self.scroll.iter_mut().enumerate() {
+            let before = speeds[i.saturating_sub(1)];
+            let after = speeds[i.min(speeds.len() - 1)];
+            point.z = if before + after > 0.0 { 2.0 * before * after / (before + after) } else { 0.0 };
+        }
+        for channel in &mut channels {
+            for run in &mut channel.runs {
+                run.x = self.position(run.time.start, duration);
+                let end = run.x + run.width;
+                // Keep a voice's words on one lane across short gaps. Only empty space bends.
+                if let Some(band) = channel.bands.last_mut().filter(|band| run.x - LANE_BLEND <= band.w) {
+                    band.z = end;
+                    band.w = end + LANE_BLEND;
+                } else {
+                    channel.bands.push(vec4(run.x - LANE_BLEND, run.x, end, end + LANE_BLEND));
+                }
+            }
+        }
+        self.channels = channels;
+    }
+
+    pub fn position(&self, time: f32, duration: f32) -> f32 {
+        let at = time.min(duration);
+        let next = self.scroll.partition_point(|point| point.x <= at);
+        let x = match (self.scroll[..next].last(), self.scroll.get(next)) {
+            (Some(a), Some(b)) => {
+                let span = b.x - a.x;
+                let t = (at - a.x) / span;
+                let delta = b.y - a.y;
+                a.y + t
+                    * (span * a.z
+                        + t * (3.0 * delta - span * (2.0 * a.z + b.z) + t * (span * (a.z + b.z) - 2.0 * delta)))
+            }
+            (Some(a), None) => a.y,
+            _ => at * Self::SILENCE_SPEED,
+        };
+        x + (time - duration).clamp(0.0, TRACK_SPACING_MS) * 96.0 / TRACK_SPACING_MS
+    }
+}
+
+// Count earlier voices occupying this part of the ribbon. A solo voice always returns to row zero.
+fn row_at(x: f32, bands: Buffer<'_, Vec4>) -> f32 {
+    let ease = |start: f32, end: f32| {
+        let t = ((x - start) / (end - start)).clamp(0.0, 1.0);
+        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+    };
+    let mut row = 0.0;
+    for index in 0..bands.len() {
+        let band = bands.load(index);
+        row += ease(band.x, band.y) * (1.0 - ease(band.z, band.w));
+    }
+    row
+}
+
 #[cfg(target_os = "linux")]
 pub fn height(music: &Music) -> f32 {
     let rows = music
@@ -23,29 +196,16 @@ pub fn height(music: &Music) -> f32 {
         .lyrics
         .values()
         .filter_map(|state| state.ready())
-        .map(|lyrics| lyrics.channels.len())
+        .map(|lyrics| lyrics.source.channels.len())
         .max()
         .unwrap_or(1);
     EXTENSION + rows.saturating_sub(1) as f32 * ROW_SPACING
 }
 
-// Each earlier voice frees one lane only inside its long silent gaps.
-fn row_at(x: f32, mut row: f32, gaps: Buffer<'_, Vec4>) -> f32 {
-    let ease = |start: f32, end: f32| {
-        let t = ((x - start) / (end - start)).clamp(0.0, 1.0);
-        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
-    };
-    for index in 0..gaps.len() {
-        let gap = gaps.load(index);
-        row -= ease(gap.x, gap.y) * (1.0 - ease(gap.z, gap.w));
-    }
-    row.max(0.0)
-}
-
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
-    let Some((index, mut time)) = music.timeline.span_at_playhead(&music.queue) else { return };
-    let silence = Lyrics::default();
-    let screen = -SHADOW_REACH * 1.2..context.frame.screen_size.x + SHADOW_REACH * 1.2;
+    let Some((index, time)) = music.timeline.span_at_playhead(&music.queue) else { return };
+    let silence = PreparedLyrics::default();
+    let screen = -GLOW_REACH * 1.2..context.frame.screen_size.x + GLOW_REACH * 1.2;
     let current = &music.queue[index];
     let lyrics = music.resources.lyrics(current, context.frame.resources).unwrap_or(&silence);
     let mut x = layout.playhead_x - lyrics.position(time, current.duration_ms as f32);
@@ -55,7 +215,6 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         let track = &music.queue[first];
         let lyrics = music.resources.lyrics(track, context.frame.resources).unwrap_or(&silence);
         x -= lyrics.position(track.queue_span_ms(), track.duration_ms as f32);
-        time += track.queue_span_ms();
     }
     for track in &music.queue[first..] {
         if x > screen.end {
@@ -63,10 +222,10 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         }
         let lyrics = music.resources.lyrics(track, context.frame.resources).unwrap_or(&silence);
         let baseline = PANEL_START + context.config.height + EXTENSION;
-        for section in &lyrics.sections {
+        for section in &lyrics.source.sections {
             let start = x + lyrics.position(section.time.start, track.duration_ms as f32);
             let label = context.frame.resources.shape(&section.text, 10.0, f32::MAX);
-            let origin = vec2(start, baseline - 11.0);
+            let origin = vec2(start, baseline - 10.0);
             shader!(
                 context
                     .frame
@@ -80,61 +239,67 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                     })
             );
         }
-        let mut bends = Vec::new();
+        let mut bands = Vec::new();
         for (row, channel) in lyrics.channels.iter().enumerate() {
             let color = channel.singer.map_or(GROUP_COLOR, |singer| CHANNEL_COLORS[singer % CHANNEL_COLORS.len()]);
             for run in channel
                 .runs
                 .iter()
-                .skip_while(|run| x + run.x.end < screen.start)
-                .take_while(|run| x + run.x.start <= screen.end)
+                .skip_while(|run| x + run.x + run.width < screen.start)
+                .take_while(|run| x + run.x <= screen.end)
             {
-                // Slide inside the shared cell so the sung fraction stays under the playhead.
-                let sung = ((time - run.time.start) / (run.time.end - run.time.start)).clamp(0.0, 1.0) * run.width;
-                let left = run.x.start
-                    + (layout.playhead_x - x - run.x.start - sung)
-                        .clamp(0.0, (run.x.end - run.x.start - run.width).max(0.0));
-                if x + left + run.width < screen.start || x + left > screen.end {
-                    continue;
-                }
-                let origin = vec2(x + left - run.line.text.min.x.min(0.0) * run.scale, baseline);
+                let origin = vec2(x + run.x - run.line.text.min.x.min(0.0) * run.scale, baseline);
+                let stretch = vec2(run.scale, 1.0);
                 let bounds = Rect::new(
-                    origin + run.line.text.min * vec2(run.scale, 1.0),
-                    origin + run.line.text.max * vec2(run.scale, 1.0) + vec2(0.0, row as f32 * ROW_SPACING),
+                    origin + run.line.text.min * stretch,
+                    origin + run.line.text.max * stretch + vec2(0.0, row as f32 * ROW_SPACING),
                 )
-                .expanded(SHADOW_REACH * run.scale.max(1.0));
+                .expanded(GLOW_REACH * run.scale + 2.0);
+                // One continuous light field crosses every fragment and vocal lane at the playhead.
                 shader!(
                     context
                         .frame
                         .upload({
                             let playhead_x: f32 = layout.playhead_x;
                             let track_x: f32 = x;
-                            let row: f32 = row as f32;
-                            let gaps: Buffer<'_, Vec4> = Buffer::new(&bends);
-                            let color: Vec4 = color.extend(1.0);
+                            let bands: Buffer<'_, Vec4> = Buffer::new(&bands);
                             let scale: f32 = run.scale;
+                            let baseline: f32;
+                            let phase: f32 = context.frame.time;
+                            let color: Vec4 = color.extend(1.0);
                             let bounds: Rect;
-                            let line: Text = context.frame.resources.place(&run.line, origin).outlined(SHADOW_REACH);
+                            let line: Text = context.frame.resources.place(&run.line, origin).outlined(GLOW_REACH);
                         })
                         .primitive(raster(bounds))
                         .fragment(|_, fragment| {
-                            let ahead = fragment.pixel.x - playhead_x;
+                            let distance = fragment.pixel.x - playhead_x;
+                            let active = (1.0 - (distance / 52.0).powi(2)).max(0.0).powi(2);
+                            let wave = distance * 0.16 - phase * 3.0;
                             let mut point = line.origin + (fragment.pixel - line.origin) / vec2(scale, 1.0);
-                            point.y -= ROW_SPACING * row_at(fragment.pixel.x - track_x, row, gaps);
-                            let surface = line
-                                .with_weight(700.0.lerp(745.0, ahead.abs().smoothstep(110.0, 0.0)))
-                                .sample_at(point);
+                            point.y -= ROW_SPACING * row_at(fragment.pixel.x - track_x, bands);
+                            point.y += active * (0.6 + 0.4 * wave.sin());
+                            let surface = line.sample_at(point);
                             let shadow = surface.distance.smoothstep(SHADOW_REACH, 0.0).powi(2);
-                            surface.paint(color, Vec3::splat(0.2).extend(shadow))
-                                * vec4(1.0, 1.0, 1.0, (ahead.smoothstep(-10.0, 5.0) + 0.5).min(1.0))
+                            let mut ink = color.truncate();
+                            let mut halo = Vec3::splat(0.2).extend(shadow);
+                            if active > 0.0 {
+                                let sheen = (wave + (fragment.pixel.y - baseline) * 0.25).sin().max(0.0).powi(8);
+                                ink = ink.lerp(Vec3::ONE, active * (0.3 + 0.7 * sheen));
+                                let glow = active
+                                    * (0.1 + 0.12 * sheen)
+                                    * (-surface.distance.max(0.0) * 0.6).exp()
+                                    * surface.distance.smoothstep(GLOW_REACH, GLOW_REACH - 2.0);
+                                halo = source_over(color.truncate().lerp(Vec3::ONE, 0.7).extend(glow), halo);
+                            }
+                            let opacity = 0.6 + 0.4 * (fragment.pixel.x - playhead_x).smoothstep(-8.0, 0.0);
+                            surface.paint(ink.extend(1.0), halo) * vec4(1.0, 1.0, 1.0, opacity)
                         })
                 );
             }
-            bends.extend(
-                channel.gaps.iter().copied().filter(|gap| x + gap.w >= screen.start && x + gap.x <= screen.end),
+            bands.extend(
+                channel.bands.iter().copied().filter(|band| x + band.w >= screen.start && x + band.x <= screen.end),
             );
         }
         x += lyrics.position(track.queue_span_ms(), track.duration_ms as f32);
-        time -= track.queue_span_ms();
     }
 }

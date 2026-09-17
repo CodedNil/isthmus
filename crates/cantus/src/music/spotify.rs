@@ -1,7 +1,4 @@
-use super::{
-    ART_SIZE, CondensedPlaylist, MusicResult, PlaybackCommand, PlaylistId, Track, TrackId, TrackRuntime,
-    lyrics::{Channel, LyricSegment, Lyrics as TrackLyrics},
-};
+use super::{ART_SIZE, CondensedPlaylist, MusicResult, PlaybackCommand, PlaylistId, Track, TrackId, TrackRuntime};
 use crate::{
     app::{AppUpdater, send_update},
     config::{self, Config, MAX_PLAYLIST_TARGETS},
@@ -16,9 +13,9 @@ use futures_util::{
 };
 use librespot_core::{
     FileId, Session, SessionConfig, SpotifyId, SpotifyUri, authentication::Credentials, cache::Cache,
-    dealer::protocol::Message as DealerMessage, error::ErrorKind,
+    dealer::protocol::Message as DealerMessage,
 };
-use librespot_metadata::{Lyrics, Metadata as _, Playlist, Track as CatalogTrack, lyrics::SyncType};
+use librespot_metadata::{Metadata as _, Playlist, Track as CatalogTrack};
 use librespot_oauth::OAuthClientBuilder;
 use librespot_protocol::{
     connect::{
@@ -106,33 +103,6 @@ impl Spotify {
         if self.commands.send(command).is_err() {
             warn!("Discarded music command after Spotify worker stopped");
         }
-    }
-
-    pub(super) async fn lyrics(&self, track_id: TrackId) -> MusicResult<TrackLyrics> {
-        let session = self.session.borrow().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
-        let id = SpotifyId::from_base62(&track_id)?;
-        let lines = match Lyrics::get(&session, &id).await {
-            Ok(lyrics) if lyrics.lyrics.sync_type == SyncType::LineSynced => lyrics.lyrics.lines,
-            Ok(_) => return Ok(TrackLyrics::default()),
-            Err(error) if error.kind == ErrorKind::NotFound => return Ok(TrackLyrics::default()),
-            Err(error) => return Err(error.into()),
-        };
-        let segments = lines
-            .iter()
-            .enumerate()
-            .filter_map(|(index, line)| {
-                let start_ms: f32 = line.start_time_ms.parse().ok()?;
-                let next_start_ms = lines.get(index + 1).and_then(|next| next.start_time_ms.parse().ok());
-                let estimated_end = start_ms + line.words.chars().count().max(10) as f32 * 100.0;
-                Some(LyricSegment {
-                    time: start_ms..next_start_ms.map_or(estimated_end, |next| estimated_end.min(next)),
-                    text: format!("{} ", line.words),
-                })
-            })
-            .collect();
-        let mut lyrics = TrackLyrics::default();
-        lyrics.channels.push(Channel { segments, ..Default::default() });
-        Ok(lyrics)
     }
 
     pub(super) async fn get_json(&self, path: &str) -> MusicResult<impl AsRef<[u8]>> {

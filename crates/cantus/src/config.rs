@@ -26,8 +26,6 @@ pub struct Config {
     pub timeline_future_minutes: f32 = 12.0,
     /// How many minutes before the current time to display in the timeline.
     pub timeline_past_minutes: f32 = 1.5,
-    /// The width in logical pixels on the left where previous tracks are displayed.
-    pub history_width: f32 = 100.0,
     /// Favourite playlists to display as buttons.
     pub playlists: ArrayVec<String, MAX_PLAYLIST_TARGETS> = ArrayVec::new_const(),
     /// Whether star ratings should be enabled.

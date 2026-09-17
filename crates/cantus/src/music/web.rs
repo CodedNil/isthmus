@@ -1,13 +1,9 @@
-use super::{MusicResult, PlaybackCommand, Track, TrackId, lyrics::Lyrics};
+use super::{MusicResult, PlaybackCommand, Track};
 use crate::{
     app::{AppUpdater, send_update},
     config::Config,
 };
-use std::{
-    collections::HashMap,
-    future::{Ready, ready},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 use web_time::Instant;
 
 #[derive(Clone)]
@@ -70,10 +66,6 @@ impl Spotify {
             let duration = music.queue.get(index).map_or(0.0, |track| track.duration_ms as f32);
             music.observe(index, position.clamp(0.0, duration), f32::from(music.playing), Instant::now());
         });
-    }
-
-    pub(super) fn lyrics(&self, _track_id: TrackId) -> Ready<MusicResult<Lyrics>> {
-        ready(Ok(Lyrics::default()))
     }
 
     pub(super) async fn get_json(&self, path: &str) -> MusicResult<&str> {
