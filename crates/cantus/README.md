@@ -18,14 +18,6 @@ A beautiful interactive music widget for Wayland
 https://github.com/user-attachments/assets/86c0bc3c-8e50-49bc-a955-86975910b7ae
 
 
-## Usage
-
-`cantus` runs on modern Wayland compositors with layer-shell v4, compositor v6, seat v8, clipboard v3, viewporter and fractional-scale support. Compositor blur is optional.
-
-`just cantusweb` builds the WebGPU browser demo.
-
-Spotify authentication opens in the browser on first launch; no developer API key is required.
-
 ## Installing with Nix
 Available in nixpkgs.
 
@@ -56,6 +48,3 @@ To build Cantus from source, ensure the following dependencies are installed:
 Then, from the root of the repository, run:
 
 ```cargo build --release```
-
-### To install it system-wide
-```sudo cp target/release/cantus /usr/bin```

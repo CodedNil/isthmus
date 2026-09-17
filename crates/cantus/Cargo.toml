@@ -82,7 +82,6 @@ zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 gloo-events = "0.3.0"
 gloo-render = "0.3.0"
 gloo-timers = { version = "0.4.0", features = ["futures"] }
-paries = { path = "../paries", optional = true }
 wasm-bindgen = "0.2.128"
 wasm-bindgen-futures = "0.4.78"
 web-sys = { version = "0.3.105", features = [

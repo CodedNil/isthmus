@@ -145,25 +145,25 @@ impl Lyrics {
 }
 
 pub(super) async fn fetch(track: &Track, http: &Client, spotify: &Spotify) -> MusicResult<Lyrics> {
-    let primary = fetch_word_lyrics(track, http).await;
-    if let Ok(Some(lyrics)) = primary {
-        info!("Fetched Apple Music lyrics for \"{}\" by {}", track.compact_title(), track.primary_artist());
+    let primary = fetch_apple_lyrics(track, http).await;
+    if let Ok(Some((lyrics, timing))) = primary {
+        info!("Fetched {timing}-synced lyrics for \"{}\" by {}", track.compact_title(), track.primary_artist());
         return Ok(lyrics);
     }
     if let Err(error) = &primary {
-        warn!(%error, track = %track.name, "Word lyrics unavailable; trying Spotify");
+        warn!(%error, track = %track.name, "Apple Music synced lyrics unavailable; trying Spotify");
     }
     if let Some(id) = track.id {
         let lyrics = spotify.lyrics(id).await?;
         if !lyrics.channels.is_empty() {
-            info!("Fetched Spotify lyrics for \"{}\" by {}", track.compact_title(), track.primary_artist());
+            info!("Fetched line-synced lyrics for \"{}\" by {}", track.compact_title(), track.primary_artist());
             return Ok(lyrics);
         }
     }
     primary.map(|_| Lyrics::default())
 }
 
-async fn fetch_word_lyrics(track: &Track, http: &Client) -> MusicResult<Option<Lyrics>> {
+async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Option<(Lyrics, &'static str)>> {
     let response = http
         .get("https://lyrics-api.binimum.org/")
         .query(&[
@@ -177,14 +177,17 @@ async fn fetch_word_lyrics(track: &Track, http: &Client) -> MusicResult<Option<L
     if response.status() != StatusCode::NOT_FOUND {
         let response = response.error_for_status()?.json::<serde_json::Value>().await?;
         let results = response["results"].as_array().ok_or("Lyrics search response has no results array")?;
-        if let Some(result) = results.iter().find(|result| result["timing_type"] == "word") {
+        let preferred = ["word", "line"].into_iter().find_map(|timing| {
+            results.iter().find(|result| result["timing_type"] == timing).map(|result| (result, timing))
+        });
+        if let Some((result, timing)) = preferred {
             let url = result["lyricsUrl"].as_str().ok_or("Lyrics search result has no URL")?;
             let source = http.get(url).send().await?.error_for_status()?.text().await?;
             let lyrics = parse_ttml(&source);
             if lyrics.channels.is_empty() {
                 return Err("Lyrics document has no usable timed text".into());
             }
-            return Ok(Some(lyrics));
+            return Ok(Some((lyrics, timing)));
         }
     }
     Ok(None)

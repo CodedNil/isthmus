@@ -339,7 +339,6 @@ dependencies = [
  "microfft",
  "nvml-wrapper",
  "palette",
- "paries",
  "pollster",
  "protobuf",
  "reqwest",
