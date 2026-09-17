@@ -169,7 +169,7 @@ impl TextCache {
         let faces: Vec<_> = fonts.iter().map(|font| FontRef::new(font).expect("parse font")).collect();
         let metrics = faces.first().expect("at least one font").metrics(Size::unscaled(), LocationRef::default());
         let span = metrics.ascent - metrics.descent;
-        let baseline = (metrics.ascent + metrics.descent) * 0.5 / span;
+        let baseline = f32::midpoint(metrics.ascent, metrics.descent) / span;
         let mut weights: Vec<_> = faces.iter().flat_map(weight_locations).collect();
         weights.sort_by(f32::total_cmp);
         weights.dedup();

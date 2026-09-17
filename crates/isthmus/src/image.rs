@@ -41,7 +41,7 @@ impl Image {
             size.into_iter().try_fold(4usize, |bytes, dimension| bytes.checked_mul(dimension as usize)),
             "RGBA8 image data has the wrong length"
         );
-        for rgba in Arc::make_mut(&mut pixels).chunks_exact_mut(4) {
+        for rgba in Arc::make_mut(&mut pixels).as_chunks_mut::<4>().0 {
             let alpha = u16::from(rgba[3]);
             for channel in &mut rgba[..3] {
                 *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
