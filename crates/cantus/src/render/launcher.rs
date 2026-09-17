@@ -4,7 +4,7 @@ use crate::{
     interaction::key,
     platform::{self, DesktopApp},
     render::{
-        GAP, PADDING, Program, TEXT_COLOR, UiContext,
+        GAP, PADDING, Program, TEXT_COLOR, UNIT, UiContext,
         sdf::{deform, glass, presence},
     },
 };
@@ -63,15 +63,14 @@ fn key_glyph(point: Vec2, shift: bool) -> f32 {
     }
 }
 
-/// Colour of one key badge; `half_width` of 0 leaves the slot empty.
-fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
-    if half_width <= 0.0 {
+fn action_badge(point: Vec2, half_size: f32, shift: bool) -> Vec4 {
+    if half_size <= 0.0 {
         return Vec4::ZERO;
     }
-    let sample = Shape::rounded_rect(vec2(half_width * 2.0, 21.0), 6.0).sample_at(point);
+    let sample = Shape::rounded_rect(Vec2::splat(half_size * 2.0), 6.0).sample_at(point);
     let (body, edge) = (sample.fill(), sample.band(-0.65..0.65));
     let glyph = if shift {
-        key_glyph(point + vec2(8.5, 0.0), true).max(key_glyph(point - vec2(7.5, 0.0), false))
+        key_glyph(point - vec2(5.0, 0.0), true).max(key_glyph(point + vec2(5.0, 0.0), false))
     } else {
         key_glyph(point, false)
     };
@@ -347,10 +346,9 @@ impl LauncherState {
             .iter()
             .position(|provider| {
                 !provider.config.alias.is_empty()
-                    && (query == provider.config.alias
-                        || query
-                            .strip_prefix(provider.config.alias.as_str())
-                            .is_some_and(|rest| rest.starts_with(char::is_whitespace)))
+                    && query
+                        .strip_prefix(provider.config.alias.as_str())
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
             })
             .map_or((None, query), |index| (Some(index), query[self.providers[index].config.alias.len()..].trim()))
     }
@@ -413,18 +411,14 @@ impl LauncherState {
         let empty = self.field.text.is_empty();
         let query = if empty { "Search anything…" } else { &self.field.text };
         let line = context.frame.resources.line(query, 18.0, 600.0).translated(vec2(left, HEADER_HEIGHT * 0.5));
-        let selection_range = self.field.selection();
         let blink = ((context.frame.time - self.field.blink_start) * 1.4).fract();
         let (caret, selection): (Vec2, Vec2) = {
             let text = &mut *context.frame.resources;
             let mut at =
                 |offset: usize| (left + text.shape(&self.field.text[..offset], 18.0, 600.0).text.width).min(right);
             let caret = vec2(at(self.field.cursor), blink.smoothstep(0.62, 0.5));
-            let selection = if selection_range.is_empty() {
-                Vec2::ZERO
-            } else {
-                vec2(at(selection_range.start), at(selection_range.end))
-            };
+            let anchor = at(self.field.anchor);
+            let selection = vec2(caret.x.min(anchor), caret.x.max(anchor));
             (caret, selection)
         };
 
@@ -461,7 +455,7 @@ impl LauncherState {
     /// Draws and interacts with calculator, application and search rows in visual order.
     fn show_entries(&mut self, context: &mut UiContext, origin: Vec2) {
         let (x, width) = (origin.x + PADDING, PANEL_WIDTH - PADDING * 2.0);
-        let text_left = ROW_HEIGHT * 0.5 + ICON_SIZE * 0.5 + GAP * 2.0;
+        let text_left = ROW_HEIGHT * 0.5 + ICON_SIZE * 0.5 + GAP + UNIT;
 
         let mut activated = None;
         for index in 0..self.entries.len() {
@@ -505,19 +499,30 @@ impl LauncherState {
                 }
             };
 
+            let mut action_lines = smallvec::SmallVec::<[Text; 4]>::new();
             let mut edge = width - ROW_HEIGHT * 0.5;
-            let mut badge = |label: Option<&str>, width: f32| {
+            let mut badge = |label: Option<&str>| {
                 let Some(label) = label.filter(|_| self.selected == index) else {
-                    return (Vec2::ZERO, Text::default());
+                    return Vec2::ZERO;
                 };
-                let badge = vec2(edge - width * 0.5, width * 0.5);
-                edge -= width + GAP;
-                let line = context.frame.resources.line(label, 13.0, 600.0).right(vec2(edge, ROW_HEIGHT * 0.5));
-                edge -= line.width + GAP * 2.0;
-                (badge, line)
+                let badge = vec2(edge - 13.5, 13.5);
+                edge -= 27.0 + GAP;
+                let line = context.frame.resources.line(label, 13.0, 600.0);
+                let width = if let Some((first, last)) = label.rsplit_once(' ').filter(|_| line.width > 100.0) {
+                    let first = context.frame.resources.line(first, 13.0, 600.0);
+                    let last = context.frame.resources.line(last, 13.0, 600.0);
+                    action_lines.push(first.right(vec2(edge, ROW_HEIGHT * 0.5 - 7.0)));
+                    action_lines.push(last.right(vec2(edge, ROW_HEIGHT * 0.5 + 7.0)));
+                    first.width.max(last.width)
+                } else {
+                    action_lines.push(line.right(vec2(edge, ROW_HEIGHT * 0.5)));
+                    line.width
+                };
+                edge -= width + GAP * 2.0;
+                badge
             };
-            let (enter_badge, action_line) = badge(Some(entry.action), 27.0);
-            let (alternate_badge, alternate_line) = badge(entry.alternate, 42.0);
+            let enter_badge = badge(Some(entry.action));
+            let alternate_badge = badge(entry.alternate);
 
             let (name_y, detail_y) =
                 if entry.detail.is_empty() { (ROW_HEIGHT * 0.5, 0.0) } else { (ROW_HEIGHT * 0.34, ROW_HEIGHT * 0.68) };
@@ -572,12 +577,10 @@ impl LauncherState {
             }
 
             let origin = vec2(x, y);
-            for (line, color) in [
-                (name_line, TEXT_COLOR),
-                (detail_line, DETAIL_COLOR),
-                (action_line, MUTED_COLOR),
-                (alternate_line, MUTED_COLOR),
-            ] {
+            for (line, color) in [(name_line, TEXT_COLOR), (detail_line, DETAIL_COLOR)]
+                .into_iter()
+                .chain(action_lines.into_iter().map(|line| (line, MUTED_COLOR)))
+            {
                 context.paint_text(pill, ROW_HEIGHT * 0.5, line.translated(origin), color.extend(1.0));
             }
         }

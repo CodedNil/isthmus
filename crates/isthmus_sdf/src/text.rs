@@ -301,7 +301,7 @@ fn curve_distance([start, control, end]: [Vec2; 3], point: Vec2, best: f32) -> (
         if lo >= hi || negative == (evaluate(hi) < 0.0) {
             continue;
         }
-        let mut t = (lo + hi) * 0.5;
+        let mut t = f32::midpoint(lo, hi);
         // Newton steps stay bracketed within a monotone interval of the stationary cubic.
         for _ in 0..24 {
             let value = evaluate(t);
@@ -318,7 +318,7 @@ fn curve_distance([start, control, end]: [Vec2; 3], point: Vec2, best: f32) -> (
             if (next - t).abs() <= f32::EPSILON * 2.0 {
                 break;
             }
-            t = if next > lo && next < hi { next } else { (lo + hi) * 0.5 };
+            t = if next > lo && next < hi { next } else { f32::midpoint(lo, hi) };
         }
         distance = distance.min((quadratic(start, control, end, t) - point).length_squared());
     }

@@ -62,7 +62,7 @@ fn reach(shape: impl Sdf, frame: ShaderFrame<Program>) -> (f32, f32) {
             ripple += (1.0 - ((frame.time - pulse.start_time) * 1.2).saturate()).powi(2) * 0.5;
         }
     }
-    let bulge_reach = (pressure * POINTER_BULGE + ripple * RIPPLE_BULGE) * 0.5;
+    let bulge_reach = f32::midpoint(pressure * POINTER_BULGE, ripple * RIPPLE_BULGE);
     let refraction_reach = POINTER_REACH * pressure * POINTER_REFRACTION + ripple * RIPPLE_REFRACTION;
     (bulge_reach, refraction_reach)
 }

@@ -324,7 +324,7 @@ impl MusicView {
                 }
                 let (mut inside, mut outside) = (0.0, bounds.size().x * 0.5);
                 for _ in 0..steps {
-                    let middle = (inside + outside) * 0.5;
+                    let middle = f32::midpoint(inside, outside);
                     if shape.contains(point + vec2(middle, 0.0)) {
                         inside = middle;
                     } else {
