@@ -7,7 +7,7 @@ use isthmus_sdf::{
     layout::{ShapedLine, TextCache},
     prelude::*,
 };
-use std::{ops::Range, sync::Arc};
+use std::{ops::Range, slice, sync::Arc};
 
 pub const EXTENSION: f32 = 17.0;
 const SHADOW_REACH: f32 = 3.0;
@@ -109,7 +109,8 @@ impl PreparedLyrics {
         for run in channels.iter_mut().flat_map(|c| &mut c.runs) {
             let bounds = run.line.text;
             let held = (run.time.end - run.time.start) / bounds.width.max(1.0) / typical;
-            run.scale = 1.0 + ((held - 1.0) * 0.25).clamp(0.0, 0.25);
+            run.scale =
+                if self.source.timing == "caption" { 1.0 } else { 1.0 + ((held - 1.0) * 0.25).clamp(0.0, 0.25) };
             run.width += (bounds.width.max(bounds.max.x) - bounds.min.x.min(0.0)) * (run.scale - 1.0);
         }
         // A shared scroll speed reserves enough space for the fastest simultaneous voice.
@@ -203,24 +204,30 @@ pub fn height(music: &Music) -> f32 {
 }
 
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
-    let Some((index, time)) = music.timeline.span_at_playhead(&music.queue) else { return };
+    let (tracks, index, time) = if let Some(local) = music.local.as_ref().filter(|_| music.local_foreground()) {
+        (slice::from_ref(&local.track), 0, -local.timeline.queue_start_ms)
+    } else {
+        let Some((index, time)) = music.timeline.span_at_playhead(&music.queue) else { return };
+        (music.queue.as_slice(), index, time)
+    };
+    let resources = &mut music.resources;
     let silence = PreparedLyrics::default();
     let screen = -GLOW_REACH * 1.2..context.frame.screen_size.x + GLOW_REACH * 1.2;
-    let current = &music.queue[index];
-    let lyrics = music.resources.lyrics(current, context.frame.resources).unwrap_or(&silence);
+    let current = &tracks[index];
+    let lyrics = resources.lyrics(current, context.frame.resources).unwrap_or(&silence);
     let mut x = layout.playhead_x - lyrics.position(time, current.duration_ms as f32);
     let mut first = index;
     while first > 0 && x >= screen.start {
         first -= 1;
-        let track = &music.queue[first];
-        let lyrics = music.resources.lyrics(track, context.frame.resources).unwrap_or(&silence);
+        let track = &tracks[first];
+        let lyrics = resources.lyrics(track, context.frame.resources).unwrap_or(&silence);
         x -= lyrics.position(track.queue_span_ms(), track.duration_ms as f32);
     }
-    for track in &music.queue[first..] {
+    for track in &tracks[first..] {
         if x > screen.end {
             break;
         }
-        let lyrics = music.resources.lyrics(track, context.frame.resources).unwrap_or(&silence);
+        let lyrics = resources.lyrics(track, context.frame.resources).unwrap_or(&silence);
         let baseline = PANEL_START + context.config.height + EXTENSION;
         for section in &lyrics.source.sections {
             let start = x + lyrics.position(section.time.start, track.duration_ms as f32);

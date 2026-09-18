@@ -53,6 +53,12 @@ pub struct BarLayout {
     pub px_per_ms: f32,
 }
 
+impl BarLayout {
+    pub fn local_scale(self, duration: u32) -> f32 {
+        if duration == 0 { self.px_per_ms } else { self.px_per_ms.max(240.0 / duration as f32) }
+    }
+}
+
 pub struct Bar {
     pub(crate) weather: Option<weathertime::WeatherPanel>,
     pub(crate) status: Option<status::StatusPanel>,
@@ -76,16 +82,21 @@ impl Bar {
             + status_width;
         let px_per_ms =
             (context.frame.screen_size.x - reserved).max(84.0) / (context.config.timeline_future_minutes * 60_000.0);
+        self.music_view.animate(music, context.frame.delta_time, context.config.height);
         let layout = BarLayout {
             playhead_x: HISTORY_WIDTH + context.config.timeline_past_minutes * 60_000.0 * px_per_ms,
             px_per_ms,
         };
         let drag = context.interaction.drag_motion();
-        music.update_timeline(
-            drag.map_or(0.0, |(offset, _)| offset.x / px_per_ms),
-            drag.is_some(),
-            context.frame.delta_time,
-        );
+        let drag = drag.map(|(id, offset, released)| {
+            let scale = music
+                .local
+                .as_ref()
+                .filter(|local| local.track.interaction_id == id)
+                .map_or(px_per_ms, |local| layout.local_scale(local.track.duration_ms));
+            (id, offset.x / scale, released)
+        });
+        music.update_playback(drag, context.frame.delta_time);
         if context.config.lyrics_enabled {
             lyrics::show(context, music, layout);
         }
