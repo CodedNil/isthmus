@@ -4,7 +4,7 @@ use crate::{
     config,
     interaction::{InputEvent, Interaction},
     music::MusicResult,
-    platform::STATUS_SAMPLE_INTERVAL,
+    platform::{CaptionFile, STATUS_SAMPLE_INTERVAL},
     render::{
         PANEL_START, Renderer,
         launcher::BACKGROUND_RADIUS,
@@ -134,7 +134,7 @@ impl Drop for NativeSurface {
     }
 }
 
-pub async fn youtube_captions(url: String) -> MusicResult<String> {
+pub async fn captions(url: String) -> MusicResult<CaptionFile> {
     spawn_blocking(move || {
         let dir = env::temp_dir().join(format!("cantus-subs-{}-{:016x}", process::id(), fastrand::u64(..)));
         fs::create_dir_all(&dir)?;
@@ -142,21 +142,25 @@ pub async fn youtube_captions(url: String) -> MusicResult<String> {
         let result = Command::new("yt-dlp")
             .args([
                 "--ignore-config",
+                "--no-playlist",
                 "--skip-download",
                 "--write-subs",
                 "--write-auto-subs",
                 "--sub-langs",
                 "en.*",
                 "--sub-format",
-                "json3",
+                "json3/ttml/srv3/vtt/srt/best",
                 "--output",
                 template.to_str().ok_or("invalid subtitle path")?,
                 &url,
             ])
             .output();
         let caption = fs::read_dir(&dir)?.filter_map(Result::ok).find_map(|entry| {
-            (entry.path().extension().and_then(|ext| ext.to_str()) == Some("json3"))
-                .then(|| fs::read_to_string(entry.path()).ok())
+            let path = entry.path();
+            let format = path.extension()?.to_str()?.to_ascii_lowercase();
+            ["json3", "ttml", "vtt", "srt", "srv3"]
+                .contains(&format.as_str())
+                .then(|| Some((format, fs::read_to_string(path).ok()?)))
                 .flatten()
         });
         let _ = fs::remove_dir_all(&dir);
@@ -164,7 +168,10 @@ pub async fn youtube_captions(url: String) -> MusicResult<String> {
         if !output.status.success() && caption.is_none() {
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned().into());
         }
-        Ok(caption.unwrap_or_default())
+        caption.map_or_else(
+            || Ok(CaptionFile { format: String::new(), source: String::new() }),
+            |(format, source)| Ok(CaptionFile { format, source }),
+        )
     })
     .await?
 }
@@ -353,7 +360,7 @@ pub fn run() {
         ..
     };
 
-    // Every output is bound so its name and description arrive; the configured monitor replaces the first one.
+    // Bind every output so names arrive; the configured monitor replaces the first.
     let registry = globals.registry();
     for global in globals.contents().clone_list() {
         if global.interface == "wl_output" {

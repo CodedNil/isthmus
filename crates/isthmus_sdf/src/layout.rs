@@ -1,4 +1,4 @@
-use crate::text::{Curve, Glyph, PlacedGlyph, Text, Weight};
+use crate::text::{Curve, Glyph, PlacedGlyph, Text};
 use hashbrown::HashMap;
 use isthmus::{
     F16x2, ResourceData, Resources, ShaderData,
@@ -30,83 +30,65 @@ impl Curve {
 }
 
 impl Outlines {
-    fn glyph(&mut self, face: &FontRef<'_>, weights: &[f32], span: f32, font: usize, id: u32) -> (u32, Glyph) {
-        if let Some(&glyph) = self.glyphs.get(&(font, id)) {
+    fn glyph(&mut self, face: &FontRef<'_>, weight: f32, width: f32, span: f32, font: usize, id: u32) -> (u32, Glyph) {
+        let key = (font, id, weight.to_bits(), width.to_bits());
+        if let Some(&glyph) = self.glyphs.get(&key) {
             return glyph;
         }
-        let outline = face.outline_glyphs().get(GlyphId::new(id));
-        let paths: Vec<Vec<PathSeg>> = weights
-            .iter()
-            .map(|&weight| {
-                let mut path = Vec::new();
-                let location = face.axes().location([(WGHT, weight)]);
-                if let Some(glyph) = &outline {
-                    glyph
-                        .draw(
-                            DrawSettings::unhinted(Size::unscaled(), &location).with_path_style(PathStyle::HarfBuzz),
-                            &mut path,
-                        )
-                        .expect("read font outline");
+        let mut path = Vec::new();
+        if let Some(glyph) = face.outline_glyphs().get(GlyphId::new(id)) {
+            let location = face.axes().location([(WGHT, weight), (WDTH, width)]);
+            glyph
+                .draw(
+                    DrawSettings::unhinted(Size::unscaled(), &location).with_path_style(PathStyle::HarfBuzz),
+                    &mut path,
+                )
+                .expect("read font outline");
+        }
+        let path: Vec<_> = outline_segments(path, span).collect();
+        let mut curves = Vec::new();
+        for segment in path {
+            match segment {
+                PathSeg::Line(line) => {
+                    curves.push(Curve::new(QuadBez::new(line.p0, line.p0.midpoint(line.p1), line.p1)));
                 }
-                outline_segments(path, span).collect()
-            })
-            .collect();
-        assert!(paths.iter().all(|path| path.len() == paths[0].len()), "variable outline topology changed");
-        let mut masters = vec![Vec::<Curve>::new(); paths.len()];
-        for index in 0..paths[0].len() {
-            let quadratics: Option<Vec<_>> = paths
-                .iter()
-                .map(|path| match path[index] {
-                    PathSeg::Line(line) => Some(QuadBez::new(line.p0, line.p0.midpoint(line.p1), line.p1)),
-                    PathSeg::Quad(quad) => Some(quad),
-                    PathSeg::Cubic(_) => None,
-                })
-                .collect();
-            if let Some(quadratics) = quadratics {
-                for (master, quad) in masters.iter_mut().zip(quadratics) {
-                    master.push(Curve::new(quad));
-                }
-            } else {
-                let cubics: Vec<_> = paths.iter().map(|path| path[index].to_cubic()).collect();
-                let splines = cubics_to_quadratic_splines(&cubics, 1e-4).expect("font cubic approximation failed");
-                for (master, spline) in masters.iter_mut().zip(splines) {
-                    master.extend(spline.to_quads().map(Curve::new));
+                PathSeg::Quad(quad) => curves.push(Curve::new(quad)),
+                PathSeg::Cubic(cubic) => {
+                    let spline = cubics_to_quadratic_splines(&[cubic], 1e-4).expect("font cubic approximation failed");
+                    curves.extend(spline[0].to_quads().map(Curve::new));
                 }
             }
         }
-        let bounds =
-            masters.iter().flatten().copied().map(Curve::bounds).reduce(|a, b| a.union(b)).unwrap_or(Rect::ZERO);
+        let bounds = curves.iter().copied().map(Curve::bounds).reduce(|a, b| a.union(b)).unwrap_or(Rect::ZERO);
         let glyph = Glyph {
             start: self.words.len() as u32,
-            count: masters[0].len() as u32,
+            count: curves.len() as u32,
             min: vec2(bounds.x0 as f32, bounds.y0 as f32),
             max: vec2(bounds.x1 as f32, bounds.y1 as f32),
         };
-        for curve in masters.into_iter().flatten() {
+        for curve in curves {
             curve.append(&mut self.words);
         }
         let offset = glyph.append(&mut self.words);
-        self.glyphs.insert((font, id), (offset, glyph));
+        self.glyphs.insert(key, (offset, glyph));
         (offset, glyph)
     }
 }
 
 const WGHT: Tag = Tag::new(b"wght");
+const WDTH: Tag = Tag::new(b"wdth");
 
 #[derive(Default)]
 struct Outlines {
-    glyphs: HashMap<(usize, u32), (u32, Glyph)>,
+    glyphs: HashMap<(usize, u32, u32, u32), (u32, Glyph)>,
     words: Vec<u32>,
 }
 
-fn weight_locations(face: &FontRef<'_>) -> Vec<f32> {
-    let Some(axis) = face.axes().iter().find(|axis| axis.tag() == WGHT) else {
-        return vec![400.0];
-    };
-    let mut weights = vec![axis.min_value(), axis.default_value(), axis.max_value()];
-    let steps = ((axis.max_value() - axis.min_value()) / 100.0).ceil() as u32;
-    weights.extend((1..steps).map(|step| axis.min_value() + step as f32 * 100.0));
-    weights
+fn axis_range(face: &FontRef<'_>, tag: Tag, fallback: f32) -> (f32, f32) {
+    face.axes()
+        .iter()
+        .find(|axis| axis.tag() == tag)
+        .map_or((fallback, fallback), |axis| (axis.min_value(), axis.max_value()))
 }
 
 fn outline_segments(outline: Vec<PathElement>, span: f32) -> impl Iterator<Item = PathSeg> {
@@ -130,12 +112,13 @@ pub struct ShapedLine {
     pub text: Text,
 }
 
-type RunCache = HashMap<String, HashMap<(u32, u32), (Arc<ShapedLine>, bool)>>;
+type RunCache = HashMap<String, HashMap<(u32, u32, u32), (Arc<ShapedLine>, bool)>>;
 
 /// Font outlines, cached text runs, and per-frame glyph placements.
 pub struct TextCache {
     fonts: Vec<Box<[u8]>>,
-    weights: Vec<f32>,
+    weight_range: (f32, f32),
+    width_range: (f32, f32),
     outlines: Outlines,
     runs: RunCache,
     span: f32,
@@ -170,17 +153,15 @@ impl TextCache {
         let metrics = faces.first().expect("at least one font").metrics(Size::unscaled(), LocationRef::default());
         let span = metrics.ascent - metrics.descent;
         let baseline = f32::midpoint(metrics.ascent, metrics.descent) / span;
-        let mut weights: Vec<_> = faces.iter().flat_map(weight_locations).collect();
-        weights.sort_by(f32::total_cmp);
-        weights.dedup();
-        let mut outlines = Outlines::default();
-        (weights.len() as u32).append(&mut outlines.words);
-        for &weight in &weights {
-            weight.append(&mut outlines.words);
-        }
+        let weight_range =
+            faces.iter().map(|face| axis_range(face, WGHT, 400.0)).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1))).unwrap();
+        let width_range =
+            faces.iter().map(|face| axis_range(face, WDTH, 100.0)).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1))).unwrap();
+        let outlines = Outlines::default();
         Self {
             fonts: fonts.iter().map(|font| (*font).into()).collect(),
-            weights,
+            weight_range,
+            width_range,
             outlines,
             runs: RunCache::default(),
             span: span / f32::from(metrics.units_per_em),
@@ -200,12 +181,16 @@ impl TextCache {
 
     /// Caches a run using character-to-glyph mapping and advances, without kerning or complex shaping.
     pub fn shape(&mut self, text: &str, size: f32, weight: f32) -> Arc<ShapedLine> {
-        let key = (size.to_bits(), weight.to_bits());
+        self.shape_width(text, size, weight, 100.0)
+    }
+
+    pub fn shape_width(&mut self, text: &str, size: f32, weight: f32, width: f32) -> Arc<ShapedLine> {
+        let key = (size.to_bits(), weight.to_bits(), width.to_bits());
         if let Some((line, used)) = self.runs.get_mut(text).and_then(|sizes| sizes.get_mut(&key)) {
             *used = true;
             return Arc::clone(line);
         }
-        let line = Arc::new(self.shape_positioned([(text, Vec2::ZERO)], size, weight));
+        let line = Arc::new(self.shape_positioned_width([(text, Vec2::ZERO)], size, weight, width));
         self.runs.entry_ref(text).or_default().insert(key, (Arc::clone(&line), true));
         line
     }
@@ -217,16 +202,28 @@ impl TextCache {
         size: f32,
         font_weight: f32,
     ) -> ShapedLine {
+        self.shape_positioned_width(parts, size, font_weight, 100.0)
+    }
+
+    pub fn shape_positioned_width<'a>(
+        &mut self,
+        parts: impl IntoIterator<Item = (&'a str, Vec2)>,
+        size: f32,
+        font_weight: f32,
+        font_width: f32,
+    ) -> ShapedLine {
         let mut min = Vec2::splat(f32::MAX);
         let mut max = Vec2::splat(f32::MIN);
-        let weight = font_weight.clamp(self.weights[0], self.weights[self.weights.len() - 1]);
+        let weight = font_weight.clamp(self.weight_range.0, self.weight_range.1);
+        let width_axis = font_width.clamp(self.width_range.0, self.width_range.1);
         let mut width: f32 = 0.0;
         let mut glyphs = Vec::new();
         if !size.is_finite() || size <= 0.0 {
             return ShapedLine::default();
         }
         let faces: Vec<_> = self.fonts.iter().map(|font| FontRef::new(font).expect("parse font")).collect();
-        let locations: Vec<_> = faces.iter().map(|face| face.axes().location([(WGHT, weight)])).collect();
+        let locations: Vec<_> =
+            faces.iter().map(|face| face.axes().location([(WGHT, weight), (WDTH, width_axis)])).collect();
         let fonts: Vec<_> = faces
             .iter()
             .zip(&locations)
@@ -251,7 +248,7 @@ impl TextCache {
                     .find_map(|(index, (charmap, ..))| charmap.map(character).map(|id| (index, id)))
                     .unwrap_or_default();
                 let (_, metrics, span) = &fonts[font];
-                let (glyph, data) = self.outlines.glyph(&faces[font], &self.weights, *span, font, id.to_u32());
+                let (glyph, data) = self.outlines.glyph(&faces[font], weight, width_axis, *span, font, id.to_u32());
                 if data.count > 0 {
                     min = min.min(vec2(x + data.min.x, y - data.max.y));
                     max = max.max(vec2(x + data.max.x, y - data.min.y));
@@ -268,16 +265,8 @@ impl TextCache {
             glyph.right = right;
         }
         ShapedLine {
-            text: Text {
-                min: min * size,
-                max: max * size,
-                size,
-                width,
-                prepared_weight: Weight::resolve(&self.outlines.words, weight),
-                count: glyphs.len() as u32,
-                ..Text::default()
-            }
-            .translated(vec2(0.0, self.baseline * size)),
+            text: Text { min: min * size, max: max * size, size, width, count: glyphs.len() as u32, ..Text::default() }
+                .translated(vec2(0.0, self.baseline * size)),
             glyphs: glyphs.into_boxed_slice(),
         }
     }

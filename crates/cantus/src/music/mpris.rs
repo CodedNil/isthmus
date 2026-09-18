@@ -91,8 +91,7 @@ async fn monitor(updater: AppUpdater) -> MusicResult<()> {
 }
 
 fn reconcile_position(local: &mut LocalTrack, previous: &LocalTrack) {
-    // Some browsers report the last anchor rather than an advancing position.
-    // Repeated snapshots must not restart the clock; changed values include backward seeks.
+    // Browsers may report a static anchor, so only changed values move the clock.
     if local.reported_position.is_none()
         || local.playing == previous.playing && local.reported_position == previous.reported_position
     {

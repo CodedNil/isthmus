@@ -1,5 +1,5 @@
 use super::{MusicResult, Track};
-use crate::{app::fetch_json, platform::youtube_captions};
+use crate::{app::fetch_json, platform::captions};
 use reqwest::{Client, StatusCode};
 use roxmltree::{Document, Node};
 use serde::Deserialize;
@@ -32,9 +32,23 @@ pub struct Channel {
 }
 
 pub(super) async fn fetch(track: &Track, http: &Client, session: &Mutex<Session>) -> MusicResult<Lyrics> {
-    if track.is_youtube() {
-        let source = youtube_captions(track.uri.clone()).await?;
-        return if source.is_empty() { Ok(Lyrics::default()) } else { parse_youtube(&source) };
+    if track.uri.starts_with("http://") || track.uri.starts_with("https://") {
+        match captions(track.uri.clone()).await {
+            Ok(file) if !file.source.is_empty() => {
+                let lyrics = match file.format.as_str() {
+                    "json3" => parse_json3(&file.source),
+                    "srv3" | "ttml" => parse_ttml(&file.source),
+                    // SubRip is WebVTT without a header, and both use `-->` cue timing.
+                    "vtt" | "srt" => parse_webvtt(&file.source),
+                    _ => Lyrics::default(),
+                };
+                if !lyrics.channels.is_empty() {
+                    return Ok(Lyrics { timing: "caption", ..lyrics });
+                }
+            }
+            Err(error) => tracing::debug!(%error, url = %track.uri, "caption extraction unavailable"),
+            _ => {}
+        }
     }
     let mut session = session.lock().await;
     let mut failure = None;
@@ -71,7 +85,7 @@ pub(super) async fn fetch(track: &Track, http: &Client, session: &Mutex<Session>
 }
 
 // JSON3 contains each phrase once, unlike rolling WebVTT captions.
-fn parse_youtube(source: &str) -> MusicResult<Lyrics> {
+fn parse_json3(source: &str) -> Lyrics {
     #[derive(Deserialize)]
     struct Captions {
         events: Vec<Event>,
@@ -91,7 +105,7 @@ fn parse_youtube(source: &str) -> MusicResult<Lyrics> {
         #[serde(rename = "tOffsetMs", default)]
         offset: f32,
     }
-    let captions: Captions = serde_json::from_str(source)?;
+    let Ok(captions) = serde_json::from_str::<Captions>(source) else { return Lyrics::default() };
     let mut segments = Vec::<LyricSegment>::new();
     for event in captions.events {
         if event.segs.iter().all(|part| part.utf8.trim().is_empty()) {
@@ -128,11 +142,61 @@ fn parse_youtube(source: &str) -> MusicResult<Lyrics> {
         segments.push(LyricSegment { time: start..event.start + event.duration, text: format!("{text} ") });
     }
     segments.retain(|segment| !segment.text.trim().is_empty() && segment.time.end > segment.time.start);
-    Ok(Lyrics {
-        channels: if segments.is_empty() { Vec::new() } else { vec![Channel { segments, ..Default::default() }] },
-        timing: "caption",
-        ..Default::default()
-    })
+    let channels = if segments.is_empty() { Vec::new() } else { vec![Channel { segments, ..Default::default() }] };
+    Lyrics { channels, ..Default::default() }
+}
+
+fn caption_time(value: &str) -> Option<f32> {
+    let value = value.trim().replace(',', ".");
+    let mut parts = value.split(':');
+    let first = parts.next()?.parse::<f32>().ok()?;
+    let second = parts.next()?.parse::<f32>().ok()?;
+    let third = parts.next().and_then(|part| part.parse::<f32>().ok());
+    Some(third.map_or(first * 60.0 + second, |third| first * 3600.0 + second * 60.0 + third))
+}
+
+fn clean_caption(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut tag = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => tag = true,
+            '>' if tag => tag = false,
+            _ if !tag => result.push(ch),
+            _ => {}
+        }
+    }
+    result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_webvtt(source: &str) -> Lyrics {
+    let mut segments = Vec::new();
+    for block in source.replace("\r\n", "\n").split("\n\n") {
+        let mut lines = block.lines();
+        let timing = lines.find(|line| line.contains("-->"));
+        let Some(timing) = timing else { continue };
+        let mut times = timing.split("-->");
+        let Some(start) = times.next().and_then(caption_time) else { continue };
+        let Some(end) =
+            times.next().and_then(|value| caption_time(value.split_whitespace().next().unwrap_or_default()))
+        else {
+            continue;
+        };
+        let text = clean_caption(&lines.collect::<Vec<_>>().join(" "));
+        if !text.is_empty() && end > start {
+            segments.push(LyricSegment { time: start..end, text: format!("{text} ") });
+        }
+    }
+    let channels = if segments.is_empty() { Vec::new() } else { vec![Channel { segments, ..Default::default() }] };
+    Lyrics { channels, ..Default::default() }
 }
 
 async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics> {
@@ -498,21 +562,22 @@ fn parse_richsync(lines: &[Line], matched: &Value, duration: f32) -> MusicResult
         if !(0.0..line.te).contains(&line.ts) || !(0.0..=duration / 1000.0 + 1.0).contains(&line.te) {
             return Err("Musixmatch line has invalid timing".into());
         }
-        if line.l.iter().any(|c| !(0.0..=line.te - line.ts + 0.002).contains(&c.o))
-            || line.l.windows(2).any(|pair| pair[0].o > pair[1].o)
-        {
+        // Offsets can invert by a rounding millisecond, so order them rather than rejecting the line.
+        if line.l.iter().any(|c| !(-0.05..=line.te - line.ts + 0.05).contains(&c.o)) {
             return Err("Musixmatch word has invalid timing".into());
         }
         if normalize(&line.l.iter().map(|c| c.c.as_str()).collect::<String>()) != normalize(&line.x) {
             return Err("Musixmatch word timing does not cover the line text".into());
         }
+        let mut cursor = 0.0;
         let mut segments: Vec<LyricSegment> = Vec::new();
         for chunk in &line.l {
+            cursor = chunk.o.max(cursor);
             if chunk.c.trim().is_empty() {
                 separate(&mut segments);
                 continue;
             }
-            let start = (line.ts + chunk.o) * 1000.0;
+            let start = (line.ts + cursor) * 1000.0;
             if let Some(previous) = segments.last_mut() {
                 // Space offsets are not vocal boundaries: hold until the next sung chunk.
                 previous.time.end = start;

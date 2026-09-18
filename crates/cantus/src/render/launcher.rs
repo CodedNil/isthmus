@@ -32,7 +32,7 @@ const MUTED_COLOR: Vec3 = Vec3::new(0.52, 0.55, 0.64);
 const CALCULATOR_ICON: u32 = 1;
 const SEARCH_ICON: u32 = 2;
 
-/// Currency rates relative to USD, fetched once and read by fend for currency conversions.
+/// Currency rates relative to USD, read by fend for conversions.
 static EXCHANGE_RATES: OnceLock<HashMap<String, f64>> = OnceLock::new();
 
 /// Coverage of a magnifying glass centered on the origin.
@@ -133,7 +133,7 @@ impl TextField {
         self.insert("");
     }
 
-    /// Moves the caret, collapsing an existing selection unless `select` extends it.
+    /// Moves the caret, collapsing the selection unless `select` extends it.
     pub fn move_cursor(&mut self, forward: bool, select: bool) {
         let range = self.selection();
         let target = if select || range.is_empty() {
@@ -318,7 +318,7 @@ impl LauncherState {
         self.selected = self.selected.saturating_add_signed(delta as isize).min(self.entries.len().saturating_sub(1));
     }
 
-    /// Runs row `index`'s action — its alternative one when `alternate` is set — then dismisses.
+    /// Runs row `index`'s action, or its alternate when set, then dismisses.
     pub fn activate(&mut self, index: usize, alternate: bool) {
         match self.entries.get(index) {
             Some(Entry::App(index)) => {
@@ -452,7 +452,7 @@ impl LauncherState {
         );
     }
 
-    /// Draws and interacts with calculator, application and search rows in visual order.
+    /// Draws and interacts with every row in visual order.
     fn show_entries(&mut self, context: &mut UiContext, origin: Vec2) {
         let (x, width) = (origin.x + PADDING, PANEL_WIDTH - PADDING * 2.0);
         let text_left = ROW_HEIGHT * 0.5 + ICON_SIZE * 0.5 + GAP + UNIT;

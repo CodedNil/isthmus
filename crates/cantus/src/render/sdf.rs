@@ -171,7 +171,7 @@ pub fn fbm(mut p: Vec2) -> f32 {
     0.5 + density * 0.5
 }
 
-/// 1.0 when positive, else 0.0; core lowers `f32::from(bool)` through `u8`, which costs an extra conversion.
+/// 1.0 when positive, else 0.0; `f32::from(bool)` costs an extra conversion.
 pub fn presence(value: f32) -> f32 {
     if value > 0.0 { 1.0 } else { 0.0 }
 }

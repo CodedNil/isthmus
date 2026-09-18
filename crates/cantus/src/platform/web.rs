@@ -3,6 +3,7 @@ use crate::{
     app::{AppUpdater, View, send_update},
     interaction::InputEvent,
     music::{MusicResult, PlaybackCommand},
+    platform::CaptionFile,
     render::{
         Renderer,
         status::{AudioMonitor, ProcessorSample, SystemSample},
@@ -30,8 +31,8 @@ pub fn spawn_task(task: impl Task<Output = ()>) {
     wasm_bindgen_futures::spawn_local(task);
 }
 
-pub async fn youtube_captions(_url: String) -> MusicResult<String> {
-    Err("YouTube captions are unavailable on this platform".into())
+pub async fn captions(_url: String) -> MusicResult<CaptionFile> {
+    Err("External captions are unavailable on this platform".into())
 }
 
 pub fn start_mpris(_updater: AppUpdater) {}

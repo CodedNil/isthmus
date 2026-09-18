@@ -407,9 +407,7 @@ impl MusicView {
 
             let mut icons = Vec::new();
             if track.id.is_some() {
-                // Resolve the hovered star before drawing any icon. Otherwise the stars before
-                // the pointer use the stored rating while later stars use the hovered rating.
-                // That makes a hover over (for example) 4.5/5 leave the first two stars filled.
+                // Resolve the hovered star first, or earlier stars keep the stored rating.
                 if stars > 0 {
                     let count = primary_icons;
                     for slot in 0..stars {
@@ -685,7 +683,6 @@ impl MusicView {
 
     fn show_particles(&mut self, context: &mut UiContext, music: &Music, bar: BarLayout, track: Option<&Track>) {
         let panel_height = context.config.height;
-        // Particle emission
         let time = context.frame.time;
         if let Some(track) = track {
             let audio = music.resources.audio(track.id);
@@ -742,7 +739,6 @@ impl MusicView {
     fn show_playhead(&mut self, context: &mut UiContext, music: &Music, x: f32, top: f32) {
         let playing = music.foreground_playing();
         let panel_height = context.config.height;
-        // Playhead interaction and rendering
         let half_width = panel_height * 0.4;
         let playhead = Rect::from_center_size(vec2(x, top + panel_height * 0.5), Vec2::splat(half_width * 2.0));
         context.interaction.input_region(playhead);

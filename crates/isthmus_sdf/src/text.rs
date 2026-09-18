@@ -33,7 +33,7 @@ pub struct Text {
     pub size: f32,
     /// Total advance in logical pixels.
     pub width: f32,
-    pub(super) prepared_weight: Weight,
+
     /// Number of placed glyphs in the run.
     pub count: u32,
     /// First glyph in the current frame's placement buffer.
@@ -100,41 +100,6 @@ impl<'a> Glyphs<'a> {
     }
 }
 
-#[derive(Clone, Copy, Default, ShaderData)]
-pub(super) struct Weight {
-    master: u32,
-    blend: f32,
-}
-
-impl Weight {
-    pub(super) fn resolve(weights: &[u32], weight: f32) -> Self {
-        let mut low = 0;
-        let last = u32::read(weights, 0).max(1) - 1;
-        let mut high = last;
-        while low < high {
-            let middle = low + (high - low).div_ceil(2);
-            if f32::read(weights, middle as usize + 1) <= weight {
-                low = middle;
-            } else {
-                high = middle - 1;
-            }
-        }
-        let next = (low + 1).min(last);
-        let a = f32::read(weights, low as usize + 1);
-        let b = f32::read(weights, next as usize + 1);
-        let blend = if b > a { ((weight - a) / (b - a)).clamp(0.0, 1.0) } else { 0.0 };
-        Self { master: low, blend }
-    }
-}
-
-impl Glyphs<'_> {
-    /// Selects a font weight for analytic distance queries.
-    pub fn with_weight(self, weight: f32) -> Self {
-        let line = Text { prepared_weight: Weight::resolve(self.outlines, weight), ..self.line };
-        Self { line, ..self }
-    }
-}
-
 impl Sdf for Glyphs<'_> {
     fn geometry_bounds(self) -> Rect {
         if self.count == 0 { Rect::EMPTY } else { Rect::new(self.min, self.max) }
@@ -149,7 +114,7 @@ impl Sdf for Glyphs<'_> {
         if line.count == 0 || line.size <= 0.0 {
             return f32::MAX;
         }
-        let weight = line.prepared_weight;
+
         let line_point = (point - line.origin) / line.size;
         let mut low = 0;
         let mut high = line.count;
@@ -185,7 +150,7 @@ impl Sdf for Glyphs<'_> {
             let glyph = Glyph::read(outlines, placed.glyph as usize);
             let glyph_point = vec2(line_point.x - placed.x, placed.y - line_point.y);
             if Shape::rectangle(Rect::new(glyph.min, glyph.max)).distance_at(glyph_point) < best {
-                best = best.min(glyph_distance(outlines, glyph.start, glyph.count, weight, glyph_point));
+                best = best.min(glyph_distance(outlines, glyph.start, glyph.count, glyph_point));
             }
         }
         best * line.size
@@ -325,19 +290,12 @@ fn curve_distance([start, control, end]: [Vec2; 3], point: Vec2, best: f32) -> (
     (distance, winding)
 }
 
-fn glyph_distance(curves: &[u32], start: u32, count: u32, weight: Weight, point: Vec2) -> f32 {
+fn glyph_distance(curves: &[u32], start: u32, count: u32, point: Vec2) -> f32 {
     let mut distance_squared = f32::MAX;
     let mut winding = 0;
     // Rust-GPU cannot lower this runtime slice iterator without a pointer-to-integer conversion.
     for index in 0..count {
-        let a = Curve::read(curves, start as usize + (weight.master * count + index) as usize * Curve::WORDS).points();
-        let points = if weight.blend == 0.0 {
-            a
-        } else {
-            let b = Curve::read(curves, start as usize + ((weight.master + 1) * count + index) as usize * Curve::WORDS)
-                .points();
-            [a[0].lerp(b[0], weight.blend), a[1].lerp(b[1], weight.blend), a[2].lerp(b[2], weight.blend)]
-        };
+        let points = Curve::read(curves, start as usize + index as usize * Curve::WORDS).points();
         let (distance, edge_winding) = curve_distance(points, point, distance_squared);
         distance_squared = distance;
         winding += edge_winding;
