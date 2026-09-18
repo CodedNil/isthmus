@@ -147,12 +147,11 @@ impl CantusApp {
                 .local
                 .iter()
                 .map(|local| &local.track)
-                .filter(|track| track.is_youtube())
                 .chain(&music.queue[current..end])
                 .chain(&music.queue[current.saturating_sub(1)..current]);
             if let Some(track) = candidates
                 .filter(|track| {
-                    track.is_youtube()
+                    track.is_web_media()
                         || (!track.name.trim().is_empty()
                             && !track.primary_artist().trim().is_empty()
                             && track.duration_ms > 0)

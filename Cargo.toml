@@ -116,3 +116,4 @@ opt-level = 3
 
 [profile.dev.package.cantus]
 codegen-units = 16
+debug = 1

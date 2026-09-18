@@ -12,7 +12,7 @@ use std::{ops::Range, slice, sync::Arc};
 pub const EXTENSION: f32 = 17.0;
 const SHADOW_REACH: f32 = 3.0;
 const GLOW_REACH: f32 = 6.0;
-const LANE_BLEND: f32 = 48.0;
+const LANE_GAP: f32 = 96.0;
 const ROW_SPACING: f32 = 12.0;
 const GROUP_COLOR: Vec3 = vec3(1.00, 0.72, 0.79); // rose, reserved for groups
 const SECTION_SHADOW: f32 = 5.0;
@@ -34,15 +34,17 @@ pub struct PreparedLyrics {
 struct Channel {
     singer: Option<usize>,
     runs: Vec<Run>,
-    bands: Vec<Vec4>,
 }
 
 struct Run {
     time: Range<f32>,
+    text: String,
     x: f32,
     width: f32,
     line: Arc<ShapedLine>,
     scale: f32,
+    /// Rows raised by earlier voices overlapping this section.
+    lane: u32,
 }
 
 impl PreparedLyrics {
@@ -66,7 +68,7 @@ impl PreparedLyrics {
         let space = text.shape(" ", 15.0, 700.0).text.width.max(6.0);
         let mut channels = Vec::new();
         for source in &mut self.source.channels {
-            let mut channel = Channel { singer: source.singer, runs: Vec::new(), bands: Vec::new() };
+            let mut channel = Channel { singer: source.singer, runs: Vec::new() };
             let segments = &mut source.segments;
             segments.retain(|s| s.time.start.is_finite() && s.time.end.is_finite() && !s.text.trim().is_empty());
             segments.sort_by(|a, b| a.time.start.total_cmp(&b.time.start));
@@ -92,8 +94,16 @@ impl PreparedLyrics {
                 // Time the separator with the word so adjacent runs meet without a scrolling jump.
                 let separated = value.ends_with(char::is_whitespace)
                     || next.is_some_and(|s| s.text.starts_with(char::is_whitespace));
-                let width = (bounds.width.max(bounds.max.x) - bounds.min.x.min(0.0)) + space * f32::from(separated);
-                channel.runs.push(Run { time: start..end, x: 0.0, width, line, scale: 1.0 });
+                let width = ink_width(bounds) + space * f32::from(separated);
+                channel.runs.push(Run {
+                    time: start..end,
+                    text: value.trim().to_owned(),
+                    x: 0.0,
+                    width,
+                    line,
+                    scale: 1.0,
+                    lane: 0,
+                });
             }
             channels.push(channel);
         }
@@ -109,9 +119,16 @@ impl PreparedLyrics {
         for run in channels.iter_mut().flat_map(|c| &mut c.runs) {
             let bounds = run.line.text;
             let held = (run.time.end - run.time.start) / bounds.width.max(1.0) / typical;
-            run.scale =
+            let target_scale =
                 if self.source.timing == "caption" { 1.0 } else { 1.0 + ((held - 1.0) * 0.25).clamp(0.0, 0.25) };
-            run.width += (bounds.width.max(bounds.max.x) - bounds.min.x.min(0.0)) * (run.scale - 1.0);
+            // Resolve the width in the font; anything past its wdth range scales geometrically.
+            if target_scale > 1.0 {
+                let separator = run.width - ink_width(bounds);
+                run.line = text.shape_width(&run.text, bounds.size, 700.0, target_scale * 100.0);
+                let shaped = run.line.text;
+                run.scale = (target_scale * bounds.width.max(1.0) / shaped.width.max(1.0)).max(1.0);
+                run.width = ink_width(shaped) * run.scale + separator;
+            }
         }
         // A shared scroll speed reserves enough space for the fastest simultaneous voice.
         let mut times = vec![0.0, duration];
@@ -141,18 +158,46 @@ impl PreparedLyrics {
             let after = speeds[i.min(speeds.len() - 1)];
             point.z = if before + after > 0.0 { 2.0 * before * after / (before + after) } else { 0.0 };
         }
+        // A whole section of a voice shares one lane, so a single word never drifts off it.
+        let mut section_starts: Vec<f32> = self.source.sections.iter().map(|section| section.time.start).collect();
+        section_starts.sort_by(f32::total_cmp);
+        let mut occupied: Vec<Vec<(f32, f32)>> = Vec::new();
         for channel in &mut channels {
             for run in &mut channel.runs {
                 run.x = self.position(run.time.start, duration);
-                let end = run.x + run.width;
-                // Keep a voice's words on one lane across short gaps. Only empty space bends.
-                if let Some(band) = channel.bands.last_mut().filter(|band| run.x - LANE_BLEND <= band.w) {
-                    band.z = end;
-                    band.w = end + LANE_BLEND;
-                } else {
-                    channel.bands.push(vec4(run.x - LANE_BLEND, run.x, end, end + LANE_BLEND));
-                }
             }
+            let section = |time: f32| section_starts.partition_point(|start| *start <= time);
+            let mut phrases = Vec::new();
+            let mut first = 0;
+            for index in 0..channel.runs.len() {
+                let boundary = channel.runs.get(index + 1).is_none_or(|next| {
+                    if section_starts.is_empty() {
+                        // Without section labels, split only at pauses long enough to be a gap.
+                        next.x - (channel.runs[index].x + channel.runs[index].width) > LANE_GAP
+                    } else {
+                        section(next.time.start) != section(channel.runs[index].time.start)
+                    }
+                });
+                if !boundary {
+                    continue;
+                }
+                let phrase = (channel.runs[first].x, channel.runs[index].x + channel.runs[index].width);
+                let lane = occupied
+                    .iter()
+                    .filter(|voice| {
+                        voice.iter().any(|span| {
+                            phrase.1.min(span.1) - phrase.0.max(span.0)
+                                > (phrase.1 - phrase.0).min(span.1 - span.0) * 0.5
+                        })
+                    })
+                    .count() as u32;
+                for run in &mut channel.runs[first..=index] {
+                    run.lane = lane;
+                }
+                phrases.push(phrase);
+                first = index + 1;
+            }
+            occupied.push(phrases);
         }
         self.channels = channels;
     }
@@ -176,18 +221,9 @@ impl PreparedLyrics {
     }
 }
 
-// Count earlier voices occupying this part of the ribbon. A solo voice always returns to row zero.
-fn row_at(x: f32, bands: Buffer<'_, Vec4>) -> f32 {
-    let ease = |start: f32, end: f32| {
-        let t = ((x - start) / (end - start)).clamp(0.0, 1.0);
-        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
-    };
-    let mut row = 0.0;
-    for index in 0..bands.len() {
-        let band = bands.load(index);
-        row += ease(band.x, band.y) * (1.0 - ease(band.z, band.w));
-    }
-    row
+/// Horizontal ink extent of a shaped line, including glyphs that overhang the advance.
+fn ink_width(bounds: Text) -> f32 {
+    bounds.width.max(bounds.max.x) - bounds.min.x.min(0.0)
 }
 
 #[cfg(target_os = "linux")]
@@ -246,8 +282,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                     })
             );
         }
-        let mut bands = Vec::new();
-        for (row, channel) in lyrics.channels.iter().enumerate() {
+        for channel in &lyrics.channels {
             let color = channel.singer.map_or(GROUP_COLOR, |singer| CHANNEL_COLORS[singer % CHANNEL_COLORS.len()]);
             for run in channel
                 .runs
@@ -259,7 +294,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                 let stretch = vec2(run.scale, 1.0);
                 let bounds = Rect::new(
                     origin + run.line.text.min * stretch,
-                    origin + run.line.text.max * stretch + vec2(0.0, row as f32 * ROW_SPACING),
+                    origin + run.line.text.max * stretch + vec2(0.0, run.lane as f32 * ROW_SPACING),
                 )
                 .expanded(GLOW_REACH * run.scale + 2.0);
                 // One continuous light field crosses every fragment and vocal lane at the playhead.
@@ -268,8 +303,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                         .frame
                         .upload({
                             let playhead_x: f32 = layout.playhead_x;
-                            let track_x: f32 = x;
-                            let bands: Buffer<'_, Vec4> = Buffer::new(&bands);
+                            let row: f32 = run.lane as f32;
                             let scale: f32 = run.scale;
                             let baseline: f32;
                             let phase: f32 = context.frame.time;
@@ -283,7 +317,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                             let active = (1.0 - (distance / 52.0).powi(2)).max(0.0).powi(2);
                             let wave = distance * 0.16 - phase * 3.0;
                             let mut point = line.origin + (fragment.pixel - line.origin) / vec2(scale, 1.0);
-                            point.y -= ROW_SPACING * row_at(fragment.pixel.x - track_x, bands);
+                            point.y -= ROW_SPACING * row;
                             point.y += active * (0.6 + 0.4 * wave.sin());
                             let surface = line.sample_at(point);
                             let shadow = surface.distance.smoothstep(SHADOW_REACH, 0.0).powi(2);
@@ -303,9 +337,6 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                         })
                 );
             }
-            bands.extend(
-                channel.bands.iter().copied().filter(|band| x + band.w >= screen.start && x + band.x <= screen.end),
-            );
         }
         x += lyrics.position(track.queue_span_ms(), track.duration_ms as f32);
     }

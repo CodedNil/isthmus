@@ -322,8 +322,9 @@ impl Track {
         self.duration_ms as f32 + TRACK_SPACING_MS
     }
 
-    pub(crate) fn is_youtube(&self) -> bool {
-        self.uri.contains("youtube.com/") || self.uri.contains("youtu.be/")
+    /// Whether the URI is a web media URL the caption extractor can be pointed at.
+    pub(crate) fn is_web_media(&self) -> bool {
+        self.uri.starts_with("http://") || self.uri.starts_with("https://")
     }
 }
 

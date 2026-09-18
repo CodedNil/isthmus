@@ -26,7 +26,7 @@ const ACTION_WIDTH: f32 = 24.0;
 const AUDIO_BAR_SPACING: f32 = 4.0;
 const AUDIO_BAR_RADIUS: f32 = 1.25;
 const AUDIO_HALF_WIDTH: f32 = AUDIO_BAR_SPACING * (AUDIO_SPECTRUM_BANDS - 1) as f32 * 0.5 + AUDIO_BAR_RADIUS;
-/// CPU/GPU graphs stay this wide regardless of whether the battery slot is present.
+/// Graph width, fixed so the battery slot does not resize it.
 const GRAPH_WIDTH: f32 = 60.0 + f32::midpoint(DATA_WIDTH, GAP);
 const CHART_LINE_WIDTH: f32 = 0.85;
 const USAGE_COLOR: Vec3 = Vec3::new(0.32, 0.68, 1.0);
@@ -53,7 +53,7 @@ pub struct AudioMonitor {
 pub struct StatusPanel {
     /// Battery charge magnitude, negated while charging.
     battery_level: Option<f32>,
-    /// Logarithmic frequency-band levels sampled from the system audio monitor stream.
+    /// Frequency-band levels from the system audio monitor.
     audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS],
     /// Fractional scroll between the two newest history samples.
     history_scroll: f32,
@@ -77,7 +77,7 @@ pub struct SystemSample {
 }
 
 impl StatusPanel {
-    /// Total on-screen width of the pill; grows to include the battery slot when shown.
+    /// Pill width, including the battery slot when shown.
     pub const fn width(&self) -> f32 {
         BASE_WIDTH + if self.battery_level.is_some() { DATA_WIDTH + GAP } else { 0.0 }
     }
