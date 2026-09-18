@@ -9,7 +9,10 @@ use image::{RgbaImage, imageops};
 use isthmus::{Image, Unorm8x4, glam::Vec3};
 use isthmus_sdf::layout::TextCache;
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
-use std::{array, collections::HashMap, fmt::Display, hash::Hash, ops::Range, time::Duration};
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
+use std::{array, collections::HashMap, fmt::Display, hash::Hash, ops::Range, sync::Arc, time::Duration};
+use tokio::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::spawn_blocking;
 use tracing::warn;
@@ -84,7 +87,7 @@ pub struct TrackCache {
     pub art: HashMap<String, Fetch<AlbumArt>>,
     pub audio: HashMap<TrackId, Fetch<AudioFeatures>>,
     pub lyrics: HashMap<String, Fetch<PreparedLyrics>>,
-    pub lyrics_session: Option<lyrics::Session> = Some(lyrics::Session::new()),
+    lyrics_session: Arc<Mutex<lyrics::Session>>,
 }
 
 impl TrackCache {
@@ -125,9 +128,10 @@ impl CantusApp {
         let now = Instant::now();
         let music = &mut self.music;
         let resources = &mut music.resources;
+        let tracks = music.queue.iter().chain(music.local.iter().map(|local| &local.track));
         resources.art.retain(|url, state| {
             matches!(state, Fetch::Fetching)
-                || music.queue.iter().any(|track| track.image.as_ref() == Some(url))
+                || tracks.clone().any(|track| track.image.as_ref() == Some(url))
                 || music.playlists.iter().any(|playlist| playlist.image_url.as_ref() == Some(url))
         });
         resources.audio.retain(|id, state| {
@@ -135,37 +139,34 @@ impl CantusApp {
         });
         resources
             .lyrics
-            .retain(|uri, state| matches!(state, Fetch::Fetching) || music.queue.iter().any(|track| &track.uri == uri));
-        if self.config.lyrics_enabled && resources.lyrics_session.is_some() {
-            let start = music.timeline.index.saturating_sub(1).min(music.queue.len());
+            .retain(|uri, state| matches!(state, Fetch::Fetching) || tracks.clone().any(|track| &track.uri == uri));
+        if self.config.lyrics_enabled {
             let current = music.timeline.index.min(music.queue.len());
-            let end = music.timeline.index.saturating_add(3).min(music.queue.len());
-            let track = music.queue[current..end]
+            let end = (current + 3).min(music.queue.len());
+            let candidates = music
+                .local
                 .iter()
-                .chain(&music.queue[start..current])
-                .find(|track| {
-                    // Queue titles can arrive before the artist and duration metadata.
-                    !track.name.trim().is_empty()
-                        && !track.primary_artist().trim().is_empty()
-                        && track.duration_ms > 0
-                        && resources.lyrics.entry(track.uri.clone()).or_default().request(now)
+                .map(|local| &local.track)
+                .filter(|track| track.is_youtube())
+                .chain(&music.queue[current..end])
+                .chain(&music.queue[current.saturating_sub(1)..current]);
+            if let Some(track) = candidates
+                .filter(|track| {
+                    track.is_youtube()
+                        || (!track.name.trim().is_empty()
+                            && !track.primary_artist().trim().is_empty()
+                            && track.duration_ms > 0)
                 })
-                .cloned();
-            if let Some(track) = track
-                && let Some(mut session) = resources.lyrics_session.take()
+                .find(|track| resources.lyrics.entry(track.uri.clone()).or_default().request(now))
             {
+                let track = track.clone();
+                let session = Arc::clone(&resources.lyrics_session);
                 let http = self.background.http.clone();
-                self.background.spawn_update(async move {
-                    let result = lyrics::fetch(&track, &http, &mut session).await.map(PreparedLyrics::new);
-                    let result = Fetch::from_result(result, track.compact_title());
-                    Some(move |app: &mut Self| {
-                        let resources = &mut app.music.resources;
-                        resources.lyrics_session = Some(session);
-                        if let Some(slot @ Fetch::Fetching) = resources.lyrics.get_mut(&track.uri) {
-                            *slot = result;
-                        }
-                    })
-                });
+                self.background.fetch(
+                    track.uri.clone(),
+                    async move { lyrics::fetch(&track, &http, &session).await.map(PreparedLyrics::new) },
+                    |cache| &mut cache.lyrics,
+                );
             }
         }
         for id in music
@@ -193,9 +194,7 @@ impl CantusApp {
                 |cache| &mut cache.audio,
             );
         }
-        for url in music
-            .queue
-            .iter()
+        for url in tracks
             .filter_map(|track| track.image.as_ref())
             .chain(music.playlists.iter().filter_map(|playlist| playlist.image_url.as_ref()))
         {
@@ -207,6 +206,12 @@ impl CantusApp {
             self.background.fetch(
                 url.clone(),
                 async move {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if url.starts_with("file:") {
+                        let path =
+                            reqwest::Url::parse(&url)?.to_file_path().map_err(|()| "Invalid artwork file URL")?;
+                        return spawn_blocking(move || -> MusicResult<_> { Ok(decode_art(&fs::read(path)?)?) }).await?;
+                    }
                     let bytes = http.get(&url).send().await?.error_for_status()?.bytes().await?;
                     #[cfg(not(target_arch = "wasm32"))]
                     let art = spawn_blocking(move || decode_art(&bytes)).await??;

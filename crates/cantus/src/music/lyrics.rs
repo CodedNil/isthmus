@@ -1,5 +1,5 @@
 use super::{MusicResult, Track};
-use crate::app::fetch_json;
+use crate::{app::fetch_json, platform::youtube_captions};
 use reqwest::{Client, StatusCode};
 use roxmltree::{Document, Node};
 use serde::Deserialize;
@@ -9,6 +9,7 @@ use std::{
     ops::Range,
     time::Duration,
 };
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 use web_time::Instant;
 
@@ -21,7 +22,7 @@ pub struct LyricSegment {
 pub struct Lyrics {
     pub channels: Vec<Channel>,
     pub sections: Vec<LyricSegment>,
-    timing: &'static str = "word",
+    pub(crate) timing: &'static str = "word",
 }
 
 #[derive(Default)]
@@ -30,7 +31,12 @@ pub struct Channel {
     pub segments: Vec<LyricSegment>,
 }
 
-pub(super) async fn fetch(track: &Track, http: &Client, session: &mut Session) -> MusicResult<Lyrics> {
+pub(super) async fn fetch(track: &Track, http: &Client, session: &Mutex<Session>) -> MusicResult<Lyrics> {
+    if track.is_youtube() {
+        let source = youtube_captions(track.uri.clone()).await?;
+        return if source.is_empty() { Ok(Lyrics::default()) } else { parse_youtube(&source) };
+    }
+    let mut session = session.lock().await;
     let mut failure = None;
     let title = track.compact_title().split(" (").next().unwrap_or(&track.name);
     let artist = track.primary_artist();
@@ -62,6 +68,71 @@ pub(super) async fn fetch(track: &Track, http: &Client, session: &mut Session) -
         }
     }
     failure.map_or_else(|| Ok(Lyrics::default()), Err)
+}
+
+// JSON3 contains each phrase once, unlike rolling WebVTT captions.
+fn parse_youtube(source: &str) -> MusicResult<Lyrics> {
+    #[derive(Deserialize)]
+    struct Captions {
+        events: Vec<Event>,
+    }
+    #[derive(Deserialize)]
+    struct Event {
+        #[serde(rename = "tStartMs")]
+        start: f32,
+        #[serde(rename = "dDurationMs", default)]
+        duration: f32,
+        #[serde(default)]
+        segs: Vec<Part>,
+    }
+    #[derive(Deserialize)]
+    struct Part {
+        utf8: String,
+        #[serde(rename = "tOffsetMs", default)]
+        offset: f32,
+    }
+    let captions: Captions = serde_json::from_str(source)?;
+    let mut segments = Vec::<LyricSegment>::new();
+    for event in captions.events {
+        if event.segs.iter().all(|part| part.utf8.trim().is_empty()) {
+            continue; // Window definitions and line breaks carry no speech.
+        }
+        if let Some(previous) = segments.last_mut() {
+            previous.time.end = previous.time.end.min(event.start);
+        }
+        let mut annotation = false;
+        let mut text = String::new();
+        let mut start = event.start;
+        for part in event.segs {
+            let spoken: String = part
+                .utf8
+                .chars()
+                .filter_map(|ch| match ch {
+                    '[' => {
+                        annotation = true;
+                        None
+                    }
+                    ']' => {
+                        annotation = false;
+                        Some(' ')
+                    }
+                    _ => (!annotation).then_some(ch),
+                })
+                .collect();
+            if text.trim().is_empty() && !spoken.trim().is_empty() {
+                start = event.start + part.offset;
+            }
+            text.push_str(&spoken);
+        }
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        segments.push(LyricSegment { time: start..event.start + event.duration, text: format!("{text} ") });
+    }
+    segments.retain(|segment| !segment.text.trim().is_empty() && segment.time.end > segment.time.start);
+    Ok(Lyrics {
+        channels: if segments.is_empty() { Vec::new() } else { vec![Channel { segments, ..Default::default() }] },
+        timing: "caption",
+        ..Default::default()
+    })
 }
 
 async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics> {
@@ -194,7 +265,7 @@ const API: &str = "https://apic-appmobile.musixmatch.com/ws/1.1/";
 const APP_ID: &str = "mac-ios-v2.0";
 const BACKOFF: Duration = Duration::from_mins(5);
 
-// Owned by the music cache, lent to one background worker at a time.
+// Shared by lyric requests to reuse authentication and rate-limit backoff.
 #[derive(Default)]
 pub struct Session {
     token: String,
@@ -202,10 +273,6 @@ pub struct Session {
 }
 
 impl Session {
-    pub const fn new() -> Self {
-        Self { token: String::new(), retry_after: None }
-    }
-
     async fn request(&mut self, http: &Client, endpoint: &str, params: &[(&str, &str)]) -> MusicResult<Value> {
         let response = fetch_json::<Value>(
             http.get(format!("{API}{endpoint}"))

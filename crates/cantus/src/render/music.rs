@@ -30,12 +30,42 @@ const HISTORY_TRACK_WIDTH: f32 = 10.0;
 /// Transparent texture used while artwork is unavailable and for rating icons.
 static EMPTY_ART: LazyLock<Image> = LazyLock::new(|| Image::rgba8([1, 1], vec![0; 4]));
 
-struct TrackLayout {
-    queue_index: usize,
+struct TrackLayout<'a> {
+    track: &'a mut Track,
+    queue_index: Option<usize>,
+    can_seek: bool,
+    scale: f32,
     start_ms: f32,
     natural_start: f32,
     width: f32,
     right: f32,
+}
+
+impl<'a> TrackLayout<'a> {
+    fn new(
+        index: Option<usize>,
+        track: &'a mut Track,
+        start_ms: f32,
+        bar: BarLayout,
+        future_end: f32,
+        trim: f32,
+        left: f32,
+    ) -> Self {
+        let natural_start = bar.playhead_x + start_ms * bar.px_per_ms;
+        let end = natural_start + (track.duration_ms as f32 * bar.px_per_ms - trim).max(0.0);
+        let clipped = end.min(future_end) - natural_start.max(left);
+        let width = clipped.max(if natural_start < left { HISTORY_TRACK_WIDTH } else { 0.0 });
+        Self {
+            track,
+            queue_index: index,
+            can_seek: true,
+            scale: bar.px_per_ms,
+            start_ms,
+            natural_start,
+            width,
+            right: end.clamp(left, future_end),
+        }
+    }
 }
 
 fn music_shape(pill: Rect, icon_supports: [Vec2; 2]) -> impl Sdf {
@@ -72,6 +102,8 @@ pub struct MusicView {
     icon_presence: f32,
     icon_morph: f32,
     playlist_hover: Vec<f32>,
+    pub lane_space: f32,
+    local_back: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -114,6 +146,12 @@ fn caustics(p: Vec2, time: f32, seed: f32, audio: AudioFeatures) -> f32 {
 }
 
 impl MusicView {
+    pub fn animate(&mut self, music: &Music, dt: f32, height: f32) {
+        let blend = 1.0 - (-dt / 0.18).exp();
+        self.lane_space += (f32::from(music.local.is_some()) * (height + GAP) - self.lane_space) * blend;
+        self.local_back += (f32::from(music.playing) - self.local_back) * blend;
+    }
+
     pub fn show(&mut self, context: &mut UiContext, music: &mut Music, bar: BarLayout) {
         let mut burst = false;
         let playlists = music.playlists.iter().filter(|playlist| playlist.rating_index.is_none());
@@ -176,20 +214,10 @@ impl MusicView {
                 );
             }
         }
-        let drag = context.interaction.drag_motion();
-
         let playhead_track = music
             .timeline
             .span_at_playhead(&music.queue)
             .filter(|(index, elapsed)| *elapsed < music.queue[*index].duration_ms as f32);
-        if drag.is_some_and(|(_, released)| released)
-            && let Some((index, position_ms)) = playhead_track
-        {
-            let track = &music.queue[index];
-            if track.duration_ms > 0 {
-                music.seek(index, track.duration_ms, position_ms / track.duration_ms as f32);
-            }
-        }
 
         let panel_height = context.config.height;
         let future_end = HISTORY_WIDTH + context.config.timeline_future_minutes * 60_000.0 * bar.px_per_ms;
@@ -200,18 +228,18 @@ impl MusicView {
         let mut visible = SmallVec::<[TrackLayout; 16]>::new();
         for (queue_index, track) in music.queue.iter_mut().enumerate().rev() {
             start_ms -= track.queue_span_ms();
-            let natural_start = bar.playhead_x + start_ms * bar.px_per_ms;
-            if natural_start >= future_end {
-                track.runtime.track_expansion = 0.0;
+            let mut layout = TrackLayout::new(Some(queue_index), track, start_ms, bar, future_end, trim, HISTORY_WIDTH);
+            if layout.natural_start >= future_end {
+                layout.track.runtime.track_expansion = 0.0;
                 continue;
             }
-            let end = natural_start + (track.duration_ms as f32 * bar.px_per_ms - trim).max(0.0);
-            let gap = if end <= HISTORY_WIDTH { gap } else { gap.min(track.queue_span_ms() * bar.px_per_ms) };
-            let clipped = end.min(future_end) - natural_start.max(HISTORY_WIDTH);
-            let width = clipped.max(if natural_start < HISTORY_WIDTH { HISTORY_TRACK_WIDTH } else { 0.0 });
-            let right = next_left.map_or_else(|| end.clamp(HISTORY_WIDTH, future_end), |left: f32| left - gap);
-            visible.push(TrackLayout { queue_index, start_ms, natural_start, width, right });
-            next_left = Some(right - width);
+            let gap =
+                if layout.right <= HISTORY_WIDTH { gap } else { gap.min(layout.track.queue_span_ms() * bar.px_per_ms) };
+            if let Some(left) = next_left {
+                layout.right = left - gap;
+            }
+            next_left = Some(layout.right - layout.width);
+            visible.push(layout);
         }
         visible.reverse();
 
@@ -220,18 +248,40 @@ impl MusicView {
         let mut seek_action = None;
         let mut rated_track = None;
         let mut playlist_toggle = None;
-
-        visible.sort_by_key(|layout| music.queue[layout.queue_index].runtime.track_expansion.to_bits());
-
+        let local_layout = music.local.as_mut().map(|local| {
+            let scale = bar.local_scale(local.track.duration_ms);
+            let mut layout = TrackLayout::new(
+                None,
+                &mut local.track,
+                local.timeline.queue_start_ms,
+                BarLayout { px_per_ms: scale, ..bar },
+                future_end,
+                trim,
+                tracks_left,
+            );
+            layout.can_seek = local.can_seek && layout.track.duration_ms > 0;
+            if layout.track.duration_ms == 0 {
+                // Missing/live duration has no meaningful end; keep its card at the playhead.
+                layout.right = (bar.playhead_x + 240.0).min(future_end);
+            }
+            layout.width = layout.width.max(240.0).min(future_end);
+            layout
+        });
+        let local_region = local_layout.as_ref().map(|layout| (layout.right - layout.width, layout.right));
+        visible.extend(local_layout);
+        visible.sort_by_key(|layout| {
+            (layout.queue_index.is_none() == (self.local_back < 0.5), layout.track.runtime.track_expansion.to_bits())
+        });
         let playhead_index = playhead_track.map(|(index, _)| index);
-        if !music.queue.is_empty()
-            && !visible.iter().any(|layout| Some(layout.queue_index) == playhead_index && layout.right > tracks_left)
-        {
-            self.show_playhead(context, music, bar.playhead_x);
-        }
-
+        let curve = |x: f32| {
+            local_region.map_or(0.0, |(left, right)| {
+                (x - left + 60.0).smoothstep(0.0, 60.0) * (right + 60.0 - x).smoothstep(0.0, 60.0)
+            })
+        };
         for layout in visible {
-            let track = &mut music.queue[layout.queue_index];
+            let is_local = layout.queue_index.is_none();
+            let can_seek = layout.can_seek;
+            let track = layout.track;
             if layout.right <= tracks_left {
                 track.runtime.track_expansion = 0.0;
                 continue;
@@ -240,6 +290,9 @@ impl MusicView {
                 * (layout.right - tracks_left).smoothstep(0.0, panel_height);
             let mut width = layout.width.max(panel_height);
             let mut x = layout.right - width;
+            let track_center = x + width * 0.5;
+            let elevation = if is_local { self.local_back } else { (1.0 - self.local_back) * curve(track_center) };
+            let pill_top = PANEL_START - self.lane_space * elevation;
             let expansion = track.runtime.track_expansion.smoothstep(0.0, 1.0);
 
             let track_text = (width > panel_height + 26.0 || expansion > 0.0).then(|| {
@@ -267,7 +320,7 @@ impl MusicView {
             if let Some(lines) = &track_text {
                 let target = lines.iter().map(|(_, full)| full.text.width).fold(0.0, f32::max) + panel_height + 26.0;
                 let extra_width = (target - width).max(0.0) * expansion;
-                let anchor = if Some(layout.queue_index) == playhead_index {
+                let anchor = if is_local || layout.queue_index == playhead_index {
                     ((bar.playhead_x - x) / width).saturate()
                 } else {
                     0.5
@@ -311,7 +364,7 @@ impl MusicView {
                 vec2(row_width(primary_icons) * primary_alpha, primary_alpha * PRIMARY_SUPPORT_DEPTH),
                 vec2(row_width(secondary_count as f32) * secondary_alpha, secondary_alpha * SECONDARY_SUPPORT_DEPTH),
             ];
-            let pill = Rect::new(vec2(x, PANEL_START), vec2(x + width, PANEL_START + panel_height));
+            let pill = Rect::new(vec2(x, pill_top), vec2(x + width, pill_top + panel_height));
             let shape = music_shape(pill, icon_supports);
             let bounds = shape.bounds(0.0);
             let (min, max) = (bounds.min, bounds.max);
@@ -333,17 +386,23 @@ impl MusicView {
                 }
                 context.interaction.input_region(Rect::from_center_size(point, vec2(inside * 2.0, 1.0)));
             }
-            let body = context.interaction.drag(track.interaction_id, shape);
+            let body = if can_seek {
+                context.interaction.drag(track.interaction_id, shape)
+            } else {
+                context.interaction.interact(track.interaction_id, shape)
+            };
             let mut hovered = body.hovered;
-            if body.clicked && track.duration_ms > 0 {
-                let fraction = if layout.natural_start + track.duration_ms as f32 * bar.px_per_ms <= HISTORY_WIDTH
-                    || layout.queue_index == music.timeline.index && mouse_pos.x <= x + pill.size().x * 0.05
+            if body.clicked && can_seek && track.duration_ms > 0 {
+                let scale = layout.scale;
+                let fraction = if !is_local
+                    && (layout.natural_start + track.duration_ms as f32 * scale <= HISTORY_WIDTH
+                        || layout.queue_index == Some(music.timeline.index) && mouse_pos.x <= x + pill.size().x * 0.05)
                 {
                     0.0
                 } else {
-                    ((mouse_pos.x - layout.natural_start) / (track.duration_ms as f32 * bar.px_per_ms)).saturate()
+                    ((mouse_pos.x - layout.natural_start) / (track.duration_ms as f32 * scale)).saturate()
                 };
-                seek_action = Some((layout.queue_index, track.duration_ms, fraction));
+                seek_action = Some((layout.queue_index, track.duration_ms as f32 * fraction));
             }
 
             let mut icons = Vec::new();
@@ -357,7 +416,7 @@ impl MusicView {
                         let icon = slot as f32 * star_alpha;
                         let center = vec2(
                             pill.center().x + (icon - (count - 1.0).max(0.0) * 0.5) * ICON_SPACING,
-                            PANEL_START + panel_height * 0.975 - 1.0,
+                            pill_top + panel_height * 0.975 - 1.0,
                         );
                         if center.distance(mouse_pos) <= ICON_WIDTH * 0.5 {
                             rating = Some(slot as i32 * 2 + 1 + i32::from(mouse_pos.x >= center.x));
@@ -383,7 +442,7 @@ impl MusicView {
                     }
                     let center = vec2(
                         pill.center().x + (icon - (count - 1.0).max(0.0) * 0.5) * ICON_SPACING * spread,
-                        PANEL_START + panel_height * 0.975 - 1.0 + f32::from(secondary) * ICON_SPACING * spread,
+                        pill_top + panel_height * 0.975 - 1.0 + f32::from(secondary) * ICON_SPACING * spread,
                     );
                     let response = context.interaction.interact(
                         (
@@ -587,18 +646,24 @@ impl MusicView {
                 .runtime
                 .track_expansion
                 .move_towards(f32::from(hovered), context.frame.delta_time.min(0.1) / 0.16);
-            if Some(layout.queue_index) == playhead_index {
-                self.show_playhead(context, music, bar.playhead_x);
-            }
         }
-        if let Some((index, duration_ms, fraction)) = seek_action {
-            music.seek(index, duration_ms, fraction);
+        if let Some((index, position)) = seek_action {
+            music.seek(index, position);
         }
         if let Some((track_id, rating)) = rated_track {
             music.rate_track(track_id, rating);
         }
         if let Some((track_id, playlist_id)) = playlist_toggle {
             music.toggle_playlist(track_id, playlist_id);
+        }
+
+        if !music.queue.is_empty() || music.local.is_some() {
+            let elevation = if music.local_foreground() {
+                self.local_back
+            } else {
+                (1.0 - self.local_back) * curve(bar.playhead_x)
+            };
+            self.show_playhead(context, music, bar.playhead_x, PANEL_START - self.lane_space * elevation);
         }
 
         if burst {
@@ -674,24 +739,25 @@ impl MusicView {
         }
     }
 
-    fn show_playhead(&mut self, context: &mut UiContext, music: &Music, x: f32) {
+    fn show_playhead(&mut self, context: &mut UiContext, music: &Music, x: f32, top: f32) {
+        let playing = music.foreground_playing();
         let panel_height = context.config.height;
         // Playhead interaction and rendering
         let half_width = panel_height * 0.4;
-        let playhead = Rect::from_center_size(vec2(x, PANEL_START + panel_height * 0.5), Vec2::splat(half_width * 2.0));
+        let playhead = Rect::from_center_size(vec2(x, top + panel_height * 0.5), Vec2::splat(half_width * 2.0));
         context.interaction.input_region(playhead);
         let response = context.interaction.interact("playhead", Shape::rectangle(playhead));
         let speed = context.frame.delta_time * 5.5;
         let last_toggle = music.last_toggle.elapsed().as_secs_f32() / 0.7;
-        if !response.hovered && music.playing && last_toggle < 1.0 {
+        if !response.hovered && playing && last_toggle < 1.0 {
             self.bar_split = 1.0 - last_toggle;
             self.icon_presence = 1.0 - last_toggle;
             self.icon_morph = self.icon_morph.move_towards(1.0, speed * 1.5);
         } else {
-            let show_icon = f32::from(response.hovered || !music.playing);
+            let show_icon = f32::from(response.hovered || !playing);
             self.bar_split = self.bar_split.move_towards(show_icon, speed);
             self.icon_presence = self.icon_presence.max(show_icon).move_towards(show_icon, speed);
-            self.icon_morph = self.icon_morph.move_towards(f32::from(response.hovered && !music.playing), speed);
+            self.icon_morph = self.icon_morph.move_towards(f32::from(response.hovered && !playing), speed);
         }
         if response.clicked {
             music.toggle_playing();
@@ -703,10 +769,8 @@ impl MusicView {
                     let bar_split: f32 = self.bar_split;
                     let icon_presence: f32 = self.icon_presence;
                     let icon_morph: f32 = self.icon_morph;
-                    let rect: Rect = Rect::new(
-                        vec2(x - half_width, PANEL_START - 5.0),
-                        vec2(x + half_width, PANEL_START + panel_height + 5.0),
-                    );
+                    let rect: Rect =
+                        Rect::new(vec2(x - half_width, top - 5.0), vec2(x + half_width, top + panel_height + 5.0));
                 })
                 .primitive(rect)
                 .fragment(|frame, surface| {

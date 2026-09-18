@@ -1,4 +1,9 @@
-use crate::{app::AppUpdater, config::Config, render::music::AudioFeatures};
+use crate::{
+    app::AppUpdater,
+    config::Config,
+    platform::{media_command, start_mpris},
+    render::music::AudioFeatures,
+};
 use arrayvec::ArrayString;
 use enrichment::TrackCache;
 use serde::Deserialize;
@@ -13,6 +18,8 @@ use web_time::Instant;
 
 pub mod enrichment;
 pub mod lyrics;
+#[cfg(target_os = "linux")]
+pub mod mpris;
 #[cfg_attr(target_arch = "wasm32", path = "web.rs")]
 mod spotify;
 
@@ -34,11 +41,13 @@ pub struct Music {
     pub playlists: Vec<CondensedPlaylist>,
     pub timeline: Timeline,
     pub last_toggle: Instant,
+    pub local: Option<LocalTrack>,
     pub(crate) spotify: spotify::Spotify,
 }
 
 impl Music {
     pub(crate) fn spotify(config: &Config, updater: &AppUpdater) -> Self {
+        start_mpris(updater.clone());
         Self {
             resources: TrackCache::default(),
             playing: false,
@@ -46,8 +55,27 @@ impl Music {
             playlists: Vec::new(),
             timeline: Timeline { observed_at: Instant::now(), .. },
             last_toggle: Instant::now(),
+            local: None,
             spotify: spotify::Spotify::new(config, updater),
         }
+    }
+}
+
+pub struct LocalTrack {
+    pub track: Track,
+    pub timeline: Timeline,
+    pub playing: bool,
+    pub source: String,
+    pub(crate) mpris_id: String,
+    #[cfg(target_os = "linux")]
+    pub(crate) reported_position: Option<f32>,
+    pub can_seek: bool,
+    pub can_toggle: bool,
+}
+
+impl LocalTrack {
+    fn command(&self, command: PlaybackCommand) {
+        media_command(self.source.clone(), self.mpris_id.clone(), command);
     }
 }
 
@@ -62,6 +90,13 @@ pub struct Timeline {
 }
 
 impl Timeline {
+    fn update(&mut self, target: f32, dragging: bool, delta_time: f32) {
+        let predicted = self.queue_start_ms - self.rate * delta_time * 1000.0;
+        let next = if dragging { target } else { predicted + (target - predicted) * (1.0 - (-delta_time / 0.3).exp()) };
+        self.movement += ((next - self.queue_start_ms) * delta_time - self.movement) * (delta_time * 10.0).min(1.0);
+        self.queue_start_ms = next;
+    }
+
     pub fn position_now(&self) -> f32 {
         self.position_ms + self.observed_at.elapsed().as_secs_f32() * 1000.0 * self.rate
     }
@@ -140,15 +175,74 @@ impl Music {
         let index = self.timeline.index.min(self.queue.len() - 1);
         let target = -self.timeline.position_now() - self.queue[..index].iter().map(Track::queue_span_ms).sum::<f32>()
             + drag_offset_ms;
-        let predicted = self.timeline.queue_start_ms - self.timeline.rate * delta_time * 1_000.0;
-        let correction = target - predicted;
-        let next = if dragging { target } else { predicted + correction * (1.0 - (-delta_time / 0.3).exp()) };
-        let target_movement = (next - self.timeline.queue_start_ms) * delta_time;
-        self.timeline.movement += (target_movement - self.timeline.movement) * (delta_time * 10.0).min(1.0);
-        self.timeline.queue_start_ms = next;
+        self.timeline.update(target, dragging, delta_time);
+    }
+
+    pub const fn local_foreground(&self) -> bool {
+        self.local.is_some() && !self.playing
+    }
+
+    pub fn foreground_playing(&self) -> bool {
+        self.playing || self.local.as_ref().is_some_and(|local| local.playing)
+    }
+
+    pub fn update_playback(&mut self, drag: Option<(u64, f32, bool)>, delta_time: f32) {
+        let local_drag =
+            self.local.as_ref().is_some_and(|local| drag.is_some_and(|(id, ..)| id == local.track.interaction_id));
+        self.update_timeline(
+            drag.filter(|_| !local_drag).map_or(0.0, |(_, offset, _)| offset),
+            drag.is_some() && !local_drag,
+            delta_time,
+        );
+        if let Some(local) = &mut self.local {
+            let offset = drag.filter(|_| local_drag).map_or(0.0, |(_, offset, _)| offset);
+            let mut position = (local.timeline.position_now() - offset).max(0.0);
+            if local.track.duration_ms > 0 {
+                position = position.min(local.track.duration_ms as f32);
+            }
+            local.timeline.update(-position, local_drag, delta_time);
+        }
+        if drag.is_some_and(|(_, _, released)| released) {
+            let target = if local_drag {
+                self.local.as_ref().map(|local| (None, -local.timeline.queue_start_ms))
+            } else {
+                self.timeline.span_at_playhead(&self.queue).map(|(index, position)| (Some(index), position))
+            };
+            if let Some((index, position)) = target {
+                self.seek(index, position);
+            }
+        }
+    }
+
+    pub fn seek(&mut self, index: Option<usize>, position: f32) {
+        if let Some(index) = index {
+            let Some(track) = self.queue.get(index) else { return };
+            let skip = (index as i64 - self.timeline.index as i64).clamp(-10, 10) as i8;
+            self.spotify.command(if skip == 0 {
+                PlaybackCommand::Seek(position.clamp(0.0, track.duration_ms as f32).round() as u32)
+            } else {
+                PlaybackCommand::Skip(skip)
+            });
+        } else if let Some(local) = &mut self.local
+            && local.can_seek
+            && local.track.duration_ms > 0
+        {
+            let position = position.clamp(0.0, local.track.duration_ms as f32).round();
+            local.command(PlaybackCommand::Seek(position as u32));
+            local.timeline.position_ms = position;
+            local.timeline.observed_at = Instant::now();
+        }
     }
 
     pub fn toggle_playing(&self) {
+        if self.local_foreground()
+            && let Some(local) = &self.local
+        {
+            if local.can_toggle {
+                local.command(PlaybackCommand::SetPlaying(!local.playing));
+            }
+            return;
+        }
         let playing = !self.playing;
         info!("{} current track", if playing { "Playing" } else { "Pausing" });
         self.spotify.command(PlaybackCommand::SetPlaying(playing));
@@ -184,17 +278,6 @@ impl Music {
             playlists: vec![(playlist_id, add)],
             liked: None,
         });
-    }
-
-    pub(crate) fn seek(&self, clicked_index: usize, clicked_duration_ms: u32, fraction: f32) {
-        let skip_count = clicked_index.abs_diff(self.timeline.index);
-        if skip_count == 0 {
-            let milliseconds = (clicked_duration_ms as f32 * fraction).round() as u32;
-            self.spotify.command(PlaybackCommand::Seek(milliseconds));
-        } else {
-            let direction = if self.timeline.index < clicked_index { 1 } else { -1 };
-            self.spotify.command(PlaybackCommand::Skip(direction * skip_count.min(10) as i8));
-        }
     }
 }
 
@@ -238,6 +321,10 @@ impl Track {
     pub fn queue_span_ms(&self) -> f32 {
         self.duration_ms as f32 + TRACK_SPACING_MS
     }
+
+    pub(crate) fn is_youtube(&self) -> bool {
+        self.uri.contains("youtube.com/") || self.uri.contains("youtu.be/")
+    }
 }
 
 pub struct CondensedPlaylist {
@@ -247,7 +334,7 @@ pub struct CondensedPlaylist {
     pub rating_index: Option<u8>,
 }
 
-enum PlaybackCommand {
+pub enum PlaybackCommand {
     PlayPlaylist(Option<PlaylistId>),
     SetPlaying(bool),
     Seek(u32),

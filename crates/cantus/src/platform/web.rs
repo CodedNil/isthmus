@@ -2,6 +2,7 @@ use super::{DesktopApp, STATUS_SAMPLE_INTERVAL};
 use crate::{
     app::{AppUpdater, View, send_update},
     interaction::InputEvent,
+    music::{MusicResult, PlaybackCommand},
     render::{
         Renderer,
         status::{AudioMonitor, ProcessorSample, SystemSample},
@@ -29,17 +30,21 @@ pub fn spawn_task(task: impl Task<Output = ()>) {
     wasm_bindgen_futures::spawn_local(task);
 }
 
+pub async fn youtube_captions(_url: String) -> MusicResult<String> {
+    Err("YouTube captions are unavailable on this platform".into())
+}
+
+pub fn start_mpris(_updater: AppUpdater) {}
+
+pub fn media_command(_source: String, _track: String, _command: PlaybackCommand) {}
+
 /// Entry point used by the generated browser glue.
-#[wasm_bindgen::prelude::wasm_bindgen(start)]
-pub fn start() {
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
     std::panic::set_hook(Box::new(|panic| {
         web_sys::console::error_1(&format!("Cantus panic: {panic}").into());
     }));
-    wasm_bindgen_futures::spawn_local(async {
-        if let Err(error) = run_web().await {
-            web_sys::console::error_1(&format!("Cantus could not start: {error}").into());
-        }
-    });
+    run_web().await.map_err(|error| error.to_string().into())
 }
 
 fn sample_status(time: f32) -> SystemSample {
@@ -88,20 +93,7 @@ pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
 }
 
 pub async fn current_location() -> Result<[f32; 2], Box<dyn std::error::Error + Send + Sync>> {
-    let geolocation = web_sys::window()
-        .and_then(|window| window.navigator().geolocation().ok())
-        .ok_or("Browser geolocation is unavailable")?;
-    let promise = web_sys::js_sys::Promise::new(&mut |resolve, reject| {
-        if let Err(error) = geolocation.get_current_position_with_error_callback(&resolve, Some(&reject)) {
-            let _ = reject.call1(&wasm_bindgen::JsValue::UNDEFINED, &error);
-        }
-    });
-    let position = wasm_bindgen_futures::JsFuture::from(promise)
-        .await
-        .map_err(|error| format!("Browser geolocation failed: {error:?}"))?
-        .unchecked_into::<web_sys::Position>();
-    let coordinates = position.coords();
-    Ok([coordinates.latitude() as f32, coordinates.longitude() as f32])
+    Err("Browser geolocation is disabled; using the browser timezone".into())
 }
 
 pub async fn sleep(duration: Duration) {
@@ -150,16 +142,11 @@ pub fn run() {}
 
 async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
     let window = web_sys::window().ok_or("browser window is unavailable")?;
-    let canvas_by_id = |id| {
-        window
-            .document()
-            .and_then(|document| document.get_element_by_id(id))
-            .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
-            .ok_or_else(|| format!("#{id} is not a canvas"))
-    };
-    let canvas = canvas_by_id("cantus")?;
-    let (updater, updates) = std::sync::mpsc::channel();
-    let app = Rc::new(RefCell::new(crate::app::CantusApp::new(updater)));
+    let canvas = window
+        .document()
+        .and_then(|document| document.get_element_by_id("cantus"))
+        .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        .ok_or("#cantus is not a canvas")?;
     let dimensions = || {
         let size = [
             window.inner_width().ok().and_then(|value| value.as_f64()).unwrap_or(1.0) as f32,
@@ -177,6 +164,8 @@ async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
         ]),
     )
     .await?;
+    let (updater, updates) = std::sync::mpsc::channel();
+    let app = Rc::new(RefCell::new(crate::app::CantusApp::new(updater)));
 
     let _pointer =
         ["pointerenter", "pointermove", "pointerdown", "pointerup", "pointerleave", "pointercancel"].map(|name| {

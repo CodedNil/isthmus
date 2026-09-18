@@ -26,7 +26,7 @@ pub(super) async fn new<P: Program>(
     [width, height]: [u32; 2],
 ) -> Result<(Gpu, SurfaceTarget), SetupError> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN | wgpu::Backends::BROWSER_WEBGPU,
+        backends: wgpu::Instance::enabled_backend_features(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let surface = instance.create_surface(source)?;

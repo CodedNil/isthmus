@@ -150,19 +150,19 @@ impl Interaction {
     }
 
     /// Captured drag displacement and release state, even when its widget is no longer drawn.
-    pub fn drag_motion(&self) -> Option<(Vec2, bool)> {
+    pub fn drag_motion(&self) -> Option<(u64, Vec2, bool)> {
         if !self.enabled {
             return None;
         }
-        if matches!(self.active, Some(Active::Drag(_)))
+        if let Some(Active::Drag(id)) = self.active
             && self.dragging()
             && let Pointer::Held { position, origin, .. } = self.pointer
         {
-            return Some((position - origin, false));
+            return Some((id, position - origin, false));
         }
         self.events.iter().rev().find_map(|event| match event {
-            ButtonEvent::Release { id: Active::Drag(_), position, drag_origin, was_dragging: true } => {
-                Some((*position - *drag_origin, true))
+            ButtonEvent::Release { id: Active::Drag(id), position, drag_origin, was_dragging: true } => {
+                Some((*id, *position - *drag_origin, true))
             }
             _ => None,
         })

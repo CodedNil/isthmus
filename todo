@@ -1,8 +1,5 @@
 repeat/shuffle button
 
-use local playing media metadata to show youtube video etc playing
-shift the music up around the currently playing alternative so it looks like its an interruption
-
 timers:
 render active timer under the date
 activate commands like: timer 30m
