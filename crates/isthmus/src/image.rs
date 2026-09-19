@@ -1,34 +1,16 @@
 use glam::Vec4;
+#[cfg(target_arch = "spirv")]
 use spirv_std::{Sampler, image::Image2d};
 #[cfg(not(target_arch = "spirv"))]
 use std::sync::Arc;
 
-/// Filtering and addressing for a sampled image; linear clamping is the default.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub enum Sampling {
-    #[default]
-    /// Linear filtering with coordinates clamped to the image edges.
-    Linear,
-    /// Nearest-pixel filtering with coordinates clamped to the image edges.
-    Nearest,
-    /// Linear filtering with repeated image coordinates.
-    LinearRepeat,
-    /// Nearest-pixel filtering with repeated image coordinates.
-    NearestRepeat,
-}
-
 #[cfg(not(target_arch = "spirv"))]
-/// Shared RGBA8 pixels and sampling settings captured by a shader.
+/// Shared RGBA8 pixels captured by a shader.
 #[derive(Clone)]
 pub struct Image {
     pub(crate) size: [u32; 2],
     pub(crate) pixels: Arc<[u8]>,
-    pub(crate) sampling: Sampling,
 }
-
-#[cfg(target_arch = "spirv")]
-/// Image capture marker replaced with a texture and sampler by shader generation.
-pub struct Image;
 
 #[cfg(not(target_arch = "spirv"))]
 impl Image {
@@ -47,33 +29,19 @@ impl Image {
                 *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
             }
         }
-        Self { size, pixels, sampling: Sampling::default() }
-    }
-
-    /// Changes sampling settings while sharing the original pixel storage.
-    pub fn sampled(&self, sampling: Sampling) -> Self {
-        Self { sampling, ..self.clone() }
+        Self { size, pixels }
     }
 
     /// Samples straight RGBA after filtering premultiplied pixels to avoid transparent-edge halos.
     pub fn sample(&self, uv: glam::Vec2) -> Vec4 {
         let size = glam::IVec2::from_array(self.size.map(|value| value as i32));
-        let repeat = matches!(self.sampling, Sampling::LinearRepeat | Sampling::NearestRepeat);
         let pixel = |point: glam::IVec2| {
-            let point = if repeat {
-                glam::ivec2(point.x.rem_euclid(size.x), point.y.rem_euclid(size.y))
-            } else {
-                point.clamp(glam::IVec2::ZERO, size - 1)
-            };
+            let point = point.clamp(glam::IVec2::ZERO, size - 1);
             let offset = (point.y * size.x + point.x) as usize * 4;
             let rgba = &self.pixels[offset..offset + 4];
             Vec4::new(f32::from(rgba[0]), f32::from(rgba[1]), f32::from(rgba[2]), f32::from(rgba[3])) / 255.0
         };
-        let uv = if repeat { uv - uv.floor() } else { uv.clamp(glam::Vec2::ZERO, glam::Vec2::ONE) };
-        if matches!(self.sampling, Sampling::Nearest | Sampling::NearestRepeat) {
-            return straight(pixel((uv * size.as_vec2()).floor().as_ivec2()));
-        }
-        let position = uv * size.as_vec2() - 0.5;
+        let position = uv.clamp(glam::Vec2::ZERO, glam::Vec2::ONE) * size.as_vec2() - 0.5;
         let lower = position.floor().as_ivec2();
         let fraction = position - position.floor();
         straight(
@@ -84,12 +52,15 @@ impl Image {
     }
 }
 
-pub struct ShaderImage<'a> {
+#[cfg(target_arch = "spirv")]
+/// A texture and sampler bound for one captured image.
+pub struct Image<'a> {
     image: &'a Image2d,
     sampler: Sampler,
 }
 
-impl<'a> ShaderImage<'a> {
+#[cfg(target_arch = "spirv")]
+impl<'a> Image<'a> {
     pub const fn new(image: &'a Image2d, sampler: Sampler) -> Self {
         Self { image, sampler }
     }

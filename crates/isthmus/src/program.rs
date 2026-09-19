@@ -10,6 +10,11 @@ pub trait Program: Copy + 'static {
     #[cfg(not(target_arch = "spirv"))]
     /// Generated shader entry points and pipeline state.
     const SHADERS: &'static [ShaderEntry];
+    #[cfg(not(target_arch = "spirv"))]
+    /// Most image bindings declared by any of the program's shaders.
+    fn max_images() -> usize {
+        Self::SHADERS.iter().map(|entry| entry.images).max().unwrap_or(0)
+    }
 }
 
 /// How a shader's colour combines with the render target.

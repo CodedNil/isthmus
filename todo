@@ -1,8 +1,2 @@
 repeat/shuffle button
-
-timers:
-render active timer under the date
-activate commands like: timer 30m
-other command such as timer cancel
-
 mouse gestures generic across programs

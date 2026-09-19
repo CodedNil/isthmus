@@ -36,7 +36,7 @@ impl Gpu {
         });
         let bind_layout = device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("frame"), entries: &entries });
-        let images = ImageCache::new(&device, P::SHADERS.iter().map(|entry| entry.images).max().unwrap_or(0));
+        let images = ImageCache::new(&device, P::max_images());
         let layouts: Vec<_> = images
             .layouts
             .iter()

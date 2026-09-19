@@ -36,7 +36,6 @@ fn shader_entry(
     vertex: bool,
     images: &[&syn::Ident],
     payload: &syn::Ident,
-    varyings: &TokenStream2,
     body: &TokenStream2,
 ) -> TokenStream2 {
     let stage = if vertex { format_ident!("vertex") } else { format_ident!("fragment") };
@@ -77,7 +76,6 @@ fn shader_entry(
         #[#isthmus::spirv_std::spirv(#stage(entry_point_name = #entry_name))]
         pub fn #name(
             #interface
-            #varyings
             #[spirv(storage_buffer, descriptor_set = 0, binding = #draws_binding)]
             draws: &[u32],
             #[spirv(storage_buffer, descriptor_set = 0, binding = #frames_binding)]

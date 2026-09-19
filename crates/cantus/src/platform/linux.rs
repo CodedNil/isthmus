@@ -6,9 +6,7 @@ use crate::{
     music::MusicResult,
     platform::{CaptionFile, STATUS_SAMPLE_INTERVAL},
     render::{
-        PANEL_START, Renderer,
-        launcher::BACKGROUND_RADIUS,
-        lyrics,
+        PANEL_RADIUS, PANEL_START, Renderer, lyrics,
         status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
         weathertime,
     },
@@ -969,7 +967,7 @@ impl LayerShellApp {
         let y = origin.y.ceil() as i32 + 1;
         let width = (origin.x + size.x).floor() as i32 - 1 - x;
         let height = (origin.y + size.y).floor() as i32 - 1 - y;
-        let radius = (BACKGROUND_RADIUS - 1).min(width / 2).min(height / 2);
+        let radius = (PANEL_RADIUS as i32 - 1).min(width / 2).min(height / 2);
         region.add(x, y + radius, width, height - radius * 2);
         for row in 0..radius {
             let dy = radius as f32 - row as f32 - 0.5;

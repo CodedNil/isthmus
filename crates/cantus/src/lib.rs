@@ -10,3 +10,4 @@ pub(crate) mod interaction;
 pub(crate) mod music;
 pub mod platform;
 pub(crate) mod render;
+pub(crate) mod timer;

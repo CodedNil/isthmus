@@ -11,7 +11,9 @@ arrayvec = { version = "0.7.8", features = ["serde"] }
 fastrand = "2.5.0"
 fend-core = "1.5.8"
 form_urlencoded = "1.2.2"
-futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+futures-util = { version = "0.3.34", default-features = false, features = [
+    "std",
+] }
 image = { version = "0.25.10", default-features = false, features = [
     "ico",
     "jpeg",
@@ -19,7 +21,7 @@ image = { version = "0.25.10", default-features = false, features = [
 ] }
 isthmus = { path = "../isthmus" }
 isthmus_sdf = { path = "../isthmus_sdf" }
-jiff = { version = "0.2.35", default-features = false, features = [
+jiff = { version = "0.2.37", default-features = false, features = [
     "js",
     "serde",
     "tz-system",
@@ -38,7 +40,11 @@ serde.workspace = true
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 smallvec.workspace = true
 tokio = { version = "1.53.1", features = ["macros", "sync"] }
-toml = { version = "1.1.5", default-features = false, features = ["parse", "serde", "std"] }
+toml = { version = "1.1.6", default-features = false, features = [
+    "parse",
+    "serde",
+    "std",
+] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = "0.3.23"
 unicode-segmentation = "1.13.3"
@@ -49,7 +55,7 @@ bytemuck.workspace = true
 calloop = "0.14"
 calloop-wayland-source = "0.4.1"
 flate2 = "1.1.10"
-freedesktop-desktop-entry = { version = "0.8.2", default-features = false }
+freedesktop-desktop-entry = { version = "0.8.3", default-features = false }
 freedesktop-icons = "0.4.0"
 librespot-core = { version = "0.8.0", default-features = false, features = [
     "rustls-tls-webpki-roots",

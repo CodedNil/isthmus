@@ -196,16 +196,7 @@ impl TextCache {
     }
 
     /// Combines independently positioned text parts into one run using logical pixel offsets.
-    pub fn shape_positioned<'a>(
-        &mut self,
-        parts: impl IntoIterator<Item = (&'a str, Vec2)>,
-        size: f32,
-        font_weight: f32,
-    ) -> ShapedLine {
-        self.shape_positioned_width(parts, size, font_weight, 100.0)
-    }
-
-    pub fn shape_positioned_width<'a>(
+    fn shape_positioned_width<'a>(
         &mut self,
         parts: impl IntoIterator<Item = (&'a str, Vec2)>,
         size: f32,

@@ -1,5 +1,4 @@
 use crate::Image;
-use core::array::from_fn;
 use smallvec::SmallVec;
 use std::{
     collections::HashMap,
@@ -13,13 +12,13 @@ struct CachedImage {
 }
 
 type ImageKey = (usize, [u32; 2]);
-type ImageBindings = SmallVec<[(ImageKey, usize); 2]>;
+type ImageBindings = SmallVec<[ImageKey; 2]>;
 
 pub(super) struct ImageCache {
     images: HashMap<ImageKey, CachedImage>,
     groups: HashMap<ImageBindings, wgpu::BindGroup>,
     pub layouts: Vec<wgpu::BindGroupLayout>,
-    samplers: [wgpu::Sampler; 4],
+    sampler: wgpu::Sampler,
 }
 
 impl ImageCache {
@@ -53,35 +52,28 @@ impl ImageCache {
                 })
             })
             .collect();
-        let samplers = from_fn(|index| {
-            let filter = if index % 2 == 0 { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest };
-            let address = if index < 2 { wgpu::AddressMode::ClampToEdge } else { wgpu::AddressMode::Repeat };
-            device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("isthmus"),
-                mag_filter: filter,
-                min_filter: filter,
-                address_mode_u: address,
-                address_mode_v: address,
-                ..Default::default()
-            })
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("isthmus"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
         });
-        Self { images: HashMap::new(), groups: HashMap::new(), layouts, samplers }
+        Self { images: HashMap::new(), groups: HashMap::new(), layouts, sampler }
     }
 
     pub fn retain_live(&mut self) {
         self.images.retain(|_, image| image.source.strong_count() != 0);
-        self.groups.retain(|key, _| key.iter().all(|(image, _)| self.images.contains_key(image)));
+        self.groups.retain(|key, _| key.iter().all(|image| self.images.contains_key(image)));
     }
 
     pub fn images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, images: &[&Image]) -> wgpu::BindGroup {
-        let key: ImageBindings = images
-            .iter()
-            .map(|image| ((image.pixels.as_ptr() as usize, image.size), image.sampling as usize))
-            .collect();
+        let key: ImageBindings = images.iter().map(|image| (image.pixels.as_ptr() as usize, image.size)).collect();
         if let Some(group) = self.groups.get(&key) {
             return group.clone();
         }
-        for (&(key, _), image) in key.iter().zip(images) {
+        for (&key, image) in key.iter().zip(images) {
             self.images.entry(key).or_insert_with(|| CachedImage {
                 source: Arc::downgrade(&image.pixels),
                 view: upload(device, queue, image.size, &image.pixels),
@@ -90,7 +82,7 @@ impl ImageCache {
         let entries: Vec<_> = key
             .iter()
             .enumerate()
-            .flat_map(|(index, (key, sampling))| {
+            .flat_map(|(index, key)| {
                 [
                     wgpu::BindGroupEntry {
                         binding: index as u32 * 2,
@@ -98,7 +90,7 @@ impl ImageCache {
                     },
                     wgpu::BindGroupEntry {
                         binding: index as u32 * 2 + 1,
-                        resource: wgpu::BindingResource::Sampler(&self.samplers[*sampling]),
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
                     },
                 ]
             })

@@ -3,9 +3,12 @@ use crate::{
     config::MAX_WORLD_CLOCKS,
     platform,
     render::{
-        GAP, PANEL_START, Program, TEXT_COLOR, UNIT, UiContext,
+        GAP, PANEL_RADIUS, PANEL_START, Program, SUPPORT_BLEND, TEXT_BODY, TEXT_COLOR, TEXT_DISPLAY, TEXT_HEADING,
+        TEXT_SHADOW, TEXT_SMALL, TEXT_TITLE, UNIT, UiContext,
         sdf::{VISIBLE_ALPHA, deform, fbm, glass, hash, refract, sample_deformation},
+        support_row,
     },
+    timer::Timer,
 };
 use arrayvec::{ArrayString, ArrayVec};
 use core::f32::consts::PI;
@@ -26,6 +29,15 @@ const HOURLY_STEP_HOURS: usize = 4;
 pub const WIDTH: f32 = UNIT * 77.0;
 pub const EXTENSION: f32 = UNIT * 61.0;
 const FORECAST_X: f32 = WIDTH + GAP;
+/// Depth of the timer readout, sized to hold its text with a little air.
+const TIMER_DEPTH: f32 = TEXT_SMALL + 2.0 * UNIT;
+/// Space around the timer text inside its support.
+const TIMER_PADDING: f32 = 12.0;
+const TIMER_COLOR: Vec3 = vec3(1.00, 0.62, 0.60);
+/// Exterior reach of the shadow painted behind weather panel text.
+const TEXT_SHADOW_REACH: f32 = 1.6;
+/// Multiplier deepening the shared text shadow for weather panel text.
+const TEXT_SHADOW_STRENGTH: f32 = 1.7;
 
 const WEEKDAY_COUNT: usize = 7;
 const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
@@ -70,15 +82,19 @@ fn grid_cell(index: usize) -> Vec2 {
     )
 }
 
-fn weather_panel(pill: Rect, expansion: f32) -> impl Sdf {
+/// The pill, its expanded calendar, and the timer readout attached below.
+fn weather_panel(pill: Rect, expansion: f32, timer: Vec2) -> impl Sdf {
     let popup_size = vec2(WIDTH + FORECAST_X * expansion, ((EXTENSION - GAP) * expansion).max(0.001));
     let popup_center =
         pill.min + vec2(-FORECAST_X * expansion * 0.5, pill.size().y + GAP * expansion) + popup_size * 0.5;
-    Shape::pill(pill).smooth_union(
-        Shape::rounded_rect(Rect::from_center_size(popup_center, popup_size), 18.0),
-        56.0,
-        expansion,
-    )
+    let support = Shape::pill(Rect::from_center_size(support_row(pill), timer));
+    Shape::pill(pill)
+        .smooth_union(
+            Shape::rounded_rect(Rect::from_center_size(popup_center, popup_size), PANEL_RADIUS),
+            56.0,
+            expansion,
+        )
+        .smooth_union(support, SUPPORT_BLEND, timer.y / TIMER_DEPTH)
 }
 
 fn forecast_center(height: f32, row: f32) -> f32 {
@@ -214,6 +230,9 @@ pub struct WeatherPanel {
     month_hover: f32,
     previous_month_hover: f32,
     next_month_hover: f32,
+    /// Animated presence of the timer readout, and the support it occupies.
+    timer_presence: f32,
+    timer_support: Vec2,
 }
 
 mod monitor {
@@ -490,18 +509,30 @@ impl WeatherPanel {
         Self { timezones, details: "Weather unavailable".into(), ..Default::default() }
     }
 
-    pub fn show(&mut self, context: &mut UiContext, status_width: f32) -> StatusSky {
+    pub fn show(&mut self, context: &mut UiContext, status_width: f32, timer: &Timer) -> StatusSky {
         let height = context.config.height;
         let x = context.frame.screen_size.x - WIDTH - GAP - status_width;
         let pill = Rect::new(vec2(x, PANEL_START), vec2(x + WIDTH, PANEL_START + height));
-        let hovered = context.interaction.pointer_in(weather_panel(pill, self.expansion.smoothstep(0.0, 1.0)));
+        let readout = timer.readout();
+        let expired = timer.expired();
+        self.timer_presence = self
+            .timer_presence
+            .move_towards(f32::from(readout.is_some()), context.frame.delta_time.min(1.0 / 30.0) * 6.0);
+        let presence = self.timer_presence.smoothstep(0.0, 1.0);
+        // Sized from a fixed run so the pulsing text never resizes its support.
+        let text = readout.as_deref().unwrap_or_default();
+        let width = context.frame.resources.shape(text, TEXT_SMALL, 900.0).text.width;
+        self.timer_support = vec2((width + TIMER_PADDING * 2.0) * presence, TIMER_DEPTH * presence);
+        let timer_support = self.timer_support;
+        let hovered =
+            context.interaction.pointer_in(weather_panel(pill, self.expansion.smoothstep(0.0, 1.0), timer_support));
         self.expansion =
             self.expansion.move_towards(f32::from(hovered), context.frame.delta_time.min(1.0 / 30.0) * 3.0);
         let (weather_label, hour) = self.collapsed_label();
         let current = self.hourly[0].conditions;
         let sun = Vec2::from(sun_position(hour, self.sun_hours));
         let expansion = self.expansion.smoothstep(0.0, 1.0);
-        let panel = weather_panel(pill, expansion);
+        let panel = weather_panel(pill, expansion, timer_support);
         context.interaction.input_region(pill);
         if expansion > 0.0 {
             context.interaction.input_region(panel.bounds(0.0));
@@ -514,6 +545,7 @@ impl WeatherPanel {
                     let next: WeatherCondition = self.hourly[1].conditions;
                     let pill: Rect;
                     let expansion: f32;
+                    let timer_support: Vec2;
                     let phase: Vec3 = sky_phase(sun.y);
                     let sun_center: Vec2 =
                         vec2(16.0 + sun.x * (pill.size().x - 32.0), pill.size().y * (0.72 - sun.y.saturate() * 0.45));
@@ -521,7 +553,7 @@ impl WeatherPanel {
                         .lerp(vec3(0.98, 0.74, 0.66), sun.y.smoothstep(0.55, 0.02))
                         .extend(sun.y.smoothstep(-0.02, 0.04));
                 })
-                .primitive(|frame| deform(weather_panel(pill, expansion), frame))
+                .primitive(|frame| deform(weather_panel(pill, expansion, timer_support), frame))
                 .fragment(|frame, surface| {
                     let body_local = surface.pixel - pill.min;
                     let edge = ((body_local.x / pill.size().x).clamp(0.0, 1.0) - 0.5).abs();
@@ -548,9 +580,17 @@ impl WeatherPanel {
         let line = context
             .frame
             .resources
-            .line(&weather_label, 24.0, 600.0)
+            .line(&weather_label, TEXT_DISPLAY, 600.0)
             .centered(vec2(x + WIDTH * 0.5, PANEL_START + height * 0.46));
         self.paint_text(context, line, pill, TEXT_COLOR.extend(1.0), false);
+        if presence > 0.0 {
+            // Quantized so the shaped run is reused rather than rebuilt every frame.
+            let pulse = ((context.frame.time * 5.0).sin() * 0.5 + 0.5).powi(2);
+            let size = TEXT_SMALL + if expired { (pulse * 2.0).round() * 0.5 } else { 0.0 };
+            let line = context.frame.resources.line(text, size, 900.0).centered(support_row(pill));
+            let alpha = if expired { 0.4 + 0.6 * pulse } else { 1.0 };
+            self.paint_text(context, line, pill, TIMER_COLOR.extend(alpha), true);
+        }
         self.show_calendar(context, pill);
         StatusSky { sun_height: sun.y, conditions: current }
     }
@@ -562,13 +602,14 @@ impl WeatherPanel {
                 .upload({
                     let pill: Rect;
                     let expansion: f32 = self.expansion.smoothstep(0.0, 1.0);
-                    let line: Text = line.outlined(0.8);
+                    let timer_support: Vec2 = self.timer_support;
+                    let line: Text = line.outlined(TEXT_SHADOW_REACH);
                     let color: Vec4;
                     let clip: bool;
                 })
-                .primitive(|frame| refract(weather_panel(pill, expansion), frame, line))
+                .primitive(|frame| refract(weather_panel(pill, expansion, timer_support), frame, line))
                 .fragment(|_, surface| {
-                    surface.paint(color.with_w(1.0), Vec3::ZERO.extend(0.18))
+                    surface.paint(color.with_w(1.0), TEXT_SHADOW.with_w(TEXT_SHADOW.w * TEXT_SHADOW_STRENGTH))
                         * vec4(1.0, 1.0, 1.0, color.w * if clip { surface.parent_fill } else { 1.0 })
                 })
         );
@@ -635,7 +676,7 @@ impl WeatherPanel {
             .resources
             .line(
                 &month.strftime("%B %Y").to_string(),
-                20.0 * (1.0 + self.month_hover * 0.2),
+                TEXT_HEADING * (1.0 + self.month_hover * 0.2),
                 750.0 + self.month_hover * 150.0,
             )
             .centered(origin + TITLE);
@@ -656,7 +697,7 @@ impl WeatherPanel {
             let line = context
                 .frame
                 .resources
-                .line(glyph, 20.0 * (1.0 + *hover * 0.35), 750.0 + *hover * 150.0)
+                .line(glyph, TEXT_HEADING * (1.0 + *hover * 0.35), 750.0 + *hover * 150.0)
                 .centered(origin + position);
             self.paint_text(context, line, pill, TEXT_COLOR.extend(reveal_progress(expansion, position.y)), true);
         }
@@ -669,9 +710,11 @@ impl WeatherPanel {
             let forecast_pill = Rect::new(origin + row_origin, origin + row_origin + size);
             let alpha = reveal_progress(expansion, row_origin.y + size.y * 0.5);
             if alpha > 0.0
-                && context
-                    .interaction
-                    .pointer_in(Shape::pill(forecast_pill).intersection(weather_panel(pill, expansion)))
+                && context.interaction.pointer_in(Shape::pill(forecast_pill).intersection(weather_panel(
+                    pill,
+                    expansion,
+                    self.timer_support,
+                )))
             {
                 let column = ((context.interaction.mouse_pos().x - origin.x - row_origin.x) / step) as usize;
                 hovered_detail = Some(items[column.min(items.len() - 1)].hover_text.as_str());
@@ -690,10 +733,12 @@ impl WeatherPanel {
                         let forecast_pill: Rect;
                         let pill: Rect;
                         let expansion: f32;
+                        let timer_support: Vec2 = self.timer_support;
                     })
                     .primitive(|frame| deform(Shape::pill(forecast_pill), frame))
                     .fragment(|frame, surface| {
-                        let panel = sample_deformation(weather_panel(pill, expansion), frame, surface.pixel);
+                        let panel =
+                            sample_deformation(weather_panel(pill, expansion, timer_support), frame, surface.pixel);
                         let position =
                             (forecast_pill.uv(surface.pixel).x * count as f32 - 0.5).clamp(0.0, count as f32 - 1.0);
                         let index = position.floor() as usize;
@@ -719,19 +764,19 @@ impl WeatherPanel {
             );
             for (column, forecast) in items.iter().enumerate() {
                 let center = origin + row_origin + vec2(step * (column as f32 + 0.5), size.y * 0.5);
-                self.pair(context, forecast.text.each_ref().map(String::as_str), 14.0, center, GAP, alpha, pill);
+                self.pair(context, forecast.text.each_ref().map(String::as_str), TEXT_BODY, center, GAP, alpha, pill);
             }
         }
         let line = context
             .frame
             .resources
-            .line(hovered_detail.unwrap_or(&self.details), 14.0, 700.0)
+            .line(hovered_detail.unwrap_or(&self.details), TEXT_BODY, 700.0)
             .centered(origin + vec2(FORECAST_X + WIDTH * 0.5, TITLE.y));
         self.paint_text(context, line, pill, TEXT_COLOR.extend(reveal), true);
 
         for (column, weekday) in WEEKDAYS.iter().enumerate() {
             let position = Vec2::new(grid_cell(column).x, UNIT * 17.0);
-            let line = context.frame.resources.line(weekday, 14.0, 700.0).centered(origin + position);
+            let line = context.frame.resources.line(weekday, TEXT_BODY, 700.0).centered(origin + position);
             self.paint_text(
                 context,
                 line,
@@ -753,7 +798,7 @@ impl WeatherPanel {
             let line = context
                 .frame
                 .resources
-                .line(&label, 16.0, if is_today { 900.0 } else { 700.0 })
+                .line(&label, TEXT_TITLE, if is_today { 900.0 } else { 700.0 })
                 .centered(origin + grid_cell(index));
             self.paint_text(context, line, pill, color.extend(alpha), true);
         }
@@ -770,7 +815,7 @@ impl WeatherPanel {
             self.pair(
                 context,
                 [&clock, &timezone.weather],
-                12.0,
+                TEXT_SMALL,
                 origin + center,
                 GAP * 0.7,
                 reveal_progress(expansion, center.y),

@@ -612,3 +612,21 @@ fn parse_richsync(lines: &[Line], matched: &Value, duration: f32) -> MusicResult
     }
     Ok(Lyrics { channels: channels.into_values().flatten().collect(), ..Default::default() })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Musixmatch rounds a line's trailing space past its final word, which used to reject
+    /// the whole track. The word must survive with a usable end boundary.
+    #[test]
+    fn repairs_inverted_word_offsets() {
+        let source = r#"[{"ts":29.89,"te":31.7,"x":"And day","l":[
+            {"c":"And","o":0},{"c":" ","o":1.81},{"c":"day","o":1.809}]}]"#;
+        let lines: Vec<Line> = serde_json::from_str(source).expect("fixture parses");
+        let lyrics = parse_richsync(&lines, &serde_json::json!({}), 220_000.0).expect("rounded offsets are valid");
+        let last = lyrics.channels[0].segments.last().expect("a final word");
+        assert_eq!(last.text.trim(), "day");
+        assert!(last.time.end > last.time.start, "{:?}", last.time);
+    }
+}

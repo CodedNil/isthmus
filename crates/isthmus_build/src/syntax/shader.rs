@@ -1,7 +1,7 @@
 use super::{image_names, shader_entry};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Expr, Ident, Pat, Stmt, Type, parse_quote, spanned::Spanned, token::Move};
+use syn::{Expr, Ident, Pat, Stmt, Type, parse_quote, spanned::Spanned};
 
 struct Binding {
     name: Ident,
@@ -43,19 +43,12 @@ impl Binding {
     }
 }
 
-struct Output {
-    name: Ident,
-    ty: Type,
-    flat: bool,
-}
-
 pub struct Shader {
     pub declaration: syn::ExprClosure,
     frame: Expr,
     stage: Expr,
     fragment: syn::ExprClosure,
     captures: Vec<Binding>,
-    outputs: Vec<Output>,
     pub entry: syn::LitStr,
     blend: syn::Path,
 }
@@ -88,28 +81,6 @@ fn closure(expr: &mut Expr, parameters: usize) -> syn::Result<&mut syn::ExprClos
         }
         _ => Err(syn::Error::new(span, format!("expected a closure with {parameters} inferred parameters"))),
     }
-}
-
-fn custom(stage: &mut Expr) -> syn::Result<Option<&mut syn::ExprClosure>> {
-    if let Expr::Closure(factory) = stage {
-        return custom(&mut factory.body);
-    }
-    if let Expr::Block(block) = stage {
-        return match block.block.stmts.last_mut() {
-            Some(Stmt::Expr(tail, None)) => custom(tail),
-            _ => Ok(None),
-        };
-    }
-    if let Expr::Call(call) = stage
-        && let Expr::Path(path) = &*call.func
-        && path.path.segments.last().is_some_and(|segment| segment.ident == "vertices")
-    {
-        if call.args.len() != 2 {
-            return Err(syn::Error::new_spanned(call, "expected vertices(count, |vertex| { ... })"));
-        }
-        return closure(call.args.last_mut().unwrap(), 1).map(Some);
-    }
-    Ok(None)
 }
 
 impl Shader {
@@ -154,37 +125,6 @@ impl Shader {
                 "shader operations must occur once, in blend/upload/primitive/fragment order",
             ));
         }
-        let mut outputs = Vec::new();
-        if let Some(vertex) = custom(&mut stage)? {
-            let statements = match &*vertex.body {
-                Expr::Block(body) => body.block.stmts.as_slice(),
-                _ => &[],
-            };
-            for statement in statements {
-                let Stmt::Local(local) = statement else { continue };
-                if let Pat::Type(pat) = &local.pat
-                    && let Type::Path(path) = &*pat.ty
-                    && let Some(marker) = path.path.segments.last()
-                    && (marker.ident == "Flat" || marker.ident == "Smooth")
-                {
-                    let binding = Binding::parse(local.clone())?;
-                    let syn::PathArguments::AngleBracketed(args) = &marker.arguments else {
-                        return Err(syn::Error::new_spanned(marker, "specify the output type"));
-                    };
-                    let Some(syn::GenericArgument::Type(ty)) = args.args.first().filter(|_| args.args.len() == 1)
-                    else {
-                        return Err(syn::Error::new_spanned(args, "specify one shader output type"));
-                    };
-                    if outputs.len() == 14 {
-                        return Err(syn::Error::new_spanned(
-                            binding.name,
-                            "vertex outputs must fit 14 stage locations",
-                        ));
-                    }
-                    outputs.push(Output { name: binding.name, ty: ty.clone(), flat: marker.ident == "Flat" });
-                }
-            }
-        }
         let inputs = captures.iter().map(|Binding { name, ty, .. }| quote!(#name: #ty));
         let declaration = parse_quote!(|#(#inputs),*| {
             let _: Program;
@@ -199,7 +139,7 @@ impl Shader {
             .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3));
         let entry =
             syn::LitStr::new(&format!("isthmus_{hash:x}_{line}_{column}_fragment"), proc_macro2::Span::call_site());
-        Ok(Self { declaration, frame, stage, fragment, captures, outputs, entry, blend: blend.path })
+        Ok(Self { declaration, frame, stage, fragment, captures, entry, blend: blend.path })
     }
 
     pub fn vertex_entry(&self) -> String {
@@ -235,37 +175,13 @@ impl Shader {
         }
     }
 
-    fn stage(&self, isthmus: &TokenStream, data: &Ident) -> (TokenStream, Expr) {
+    fn stage(&self, isthmus: &TokenStream) -> Expr {
         let mut stage = self.stage.clone();
-        if let Some(vertex) = custom(&mut stage).unwrap() {
-            let input = vertex.inputs.first().unwrap();
-            let typed: syn::ExprClosure = parse_quote!(|#input: #isthmus::VertexInput<Program>| {});
-            vertex.inputs = typed.inputs;
-            vertex.capture = Some(Move::default());
-            if !self.outputs.is_empty()
-                && let Expr::Block(body) = &mut *vertex.body
-            {
-                let tail = body.block.stmts.pop().unwrap();
-                let fields = self.outputs.iter().map(|Output { name, .. }| quote!(#name: #name.0));
-                let tail = match tail {
-                    Stmt::Expr(expr, None) => expr,
-                    other => parse_quote!({ #other }),
-                };
-                body.block.stmts.push(parse_quote!(let __vertex = #tail;));
-                body.block.stmts.push(Stmt::Expr(parse_quote!(__vertex.with(#data { #(#fields),* })), None));
-            }
-        }
         let factory = closure(&mut stage, 1).unwrap();
         let input = factory.inputs.first().unwrap();
         let typed: syn::ExprClosure = parse_quote!(|#input: #isthmus::ShaderFrame<Program>| {});
         factory.inputs = typed.inputs;
-        let fields = self.outputs.iter().map(|Output { name, ty, .. }| quote!(pub #name: #ty));
-        let declaration = if self.outputs.is_empty() {
-            quote!()
-        } else {
-            quote!(#[derive(Clone, Copy)] struct #data { #(#fields),* })
-        };
-        (declaration, stage)
+        stage
     }
 
     pub fn host(&self, isthmus: &TokenStream) -> TokenStream {
@@ -289,12 +205,11 @@ impl Shader {
         let images = self.images();
 
         let payload = self.payload(isthmus, &format_ident!("__IsthmusPayload"));
-        let (outputs, stage) = self.stage(isthmus, &format_ident!("__IsthmusOutputs"));
+        let stage = self.stage(isthmus);
         quote!({
             const _: () = assert!(matches!(#blend, #isthmus::Blend::#variant));
             #(#bindings)*
             let __isthmus_frame: &mut #isthmus::Frame<'_, Program> = (#frame).reborrow();
-            #outputs
             let __vertices = {
                 #(#views)*
                 __isthmus_frame.prepare(#stage, #fragment)
@@ -312,8 +227,7 @@ impl Shader {
     pub fn gpu(&self, isthmus: &TokenStream) -> TokenStream {
         let suffix = self.entry.value().replace('_', "");
         let payload_name = format_ident!("IsthmusPayload{suffix}");
-        let data = format_ident!("IsthmusOutputs{suffix}");
-        let (outputs, stage) = self.stage(isthmus, &data);
+        let stage = self.stage(isthmus);
         let payload = self.payload(isthmus, &payload_name);
         let frame_input = self.fragment.inputs.first().unwrap();
         let input = &self.fragment.inputs[1];
@@ -322,7 +236,7 @@ impl Shader {
             let value = match kind {
                 CaptureKind::Image => {
                     let (image, sampler) = image_names(name);
-                    quote!(#isthmus::__private::ShaderImage::new(#image, *#sampler))
+                    quote!(#isthmus::Image::new(#image, *#sampler))
                 }
                 CaptureKind::Buffer => quote!(#isthmus::Buffer::from_words(payload, _instance.#name)),
                 CaptureKind::Data => quote!(#isthmus::ShaderData::resolve(_instance.#name, #isthmus::ResourceData {
@@ -342,29 +256,9 @@ impl Shader {
             };
             let __stage = (#stage)(__frame);
         };
-        let interface = |vertex: bool| {
-            let fields = self.outputs.iter().enumerate().map(|(index, output)| {
-                let name = format_ident!("__varying_{}", output.name);
-                let ty = &output.ty;
-                let ty = if vertex { quote!(&mut #ty) } else { quote!(#ty) };
-                let location = index as u32 + 2;
-                let flat = output.flat.then(|| quote!(, flat));
-                quote!(#[spirv(location = #location #flat)] #name: #ty,)
-            });
-            quote!(#(#fields)*)
-        };
-        let (writes, reads): (Vec<_>, Vec<_>) = self
-            .outputs
-            .iter()
-            .map(|Output { name, .. }| {
-                let varying = format_ident!("__varying_{name}");
-                (quote!(*#varying = vertex.outputs.#name;), quote!(#name: #varying))
-            })
-            .unzip();
-        let read = if self.outputs.is_empty() { quote!(()) } else { quote!(#data { #(#reads),* }) };
         let images = self.images().collect::<Vec<_>>();
         let vertex_name = syn::LitStr::new(&self.vertex_entry(), self.entry.span());
-        let vertex = shader_entry(isthmus, &vertex_name, true, &images, &payload_name, &interface(true), &quote! {
+        let vertex = shader_entry(isthmus, &vertex_name, true, &images, &payload_name, &quote! {
             #setup
             let vertex = #isthmus::Primitive::vertex(__stage, #isthmus::VertexInput::<__Program> {
                 index, frame: __frame,
@@ -372,9 +266,8 @@ impl Shader {
             *out_position = vertex.position;
             *out_uv = vertex.uv;
             *out_draw_index = draw_index;
-            #(#writes)*
         });
-        let fragment = shader_entry(isthmus, &self.entry, false, &images, &payload_name, &interface(false), &quote! {
+        let fragment = shader_entry(isthmus, &self.entry, false, &images, &payload_name, &quote! {
             #setup
             let __fragment = #isthmus::Fragment {
                 pixel: #isthmus::glam::vec2(pixel.x, pixel.y) * frame.pixel_scale,
@@ -382,7 +275,7 @@ impl Shader {
                 sample: (),
                 coverage: 1.0,
             };
-            let (__sample, __coverage) = #isthmus::Primitive::<__Program>::sample(__stage, __fragment, #read);
+            let (__sample, __coverage) = #isthmus::Primitive::<__Program>::sample(__stage, __fragment);
             let #input = #isthmus::Fragment {
                 pixel: __fragment.pixel, uv: __fragment.uv, sample: __sample, coverage: __coverage,
             };
@@ -392,6 +285,6 @@ impl Shader {
             let alpha = color.w * __coverage;
             *out_color = (color.truncate() * alpha).extend(alpha);
         });
-        quote!(#payload #outputs #vertex #fragment)
+        quote!(#payload #vertex #fragment)
     }
 }

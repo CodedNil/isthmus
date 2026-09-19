@@ -1,4 +1,4 @@
-use crate::render::Program;
+use crate::render::{Program, RipplePulse};
 use isthmus::prelude::*;
 use isthmus_sdf::prelude::*;
 
@@ -13,10 +13,7 @@ const LENS_REACH: f32 = 3.0;
 /// Smallest coverage worth shading; analytic shadows never reach exact zero.
 pub const VISIBLE_ALPHA: f32 = 1.0 / 1024.0;
 
-pub fn deform(
-    shape: impl Sdf,
-    frame: ShaderFrame<Program>,
-) -> impl Primitive<Program, Outputs = (), Sample = DeformedSample> {
+pub fn deform(shape: impl Sdf, frame: ShaderFrame<Program>) -> impl Primitive<Program, Sample = DeformedSample> {
     let (bulge_reach, _) = reach(shape, frame);
     let shape = shape.outlined((SHADOW_OPACITY / VISIBLE_ALPHA).ln() / SHADOW_DECAY);
     surface(shape.bounds(bulge_reach), move |point| {
@@ -30,7 +27,7 @@ pub fn refract(
     parent: impl Sdf,
     frame: ShaderFrame<Program>,
     shape: impl Sdf,
-) -> impl Primitive<Program, Outputs = (), Sample = DeformedSample> {
+) -> impl Primitive<Program, Sample = DeformedSample> {
     let (_, refraction_reach) = reach(parent, frame);
     surface(shape.bounds(refraction_reach), move |point| {
         let mut sample = sample_deformation(parent, frame, point);
@@ -44,7 +41,7 @@ pub fn lens(
     parent: impl Sdf,
     frame: ShaderFrame<Program>,
     shape: impl Sdf,
-) -> impl Primitive<Program, Outputs = (), Sample = DeformedSample> {
+) -> impl Primitive<Program, Sample = DeformedSample> {
     let (bulge_reach, refraction_reach) = reach(parent, frame);
     surface(shape.bounds(refraction_reach + bulge_reach + LENS_REACH), move |point| {
         let mut parent = sample_deformation(parent, frame, point);
@@ -54,34 +51,41 @@ pub fn lens(
 }
 
 fn reach(shape: impl Sdf, frame: ShaderFrame<Program>) -> (f32, f32) {
-    let pressure = frame.globals.pressure * shape.distance_at(frame.globals.pointer).smoothstep(0.5, -0.5);
+    let pressure = pointer_pressure(shape, frame);
     let mut ripple = 0.0;
     for index in 0..frame.globals.ripples.len() {
-        let pulse = frame.globals.ripples[index];
-        if pulse.start_time > 0.0 {
-            ripple += (1.0 - ((frame.time - pulse.start_time) * 1.2).saturate()).powi(2) * 0.5;
-        }
+        ripple += ripple_falloff(frame, frame.globals.ripples[index]);
     }
-    let bulge_reach = f32::midpoint(pressure * POINTER_BULGE, ripple * RIPPLE_BULGE);
-    let refraction_reach = POINTER_REACH * pressure * POINTER_REFRACTION + ripple * RIPPLE_REFRACTION;
-    (bulge_reach, refraction_reach)
+    let bulge = f32::midpoint(pressure * POINTER_BULGE, ripple * RIPPLE_BULGE);
+    (bulge, POINTER_REACH * pressure * POINTER_REFRACTION + ripple * RIPPLE_REFRACTION)
+}
+
+/// Pointer pressure on a shape's edge, shared by deformation and its bounds.
+fn pointer_pressure(shape: impl Sdf, frame: ShaderFrame<Program>) -> f32 {
+    frame.globals.pressure * shape.distance_at(frame.globals.pointer).smoothstep(0.5, -0.5)
+}
+
+/// Falloff of one ripple pulse, which also bounds its displacement contribution.
+fn ripple_falloff(frame: ShaderFrame<Program>, pulse: RipplePulse) -> f32 {
+    if pulse.start_time > 0.0 { (1.0 - ((frame.time - pulse.start_time) * 1.2).saturate()).powi(2) * 0.5 } else { 0.0 }
 }
 
 pub fn sample_deformation(shape: impl Sdf, frame: ShaderFrame<Program>, point: Vec2) -> DeformedSample {
-    let pressure = frame.globals.pressure * shape.distance_at(frame.globals.pointer).smoothstep(0.5, -0.5);
+    let pressure = pointer_pressure(shape, frame);
     let mut ripple = Vec2::ZERO;
     let mut flash = 0.0;
     // Rust-GPU cannot lower this slice iterator without a pointer-to-integer conversion.
     for index in 0..frame.globals.ripples.len() {
         let pulse = frame.globals.ripples[index];
-        let progress = ((frame.time - pulse.start_time) * 1.2).saturate();
-        if pulse.start_time > 0.0 && progress < 1.0 {
+        let falloff = ripple_falloff(frame, pulse);
+        if falloff > 0.0 {
+            let progress = ((frame.time - pulse.start_time) * 1.2).saturate();
             let offset = point - pulse.origin;
             let distance = offset.length();
             let direction = if distance > 0.0001 { offset / distance } else { Vec2::ZERO };
-            let wave = (distance - progress * 600.0).abs().smoothstep(80.0, 0.0) * (1.0 - progress);
-            ripple += direction * wave * (1.0 - progress) * 0.5;
-            flash = (flash + wave * 0.5).min(1.0);
+            let wave = (distance - progress * 600.0).abs().smoothstep(80.0, 0.0);
+            ripple += direction * wave * falloff;
+            flash = (flash + wave * (1.0 - progress) * 0.5).min(1.0);
         }
     }
     let pointer_offset = point - frame.globals.pointer;

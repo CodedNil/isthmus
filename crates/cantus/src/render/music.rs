@@ -1,8 +1,10 @@
 use crate::{
     music::{Music, TRACK_SPACING_MS, Track},
     render::{
-        BarLayout, GAP, HISTORY_WIDTH, PANEL_START, Program, TEXT_COLOR, UiContext,
+        BarLayout, GAP, HISTORY_WIDTH, PANEL_START, Program, SUPPORT_BLEND, SUPPORT_INSET, TEXT_BODY, TEXT_COLOR,
+        TEXT_TITLE, UiContext,
         sdf::{deform, glass, hash, refract, simplex_noise},
+        support_row,
     },
 };
 use core::{
@@ -18,15 +20,15 @@ use std::{iter, sync::LazyLock};
 /// Number of colors extracted from album artwork.
 pub const PALETTE_COLORS: usize = 4;
 /// Visual width, in pixels, of rating and playlist icons before hover growth.
-const ICON_WIDTH: f32 = 21.6;
+const ICON_WIDTH: f32 = 24.0;
 /// Center-to-center icon spacing for rating stars and playlist artwork.
-const ICON_SPACING: f32 = 18.0;
+const ICON_SPACING: f32 = 20.0;
 /// Height added below the pill for ratings and saved playlists.
-const PRIMARY_SUPPORT_DEPTH: f32 = 7.0;
+const PRIMARY_SUPPORT_DEPTH: f32 = 8.0;
 /// Height added below the first icon row for other playlists.
-const SECONDARY_SUPPORT_DEPTH: f32 = 18.0;
+const SECONDARY_SUPPORT_DEPTH: f32 = 20.0;
 /// Space reserved for each collapsed history track, excluding its gap.
-const HISTORY_TRACK_WIDTH: f32 = 10.0;
+const HISTORY_TRACK_WIDTH: f32 = 12.0;
 /// Transparent texture used while artwork is unavailable and for rating icons.
 static EMPTY_ART: LazyLock<Image> = LazyLock::new(|| Image::rgba8([1, 1], vec![0; 4]));
 
@@ -71,13 +73,16 @@ impl<'a> TrackLayout<'a> {
 fn music_shape(pill: Rect, icon_supports: [Vec2; 2]) -> impl Sdf {
     let support = |index: usize| {
         Shape::pill(Rect::from_center_size(
-            vec2(pill.center().x, pill.max.y - 6.0 + index as f32 * 7.0 + icon_supports[index].y * 0.5),
+            vec2(
+                pill.center().x,
+                pill.max.y - SUPPORT_INSET + index as f32 * PRIMARY_SUPPORT_DEPTH + icon_supports[index].y * 0.5,
+            ),
             icon_supports[index],
         ))
     };
-    Shape::pill(pill).smooth_union(support(0), 9.0, icon_supports[0].y / PRIMARY_SUPPORT_DEPTH).smooth_union(
+    Shape::pill(pill).smooth_union(support(0), SUPPORT_BLEND, icon_supports[0].y / PRIMARY_SUPPORT_DEPTH).smooth_union(
         support(1),
-        9.0,
+        SUPPORT_BLEND,
         icon_supports[1].y / SECONDARY_SUPPORT_DEPTH,
     )
 }
@@ -307,8 +312,8 @@ impl MusicView {
                 let compact_details = format!("{time}\u{2004}•\u{2004}{}", track.primary_artist());
                 let full_details = format!("{time}\u{2004}•\u{2004}{artists}");
                 [
-                    (track.compact_title(), track.name.as_str(), 16.0),
-                    (compact_details.as_str(), full_details.as_str(), 14.0),
+                    (track.compact_title(), track.name.as_str(), TEXT_TITLE),
+                    (compact_details.as_str(), full_details.as_str(), TEXT_BODY),
                 ]
                 .map(|(compact, full, size)| {
                     (
@@ -414,7 +419,7 @@ impl MusicView {
                         let icon = slot as f32 * star_alpha;
                         let center = vec2(
                             pill.center().x + (icon - (count - 1.0).max(0.0) * 0.5) * ICON_SPACING,
-                            pill_top + panel_height * 0.975 - 1.0,
+                            support_row(pill).y,
                         );
                         if center.distance(mouse_pos) <= ICON_WIDTH * 0.5 {
                             rating = Some(slot as i32 * 2 + 1 + i32::from(mouse_pos.x >= center.x));
@@ -440,7 +445,7 @@ impl MusicView {
                     }
                     let center = vec2(
                         pill.center().x + (icon - (count - 1.0).max(0.0) * 0.5) * ICON_SPACING * spread,
-                        pill_top + panel_height * 0.975 - 1.0 + f32::from(secondary) * ICON_SPACING * spread,
+                        support_row(pill).y + f32::from(secondary) * ICON_SPACING * spread,
                     );
                     let response = context.interaction.interact(
                         (
