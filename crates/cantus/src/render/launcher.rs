@@ -4,22 +4,21 @@ use crate::{
     interaction::key,
     platform::{self, DesktopApp},
     render::{
-        GAP, PADDING, Program, TEXT_COLOR, UNIT, UiContext,
+        GAP, PADDING, PANEL_RADIUS, Program, TEXT_COLOR, TEXT_HEADING, TEXT_SMALL, TEXT_TITLE, UNIT, UiContext,
         sdf::{deform, glass, presence},
     },
+    timer::{self, Request},
 };
 use fend_core::Context;
 use isthmus::prelude::*;
 use isthmus_sdf::prelude::*;
 use serde::Deserialize;
-use std::{collections::HashMap, error::Error, ops::Range, sync::OnceLock};
+use std::{collections::HashMap, error::Error, mem, ops::Range, sync::OnceLock};
 use unicode_segmentation::UnicodeSegmentation;
 
 const PANEL_WIDTH: f32 = 520.0;
-const ROW_HEIGHT: f32 = 50.0;
+const ROW_HEIGHT: f32 = UNIT * 12.0;
 const HEADER_HEIGHT: f32 = ROW_HEIGHT + PADDING;
-pub const BACKGROUND_RADIUS: i32 = 16;
-/// Matched-app/calculator rows shown below the search bar.
 pub const MAX_VISIBLE: usize = 8;
 
 /// Side of the square icon tile at the left of every row.
@@ -27,10 +26,53 @@ const ICON_SIZE: f32 = 32.0;
 /// Icons, badge outlines and the magnifier all share one grey.
 const ICON_COLOR: Vec3 = Vec3::splat(0.58);
 const ACCENT_COLOR: Vec3 = vec3(0.44, 0.40, 0.80);
-const DETAIL_COLOR: Vec3 = Vec3::new(0.56, 0.63, 0.86);
+/// Dimmer grey for action badges, placeholders and secondary detail.
 const MUTED_COLOR: Vec3 = Vec3::new(0.52, 0.55, 0.64);
 const CALCULATOR_ICON: u32 = 1;
 const SEARCH_ICON: u32 = 2;
+const TIMER_ICON: u32 = 3;
+/// Confidence given to a successful calculation; an exactly named app still wins.
+const ANSWER_CONFIDENCE: f32 = 0.9;
+/// Confidence below which an app name is not worth listing.
+const MIN_CONFIDENCE: f32 = 0.6;
+
+/// Confidence that `query` names `text`, from 0 to 1.
+///
+/// Containment ranks highest, scaled by how much of the name the query covers, so
+/// `code` still finds `Visual Studio Code`. Otherwise edit distance catches typos.
+pub fn confidence(query: &str, text: &str) -> f32 {
+    let (query, text) = (query.trim().to_lowercase(), text.to_lowercase());
+    if query.is_empty() || text.is_empty() {
+        return 0.0;
+    }
+    let coverage = query.len() as f32 / text.len() as f32;
+    if text.starts_with(&query) {
+        return 0.8 + 0.2 * coverage;
+    }
+    if text.contains(&query) {
+        return MIN_CONFIDENCE + 0.2 * coverage;
+    }
+    similarity(&query, &text)
+}
+
+/// Normalized edit distance between two words, from 0 to 1.
+pub fn similarity(a: &str, b: &str) -> f32 {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0; b.len() + 1];
+    for (row, left) in a.iter().enumerate() {
+        current[0] = row + 1;
+        for (column, right) in b.iter().enumerate() {
+            let substitute = previous[column] + usize::from(left != right);
+            current[column + 1] = substitute.min(previous[column + 1] + 1).min(current[column] + 1);
+        }
+        mem::swap(&mut previous, &mut current);
+    }
+    1.0 - previous[b.len()] as f32 / a.len().max(b.len()) as f32
+}
 
 /// Currency rates relative to USD, read by fend for conversions.
 static EXCHANGE_RATES: OnceLock<HashMap<String, f64>> = OnceLock::new();
@@ -45,6 +87,13 @@ fn calculator_icon(point: Vec2) -> Vec4 {
     let badge = Shape::rounded_rect(Vec2::splat(26.0), 9.0).fill_at(point);
     let equals = Shape::segment(vec2(-4.3, 0.0), vec2(4.3, 0.0), 2.2).fill_at(vec2(point.x, point.y.abs() - 3.1));
     ACCENT_COLOR.lerp(Vec3::splat(0.96), equals).extend(badge)
+}
+
+/// Coverage of a clock face centered on the origin.
+fn timer_icon(point: Vec2) -> f32 {
+    let face = Shape::circle(Vec2::ZERO, 7.0).stroke(1.8);
+    let hands = Shape::segment(Vec2::ZERO, vec2(0.0, -4.2), 1.4).union(Shape::segment(Vec2::ZERO, vec2(3.2, 1.6), 1.4));
+    face.union(hands).fill_at(point)
 }
 
 /// "↵" or "⇧" glyph coverage, drawn around the origin.
@@ -157,6 +206,8 @@ pub struct LauncherState {
     pub selected: usize,
     /// Text waiting to be put on the system clipboard by the platform layer.
     pub pending_copy: Option<String>,
+    /// Timer request waiting to be applied to the application's timer.
+    pub pending_timer: Option<Request>,
     calc: Context,
     apps: Vec<DesktopApp>,
     providers: Vec<SearchEngine>,
@@ -172,6 +223,7 @@ enum Entry {
     Answer(String),
     App(usize),
     Search(usize),
+    Timer { request: Request, label: String },
 }
 
 #[derive(Default)]
@@ -283,34 +335,37 @@ impl LauncherState {
         let (provider, query) = self.search_query();
         let explicit_search = provider.is_some();
         let query = query.to_owned();
-        self.entries = (!explicit_search && query.len() >= 4)
-            .then(|| fend_core::evaluate(&query, &mut self.calc).ok())
-            .flatten()
-            .map(|result| result.get_main_result().to_owned())
-            .filter(|result| !result.is_empty() && result != &query)
-            .map(Entry::Answer)
-            .into_iter()
-            .collect();
-
-        let lower_query = query.to_lowercase();
-        let has_search = !self.providers.is_empty() && (!lower_query.is_empty() || explicit_search);
-        let visible = MAX_VISIBLE - self.entries.len() - usize::from(has_search);
-        let mut scored = self
-            .apps
-            .iter()
-            .enumerate()
-            .filter(|_| !explicit_search)
-            .filter_map(|(index, app)| {
-                let name = app.name.to_lowercase();
-                name.contains(&lower_query).then(|| (index, name.starts_with(&lower_query)))
-            })
-            .collect::<Vec<_>>();
-        scored.sort_by_key(|&(_, prefix_match)| !prefix_match);
-        self.entries.extend(scored.into_iter().take(visible).map(|(index, _)| Entry::App(index)));
+        let has_search = !self.providers.is_empty() && (!query.trim().is_empty() || explicit_search);
+        let mut scored = Vec::new();
+        if !explicit_search {
+            if let Some((request, confidence)) = timer::parse(&query) {
+                let label = request.label();
+                scored.push((confidence, Entry::Timer { request, label }));
+            }
+            if let Some(answer) = self.evaluate(&query) {
+                scored.push((ANSWER_CONFIDENCE, Entry::Answer(answer)));
+            }
+            scored.extend(self.apps.iter().enumerate().filter_map(|(index, app)| {
+                let confidence = confidence(&query, &app.name);
+                (confidence >= MIN_CONFIDENCE).then_some((confidence, Entry::App(index)))
+            }));
+        }
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        scored.truncate(MAX_VISIBLE - usize::from(has_search));
+        self.entries = scored.into_iter().map(|(_, entry)| entry).collect();
         if has_search {
             self.entries.push(Entry::Search(provider.unwrap_or_default()));
         }
         self.selected = 0;
+    }
+
+    /// Evaluates the query as an expression, unless the answer only echoes it.
+    fn evaluate(&mut self, query: &str) -> Option<String> {
+        (query.len() >= 4)
+            .then(|| fend_core::evaluate(query, &mut self.calc).ok())
+            .flatten()
+            .map(|result| result.get_main_result().to_owned())
+            .filter(|result| !result.is_empty() && result != query)
     }
 
     /// Moves the highlight by `delta` rows, stopping at either end.
@@ -326,6 +381,7 @@ impl LauncherState {
                 platform::spawn(app.action.as_ref().filter(|_| alternate).map_or(&app.exec, |(_, exec)| exec));
             }
             Some(Entry::Answer(answer)) => self.pending_copy = Some(answer.to_owned()),
+            Some(Entry::Timer { request, .. }) => self.pending_timer = Some(*request),
             Some(Entry::Search(index)) => {
                 let engine = &self.providers[*index];
                 let terms = self.search_query().1;
@@ -385,7 +441,7 @@ impl LauncherState {
         }
         let (origin, size) = self.bounds(context.frame.screen_size);
         let rect = Rect::new(origin, origin + size);
-        let panel = Shape::rounded_rect(rect, BACKGROUND_RADIUS as f32);
+        let panel = Shape::rounded_rect(rect, PANEL_RADIUS);
         if !Self::ALWAYS_OPEN {
             let screen = Rect::new(Vec2::ZERO, context.frame.screen_size);
             context.interaction.input_region(screen);
@@ -410,12 +466,13 @@ impl LauncherState {
         }
         let empty = self.field.text.is_empty();
         let query = if empty { "Search anything…" } else { &self.field.text };
-        let line = context.frame.resources.line(query, 18.0, 600.0).translated(vec2(left, HEADER_HEIGHT * 0.5));
+        let line = context.frame.resources.line(query, TEXT_HEADING, 600.0).translated(vec2(left, HEADER_HEIGHT * 0.5));
         let blink = ((context.frame.time - self.field.blink_start) * 1.4).fract();
         let (caret, selection): (Vec2, Vec2) = {
             let text = &mut *context.frame.resources;
-            let mut at =
-                |offset: usize| (left + text.shape(&self.field.text[..offset], 18.0, 600.0).text.width).min(right);
+            let mut at = |offset: usize| {
+                (left + text.shape(&self.field.text[..offset], TEXT_HEADING, 600.0).text.width).min(right)
+            };
             let caret = vec2(at(self.field.cursor), blink.smoothstep(0.62, 0.5));
             let anchor = at(self.field.anchor);
             let selection = vec2(caret.x.min(anchor), caret.x.max(anchor));
@@ -430,7 +487,7 @@ impl LauncherState {
                     let selection: Vec2;
                     let rect: Rect;
                 })
-                .primitive(|frame| deform(Shape::rounded_rect(rect, BACKGROUND_RADIUS as f32), frame))
+                .primitive(|frame| deform(Shape::rounded_rect(rect, PANEL_RADIUS), frame))
                 .fragment(|_, surface| {
                     let point = surface.content - rect.min;
                     let mut color = Vec3::splat(0.09)
@@ -446,7 +503,7 @@ impl LauncherState {
         );
         context.paint_text(
             rect,
-            BACKGROUND_RADIUS as f32,
+            PANEL_RADIUS,
             line.translated(origin),
             (if empty { MUTED_COLOR } else { TEXT_COLOR }).extend(1.0),
         );
@@ -465,6 +522,7 @@ impl LauncherState {
                 Entry::App(index) => key(("app", &self.apps[*index].exec)),
                 Entry::Answer(answer) => key(("answer", answer)),
                 Entry::Search(index) => key(("search", &self.providers[*index].config.url, self.search_query().1)),
+                Entry::Timer { .. } => key("timer"),
             };
             let response = context.interaction.interact(identity, Shape::pill(pill));
             if response.hovered {
@@ -497,6 +555,9 @@ impl LauncherState {
                         ..Default::default()
                     }
                 }
+                Entry::Timer { request, label } => {
+                    EntryView { icon_kind: TIMER_ICON, name: label, action: request.action(), ..Default::default() }
+                }
             };
 
             let mut action_lines = smallvec::SmallVec::<[Text; 4]>::new();
@@ -507,10 +568,10 @@ impl LauncherState {
                 };
                 let badge = vec2(edge - 13.5, 13.5);
                 edge -= 27.0 + GAP;
-                let line = context.frame.resources.line(label, 13.0, 600.0);
+                let line = context.frame.resources.line(label, TEXT_SMALL, 600.0);
                 let width = if let Some((first, last)) = label.rsplit_once(' ').filter(|_| line.width > 100.0) {
-                    let first = context.frame.resources.line(first, 13.0, 600.0);
-                    let last = context.frame.resources.line(last, 13.0, 600.0);
+                    let first = context.frame.resources.line(first, TEXT_SMALL, 600.0);
+                    let last = context.frame.resources.line(last, TEXT_SMALL, 600.0);
                     action_lines.push(first.right(vec2(edge, ROW_HEIGHT * 0.5 - 7.0)));
                     action_lines.push(last.right(vec2(edge, ROW_HEIGHT * 0.5 + 7.0)));
                     first.width.max(last.width)
@@ -526,9 +587,10 @@ impl LauncherState {
 
             let (name_y, detail_y) =
                 if entry.detail.is_empty() { (ROW_HEIGHT * 0.5, 0.0) } else { (ROW_HEIGHT * 0.34, ROW_HEIGHT * 0.68) };
-            let name_line = context.frame.resources.line(entry.name, 16.0, 700.0).translated(vec2(text_left, name_y));
+            let name_line =
+                context.frame.resources.line(entry.name, TEXT_TITLE, 700.0).translated(vec2(text_left, name_y));
             let detail_line =
-                context.frame.resources.line(entry.detail, 13.0, 600.0).translated(vec2(text_left, detail_y));
+                context.frame.resources.line(entry.detail, TEXT_SMALL, 600.0).translated(vec2(text_left, detail_y));
 
             shader!(
                 context
@@ -549,6 +611,8 @@ impl LauncherState {
                             color = source_over(calculator_icon(icon_point), color.extend(1.0)).truncate();
                         } else if icon_kind == SEARCH_ICON {
                             color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
+                        } else if icon_kind == TIMER_ICON {
+                            color = color.lerp(ICON_COLOR, timer_icon(icon_point));
                         }
                         let point = surface.content - pill.min;
                         let paint_badge = |color: Vec3, badge: Vec2, shift: bool| {
@@ -577,7 +641,7 @@ impl LauncherState {
             }
 
             let origin = vec2(x, y);
-            for (line, color) in [(name_line, TEXT_COLOR), (detail_line, DETAIL_COLOR)]
+            for (line, color) in [(name_line, TEXT_COLOR), (detail_line, MUTED_COLOR)]
                 .into_iter()
                 .chain(action_lines.into_iter().map(|line| (line, MUTED_COLOR)))
             {
@@ -587,5 +651,19 @@ impl LauncherState {
         if let Some(index) = activated {
             self.activate(index, false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranks_name_matches() {
+        assert!(confidence("firefox", "Firefox") > confidence("fire", "Firefox"));
+        assert!(confidence("fire", "Firefox") > confidence("fox", "Firefox"));
+        // Containment must clear the listing threshold however little it covers.
+        assert!(confidence("fox", "Firefox") >= MIN_CONFIDENCE);
+        assert!(confidence("z", "Firefox") < MIN_CONFIDENCE);
     }
 }

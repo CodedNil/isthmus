@@ -158,7 +158,6 @@ impl Sdf for Glyphs<'_> {
 }
 
 impl<P: Program> Primitive<P> for Glyphs<'_> {
-    type Outputs = ();
     type Sample = Sample;
 
     fn vertex_count(self) -> u32 {
@@ -169,7 +168,7 @@ impl<P: Program> Primitive<P> for Glyphs<'_> {
         raster(self.bounds(0.0)).vertex(input)
     }
 
-    fn sample(self, fragment: Fragment, (): ()) -> (Sample, f32) {
+    fn sample(self, fragment: Fragment) -> (Sample, f32) {
         let sample = self.sample_at(fragment.pixel);
         (sample, sample.coverage)
     }

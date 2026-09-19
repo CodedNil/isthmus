@@ -2,7 +2,7 @@ use crate::{
     app::Background,
     platform,
     render::{
-        GAP, PANEL_START, Program, TEXT_COLOR, UiContext,
+        GAP, PANEL_START, Program, TEXT_COLOR, TEXT_SMALL, UiContext,
         sdf::{deform, glass, hash, lens, refract, sample_deformation},
         weathertime::{StatusSky, WeatherCondition, scene, sky_phase},
     },
@@ -31,7 +31,7 @@ const GRAPH_WIDTH: f32 = 60.0 + f32::midpoint(DATA_WIDTH, GAP);
 const CHART_LINE_WIDTH: f32 = 0.85;
 const USAGE_COLOR: Vec3 = Vec3::new(0.32, 0.68, 1.0);
 const MEMORY_COLOR: Vec3 = Vec3::new(0.78, 0.3, 1.0);
-const MUTED_COLOR: Vec3 = Vec3::new(1.0, 0.24, 0.3);
+const MUTED_AUDIO_COLOR: Vec3 = Vec3::new(1.0, 0.24, 0.3);
 const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
 const STATUS_INSET: f32 = GAP * 2.0;
 const BASE_WIDTH: f32 = GRAPH_WIDTH * 2.0 + DATA_WIDTH + ACTION_WIDTH * 2.0 + GAP * 4.0 + STATUS_INSET * 2.0;
@@ -203,7 +203,7 @@ impl StatusPanel {
             let line = context
                 .frame
                 .resources
-                .line(&label, 11.0, 700.0)
+                .line(&label, TEXT_SMALL, 700.0)
                 .fit(GAP + 5.0, center - half_width..center + half_width)
                 .translated(vec2(x, PANEL_START));
             context.paint_text(panel, panel.size().y * 0.5, line, TEXT_COLOR.extend(1.0));
@@ -289,7 +289,7 @@ impl StatusPanel {
                     let level_x = AUDIO_HALF_WIDTH * (volume.saturate() * 2.0 - 1.0);
                     let level = rail * rail_point.x.smoothstep(level_x + 0.8, level_x - 0.8);
                     let color = vec3(0.18, 0.96, 1.0);
-                    source_over(color.extend(bars), color.lerp(MUTED_COLOR, muted).extend(level))
+                    source_over(color.extend(bars), color.lerp(MUTED_AUDIO_COLOR, muted).extend(level))
                 })
         );
         cursor += DATA_WIDTH + GAP;

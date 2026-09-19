@@ -1,4 +1,4 @@
-use crate::{app::Background, config::Config, interaction::Interaction, music::Music};
+use crate::{app::Background, config::Config, interaction::Interaction, music::Music, timer::Timer};
 use isthmus::prelude::*;
 use isthmus_sdf::{layout::TextCache, prelude::*};
 use sdf::refract;
@@ -13,7 +13,29 @@ pub mod weathertime;
 /// Space for playlist buttons and compact history tracks, in logical pixels.
 pub const HISTORY_WIDTH: f32 = 200.0;
 
+/// Fraction of a pill's height at which its bottom content row is centred.
+pub const SUPPORT_ROW: f32 = 0.975;
+
+/// Centre of a pill's bottom content row, which a support shape hangs beneath.
+pub fn support_row(pill: Rect) -> Vec2 {
+    vec2(pill.center().x, pill.min.y + pill.size().y * SUPPORT_ROW - 1.0)
+}
+
 pub const TEXT_COLOR: Vec3 = Vec3::splat(0.94);
+/// Straight-alpha shadow painted behind text for readability.
+pub const TEXT_SHADOW: Vec4 = Vec4::new(0.2, 0.2, 0.2, 0.18);
+/// Corner radius of the bar's expanded glass panels.
+pub const PANEL_RADIUS: f32 = 16.0;
+/// Blend radius where a support shape merges into its pill.
+pub const SUPPORT_BLEND: f32 = UNIT * 2.0;
+/// Distance a support shape's top sits above the pill's lower edge.
+pub const SUPPORT_INSET: f32 = 8.0;
+/// Text sizes, from the smallest caption to the largest display label.
+pub const TEXT_SMALL: f32 = 12.0;
+pub const TEXT_BODY: f32 = 14.0;
+pub const TEXT_TITLE: f32 = 16.0;
+pub const TEXT_HEADING: f32 = 20.0;
+pub const TEXT_DISPLAY: f32 = 24.0;
 /// Gap between the top of the surface and the top of the bar.
 pub const PANEL_START: f32 = 6.0;
 /// Base spacing unit. Sizes and gaps should be whole multiples of it.
@@ -74,7 +96,7 @@ impl Bar {
         }
     }
 
-    pub fn show(&mut self, context: &mut UiContext, music: &mut Music) {
+    pub fn show(&mut self, context: &mut UiContext, music: &mut Music, timer: &Timer) {
         let status_width = self.status.as_ref().map_or(0.0, |status| status.width() + GAP);
         let reserved = HISTORY_WIDTH
             + GAP
@@ -103,7 +125,7 @@ impl Bar {
         let sky = self
             .weather
             .as_mut()
-            .map_or_else(weathertime::StatusSky::default, |weather| weather.show(context, status_width));
+            .map_or_else(weathertime::StatusSky::default, |weather| weather.show(context, status_width, timer));
         if let Some(status) = self.status.as_mut() {
             status.show(context, sky);
         }

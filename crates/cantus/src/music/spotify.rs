@@ -401,25 +401,7 @@ impl SpotifyWorker {
             (requested, metadata)
         }));
     }
-}
 
-async fn connected_request(
-    session: &Session,
-    path: &str,
-    encoding: Option<&'static str>,
-    body: &[u8],
-) -> MusicResult<()> {
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
-    headers.insert("x-spotify-connection-id", session.connection_id().parse()?);
-    if let Some(encoding) = encoding {
-        headers.insert(header::CONTENT_ENCODING, encoding.parse()?);
-    }
-    session.spclient().request(&Method::POST, path, Some(headers), Some(body)).await?;
-    Ok(())
-}
-
-impl SpotifyWorker {
     async fn refresh_playlists(&mut self) {
         if let Err(error) = self.load_playlists().await {
             warn!(%error, "Spotify library refresh failed");
@@ -560,6 +542,22 @@ impl SpotifyWorker {
         });
         Ok(())
     }
+}
+
+async fn connected_request(
+    session: &Session,
+    path: &str,
+    encoding: Option<&'static str>,
+    body: &[u8],
+) -> MusicResult<()> {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
+    headers.insert("x-spotify-connection-id", session.connection_id().parse()?);
+    if let Some(encoding) = encoding {
+        headers.insert(header::CONTENT_ENCODING, encoding.parse()?);
+    }
+    session.spclient().request(&Method::POST, path, Some(headers), Some(body)).await?;
+    Ok(())
 }
 
 fn playlist_image(attributes: &ListAttributes) -> Option<String> {

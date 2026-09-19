@@ -37,7 +37,7 @@ pub(super) async fn new<P: Program>(
             ..Default::default()
         })
         .await?;
-    let images = u32::try_from(P::SHADERS.iter().map(|entry| entry.images).max().unwrap_or(0)).unwrap_or(u32::MAX);
+    let images = u32::try_from(P::max_images()).unwrap_or(u32::MAX);
     let mut limits = wgpu::Limits::default().using_resolution(adapter.limits());
     limits.max_sampled_textures_per_shader_stage = limits.max_sampled_textures_per_shader_stage.max(images);
     limits.max_samplers_per_shader_stage = limits.max_samplers_per_shader_stage.max(images);

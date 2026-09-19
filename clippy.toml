@@ -1,4 +1,3 @@
-# Keep imports first; preserve logical ordering of implementations and fields.
 source-item-ordering = ["module"]
 module-item-order-groupings = [
     ["extern_crates", ["extern_crate"]],

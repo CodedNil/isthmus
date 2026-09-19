@@ -4,6 +4,7 @@ use crate::{
     music::Music,
     platform::{self, Task},
     render::{Bar, Globals, Program, UiContext, launcher::LauncherState},
+    timer::Timer,
 };
 #[cfg(target_os = "linux")]
 use calloop::channel::Sender;
@@ -81,6 +82,7 @@ pub struct CantusApp {
     pub(crate) background: Background,
     pub(crate) interaction: Interaction,
     pub(crate) next_enrichment: Instant,
+    pub(crate) timer: Timer,
 }
 
 impl CantusApp {
@@ -98,11 +100,15 @@ impl CantusApp {
             background,
             interaction: Interaction::default(),
             next_enrichment: Instant::now(),
+            timer: Timer::default(),
             config,
         }
     }
 
     pub(crate) fn refresh(&mut self) {
+        if let Some(request) = self.launcher.pending_timer.take() {
+            self.timer.apply(request);
+        }
         if Instant::now() >= self.next_enrichment {
             self.next_enrichment = Instant::now() + Duration::from_secs(1);
             self.refresh_enrichment();
@@ -130,7 +136,7 @@ impl CantusApp {
         render.surface(surface, screen_size, globals, |frame| {
             let mut context = UiContext { frame, config: &self.config, interaction: &mut self.interaction };
             if view.bar {
-                self.bar.show(&mut context, &mut self.music);
+                self.bar.show(&mut context, &mut self.music, &self.timer);
             }
             if view.launcher {
                 self.launcher.show(&mut context);

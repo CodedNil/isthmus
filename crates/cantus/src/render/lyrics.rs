@@ -1,6 +1,6 @@
 use crate::{
     music::{Music, TRACK_SPACING_MS, lyrics::Lyrics},
-    render::{BarLayout, PANEL_START, Program, TEXT_COLOR, UiContext},
+    render::{BarLayout, PANEL_START, Program, TEXT_BODY, TEXT_COLOR, TEXT_SHADOW, TEXT_SMALL, UiContext},
 };
 use isthmus::prelude::*;
 use isthmus_sdf::{
@@ -9,13 +9,20 @@ use isthmus_sdf::{
 };
 use std::{ops::Range, slice, sync::Arc};
 
-pub const EXTENSION: f32 = 17.0;
-const SHADOW_REACH: f32 = 3.0;
+const SHADOW_REACH: f32 = 5.0;
+/// Multiplier deepening the shared text shadow behind lyric runs.
+const SHADOW_STRENGTH: f32 = 2.6;
 const GLOW_REACH: f32 = 6.0;
 const LANE_GAP: f32 = 96.0;
 const ROW_SPACING: f32 = 12.0;
+/// Distance from the panel's bottom edge to the first lyric row.
+const LYRIC_INSET: f32 = 12.0;
+/// Space reserved below the panel for one lyric row and the label beneath it.
+pub const EXTENSION: f32 = LYRIC_INSET + ROW_SPACING;
 const GROUP_COLOR: Vec3 = vec3(1.00, 0.72, 0.79); // rose, reserved for groups
-const SECTION_SHADOW: f32 = 5.0;
+const SECTION_SHADOW: f32 = 7.0;
+/// Multiplier deepening the shared text shadow behind section labels.
+const SECTION_SHADOW_STRENGTH: f32 = 0.6;
 const CHANNEL_COLORS: [Vec3; 3] = [
     TEXT_COLOR,
     vec3(0.66, 0.82, 1.00), // blue
@@ -65,7 +72,7 @@ impl PreparedLyrics {
             return;
         }
         // Leave visible air between words even with their dark readability outlines.
-        let space = text.shape(" ", 15.0, 700.0).text.width.max(6.0);
+        let space = text.shape(" ", TEXT_BODY, 700.0).text.width.max(6.0);
         let mut channels = Vec::new();
         for source in &mut self.source.channels {
             let mut channel = Channel { singer: source.singer, runs: Vec::new() };
@@ -83,7 +90,7 @@ impl PreparedLyrics {
             for (index, segment) in segments.iter().enumerate() {
                 let next = segments.get(index + 1);
                 let value = segment.text.replace('🎵', "♪").replace('🎶', "♫");
-                let line = text.shape(value.trim(), 15.0, 700.0);
+                let line = text.shape(value.trim(), TEXT_BODY, 700.0);
                 let bounds = line.text;
                 let start = segment.time.start.clamp(0.0, duration);
                 let end =
@@ -202,6 +209,16 @@ impl PreparedLyrics {
         self.channels = channels;
     }
 
+    /// Lowest lyric row drawn at a track-local x, so a label can sit beneath it.
+    fn rows_at(&self, x: f32) -> f32 {
+        self.channels
+            .iter()
+            .flat_map(|channel| &channel.runs)
+            .filter(|run| run.x <= x && x <= run.x + run.width)
+            .map(|run| run.lane as f32 + 1.0)
+            .fold(1.0, f32::max)
+    }
+
     pub fn position(&self, time: f32, duration: f32) -> f32 {
         let at = time.min(duration);
         let next = self.scroll.partition_point(|point| point.x <= at);
@@ -236,7 +253,7 @@ pub fn height(music: &Music) -> f32 {
         .map(|lyrics| lyrics.source.channels.len())
         .max()
         .unwrap_or(1);
-    EXTENSION + rows.saturating_sub(1) as f32 * ROW_SPACING
+    LYRIC_INSET + rows as f32 * ROW_SPACING
 }
 
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
@@ -264,11 +281,11 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
             break;
         }
         let lyrics = resources.lyrics(track, context.frame.resources).unwrap_or(&silence);
-        let baseline = PANEL_START + context.config.height + EXTENSION;
+        let baseline = PANEL_START + context.config.height + LYRIC_INSET;
         for section in &lyrics.source.sections {
-            let start = x + lyrics.position(section.time.start, track.duration_ms as f32);
-            let label = context.frame.resources.shape(&section.text, 10.0, f32::MAX);
-            let origin = vec2(start, baseline - 10.0);
+            let local = lyrics.position(section.time.start, track.duration_ms as f32);
+            let label = context.frame.resources.shape(&section.text, TEXT_SMALL, f32::MAX);
+            let origin = vec2(x + local, baseline + lyrics.rows_at(local) * ROW_SPACING);
             shader!(
                 context
                     .frame
@@ -277,8 +294,8 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                     })
                     .primitive(line)
                     .fragment(|_, surface| {
-                        let shadow = (-surface.distance.max(0.0) * 0.7).exp() * 0.3;
-                        surface.paint(TEXT_COLOR.extend(0.9), Vec3::splat(0.2).extend(shadow))
+                        let shadow = (-surface.distance.max(0.0) * 0.7).exp() * SECTION_SHADOW_STRENGTH;
+                        surface.paint(TEXT_COLOR.extend(0.9), TEXT_SHADOW.with_w(TEXT_SHADOW.w * shadow))
                     })
             );
         }
@@ -320,9 +337,9 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                             point.y -= ROW_SPACING * row;
                             point.y += active * (0.6 + 0.4 * wave.sin());
                             let surface = line.sample_at(point);
-                            let shadow = surface.distance.smoothstep(SHADOW_REACH, 0.0).powi(2);
+                            let shadow = surface.distance.smoothstep(SHADOW_REACH, 0.0).powi(2) * SHADOW_STRENGTH;
                             let mut ink = color.truncate();
-                            let mut halo = Vec3::splat(0.2).extend(shadow);
+                            let mut halo = TEXT_SHADOW.with_w(TEXT_SHADOW.w * shadow);
                             if active > 0.0 {
                                 let sheen = (wave + (fragment.pixel.y - baseline) * 0.25).sin().max(0.0).powi(8);
                                 ink = ink.lerp(Vec3::ONE, active * (0.3 + 0.7 * sheen));

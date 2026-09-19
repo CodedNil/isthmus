@@ -251,10 +251,9 @@ impl<F: Fn(Vec2) -> f32 + Copy> Sdf for Shape<F> {
 }
 
 impl<P: Program, F: Fn(Vec2) -> f32 + Copy> Primitive<P> for Shape<F> {
-    type Outputs = ();
     type Sample = Sample;
 
-    fn sample(self, fragment: Fragment, (): ()) -> (Sample, f32) {
+    fn sample(self, fragment: Fragment) -> (Sample, f32) {
         let sample = self.sample_at(fragment.pixel);
         (sample, sample.coverage)
     }
