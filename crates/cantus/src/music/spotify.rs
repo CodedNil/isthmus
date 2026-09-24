@@ -638,6 +638,13 @@ fn track_from_provided(
             Ok(SpotifyUri::Track { id }) => id.to_base62().ok().and_then(|id| id.parse().ok()),
             _ => None,
         },
+        isrc: catalog.and_then(|track| {
+            track
+                .external_ids
+                .iter()
+                .find(|external| external.external_type.eq_ignore_ascii_case("isrc"))
+                .map(|external| external.id.clone())
+        }),
         uri: track.uri.clone(),
         original_title: catalog.map(|track| track.original_title.clone()),
         name: catalog

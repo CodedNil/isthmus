@@ -14,8 +14,8 @@ pub struct Spotify {
 
 impl Spotify {
     pub(super) fn new(_config: &Config, updater: &AppUpdater) -> Self {
-        let tracks: Vec<FixtureTrack> = serde_json::from_str(include_str!("../../../../assets/web/tracks.json"))
-            .unwrap_or_else(|error| {
+        let tracks: Vec<FixtureTrack> =
+            serde_json::from_str(include_str!("../../assets/tracks.json")).unwrap_or_else(|error| {
                 tracing::error!(%error, "Invalid bundled Spotify tracks");
                 Vec::new()
             });

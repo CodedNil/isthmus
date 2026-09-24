@@ -1,5 +1,8 @@
-use crate::syntax::{program, program_types, shader::Shader};
-use proc_macro2::TokenStream;
+use crate::syntax::{
+    program, program_types,
+    shader::{Shader, SliceIndices},
+};
+use proc_macro2::{TokenStream, TokenTree};
 use quote::{ToTokens, quote};
 use references::References;
 use std::{
@@ -11,6 +14,7 @@ use syn::{
     Item, UseTree,
     punctuated::Punctuated,
     visit::{self, Visit},
+    visit_mut::VisitMut,
 };
 
 mod references;
@@ -113,6 +117,23 @@ pub fn generate(path: &Path, root: Vec<String>, isthmus: &TokenStream) -> Result
         #![no_std]
         #![feature(default_field_values)]
         #![allow(dead_code, unused_imports, unused_features, reason = "shared shader code may not use every retained method, import, or enabled language feature")]
+        extern crate isthmus;
+        #[derive(Clone, Copy)]
+        pub struct ShaderSlice<'a, T: isthmus::ShaderData> {
+            words: &'a [u32],
+            range: [u32; 2],
+            marker: core::marker::PhantomData<T>,
+        }
+        impl<'a, T: isthmus::ShaderData> ShaderSlice<'a, T> {
+            fn from_words(words: &'a [u32], range: [u32; 2]) -> Self {
+                Self { words, range, marker: core::marker::PhantomData }
+            }
+            fn len(self) -> usize { self.range[1] as usize }
+            fn load(self, index: usize) -> T {
+                if index >= self.len() { T::ZERO }
+                else { T::read(self.words, self.range[0] as usize + index * T::WORDS) }
+            }
+        }
         #module
     };
     let source = syn::parse2(source).map_err(|error| error.to_string())?;
@@ -322,6 +343,9 @@ impl Graph {
         }
         for &index in &module.selected {
             let mut item = module.items[index].clone();
+            if let Item::Fn(function) = &mut item {
+                rewrite_slices(&mut function.sig, &mut function.block);
+            }
             if let Item::Struct(item) = &mut item {
                 for attribute in &mut item.attrs {
                     if let Some(paths) = shader_derives(attribute) {
@@ -340,6 +364,11 @@ impl Graph {
                     .enumerate()
                     .filter_map(|(member, item)| module.impl_members.contains(&(index, member)).then_some(item))
                     .collect();
+                for member in &mut item.items {
+                    if let syn::ImplItem::Fn(function) = member {
+                        rewrite_slices(&mut function.sig, &mut function.block);
+                    }
+                }
                 if !item.items.is_empty() {
                     output.extend(item.to_token_stream());
                 }
@@ -364,7 +393,35 @@ impl Graph {
     }
 }
 
+fn rewrite_slices(signature: &mut syn::Signature, block: &mut syn::Block) {
+    let mut names = BTreeSet::new();
+    for argument in &mut signature.inputs {
+        let syn::FnArg::Typed(argument) = argument else { continue };
+        let syn::Type::Reference(reference) = &*argument.ty else { continue };
+        let syn::Type::Slice(slice) = &*reference.elem else { continue };
+        let syn::Pat::Ident(name) = &*argument.pat else { continue };
+        let ident = name.ident.clone();
+        let element = &slice.elem;
+        *argument.ty = syn::parse_quote!(crate::ShaderSlice<'_, #element>);
+        names.insert(ident.to_string());
+    }
+    SliceIndices(names).visit_block_mut(block);
+}
+
 fn item_name(item: &Item) -> Option<String> {
+    if let Item::Macro(item) = item
+        && item.mac.path.segments.last().is_some_and(|segment| segment.ident == "bitflags")
+    {
+        let mut tokens = item.mac.tokens.clone().into_iter();
+        while let Some(token) = tokens.next() {
+            if matches!(token, TokenTree::Ident(name) if name == "struct") {
+                return match tokens.next() {
+                    Some(TokenTree::Ident(name)) => Some(name.to_string()),
+                    _ => None,
+                };
+            }
+        }
+    }
     Some(
         match item {
             Item::Const(item) => &item.ident,

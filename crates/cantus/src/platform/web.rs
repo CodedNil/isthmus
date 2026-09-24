@@ -160,8 +160,8 @@ async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
         SurfaceTarget::Canvas(canvas.clone()),
         physical,
         TextCache::new(&[
-            include_bytes!("../../../../assets/NotoSans-Variable.ttf"),
-            include_bytes!("../../../../assets/NotoSansSymbols-Music.ttf"),
+            include_bytes!("../../assets/NotoSans-Variable.ttf"),
+            include_bytes!("../../assets/NotoSansSymbols-Music.ttf"),
         ]),
     )
     .await?;

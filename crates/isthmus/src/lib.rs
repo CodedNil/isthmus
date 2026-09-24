@@ -4,7 +4,7 @@
 
 extern crate self as isthmus;
 
-pub use data::{Buffer, F16x2, ShaderData, Unorm8x4, Unorm16x2};
+pub use data::{F16x2, InlineVec, ShaderData, Unorm8x4, Unorm16x2};
 pub use geometry::{Quad, Rect};
 pub use glam;
 pub use image::Image;
@@ -46,13 +46,10 @@ pub trait Float = glam::FloatExt + num_traits::Float;
 /// Common shader types and operations, intended for `use isthmus::prelude::*`.
 pub mod prelude {
     pub use crate::{
-        Blend, Buffer, F16x2, Float, Fragment, Image, Paint, Primitive, Quad, Rect, ShaderData, ShaderFrame, Unorm8x4,
-        Unorm16x2, Vertex, VertexInput, program, raster, shader, source_over, surface,
+        Blend, F16x2, Float, Fragment, Image, InlineVec, Paint, Primitive, Quad, Rect, ShaderData, ShaderFrame,
+        Unorm8x4, Unorm16x2, Vertex, VertexInput, program, raster, shader, source_over, surface,
     };
-    pub use glam::{
-        IVec2, IVec3, IVec4, Mat2, Mat3, Mat4, Quat, UVec2, UVec3, UVec4, Vec2, Vec3, Vec4, ivec2, ivec3, ivec4, uvec2,
-        uvec3, uvec4, vec2, vec3, vec4,
-    };
+    pub use glam::prelude::*;
     pub use spirv_std::arch::Derivative;
 }
 

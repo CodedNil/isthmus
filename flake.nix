@@ -74,8 +74,6 @@ rec {
               ./Cargo.lock
               ./rustfmt.toml
               ./crates
-              ./assets/NotoSans-Variable.ttf
-              ./assets/NotoSansSymbols-Music.ttf
             ];
           };
           buildAndTestSubdir = "crates/cantus";

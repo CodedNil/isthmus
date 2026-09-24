@@ -1,68 +1,84 @@
 use crate::ResourceData;
-use glam::{UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
+use core::ops::Index;
+use glam::{Mat4, UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
 use isthmus_macros::ShaderData;
 use spirv_std::arch::IndexUnchecked;
 
-/// A borrowed array capture; shaders decode only the elements they read.
+/// A fixed-capacity vector that can be shared with shaders.
 #[derive(Clone, Copy)]
-pub struct Buffer<'a, T: ShaderData> {
-    #[cfg(not(target_arch = "spirv"))]
-    pub(crate) values: &'a [T],
-    #[cfg(target_arch = "spirv")]
-    words: &'a [u32],
-    #[cfg(target_arch = "spirv")]
-    range: [u32; 2],
-    #[cfg(target_arch = "spirv")]
-    marker: core::marker::PhantomData<T>,
+// Nested shader arrays require 16-byte alignment.
+#[repr(C, align(16))]
+pub struct InlineVec<T, const N: usize> {
+    len: u32,
+    items: [T; N],
 }
 
-impl<'a, T: ShaderData> Buffer<'a, T> {
-    /// Returns the number of captured elements.
-    pub const fn len(self) -> usize {
-        #[cfg(not(target_arch = "spirv"))]
-        {
-            self.values.len()
+impl<T: ShaderData, const N: usize> InlineVec<T, N> {
+    pub const fn new() -> Self {
+        Self { len: 0, items: [T::ZERO; N] }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub const fn push(&mut self, item: T) {
+        assert!((self.len as usize) < N, "inline vector is full");
+        self.items[self.len as usize] = item;
+        self.len += 1;
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        &self.items[..self.len()]
+    }
+}
+
+impl<T: ShaderData, const N: usize> Index<usize> for InlineVec<T, N> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &T {
+        assert!(index < self.len(), "inline vector index is out of bounds");
+        &self.items[index]
+    }
+}
+
+impl<T: ShaderData, const N: usize> Default for InlineVec<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: ShaderData, const N: usize> ShaderData for InlineVec<T, N> {
+    type View<'a> = Self;
+
+    const WORDS: usize = 1 + N * T::WORDS;
+    const ZERO: Self = Self::new();
+
+    fn resolve(self, _: ResourceData<'_>) -> Self {
+        self
+    }
+
+    unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
+        // SAFETY: The caller guarantees the complete record.
+        let len = unsafe { u32::read_unchecked(words, offset) }.min(N as u32);
+        let mut items = [T::ZERO; N];
+        let mut index = 0;
+        while index < len as usize {
+            // SAFETY: Active items lie within the complete record.
+            items[index] = unsafe { T::read_unchecked(words, offset + 1 + index * T::WORDS) };
+            index += 1;
         }
-        #[cfg(target_arch = "spirv")]
-        {
-            self.range[1] as usize
-        }
+        Self { len, items }
     }
 
-    /// Reports whether the captured array has no elements.
-    pub const fn is_empty(self) -> bool {
-        self.len() == 0
-    }
-
-    #[cfg(not(target_arch = "spirv"))]
-    /// Borrows a host slice for capture by a shader.
-    pub const fn new(values: &'a [T]) -> Self {
-        Self { values }
-    }
-
-    #[cfg(target_arch = "spirv")]
-    /// Decodes a generated buffer capture from its payload offset and element count.
-    pub fn from_words(words: &'a [u32], range: [u32; 2]) -> Self {
-        Self { words, range, marker: core::marker::PhantomData }
-    }
-
-    /// Returns zero when the index is outside the captured array.
-    pub fn load(self, index: usize) -> T {
-        #[cfg(not(target_arch = "spirv"))]
-        {
-            self.values.get(index).copied().unwrap_or(T::ZERO)
-        }
-        #[cfg(target_arch = "spirv")]
-        {
-            if index >= self.range[1] as usize || T::WORDS == 0 {
-                return T::ZERO;
-            }
-            let offset = self.range[0] as usize;
-            if offset > self.words.len() || index >= (self.words.len() - offset) / T::WORDS {
-                return T::ZERO;
-            }
-            // SAFETY: The offset and complete record were checked above.
-            unsafe { T::read_unchecked(self.words, offset + index * T::WORDS) }
+    fn write(self, words: &mut [u32], offset: usize) {
+        self.len.write(words, offset);
+        for index in 0..self.len() {
+            self.items[index].write(words, offset + 1 + index * T::WORDS);
         }
     }
 }
@@ -214,6 +230,7 @@ codec!(Unorm16x2, u32, Self(0), Self, |value: Self| value.0);
 codec!(Vec2, [f32; 2], Self::ZERO, Self::from_array, |v: Self| v.to_array());
 codec!(Vec3, [f32; 3], Self::ZERO, Self::from_array, |v: Self| v.to_array());
 codec!(Vec4, [f32; 4], Self::ZERO, Self::from_array, |v: Self| v.to_array());
+codec!(Mat4, [f32; 16], Self::ZERO, |v: [f32; 16]| Self::from_cols_array(&v), |v: Self| v.to_cols_array());
 codec!(UVec2, [u32; 2], Self::ZERO, Self::from_array, |v: Self| v.to_array());
 codec!(UVec3, [u32; 3], Self::ZERO, Self::from_array, |v: Self| v.to_array());
 codec!(UVec4, [u32; 4], Self::ZERO, Self::from_array, |v: Self| v.to_array());

@@ -133,6 +133,7 @@ fn parse_player(source: &str, mut properties: Properties) -> Option<LocalTrack> 
     Some(LocalTrack {
         track: Track {
             id: None,
+            isrc: None,
             uri,
             name: take(&mut metadata, "xesam:title").unwrap_or_else(|| "Unknown track".into()),
             original_title: None,

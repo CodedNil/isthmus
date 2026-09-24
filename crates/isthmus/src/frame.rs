@@ -1,5 +1,5 @@
 use crate::{
-    Buffer, Fragment, Image, Primitive, Program, ShaderData, ShaderFrame,
+    Fragment, Image, Primitive, Program, ShaderData, ShaderFrame,
     backend::{gpu::Gpu, surface::SurfaceTarget},
     bindings,
 };
@@ -28,13 +28,13 @@ impl<P: Program> Frame<'_, P> {
     }
 
     #[doc(hidden)]
-    pub fn capture_buffer<T: ShaderData>(&mut self, buffer: Buffer<'_, T>) -> [u32; 2] {
+    pub fn capture_slice<T: ShaderData>(&mut self, slice: &[T]) -> [u32; 2] {
         let payload = &mut self.gpu.buffers[bindings::PAYLOAD as usize];
         let range = [
             u32::try_from(payload.words.len()).expect("payload exceeds u32"),
-            u32::try_from(buffer.values.len()).expect("buffer exceeds u32"),
+            u32::try_from(slice.len()).expect("slice exceeds u32"),
         ];
-        for &value in buffer.values {
+        for &value in slice {
             value.append(&mut payload.words);
         }
         range

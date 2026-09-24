@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:,">
+    <title>Lares</title>
+    <style>
+        html,
+        body,
+        canvas {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+        }
+
+        body {
+            overflow: hidden;
+            background: #0b0f14;
+        }
+
+        #lares {
+            position: relative;
+            display: block;
+            touch-action: none;
+        }
+
+        #error {
+            position: absolute;
+            inset: 15% 10%;
+            color: #e2e8f0;
+            font: 16px/1.6 system-ui, sans-serif;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="lares"></canvas>
+    <p id="error" role="alert" hidden></p>
+    <script type="module">
+        import init, {start} from "./web/lares.js";
+        try {
+            if (!isSecureContext) throw new Error("Open Lares over HTTPS or on localhost to use WebGPU.");
+            if (!navigator.gpu) throw new Error("GPU adapter unavailable: this browser does not expose WebGPU.");
+            await init();
+            await start();
+        } catch (error) {
+            console.error("Lares could not start:", error);
+            const message = document.getElementById("error");
+            message.textContent = String(error).includes("GPU adapter")
+                ? "Lares needs WebGPU, but this browser has no available GPU adapter.\n\nEnable browser graphics acceleration and restart."
+                : `Lares could not start: ${error}`;
+            message.hidden = false;
+        }
+    </script>
+</body>
+
+</html>
