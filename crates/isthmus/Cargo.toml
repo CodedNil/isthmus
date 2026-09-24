@@ -16,7 +16,7 @@ glam = { workspace = true, features = ["std"] }
 half = "2.7.1"
 slotmap = "1.1.1"
 smallvec.workspace = true
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 web-time = "1.1.0"
 wgpu = { workspace = true, features = ["std", "vulkan", "webgpu", "wgsl"] }
 

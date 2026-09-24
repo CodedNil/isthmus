@@ -89,7 +89,6 @@ impl<P: Program, T, F: FnOnce(Vec2) -> (T, f32) + Copy> Primitive<P> for Surface
 }
 
 /// Rasterized fragment coordinates.
-/// Rasterized fragment coordinates.
 #[derive(Clone, Copy)]
 pub struct Fragment<T = ()> {
     /// Actual screen position in logical pixels.

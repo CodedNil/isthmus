@@ -63,12 +63,18 @@ pub fn build(source: &str) -> Result<()> {
         generated.identifiers.contains(&dep.name)
             && dep.dep_kinds.iter().any(|kind| kind.kind == DependencyKind::Normal)
     }) {
+        let requested = package
+            .dependencies
+            .iter()
+            .find(|direct| {
+                direct.kind == DependencyKind::Normal && direct.rename.as_deref().unwrap_or(&direct.name) == dep.name
+            })
+            .context("shader dependency is absent from the consumer manifest")?;
         let package = &resolved[&dep.pkg];
-        let node = nodes.iter().find(|node| node.id == dep.pkg).expect("resolved dependency has a node");
         let mut value = toml::toml! {
             package = (package.name.as_str())
             default-features = false
-            features = (node.features.iter().map(ToString::to_string).collect::<Vec<_>>())
+            features = (requested.features.clone())
         };
         match package.source.as_ref().map(|source| source.repr.as_str()) {
             None => {

@@ -3,8 +3,41 @@ name = "lares"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[lib]
+crate-type = ["cdylib", "rlib"]
 
+[dependencies]
+bitflags.workspace = true
+isthmus = { path = "../isthmus" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+axum = { version = "0.8.9", default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+] }
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread"] }
+tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = "0.3.23"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-events = "0.3.0"
+gloo-render = "0.3.0"
+tokio = { version = "1.53.1", default-features = false, features = ["sync"] }
+wasm-bindgen = "=0.2.127"
+wasm-bindgen-futures = "=0.4.77"
+web-sys = { version = "=0.3.104", features = [
+    "Document",
+    "HtmlCanvasElement",
+    "PointerEvent",
+    "WheelEvent",
+    "Window",
+    "console",
+] }
+
+[build-dependencies]
+isthmus-build = { path = "../isthmus_build" }
 
 [lints]
 workspace = true

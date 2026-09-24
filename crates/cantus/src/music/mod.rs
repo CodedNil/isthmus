@@ -284,6 +284,9 @@ impl Music {
 #[derive(Clone, Deserialize)]
 pub struct Track {
     pub id: Option<TrackId>,
+    /// The recording identifier used to disambiguate lyric-provider matches.
+    #[serde(default)]
+    pub isrc: Option<String>,
     #[serde(default)]
     pub uri: String,
     pub name: String,

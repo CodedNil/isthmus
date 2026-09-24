@@ -155,7 +155,7 @@ impl StatusPanel {
                     .frame
                     .upload({
                         let panel: Rect;
-                        let history: Buffer<'_, Unorm16x2> = Buffer::new(&processor.history);
+                        let history: &[Unorm16x2] = &processor.history;
                         let history_scroll: f32 = self.history_scroll;
                         let graph_pill: Rect;
                         let frame_color: Vec3 = {
@@ -163,7 +163,7 @@ impl StatusPanel {
                                 .lerp(vec3(1.0, 0.38, 0.08), processor.temperature.smoothstep(60.0, 72.0))
                                 .lerp(vec3(1.0, 0.08, 0.035), processor.temperature.smoothstep(72.0, 88.0));
                             vec3(0.025, 0.09, 0.15)
-                                .lerp(USAGE_COLOR, 0.18 + history.load(HISTORY_END).to_vec2().x * 0.24)
+                                .lerp(USAGE_COLOR, 0.18 + history[HISTORY_END].to_vec2().x * 0.24)
                                 .lerp(heat, processor.temperature.smoothstep(60.0, 86.0) * 0.9)
                         };
                     })
@@ -179,9 +179,8 @@ impl StatusPanel {
                                 let sample = ((point.x + half_width) / history_step + history_scroll)
                                     .clamp(0.0, HISTORY_END as f32);
                                 let index = sample.floor() as usize;
-                                let start = (1.0 - history.load(index).to_vec2().dot(channel) * 2.0) * graph_height;
-                                let end = (1.0
-                                    - history.load((index + 1).min(HISTORY_END)).to_vec2().dot(channel) * 2.0)
+                                let start = (1.0 - history[index].to_vec2().dot(channel) * 2.0) * graph_height;
+                                let end = (1.0 - history[(index + 1).min(HISTORY_END)].to_vec2().dot(channel) * 2.0)
                                     * graph_height;
                                 let delta = end - start;
                                 let t = sample.fract();

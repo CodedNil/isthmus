@@ -174,7 +174,7 @@ pub async fn captions(url: String) -> MusicResult<CaptionFile> {
     .await?
 }
 
-const PANEL_OVERFLOW: f32 = 16.0;
+const PANEL_OVERFLOW: f32 = 12.0;
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const AUDIO_WINDOW_SIZE: usize = 1024;
 const AUDIO_BAND_EDGES: [f32; AUDIO_SPECTRUM_BANDS + 1] =
@@ -911,8 +911,8 @@ impl LayerShellApp {
                     Arc::clone(&surface.native),
                     size,
                     TextCache::new(&[
-                        include_bytes!("../../../../assets/NotoSans-Variable.ttf"),
-                        include_bytes!("../../../../assets/NotoSansSymbols-Music.ttf"),
+                        include_bytes!("../../assets/NotoSans-Variable.ttf"),
+                        include_bytes!("../../assets/NotoSansSymbols-Music.ttf"),
                     ]),
                 ))
                 .expect("failed to initialize renderer");

@@ -1,7 +1,12 @@
 use super::{image_names, shader_entry};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Expr, Ident, Pat, Stmt, Type, parse_quote, spanned::Spanned};
+use std::collections::BTreeSet;
+use syn::{
+    Expr, Ident, Pat, Stmt, Type, parse_quote,
+    spanned::Spanned,
+    visit_mut::{self, VisitMut},
+};
 
 struct Binding {
     name: Ident,
@@ -14,7 +19,7 @@ struct Binding {
 enum CaptureKind {
     Data,
     Image,
-    Buffer,
+    Slice,
 }
 
 impl Binding {
@@ -29,12 +34,12 @@ impl Binding {
         {
             let name = name.ident.clone();
             let value = local.init.as_ref().map_or_else(|| parse_quote!(#name), |init| (*init.expr).clone());
-            let ty = if let Type::Reference(reference) = &*pat.ty { &*reference.elem } else { &*pat.ty };
-            let kind = match ty {
+            let kind = match &*pat.ty {
                 Type::Path(path) if path.path.segments.last().is_some_and(|s| s.ident == "Image") => CaptureKind::Image,
-                Type::Path(path) if path.path.segments.last().is_some_and(|s| s.ident == "Buffer") => {
-                    CaptureKind::Buffer
+                Type::Reference(reference) if matches!(&*reference.elem, Type::Path(path) if path.path.segments.last().is_some_and(|s| s.ident == "Image")) => {
+                    CaptureKind::Image
                 }
+                Type::Reference(reference) if matches!(&*reference.elem, Type::Slice(_)) => CaptureKind::Slice,
                 _ => CaptureKind::Data,
             };
             return Ok(Self { name, ty: (*pat.ty).clone(), value, kind });
@@ -166,7 +171,7 @@ impl Shader {
     fn payload(&self, isthmus: &TokenStream, name: &Ident) -> TokenStream {
         let fields = self.captures.iter().filter(|capture| capture.kind != CaptureKind::Image).map(|capture| {
             let (name, ty) = (&capture.name, &capture.ty);
-            let ty = if capture.kind == CaptureKind::Buffer { quote!([u32; 2]) } else { quote!(#ty) };
+            let ty = if capture.kind == CaptureKind::Slice { quote!([u32; 2]) } else { quote!(#ty) };
             quote!(#name: #ty)
         });
         quote! {
@@ -196,8 +201,8 @@ impl Shader {
         });
         let fields = self.captures.iter().filter(|capture| capture.kind != CaptureKind::Image).map(|capture| {
             let name = &capture.name;
-            if capture.kind == CaptureKind::Buffer {
-                quote!(#name: __isthmus_frame.capture_buffer(#name))
+            if capture.kind == CaptureKind::Slice {
+                quote!(#name: __isthmus_frame.capture_slice(#name))
             } else {
                 quote!(#name)
             }
@@ -231,19 +236,33 @@ impl Shader {
         let payload = self.payload(isthmus, &payload_name);
         let frame_input = self.fragment.inputs.first().unwrap();
         let input = &self.fragment.inputs[1];
-        let body = &self.fragment.body;
+        let mut body = (*self.fragment.body).clone();
+        let mut stage = stage;
+        let slices = self
+            .captures
+            .iter()
+            .filter(|capture| capture.kind == CaptureKind::Slice)
+            .map(|capture| capture.name.to_string())
+            .collect::<BTreeSet<_>>();
+        SliceIndices(slices.clone()).visit_expr_mut(&mut body);
+        SliceIndices(slices).visit_expr_mut(&mut stage);
         let bindings = self.captures.iter().map(|Binding { name, ty, kind, .. }| {
             let value = match kind {
                 CaptureKind::Image => {
                     let (image, sampler) = image_names(name);
                     quote!(#isthmus::Image::new(#image, *#sampler))
                 }
-                CaptureKind::Buffer => quote!(#isthmus::Buffer::from_words(payload, _instance.#name)),
+                CaptureKind::Slice => quote!(crate::ShaderSlice::from_words(payload, _instance.#name)),
                 CaptureKind::Data => quote!(#isthmus::ShaderData::resolve(_instance.#name, #isthmus::ResourceData {
                     transient: _transient, persistent: _persistent,
                 })),
             };
-            let annotation = (*kind == CaptureKind::Buffer).then(|| quote!(: #ty));
+            let annotation = (*kind == CaptureKind::Slice).then(|| {
+                let Type::Reference(reference) = ty else { return quote!() };
+                let Type::Slice(slice) = &*reference.elem else { return quote!() };
+                let element = &slice.elem;
+                quote!(: crate::ShaderSlice<'_, #element>)
+            });
             // Captures can be used by only one stage; both stages share this setup.
             quote!(let #name #annotation = #value; let _ = &#name;)
         });
@@ -286,5 +305,38 @@ impl Shader {
             *out_color = (color.truncate() * alpha).extend(alpha);
         });
         quote!(#payload #vertex #fragment)
+    }
+}
+
+pub struct SliceIndices(pub BTreeSet<String>);
+
+impl VisitMut for SliceIndices {
+    fn visit_expr_mut(&mut self, i: &mut Expr) {
+        visit_mut::visit_expr_mut(self, i);
+        if let Expr::ForLoop(loop_) = i
+            && let Expr::Path(path) = &*loop_.expr
+            && let Some(name) = path.path.get_ident()
+            && self.0.contains(&name.to_string())
+        {
+            let binding = &loop_.pat;
+            let body = &loop_.body;
+            *i = parse_quote!({
+                for __isthmus_index in 0..#name.len() {
+                    let __isthmus_item = #name.load(__isthmus_index);
+                    let #binding = &__isthmus_item;
+                    #body
+                }
+            });
+            return;
+        }
+        if let Expr::Index(index) = i
+            && let Expr::Path(path) = &*index.expr
+            && let Some(name) = path.path.get_ident()
+            && self.0.contains(&name.to_string())
+        {
+            let receiver = (*index.expr).clone();
+            let subscript = (*index.index).clone();
+            *i = parse_quote!(#receiver.load(#subscript));
+        }
     }
 }

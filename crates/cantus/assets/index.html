@@ -40,7 +40,7 @@
     <canvas id="cantus"></canvas>
     <p id="error" role="alert" hidden></p>
     <script type="module">
-        import init, {start} from "./cantus.js";
+        import init, {start} from "./web/cantus.js";
         try {
             if (!isSecureContext) throw new Error("Open Cantus over HTTPS or on localhost to use WebGPU.");
             if (!navigator.gpu) throw new Error("GPU adapter unavailable: this browser does not expose WebGPU.");

@@ -200,23 +200,23 @@ fn parse_webvtt(source: &str) -> Lyrics {
 }
 
 async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics> {
-    let response = http
-        .get("https://lyrics-api.binimum.org/")
-        .query(&[
-            ("track", track.name.as_str()),
-            ("artist", track.primary_artist()),
-            ("album", track.album.as_str()),
-            ("duration", &(track.duration_ms / 1000).to_string()),
-        ])
-        .send()
-        .await?;
+    let duration = (track.duration_ms / 1000).to_string();
+    let mut request = http.get("https://lyrics-api.binimum.org/").query(&[
+        ("track", track.name.as_str()),
+        ("artist", track.primary_artist()),
+        ("album", track.album.as_str()),
+        ("duration", duration.as_str()),
+    ]);
+    if let Some(isrc) = track.isrc.as_deref() {
+        request = request.query(&[("isrc", isrc)]);
+    }
+    let response = request.send().await?;
     if response.status() != StatusCode::NOT_FOUND {
         let response = response.error_for_status()?.json::<Value>().await?;
         let results = response["results"].as_array().ok_or("Lyrics search response has no results array")?;
-        let preferred = ["word", "line"].into_iter().find_map(|timing| {
-            results.iter().find(|result| result["timing_type"] == timing).map(|result| (result, timing))
-        });
-        if let Some((result, timing)) = preferred {
+        if let Some((timing, result)) = ["word", "line"].into_iter().find_map(|timing| {
+            results.iter().find(|result| result["timing_type"] == timing).map(|result| (timing, result))
+        }) {
             let url = result["lyricsUrl"].as_str().ok_or("Lyrics search result has no URL")?;
             let source = http.get(url).send().await?.error_for_status()?.text().await?;
             let mut lyrics = parse_ttml(&source);
