@@ -324,11 +324,6 @@ impl Track {
     pub fn queue_span_ms(&self) -> f32 {
         self.duration_ms as f32 + TRACK_SPACING_MS
     }
-
-    /// Whether the URI is a web media URL the caption extractor can be pointed at.
-    pub(crate) fn is_web_media(&self) -> bool {
-        self.uri.starts_with("http://") || self.uri.starts_with("https://")
-    }
 }
 
 pub struct CondensedPlaylist {

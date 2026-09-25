@@ -50,7 +50,7 @@ use tokio::{
         watch,
     },
     task::spawn_blocking,
-    time::sleep,
+    time::{Instant as TokioInstant, sleep, sleep_until},
 };
 use tracing::{error, info, warn};
 use web_time::Instant;
@@ -147,6 +147,8 @@ async fn run_spotify(
     let mut clusters = dealer.listen_for("hm://connect-state/v1/cluster", DealerMessage::from_raw::<ClusterUpdate>)?;
     let mut playlist_changes = dealer.listen_for("hm://playlist/v2", |_| Ok(()))?;
     dealer.start().await?;
+    let cluster_watchdog = sleep_until(TokioInstant::now() + Duration::from_secs(180));
+    tokio::pin!(cluster_watchdog);
 
     let mut worker = SpotifyWorker {
         session,
@@ -161,6 +163,7 @@ async fn run_spotify(
     };
 
     loop {
+        let is_playing = worker.player.as_ref().is_some_and(|player| player.is_playing && !player.is_paused);
         tokio::select! {
             Some(command) = commands.recv() => worker.command(command).await,
             Some((requested, mut values)) = worker.pending.next() => {
@@ -195,9 +198,15 @@ async fn run_spotify(
                 Err(error) => warn!(%error, "Invalid Spotify connection update"),
             },
             Some(update) = clusters.next() => match update {
-                Ok(update) => worker.update_cluster(update.cluster.into_option().unwrap_or_default()),
+                Ok(update) => {
+                    cluster_watchdog.as_mut().reset(TokioInstant::now() + Duration::from_secs(180));
+                    worker.update_cluster(update.cluster.into_option().unwrap_or_default());
+                }
                 Err(error) => warn!(%error, "Invalid Spotify cluster update"),
             },
+            () = &mut cluster_watchdog, if is_playing => {
+                return Err(io::Error::other("Spotify stopped sending playback updates").into());
+            }
             Some(change) = playlist_changes.next() => match change {
                 Ok(()) => worker.refresh_playlists().await,
                 Err(error) => warn!(%error, "Invalid Spotify playlist update"),

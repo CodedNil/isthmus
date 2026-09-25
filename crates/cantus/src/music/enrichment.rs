@@ -128,7 +128,7 @@ impl CantusApp {
         let now = Instant::now();
         let music = &mut self.music;
         let resources = &mut music.resources;
-        let tracks = music.queue.iter().chain(music.local.iter().map(|local| &local.track));
+        let tracks = music.queue.iter();
         resources.art.retain(|url, state| {
             matches!(state, Fetch::Fetching)
                 || tracks.clone().any(|track| track.image.as_ref() == Some(url))
@@ -143,18 +143,10 @@ impl CantusApp {
         if self.config.lyrics_enabled {
             let current = music.timeline.index.min(music.queue.len());
             let end = (current + 3).min(music.queue.len());
-            let candidates = music
-                .local
-                .iter()
-                .map(|local| &local.track)
-                .chain(&music.queue[current..end])
-                .chain(&music.queue[current.saturating_sub(1)..current]);
+            let candidates = music.queue[current..end].iter().chain(&music.queue[current.saturating_sub(1)..current]);
             if let Some(track) = candidates
                 .filter(|track| {
-                    track.is_web_media()
-                        || (!track.name.trim().is_empty()
-                            && !track.primary_artist().trim().is_empty()
-                            && track.duration_ms > 0)
+                    !track.name.trim().is_empty() && !track.primary_artist().trim().is_empty() && track.duration_ms > 0
                 })
                 .find(|track| resources.lyrics.entry(track.uri.clone()).or_default().request(now))
             {
