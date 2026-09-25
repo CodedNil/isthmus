@@ -32,6 +32,14 @@ pub struct Channel {
 }
 
 pub(super) async fn fetch(track: &Track, http: &Client, session: &Mutex<Session>) -> MusicResult<Lyrics> {
+    let youtube_url = reqwest::Url::parse(&track.uri).is_ok_and(|url| {
+        matches!(
+            url.host_str(),
+            Some(
+                "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be" | "www.youtu.be"
+            )
+        )
+    });
     if track.uri.starts_with("http://") || track.uri.starts_with("https://") {
         match captions(track.uri.clone()).await {
             Ok(file) if !file.source.is_empty() => {
@@ -49,6 +57,9 @@ pub(super) async fn fetch(track: &Track, http: &Client, session: &Mutex<Session>
             Err(error) => tracing::debug!(%error, url = %track.uri, "caption extraction unavailable"),
             _ => {}
         }
+    }
+    if youtube_url {
+        return Ok(Lyrics::default());
     }
     let mut session = session.lock().await;
     let mut failure = None;
