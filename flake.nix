@@ -15,23 +15,12 @@ rec {
       ...
     }:
     let
-      inherit (nixpkgs) lib;
       system = "x86_64-linux";
       pkgs = import nixpkgs {
         inherit system;
         overlays = [ rust-overlay.overlays.default ];
       };
-      pname = "cantus";
-      runtimeLibraries = with pkgs; [
-        wayland
-        vulkan-loader
-        libxkbcommon
-      ];
-      runtimeTools = with pkgs; [
-        pipewire
-        wireplumber
-      ];
-      runtimeLibraryPath = "${lib.makeLibraryPath runtimeLibraries}:/run/opengl-driver/lib";
+      # Rust-GPU requires this exact nightly and the compiler development components.
       rust = pkgs.rust-bin.nightly."2026-07-03".default.override {
         extensions = [
           "clippy"
@@ -41,155 +30,36 @@ rec {
           "llvm-tools"
         ];
       };
-      rustPlatform = pkgs.makeRustPlatform {
-        rustc = rust;
-        cargo = rust;
+      cantus = pkgs.callPackage ./crates/cantus/package.nix {
+        inherit rust description;
       };
     in
     {
-      packages.${system} = rec {
+      packages.${system} = {
+        inherit cantus;
         default = cantus;
-        cantus = rustPlatform.buildRustPackage {
-          inherit pname;
-          cargoDeps = pkgs.symlinkJoin {
-            name = "cargo-vendor-dir";
-            # build-std also resolves dependencies from the pinned Rust sysroot.
-            paths = [
-              (rustPlatform.importCargoLock {
-                lockFile = ./Cargo.lock;
-                outputHashes = {
-                  "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-OL8FIC3YOuH5Xkfee1alGKl6V43jlGaPXS08EOga/W0=";
-                };
-              })
-              (rustPlatform.importCargoLock {
-                lockFile = "${rust}/lib/rustlib/src/rust/library/Cargo.lock";
-              })
-            ];
-          };
-          version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
-          src = lib.fileset.toSource {
-            root = ./.;
-            fileset = lib.fileset.unions [
-              ./Cargo.toml
-              ./Cargo.lock
-              ./rustfmt.toml
-              ./crates
-            ];
-          };
-          buildAndTestSubdir = "crates/cantus";
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-            makeWrapper
-            mold
-          ];
-          buildInputs = runtimeLibraries;
-          RUSTFLAGS = "--remap-path-prefix=${rust}=/rustc";
-          postInstall = ''
-            wrapProgram "$out/bin/${pname}" \
-              --set LD_LIBRARY_PATH "${runtimeLibraryPath}" \
-              --prefix PATH : "${lib.makeBinPath runtimeTools}"
-          '';
-          meta = {
-            inherit description;
-            homepage = "https://github.com/CodedNil/cantus";
-            license = lib.licenses.mit;
-            maintainers = with lib.maintainers; [ CodedNil ];
-            platforms = lib.platforms.linux;
-            mainProgram = pname;
-          };
-        };
       };
 
       devShells.${system}.default = pkgs.mkShell {
-        name = pname;
-        packages = with pkgs; [
-          rust
-          mold
-          pkg-config
-          just
-          nixfmt
-          spirv-tools
-          wasm-bindgen-cli
-          pipewire
-          wireplumber
-        ];
-        buildInputs = runtimeLibraries;
-        LD_LIBRARY_PATH = runtimeLibraryPath;
+        name = "isthmus";
+        inputsFrom = [ cantus ];
+        packages =
+          cantus.runtimeTools
+          ++ (with pkgs; [
+            rust
+            just
+            nixfmt
+            spirv-tools
+            wasm-bindgen-cli
+          ]);
+        LD_LIBRARY_PATH = cantus.runtimeLibraryPath;
       };
 
       formatter.${system} = pkgs.nixfmt;
 
-      homeManagerModules = {
-        default = self.homeManagerModules.cantus;
-        cantus =
-          {
-            config,
-            lib,
-            pkgs,
-            ...
-          }:
-          let
-            cfg = config.programs.cantus;
-            settingsFormat = pkgs.formats.toml { };
-            settingsOptions = import ./generated-options.nix { inherit lib; };
-          in
-          {
-            options.programs.cantus = {
-              enable = lib.mkEnableOption description;
-
-              package = lib.mkOption {
-                type = lib.types.package;
-                default = self.packages.${pkgs.system}.cantus;
-                defaultText = lib.literalExpression "inputs.${pname}.packages.${pkgs.system}.${pname}";
-                description = "Cantus package to install.";
-              };
-
-              autoStart = lib.mkOption {
-                type = lib.types.bool;
-                default = true;
-                description = "Whether to start the Cantus widget automatically.";
-              };
-
-              settings = lib.mkOption {
-                type = lib.types.nullOr (
-                  lib.types.submodule {
-                    options = settingsOptions;
-                  }
-                );
-                default = null;
-                description = "Settings written as TOML to `~/.config/cantus/cantus.toml`.";
-                example = lib.mapAttrs (_: option: option.default) settingsOptions;
-              };
-            };
-
-            config = lib.mkIf cfg.enable {
-              home.packages = [ cfg.package ];
-
-              xdg.configFile = lib.optionalAttrs (cfg.settings != null) {
-                "cantus/cantus.toml".source = settingsFormat.generate "cantus.toml" (
-                  lib.filterAttrs (_: value: value != null) cfg.settings
-                );
-              };
-
-              systemd.user.services.cantus = lib.mkIf cfg.autoStart {
-                Unit = {
-                  Description = description;
-                  After = [ config.wayland.systemd.target ];
-                  X-Restart-Triggers = lib.optional (
-                    cfg.settings != null
-                  ) config.xdg.configFile."cantus/cantus.toml".source;
-                };
-
-                Service = {
-                  Type = "simple";
-                  ExecStart = "${cfg.package}/bin/${pname}";
-                  Restart = "on-failure";
-                };
-
-                Install.WantedBy = [ config.wayland.systemd.target ];
-              };
-            };
-          };
+      homeManagerModules = rec {
+        default = cantus;
+        cantus = import ./crates/cantus/home-manager.nix { inherit self description; };
       };
     };
 }
