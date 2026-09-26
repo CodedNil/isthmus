@@ -172,7 +172,7 @@ pub fn generate_nix_options() -> io::Result<()> {
         ).unwrap();
     }
     output.push_str("}\n");
-    let path = "generated-options.nix";
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/generated-options.nix");
     if !fs::read_to_string(path).is_ok_and(|contents| contents == output) {
         fs::write(path, output)?;
     }
