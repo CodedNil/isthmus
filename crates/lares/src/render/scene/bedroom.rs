@@ -14,5 +14,5 @@ pub(super) fn bed(local: Vec3, size: Vec3) -> Hit {
     } else {
         (Material::Fabric, vec3(0.68, 0.62, 0.54))
     };
-    Hit { distance, material, tint }
+    Hit::new(distance, material, tint)
 }

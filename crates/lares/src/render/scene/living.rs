@@ -1,43 +1,124 @@
 use super::{Hit, Material};
 use isthmus::prelude::*;
+const LINEN: Vec3 = vec3(0.79, 0.765, 0.70);
+const BLUE: Vec3 = vec3(0.38, 0.49, 0.56);
 
-pub(super) fn ottoman(local: Vec3, _size: Vec3) -> Hit {
-    let base = super::rounded_box(local - vec3(0.0, 0.0, -0.15), vec3(0.78, 0.58, 0.16), 0.03);
-    let cushion = super::rounded_box(local - vec3(0.0, 0.0, 0.02), vec3(0.8, 0.6, 0.36), 0.1);
-    let throw = super::rounded_box(local - vec3(0.08, 0.04, 0.19), vec3(0.44, 0.3, 0.05), 0.02);
-    let body = super::blend(base, cushion, 0.08);
-    let distance = body.min(throw);
-    let tint = if throw < body { vec3(0.12, 0.3, 0.72) } else { vec3(0.7, 0.6, 0.47) };
-    Hit { distance, material: Material::Fabric, tint }
-}
-
-pub(super) fn rug(local: Vec3, _size: Vec3) -> Hit {
-    Hit {
-        distance: super::rounded_box(local - Vec3::ZERO, vec3(2.6, 2.0, 0.05), 0.02),
-        material: Material::Carpet,
-        tint: Vec3::ONE,
-    }
-}
-
-pub(super) fn sofa(local: Vec3, size: Vec3) -> Hit {
-    let fabric = vec3(0.7, 0.6, 0.47);
-    let blue = vec3(0.12, 0.3, 0.72);
-    let seat = super::scaled_box(local, size, vec3(0.0, 0.05, -0.2), vec3(1.0, 0.85, 0.55), 0.16);
-    let back = super::scaled_box(local, size, vec3(0.0, -0.42, 0.22), vec3(1.0, 0.16, 0.55), 0.3);
-    let arm = super::scaled_box(local, size, vec3(-0.44, 0.05, 0.0), vec3(0.12, 0.9, 0.6), 0.4);
-    let arm_2 = super::scaled_box(local, size, vec3(0.44, 0.05, 0.0), vec3(0.12, 0.9, 0.6), 0.4);
-    let cushion = super::scaled_box(local, size, vec3(-0.22, -0.34, 0.2), vec3(0.4, 0.14, 0.5), 0.3);
-    let cushion_2 = super::scaled_box(local, size, vec3(0.22, -0.34, 0.2), vec3(0.4, 0.14, 0.5), 0.3);
-    let pillow = super::scaled_box(local, size, vec3(-0.3, -0.24, 0.02), vec3(0.24, 0.12, 0.36), 0.4);
-    let pillow_2 = super::scaled_box(local, size, vec3(0.3, -0.24, 0.02), vec3(0.24, 0.12, 0.36), 0.4);
-    let blanket = super::scaled_box(local, size, vec3(0.0, 0.32, 0.18), vec3(0.72, 0.3, 0.1), 0.08);
-    let body = super::blend(
-        super::blend(super::blend(super::blend(seat, back, 0.14), arm, 0.1), arm_2, 0.1),
-        super::blend(cushion, cushion_2, 0.05),
-        0.05,
+pub(super) fn ottoman(p: Vec3, size: Vec3) -> Hit {
+    let base = super::scaled_box(p, size, vec3(0.0, 0.0, -0.14), vec3(0.96, 0.96, 0.65), 0.06);
+    let cushion = super::scaled_box(p, size, vec3(0.0, 0.0, 0.29), vec3(1.0, 1.0, 0.35), 0.10);
+    let piping = super::scaled_box(p, size, vec3(0.0, 0.0, 0.14), vec3(0.985, 0.985, 0.018), 0.04);
+    // Folded dusty blue throw, with a gently rolled edge.
+    let cloth = p - vec3(-0.06, 0.08, 0.47) * size;
+    let cloth = vec3(cloth.x, cloth.y, cloth.z - 0.003 * (cloth.x * 58.0 + cloth.y * 6.0).sin());
+    let throw = super::rounded_box(cloth, size * vec3(0.68, 0.50, 0.035), 0.006) * 0.83;
+    let index = (cloth.x / 0.009).round().clamp(-size.x * 0.30 / 0.009, size.x * 0.30 / 0.009);
+    let fringe_point = vec3(cloth.x - index * 0.009, cloth.y, cloth.z);
+    let fringe = super::capsule(
+        fringe_point,
+        vec3(0.0, size.y * 0.25, -0.001),
+        vec3(0.003, size.y * 0.25 + 0.038, -0.006),
+        0.0015,
     );
-    let pillows = pillow.min(pillow_2).min(blanket);
-    let distance = body.min(pillows);
-    let tint = if pillows < body { blue } else { fabric };
-    Hit { distance, material: Material::Fabric, tint }
+    let throw = throw.min(fringe);
+    let body = base.min(cushion).min(piping);
+    Hit::new(
+        body.min(throw),
+        if throw < body { Material::Knit } else { Material::Fabric },
+        if throw < body { vec3(0.64, 0.70, 0.71) } else { LINEN },
+    )
+}
+pub(super) fn rug(p: Vec3, size: Vec3) -> Hit {
+    // Dense, continuous pile avoids empty gaps between isolated fiber capsules.
+    // These are centimeter-scale height changes in the traced surface, not bump.
+    let rotated = vec2(p.x * 0.8 - p.y * 0.6, p.x * 0.6 + p.y * 0.8);
+    let clumps = super::materials::noise(rotated * 38.0);
+    let nap = super::materials::noise(p.xy() * 17.0 + 3.7);
+    let height = size.z * 0.5 + 0.016 + clumps * 0.006 + nap * 0.003;
+    let edge = super::rounded_box(vec3(p.x, p.y, 0.0), vec3(size.x, size.y, 0.16), 0.025);
+    let layer = (p.z - height).max(-p.z - size.z * 0.5);
+    // Quintic noise gradient <= 2.652 per octave. The combined height
+    // slope <= 0.740 gives a tight, conservative extrusion bound of 1.25.
+    let distance = edge.max(layer) / 1.25;
+    Hit::new(distance, Material::Shag, Vec3::ONE)
+}
+/// Cushions bulge between their seams and compress toward their edges.
+fn cushion(p: Vec3, size: Vec3, radius: f32) -> f32 {
+    let uv = p.xy() / (size.xy() * 0.5);
+    let dome = (1.0 - uv.x * uv.x).max(0.0) * (1.0 - uv.y * uv.y).max(0.0);
+    let q = vec3(p.x, p.y, p.z - dome * size.z * 0.10);
+    super::rounded_box(q, size, radius) * 0.75
+}
+pub(super) fn sofa(p: Vec3, size: Vec3) -> Hit {
+    let base = super::scaled_box(p, size, vec3(0.0, 0.02, -0.34), vec3(0.98, 0.92, 0.30), 0.05);
+    // Two separate seat and back cushions with defined seams.
+    let mirrored = vec3(p.x.abs(), p.y, p.z);
+    let seat_width = (size.x - 0.50) * 0.5;
+    let center = vec3(seat_width * 0.5, size.y * 0.12, -size.z * 0.07);
+    let seat = cushion(mirrored - center, vec3(seat_width - 0.008, size.y * 0.74, size.z * 0.23), 0.045);
+    let back = mirrored - vec3(center.x, -size.y * 0.34, size.z * 0.20);
+    let back = vec3(back.x, back.z * 0.98 - back.y * 0.20, back.y * 0.98 + back.z * 0.20);
+    let back = cushion(back, vec3(seat_width - 0.008, size.z * 0.57, size.y * 0.23), 0.055);
+    let arm = super::rounded_box(
+        mirrored - vec3(size.x * 0.5 - 0.125, size.y * 0.025, -size.z * 0.19),
+        vec3(0.25, size.y * 0.96, size.z * 0.68),
+        0.045,
+    );
+    let welt = super::rounded_box(
+        mirrored - vec3(center.x, center.y, -size.z * 0.18),
+        vec3(seat_width - 0.003, size.y * 0.747, size.z * 0.010),
+        0.008,
+    );
+    let body = base.min(seat).min(back).min(arm).min(welt);
+    // Cushions lean against the back, at a real physical angle.
+    let q = p - vec3(if p.x < 0.0 { -0.28 } else { 0.28 }, -0.20, 0.19) * size;
+    let pillow = vec3(q.x, q.y * 0.91 + q.z * 0.414, -q.y * 0.414 + q.z * 0.91);
+    let edge = (pillow.x.abs() / (size.x * 0.085)).clamp(0.0, 1.0);
+    let creases = 0.008 * (pillow.x * 53.0 + pillow.z * 12.0).sin() * edge * edge;
+    let folded = vec3(pillow.x, pillow.y + creases, pillow.z);
+    // Puckered seam and a softly inflated center rather than a rigid slab.
+    let face = vec3(folded.x, folded.z, folded.y);
+    let pillow_size = vec3(0.44, 0.43, 0.15);
+    let pillow_body = cushion(face, pillow_size, 0.045);
+    let piping = super::rounded_box(face, vec3(0.438, 0.428, 0.006), 0.003);
+    let pillow = pillow_body.min(piping) * 0.70;
+    let cushion = pillow < body;
+    Hit::new(
+        body.min(pillow),
+        if cushion && p.x > 0.0 { Material::Knit } else { Material::Fabric },
+        if cushion { if p.x > 0.0 { vec3(0.34, 0.45, 0.48) } else { BLUE } } else { LINEN },
+    )
+}
+
+pub(super) fn side_table(p: Vec3, size: Vec3) -> Hit {
+    // STARKVIND: 54 cm veneer top, suspended cylindrical filter and four legs.
+    // size.z describes the table itself; tabletop dressing shares its BVH leaf.
+    let deck = size.z * 0.5 - 0.012;
+    let top = super::cylinder(p - Vec3::Z * deck, size.x * 0.5, 0.024);
+    let folded = vec3(p.x.abs(), p.y.abs(), p.z);
+    let legs = super::taper(folded, vec3(0.17, 0.17, -size.z * 0.5), vec3(0.135, 0.135, deck - 0.025), 0.016, 0.022);
+    let drum = p - Vec3::Z * (deck - 0.10);
+    let barrel = super::cylinder(drum, size.x * 0.435, 0.15);
+    let shell = barrel.max(-super::cylinder(drum, size.x * 0.435 - 0.006, 0.145));
+    let arc = drum.y.atan2(drum.x) * size.x * 0.435;
+    let hole = vec2(arc - (arc / 0.009).round() * 0.009, drum.z - (drum.z / 0.009).round() * 0.009).length() - 0.0025;
+    let grille = shell.max(-hole);
+    let filter = super::cylinder(drum, size.x * 0.41, 0.14);
+    let knob = super::cylinder(vec3(p.x, p.z - deck + 0.09, p.y - size.x * 0.44), 0.019, 0.022);
+    let hardware = grille.min(filter).min(knob);
+    let book = super::rounded_box(p - vec3(0.025, -0.065, deck + 0.026), vec3(0.19, 0.115, 0.023), 0.003);
+    let coaster = super::cylinder(p - vec3(0.16, 0.025, deck + 0.017), 0.028, 0.005);
+    let mut hit = Hit::new(top.min(legs), Material::Wood, vec3(0.19, 0.16, 0.13))
+        .union(Hit::new(hardware, Material::Metal, vec3(0.15, 0.16, 0.16)))
+        .union(Hit::new(book, Material::Fabric, vec3(0.17, 0.19, 0.15)))
+        .union(Hit::new(coaster, Material::Ceramic, vec3(0.92, 0.90, 0.84)));
+    // Skip tabletop dressing outside conservative bounds of each component.
+    let lamp = p - vec3(-0.10, 0.085, deck + 0.193);
+    if (lamp.length() - 0.18).max(0.0) * 0.4 <= hit.distance {
+        hit = hit.union(super::decor::table_lamp(lamp + Vec3::Z * 0.18));
+    }
+    let flowers = p - vec3(0.015, -0.085, deck + 0.112);
+    if (flowers.length() - 0.10).max(0.0) * 0.4 <= hit.distance {
+        hit = hit.union(super::decor::table_flowers(flowers + Vec3::Z * 0.07));
+    }
+    hit
 }

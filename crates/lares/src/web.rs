@@ -40,16 +40,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         EventListener::new(&canvas, name, move |event| {
             let event = event.unchecked_ref::<web_sys::PointerEvent>();
             let position = vec2(event.offset_x() as f32, event.offset_y() as f32);
+            let viewport = vec2(capture.client_width() as f32, capture.client_height() as f32);
             let mut app = app.borrow_mut();
             match name {
                 "pointerdown" if event.button() == 0 => {
                     let _ = capture.set_pointer_capture(event.pointer_id());
-                    app.pointer_moved(position);
+                    app.pointer_moved(position, viewport);
                     app.pointer_pressed();
                 }
                 "pointerup" if event.button() == 0 => app.pointer_released(),
                 "pointercancel" => app.pointer_released(),
-                "pointermove" => app.pointer_moved(position),
+                "pointermove" => app.pointer_moved(position, viewport),
                 _ => {}
             }
         })

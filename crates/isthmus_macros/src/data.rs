@@ -35,6 +35,17 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
         let name = &input.ident;
         let variants: Vec<_> = data.variants.iter().map(|variant| &variant.ident).collect();
         let first = variants[0];
+        let decode = if data.variants.iter().all(|variant| variant.discriminant.is_none()) {
+            let count = variants.len() as u32;
+            quote! {
+                if value < #count {
+                    // SAFETY: An implicit repr(u32) enum has exactly the discriminants 0..count.
+                    unsafe { core::mem::transmute::<u32, Self>(value) }
+                } else { Self::ZERO }
+            }
+        } else {
+            quote! { match value { #(value if value == Self::#variants as u32 => Self::#variants,)* _ => Self::ZERO } }
+        };
         return quote! {
             impl #isthmus::ShaderData for #name {
                 type View<'a> = Self;
@@ -43,7 +54,7 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
                 fn resolve(self, _: #isthmus::ResourceData<'_>) -> Self { self }
                 unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
                     let value = unsafe { <u32 as #isthmus::ShaderData>::read_unchecked(words, offset) };
-                    match value { #(value if value == Self::#variants as u32 => Self::#variants,)* _ => Self::ZERO }
+                    #decode
                 }
                 fn write(self, words: &mut [u32], offset: usize) {
                     <u32 as #isthmus::ShaderData>::write(self as u32, words, offset);
