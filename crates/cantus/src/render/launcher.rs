@@ -281,9 +281,7 @@ impl LauncherState {
     pub fn toggle(&mut self) {
         self.session = self.session.wrapping_add(1);
         self.open = Self::ALWAYS_OPEN || !self.open;
-        self.field.text.clear();
-        self.field.set_cursor(0, false);
-        self.refresh_matches();
+        self.edit(|field| *field = TextField { touched: true, ..Default::default() });
     }
 
     /// Runs one edit against the search field, then re-runs the query.
@@ -361,11 +359,11 @@ impl LauncherState {
 
     /// Evaluates the query as an expression, unless the answer only echoes it.
     fn evaluate(&mut self, query: &str) -> Option<String> {
-        (query.len() >= 4)
-            .then(|| fend_core::evaluate(query, &mut self.calc).ok())
-            .flatten()
-            .map(|result| result.get_main_result().to_owned())
-            .filter(|result| !result.is_empty() && result != query)
+        if query.len() < 4 {
+            return None;
+        }
+        let answer = fend_core::evaluate(query, &mut self.calc).ok()?.get_main_result().to_owned();
+        (!answer.is_empty() && answer != query).then_some(answer)
     }
 
     /// Moves the highlight by `delta` rows, stopping at either end.
@@ -391,9 +389,7 @@ impl LauncherState {
             None => return,
         }
         self.open = Self::ALWAYS_OPEN;
-        self.field.text.clear();
-        self.field.set_cursor(0, false);
-        self.refresh_matches();
+        self.edit(|field| *field = TextField { touched: true, ..Default::default() });
     }
 
     fn search_query(&self) -> (Option<usize>, &str) {

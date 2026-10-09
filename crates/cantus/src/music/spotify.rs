@@ -391,15 +391,15 @@ impl SpotifyWorker {
 
     fn schedule_metadata<'a>(&mut self, tracks: impl Iterator<Item = &'a ProvidedTrack>) {
         let requested = tracks
-            .filter(|track| {
-                matches!(SpotifyUri::from_uri(&track.uri), Ok(SpotifyUri::Track { .. }))
-                    && !self.track_metadata.contains_key(&track.uri)
-                    && {
-                        self.track_metadata.insert(track.uri.clone(), None);
-                        true
-                    }
+            .filter_map(|track| {
+                if !matches!(SpotifyUri::from_uri(&track.uri), Ok(SpotifyUri::Track { .. }))
+                    || self.track_metadata.contains_key(&track.uri)
+                {
+                    return None;
+                }
+                self.track_metadata.insert(track.uri.clone(), None);
+                Some(track.uri.clone())
             })
-            .map(|track| track.uri.clone())
             .collect::<Vec<_>>();
         if requested.is_empty() {
             return;
@@ -608,18 +608,13 @@ async fn fetch_track_metadata(session: &Session, tracks: &[String]) -> Metadata 
         .filter_map(|data| {
             let bytes = data.extension_data.into_option()?.value;
             let message = metadata::Track::parse_from_bytes(&bytes).ok()?;
-            match CatalogTrack::try_from(&message) {
-                Ok(mut track) => {
-                    if track.album.covers.is_empty() {
-                        track.album.covers = message.album.get_or_default().cover.as_slice().into();
-                    }
-                    Some((data.entity_uri, track))
-                }
-                Err(error) => {
-                    warn!(%error, uri = %data.entity_uri, "Invalid Spotify track metadata");
-                    None
-                }
+            let mut track = CatalogTrack::try_from(&message)
+                .inspect_err(|error| warn!(%error, uri = %data.entity_uri, "Invalid Spotify track metadata"))
+                .ok()?;
+            if track.album.covers.is_empty() {
+                track.album.covers = message.album.get_or_default().cover.as_slice().into();
             }
+            Some((data.entity_uri, track))
         })
         .collect()
 }

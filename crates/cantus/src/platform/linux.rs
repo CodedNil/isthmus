@@ -8,7 +8,7 @@ use crate::{
     render::{
         PANEL_RADIUS, PANEL_START, Renderer, lyrics,
         status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
-        weathertime,
+        text_cache, weathertime,
     },
 };
 use calloop::{EventLoop, channel};
@@ -22,7 +22,6 @@ use isthmus::{
         WindowHandle,
     },
 };
-use isthmus_sdf::layout::TextCache;
 use microfft::real::rfft_1024;
 use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
 use serde_json::Value;
@@ -166,10 +165,8 @@ pub async fn captions(url: String) -> MusicResult<CaptionFile> {
         if !output.status.success() && caption.is_none() {
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned().into());
         }
-        caption.map_or_else(
-            || Ok(CaptionFile { format: String::new(), source: String::new() }),
-            |(format, source)| Ok(CaptionFile { format, source }),
-        )
+        let (format, source) = caption.unwrap_or_default();
+        Ok(CaptionFile { format, source })
     })
     .await?
 }
@@ -212,7 +209,7 @@ pub fn run_power_action(action: super::PowerAction) {
         super::PowerAction::Reboot => "Reboot",
     };
     spawn_task(async move {
-        let result: Result<(), zbus::Error> = async {
+        let result = async {
             zbus::Connection::system()
                 .await?
                 .call_method(
@@ -222,8 +219,7 @@ pub fn run_power_action(action: super::PowerAction) {
                     method,
                     &(false,),
                 )
-                .await?;
-            Ok(())
+                .await
         }
         .await;
         if let Err(error) = result {
@@ -907,15 +903,8 @@ impl LayerShellApp {
             surface.viewport.set_destination(surface.size.x as i32, surface.size.y as i32);
             let size = (surface.size * surface.scale).to_array().map(|size| size.round().max(1.0) as u32);
             if self.gpu.is_none() {
-                let (gpu, handle) = pollster::block_on(Renderer::new(
-                    Arc::clone(&surface.native),
-                    size,
-                    TextCache::new(&[
-                        include_bytes!("../../assets/NotoSans-Variable.ttf"),
-                        include_bytes!("../../assets/NotoSansSymbols-Music.ttf"),
-                    ]),
-                ))
-                .expect("failed to initialize renderer");
+                let (gpu, handle) = pollster::block_on(Renderer::new(Arc::clone(&surface.native), size, text_cache()))
+                    .expect("failed to initialize renderer");
                 tracing::info!("Using GPU device: {}", gpu.device_name());
                 self.gpu = Some(gpu);
                 surface.gpu = Some(handle);

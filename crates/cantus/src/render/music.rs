@@ -293,6 +293,10 @@ impl MusicView {
             }
             let opacity = (future_end - layout.natural_start).smoothstep(0.0, panel_height)
                 * (layout.right - tracks_left).smoothstep(0.0, panel_height);
+            let can_expand = layout.width > panel_height;
+            if !can_expand {
+                track.runtime.track_expansion = 0.0;
+            }
             let mut width = layout.width.max(panel_height);
             let mut x = layout.right - width;
             let track_center = x + width * 0.5;
@@ -371,19 +375,20 @@ impl MusicView {
             ];
             let pill = Rect::new(vec2(x, pill_top), vec2(x + width, pill_top + panel_height));
             let shape = music_shape(pill, icon_supports);
-            let bounds = shape.bounds(0.0);
+            let hit_shape = shape.offset(if expansion > 0.0 { 12.0 } else { 0.0 });
+            let bounds = hit_shape.bounds(0.0);
             let (min, max) = (bounds.min, bounds.max);
             // Halve the search interval until it is at most half a pixel wide.
             let steps = bounds.size().x.max(1.0).log2().ceil() as u32;
             for y in min.y.floor() as i32..max.y.ceil() as i32 {
                 let point = vec2(pill.center().x, y as f32 + 0.5);
-                if !shape.contains(point) {
+                if !hit_shape.contains(point) {
                     continue;
                 }
                 let (mut inside, mut outside) = (0.0, bounds.size().x * 0.5);
                 for _ in 0..steps {
                     let middle = f32::midpoint(inside, outside);
-                    if shape.contains(point + vec2(middle, 0.0)) {
+                    if hit_shape.contains(point + vec2(middle, 0.0)) {
                         inside = middle;
                     } else {
                         outside = middle;
@@ -392,9 +397,9 @@ impl MusicView {
                 context.interaction.input_region(Rect::from_center_size(point, vec2(inside * 2.0, 1.0)));
             }
             let body = if can_seek {
-                context.interaction.drag(track.interaction_id, shape)
+                context.interaction.drag(track.interaction_id, hit_shape)
             } else {
-                context.interaction.interact(track.interaction_id, shape)
+                context.interaction.interact(track.interaction_id, hit_shape)
             };
             let mut hovered = body.hovered;
             if body.clicked && can_seek && track.duration_ms > 0 {
@@ -412,20 +417,6 @@ impl MusicView {
 
             let mut icons = Vec::new();
             if track.id.is_some() {
-                // Resolve the hovered star first, or earlier stars keep the stored rating.
-                if stars > 0 {
-                    let count = primary_icons;
-                    for slot in 0..stars {
-                        let icon = slot as f32 * star_alpha;
-                        let center = vec2(
-                            pill.center().x + (icon - (count - 1.0).max(0.0) * 0.5) * ICON_SPACING,
-                            support_row(pill).y,
-                        );
-                        if center.distance(mouse_pos) <= ICON_WIDTH * 0.5 {
-                            rating = Some(slot as i32 * 2 + 1 + i32::from(mouse_pos.x >= center.x));
-                        }
-                    }
-                }
                 for slot in 0..stars + primary_count + secondary_count {
                     let playlist_slot = slot.saturating_sub(stars);
                     let is_star = slot < stars;
@@ -457,6 +448,9 @@ impl MusicView {
                         Shape::circle(center, ICON_WIDTH * 0.5),
                     );
                     hovered |= response.hovered;
+                    if is_star && response.hovered {
+                        rating = Some(slot as i32 * 2 + 1 + i32::from(mouse_pos.x >= center.x));
+                    }
                     icons.push((slot, playlist, secondary, is_star, alpha, center, response));
                 }
             }
@@ -535,7 +529,7 @@ impl MusicView {
                             * speckle(uv * pill.size(), frame.time, seed, audio);
                         color *= 1.0 + caustics(uv * pill.size() / pill.size().y, frame.time, seed, audio);
                         let center = pill.center() + vec2((pill.size().x - pill.size().y) * 0.5, 0.0);
-                        let radius = pill.size().y * 0.5;
+                        let radius = f32::midpoint(pill.size().y, surface.bulge);
                         let edge = (surface.pixel.distance(center) - radius).max(surface.sdf.distance);
                         source_over(
                             image.sample((surface.refracted - center) / (radius * 2.0) + 0.5)
@@ -571,8 +565,9 @@ impl MusicView {
                                 if surface.refracted.x >= image_center.x {
                                     kill();
                                 }
-                                let alpha = (surface.refracted.distance(image_center) - pill.size().y * 0.5)
-                                    .smoothstep(2.0, 18.0);
+                                let alpha = (surface.refracted.distance(image_center)
+                                    - f32::midpoint(pill.size().y, surface.bulge))
+                                .smoothstep(2.0, 18.0);
                                 // Shared glyphs stay opaque while the additional text fades in.
                                 let ink =
                                     compact.fill_at(surface.content).lerp(full.fill_at(surface.content), expansion);
@@ -604,9 +599,6 @@ impl MusicView {
                         } else {
                             rated_track = Some((track_id, slot as u8 * 2 + u8::from(mouse_pos.x >= center.x)));
                         }
-                    }
-                    if is_star && response.hovered {
-                        rating = Some(slot as i32 * 2 + 1 + i32::from(mouse_pos.x >= center.x));
                     }
                     shader!(
                         context
@@ -648,7 +640,7 @@ impl MusicView {
             track.runtime.track_expansion = track
                 .runtime
                 .track_expansion
-                .move_towards(f32::from(hovered), context.frame.delta_time.min(0.1) / 0.16);
+                .move_towards(f32::from(hovered && can_expand), context.frame.delta_time.min(0.1) / 0.16);
         }
         if let Some((index, position)) = seek_action {
             music.seek(index, position);

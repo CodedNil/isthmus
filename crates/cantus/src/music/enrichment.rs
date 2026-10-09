@@ -128,7 +128,7 @@ impl CantusApp {
         let now = Instant::now();
         let music = &mut self.music;
         let resources = &mut music.resources;
-        let tracks = music.queue.iter();
+        let tracks = music.queue.iter().chain(music.local.iter().map(|local| &local.track));
         resources.art.retain(|url, state| {
             matches!(state, Fetch::Fetching)
                 || tracks.clone().any(|track| track.image.as_ref() == Some(url))

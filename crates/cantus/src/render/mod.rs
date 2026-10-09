@@ -57,6 +57,13 @@ pub struct Globals {
 
 isthmus::program!(Globals, TextCache);
 
+pub fn text_cache() -> TextCache {
+    TextCache::new(&[
+        include_bytes!("../../assets/NotoSans-Variable.ttf"),
+        include_bytes!("../../assets/NotoSansSymbols-Music.ttf"),
+    ])
+}
+
 #[derive(Clone, Copy, Default, ShaderData)]
 pub struct RipplePulse {
     pub origin: Vec2,
