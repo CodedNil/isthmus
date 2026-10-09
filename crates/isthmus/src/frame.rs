@@ -1,7 +1,7 @@
 use crate::{
     Fragment, Image, Primitive, Program, ShaderData, ShaderFrame,
     backend::{gpu::Gpu, surface::SurfaceTarget},
-    bindings,
+    bindings, glam,
 };
 
 /// Immediate-mode drawing context for one surface in the current frame.

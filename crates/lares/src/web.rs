@@ -7,6 +7,11 @@ use tokio::sync::oneshot;
 use wasm_bindgen::JsCast;
 
 #[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    fn laresProgress(stage: &str);
+}
+
+#[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
     std::panic::set_hook(Box::new(|panic| {
         web_sys::console::error_1(&format!("Lares panic: {panic}").into());
@@ -30,9 +35,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let physical = [(viewport.x * scale).round().max(1.0) as u32, (viewport.y * scale).round().max(1.0) as u32];
         (vec2(physical[0] as f32, physical[1] as f32), physical)
     };
+    laresProgress("Preparing the scene…");
+    next_frame().await;
+    let app = App::template();
+    let app = Rc::new(RefCell::new(app));
+    laresProgress("Preparing graphics…");
+    next_frame().await;
     let (_, physical) = dimensions();
     let (mut gpu, surface) = Renderer::new(SurfaceTarget::Canvas(canvas.clone()), physical, ()).await?;
-    let app = Rc::new(RefCell::new(App::template()));
+    laresProgress("Drawing the first view…");
+    gpu.render(|render| app.borrow().draw(render, surface, vec2(physical[0] as f32, physical[1] as f32)))?;
+    let (sender, ready) = oneshot::channel();
+    gpu.queue().on_submitted_work_done(move || {
+        let _ = sender.send(());
+    });
+    ready.await?;
+    next_frame().await;
+    laresProgress("ready");
 
     let _pointer_listeners = ["pointerdown", "pointerup", "pointermove", "pointercancel"].map(|name| {
         let app = Rc::clone(&app);
@@ -40,16 +59,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         EventListener::new(&canvas, name, move |event| {
             let event = event.unchecked_ref::<web_sys::PointerEvent>();
             let position = vec2(event.offset_x() as f32, event.offset_y() as f32);
+            let viewport = vec2(capture.client_width() as f32, capture.client_height() as f32);
             let mut app = app.borrow_mut();
             match name {
                 "pointerdown" if event.button() == 0 => {
                     let _ = capture.set_pointer_capture(event.pointer_id());
-                    app.pointer_moved(position);
+                    app.pointer_moved(position, viewport);
                     app.pointer_pressed();
                 }
                 "pointerup" if event.button() == 0 => app.pointer_released(),
                 "pointercancel" => app.pointer_released(),
-                "pointermove" => app.pointer_moved(position),
+                "pointermove" => app.pointer_moved(position, viewport),
                 _ => {}
             }
         })
@@ -63,15 +83,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     loop {
-        let (sender, frame) = oneshot::channel();
-        let _animation = request_animation_frame(move |time| {
-            let _ = sender.send(time);
-        });
-        let Ok(_) = frame.await else { break };
+        next_frame().await;
         let (size, physical) = dimensions();
         gpu.resize(surface, physical);
         let app = app.borrow();
         gpu.render(|render| app.draw(render, surface, size))?;
     }
-    Ok(())
+}
+
+async fn next_frame() {
+    let (sender, frame) = oneshot::channel();
+    let _animation = request_animation_frame(move |_| {
+        let _ = sender.send(());
+    });
+    let _ = frame.await;
 }

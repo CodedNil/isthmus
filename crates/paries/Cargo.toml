@@ -1,20 +1,20 @@
 [package]
 name = "paries"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 
 [dependencies]
-isthmus = { path = "../isthmus" }
+isthmus.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-wayland-backend = { version = "0.3.17", features = ["rwh_06"] }
-wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
-wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
-pollster = "1.0.1"
-wayland-client = { version = "0.31.15", features = ["system"] }
+pollster.workspace = true
+wayland-backend.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
 
 [build-dependencies]
-isthmus-build = { path = "../isthmus_build" }
+isthmus-build.workspace = true
 
 [lints]
 workspace = true

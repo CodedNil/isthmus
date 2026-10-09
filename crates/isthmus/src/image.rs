@@ -1,4 +1,4 @@
-use glam::Vec4;
+use crate::glam::{self, Vec4};
 #[cfg(target_arch = "spirv")]
 use spirv_std::{Sampler, image::Image2d};
 #[cfg(not(target_arch = "spirv"))]

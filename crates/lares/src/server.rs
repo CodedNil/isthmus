@@ -8,8 +8,11 @@ const FRONTEND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
 pub const DEFAULT_PORT: u16 = 8128;
 
 pub async fn serve(port: u16) {
-    let app = Router::new()
-        .fallback_service(ServeDir::new(FRONTEND).not_found_service(ServeFile::new(format!("{FRONTEND}/index.html"))));
+    let app = Router::new().fallback_service(
+        ServeDir::new(FRONTEND)
+            .precompressed_gzip()
+            .not_found_service(ServeFile::new(format!("{FRONTEND}/index.html"))),
+    );
     let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
     match TcpListener::bind(address).await {
         Ok(listener) => {

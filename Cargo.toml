@@ -1,23 +1,44 @@
 [workspace]
 resolver = "3"
-members = [
-    "crates/isthmus",
-    "crates/isthmus_sdf",
-    "crates/isthmus_build",
-    "crates/isthmus_macros",
-    "crates/cantus",
-    "crates/lares",
-    "crates/paries",
-]
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
 
 [workspace.dependencies]
-bytemuck = "1.25.2"
 bitflags = "2.13.2"
-glam = { version = "0.33.10", default-features = false, features = ["u32"] }
+bytemuck = "1.25.2"
+form_urlencoded = "1.2.2"
+gloo-events = "0.3.0"
+gloo-render = "0.3.0"
+isthmus = { path = "crates/isthmus" }
+isthmus-build = { path = "crates/isthmus_build" }
+isthmus_macros = { path = "crates/isthmus_macros" }
+isthmus_sdf = { path = "crates/isthmus_sdf" }
+pollster = "1.0.1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 smallvec = "1.16.2"
-spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "e6394e08eb3356083b12f732a01906f8e49f7c4a" }
-spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "e6394e08eb3356083b12f732a01906f8e49f7c4a" }
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "d83e251c46a0d8e87a8b861ba984e2775e520409" }
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "d83e251c46a0d8e87a8b861ba984e2775e520409" }
+syn = { version = "3", features = ["full"] }
+tokio = { version = "1.53.2", default-features = false }
+toml = { version = "1.1.8", default-features = false, features = [
+    "parse",
+    "serde",
+    "std",
+] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = "0.3.23"
+wasm-bindgen = "=0.2.127"
+wasm-bindgen-futures = "=0.4.77"
+wayland-backend = { version = "0.3.17", features = ["rwh_06"] }
+wayland-client = { version = "0.31.15", features = ["system"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+web-sys = "=0.3.104"
+web-time = "1.1.0"
 wgpu = { version = "30.0.1", default-features = false }
 
 [workspace.lints.rust]

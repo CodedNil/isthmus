@@ -15,4 +15,5 @@ paries:
 lares:
     cargo build --release -Zbuild-std=std,panic_abort --lib -p lares --target wasm32-unknown-unknown
     wasm-bindgen --target web --out-dir crates/lares/assets/web target/wasm32-unknown-unknown/release/lares.wasm
+    gzip -kf crates/lares/assets/web/lares_bg.wasm crates/lares/assets/web/lares.js
     cargo run -p lares

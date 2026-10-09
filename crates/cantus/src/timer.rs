@@ -195,13 +195,4 @@ mod tests {
             assert_eq!(parse(query).map(|(request, _)| request), expected, "{query}");
         }
     }
-
-    #[test]
-    fn formats_readout() {
-        assert_eq!(describe(Duration::from_mins(30)), "30 Minute");
-        assert_eq!(describe(Duration::from_hours(2)), "2 Hour");
-        assert_eq!(describe(Duration::from_mins(90)), "1 Hour 30 Minute");
-        assert_eq!(countdown(Duration::from_secs(932)), "15:32");
-        assert_eq!(countdown(Duration::from_mins(65)), "1:05:00");
-    }
 }

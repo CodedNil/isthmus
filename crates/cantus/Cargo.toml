@@ -1,7 +1,7 @@
 [package]
 name = "cantus"
 version = "0.8.0"
-edition = "2024"
+edition.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 arrayvec = { version = "0.7.8", features = ["serde"] }
 fastrand = "2.5.0"
 fend-core = "1.5.8"
-form_urlencoded = "1.2.2"
+form_urlencoded.workspace = true
 futures-util = { version = "0.3.34", default-features = false, features = [
     "std",
 ] }
@@ -19,9 +19,9 @@ image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
     "png",
 ] }
-isthmus = { path = "../isthmus" }
-isthmus_sdf = { path = "../isthmus_sdf" }
-jiff = { version = "0.2.37", default-features = false, features = [
+isthmus.workspace = true
+isthmus_sdf.workspace = true
+jiff = { version = "0.2.38", default-features = false, features = [
     "js",
     "serde",
     "tz-system",
@@ -39,16 +39,12 @@ roxmltree = "0.21.1"
 serde.workspace = true
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 smallvec.workspace = true
-tokio = { version = "1.53.1", features = ["macros", "sync"] }
-toml = { version = "1.1.6", default-features = false, features = [
-    "parse",
-    "serde",
-    "std",
-] }
-tracing = { version = "0.1.44", default-features = false, features = ["std"] }
-tracing-subscriber = "0.3.23"
+tokio = { workspace = true, features = ["macros", "sync"] }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 unicode-segmentation = "1.13.3"
-web-time = "1.1.0"
+web-time.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bytemuck.workspace = true
@@ -72,25 +68,25 @@ microfft = { version = "0.6.0", default-features = false, features = [
     "std",
 ] }
 nvml-wrapper = "0.13.0"
-pollster = "1.0.1"
+pollster.workspace = true
 protobuf = "3.7.2"
 schemars = { version = "1.2.2", features = ["arrayvec07", "preserve_order"] }
 smithay-clipboard = { version = "0.7.3", default-features = false }
-tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "time"] }
-wayland-backend = { version = "0.3.17", features = ["rwh_06"] }
-wayland-client = { version = "0.31.15", features = ["system"] }
-wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
-wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "time"] }
+wayland-backend.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
 xkbcommon = { version = "0.9.0", default-features = false }
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-gloo-events = "0.3.0"
-gloo-render = "0.3.0"
+gloo-events.workspace = true
+gloo-render.workspace = true
 gloo-timers = { version = "0.4.0", features = ["futures"] }
-wasm-bindgen = "=0.2.127"
-wasm-bindgen-futures = "=0.4.77"
-web-sys = { version = "=0.3.104", features = [
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = [
     "Clipboard",
     "ClipboardEvent",
     "Coordinates",
@@ -108,7 +104,7 @@ web-sys = { version = "=0.3.104", features = [
 ] }
 
 [build-dependencies]
-isthmus-build = { path = "../isthmus_build" }
+isthmus-build.workspace = true
 # librespot-core 0.8's vergen-gitcl build dependency is incompatible with vergen 9.1.
 vergen = "=9.0.6"
 

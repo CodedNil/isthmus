@@ -1,16 +1,16 @@
 [package]
 name = "isthmus_macros"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 
 [lib]
 proc-macro = true
 
 [dependencies]
 proc-macro-crate = "3"
-proc-macro2 = { version = "1", features = ["span-locations"] }
-quote = "1"
-syn = { version = "3", features = ["full"] }
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
 
 [lints]
 workspace = true
