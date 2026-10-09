@@ -96,7 +96,7 @@ impl CantusApp {
         Self {
             launcher: LauncherState::new(&background, config.search_providers.iter().cloned()),
             bar: Bar::new(&config, &background),
-            music: Music::spotify(&config, &background.updater),
+            music: Music::new(&config, &background.updater),
             background,
             interaction: Interaction::default(),
             next_enrichment: Instant::now(),

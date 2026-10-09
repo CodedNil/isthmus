@@ -228,8 +228,7 @@ pub struct WeatherPanel {
     timezones: ArrayVec<WorldClock, MAX_WORLD_CLOCKS>,
     month_offset: i32,
     month_hover: f32,
-    previous_month_hover: f32,
-    next_month_hover: f32,
+    arrow_hover: [f32; 2],
     /// Animated presence of the timer readout, and the support it occupies.
     timer_presence: f32,
     timer_support: Vec2,
@@ -692,7 +691,7 @@ impl WeatherPanel {
             if response.clicked {
                 self.month_offset = (self.month_offset + side as i32).clamp(-1200, 1200);
             }
-            let hover = if index == 0 { &mut self.previous_month_hover } else { &mut self.next_month_hover };
+            let hover = &mut self.arrow_hover[index];
             *hover = hover.move_towards(f32::from(response.hovered), context.frame.delta_time / 0.12);
             let line = context
                 .frame

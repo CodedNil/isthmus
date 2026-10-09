@@ -40,29 +40,24 @@ impl Request {
 /// One countdown timer; starting a new one replaces the running one.
 #[derive(Default)]
 pub struct Timer {
-    start: Option<Zoned>,
+    start: Option<(Zoned, Instant)>,
     duration: Duration,
-    deadline: Option<Instant>,
 }
 
 impl Timer {
     pub fn apply(&mut self, request: Request) {
         match request {
             Request::Start(duration) => {
-                self.start = Some(Zoned::now());
+                self.start = Some((Zoned::now(), Instant::now()));
                 self.duration = duration;
-                self.deadline = Some(Instant::now() + duration);
             }
-            Request::Cancel => {
-                self.start = None;
-                self.deadline = None;
-            }
+            Request::Cancel => self.start = None,
         }
     }
 
     /// Readout for the weather pill, reporting completion once the deadline passes.
     pub fn readout(&self) -> Option<String> {
-        let start = self.start.as_ref()?;
+        let (start, _) = self.start.as_ref()?;
         let end = start.checked_add(self.duration).ok()?;
         Some(if self.expired() {
             format!("{} Timer Complete at {}", describe(self.duration), clock(&end))
@@ -74,12 +69,12 @@ impl Timer {
     }
 
     pub fn expired(&self) -> bool {
-        self.deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        self.start.as_ref().is_some_and(|(_, start)| start.elapsed() >= self.duration)
     }
 
     /// Remaining time, zero once the deadline passes.
     fn remaining(&self) -> Duration {
-        self.deadline.map_or(Duration::ZERO, |deadline| deadline.saturating_duration_since(Instant::now()))
+        self.start.as_ref().map_or(Duration::ZERO, |(_, start)| self.duration.saturating_sub(start.elapsed()))
     }
 }
 

@@ -157,15 +157,6 @@ fn parse_json3(source: &str) -> Lyrics {
     Lyrics { channels, ..Default::default() }
 }
 
-fn caption_time(value: &str) -> Option<f32> {
-    let value = value.trim().replace(',', ".");
-    let mut parts = value.split(':');
-    let first = parts.next()?.parse::<f32>().ok()?;
-    let second = parts.next()?.parse::<f32>().ok()?;
-    let third = parts.next().and_then(|part| part.parse::<f32>().ok());
-    Some(third.map_or(first * 60.0 + second, |third| first * 3600.0 + second * 60.0 + third))
-}
-
 fn clean_caption(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut tag = false;
@@ -195,10 +186,8 @@ fn parse_webvtt(source: &str) -> Lyrics {
         let timing = lines.find(|line| line.contains("-->"));
         let Some(timing) = timing else { continue };
         let mut times = timing.split("-->");
-        let Some(start) = times.next().and_then(caption_time) else { continue };
-        let Some(end) =
-            times.next().and_then(|value| caption_time(value.split_whitespace().next().unwrap_or_default()))
-        else {
+        let Some(start) = times.next().and_then(time) else { continue };
+        let Some(end) = times.next().and_then(|value| time(value.split_whitespace().next().unwrap_or_default())) else {
             continue;
         };
         let text = clean_caption(&lines.collect::<Vec<_>>().join(" "));
@@ -242,7 +231,8 @@ async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics>
 }
 
 fn time(value: &str) -> Option<f32> {
-    let value = value.strip_suffix('s').unwrap_or(value);
+    let value = value.trim().replace(',', ".");
+    let value = value.strip_suffix('s').unwrap_or(&value);
     value.split(':').try_fold(0.0, |ms, part| Some(ms * 60.0 + part.parse::<f32>().ok()? * 1000.0))
 }
 
@@ -627,6 +617,17 @@ fn parse_richsync(lines: &[Line], matched: &Value, duration: f32) -> MusicResult
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caption_formats_use_the_same_millisecond_clock() {
+        for source in
+            ["WEBVTT\n\n01:02.500 --> 01:04.000 align:start\nHello\n", "1\n00:01:02,500 --> 00:01:04,000\nHello\n"]
+        {
+            let lyrics = parse_webvtt(source);
+            assert_eq!(lyrics.channels[0].segments[0].time, 62_500.0..64_000.0);
+        }
+        assert_eq!(time("62.5s"), Some(62_500.0));
+    }
 
     /// Musixmatch rounds a line's trailing space past its final word, which used to reject
     /// the whole track. The word must survive with a usable end boundary.

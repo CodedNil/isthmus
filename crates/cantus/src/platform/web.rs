@@ -7,13 +7,13 @@ use crate::{
     render::{
         Renderer,
         status::{AudioMonitor, ProcessorSample, SystemSample},
+        text_cache,
     },
 };
 use gloo_events::{EventListener, EventListenerOptions};
 use gloo_render::request_animation_frame;
 use gloo_timers::future::TimeoutFuture;
 use isthmus::{glam::vec2, wgpu::SurfaceTarget};
-use isthmus_sdf::layout::TextCache;
 use std::{
     cell::RefCell,
     future::Future,
@@ -156,15 +156,7 @@ async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
         (size.into(), size.map(|axis| (axis * window.device_pixel_ratio() as f32).round() as u32))
     };
     let (_, physical) = dimensions();
-    let (mut gpu, surface) = Renderer::new(
-        SurfaceTarget::Canvas(canvas.clone()),
-        physical,
-        TextCache::new(&[
-            include_bytes!("../../assets/NotoSans-Variable.ttf"),
-            include_bytes!("../../assets/NotoSansSymbols-Music.ttf"),
-        ]),
-    )
-    .await?;
+    let (mut gpu, surface) = Renderer::new(SurfaceTarget::Canvas(canvas.clone()), physical, text_cache()).await?;
     let (updater, updates) = std::sync::mpsc::channel();
     let app = Rc::new(RefCell::new(crate::app::CantusApp::new(updater)));
 

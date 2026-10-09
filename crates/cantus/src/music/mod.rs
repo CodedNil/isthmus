@@ -36,29 +36,13 @@ fn audio_features_path(id: TrackId) -> String {
 
 pub struct Music {
     pub resources: TrackCache,
-    pub playing: bool,
-    pub queue: Vec<Track>,
-    pub playlists: Vec<CondensedPlaylist>,
+    pub playing: bool = false,
+    pub queue: Vec<Track> = Vec::new(),
+    pub playlists: Vec<CondensedPlaylist> = Vec::new(),
     pub timeline: Timeline,
     pub last_toggle: Instant,
-    pub local: Option<LocalTrack>,
+    pub local: Option<LocalTrack> = None,
     pub(crate) spotify: spotify::Spotify,
-}
-
-impl Music {
-    pub(crate) fn spotify(config: &Config, updater: &AppUpdater) -> Self {
-        start_mpris(updater.clone());
-        Self {
-            resources: TrackCache::default(),
-            playing: false,
-            queue: Vec::new(),
-            playlists: Vec::new(),
-            timeline: Timeline { observed_at: Instant::now(), .. },
-            last_toggle: Instant::now(),
-            local: None,
-            spotify: spotify::Spotify::new(config, updater),
-        }
-    }
 }
 
 pub struct LocalTrack {
@@ -114,6 +98,17 @@ impl Timeline {
 }
 
 impl Music {
+    pub(crate) fn new(config: &Config, updater: &AppUpdater) -> Self {
+        start_mpris(updater.clone());
+        Self {
+            resources: TrackCache::default(),
+            timeline: Timeline { observed_at: Instant::now(), .. },
+            last_toggle: Instant::now(),
+            spotify: spotify::Spotify::new(config, updater),
+            ..
+        }
+    }
+
     fn observe(&mut self, index: usize, position_ms: f32, rate: f32, observed_at: Instant) {
         self.timeline.index = index.min(self.queue.len().saturating_sub(1));
         self.timeline.position_ms = position_ms;
