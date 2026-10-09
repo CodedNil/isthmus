@@ -6,6 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="icon" href="data:,">
     <title>Lares</title>
+    <link rel="preload" href="./web/lares_bg.wasm" as="fetch" type="application/wasm" crossorigin>
+    <link rel="preload" href="./references/lounge.webp" as="image">
     <style>
         html,
         body,
@@ -17,7 +19,7 @@
 
         body {
             overflow: hidden;
-            background: #0b0f14;
+            background: #ddd6c9;
         }
 
         #lares {
@@ -26,10 +28,41 @@
             touch-action: none;
         }
 
+        #loading {
+            position: absolute;
+            inset: 0;
+            display: grid;
+            place-items: center;
+            background: #ddd6c9;
+        }
+
+        #loading img {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        #loading p {
+            position: relative;
+            padding: 14px 22px;
+            border-radius: 12px;
+            background: #f7f3ecee;
+            color: #454038;
+            font: 16px/1.5 system-ui, sans-serif;
+            box-shadow: 0 4px 24px #30282020;
+        }
+
+        #loading[hidden] { display: none; }
+
         #error {
             position: absolute;
             inset: 15% 10%;
-            color: #e2e8f0;
+            color: #454038;
+            background: #f7f3ec;
+            padding: 24px;
+            border-radius: 12px;
+            z-index: 2;
             font: 16px/1.6 system-ui, sans-serif;
             white-space: pre-wrap;
         }
@@ -38,13 +71,34 @@
 
 <body>
     <canvas id="lares"></canvas>
+    <div id="loading" role="status" aria-live="polite">
+        <img src="./references/lounge.webp" alt="" fetchpriority="high">
+        <p>Loading your home…</p>
+    </div>
     <p id="error" role="alert" hidden></p>
     <script type="module">
-        import init, {start} from "./web/lares.js";
+        const loading = document.getElementById("loading");
+        let previousStage = "Loading module";
+        let previousTime = performance.now();
+        window.laresProgress = (stage) => {
+            const now = performance.now();
+            console.info(`Lares ${stage} (${previousStage}: ${(now - previousTime).toFixed(0)} ms)`);
+            previousStage = stage;
+            previousTime = now;
+            performance.mark(`lares:${stage}`);
+            if (stage === "ready") {
+                loading.hidden = true;
+                document.body.dataset.ready = "true";
+            } else {
+                loading.querySelector("p").textContent = stage;
+            }
+        };
         try {
             if (!isSecureContext) throw new Error("Open Lares over HTTPS or on localhost to use WebGPU.");
             if (!navigator.gpu) throw new Error("GPU adapter unavailable: this browser does not expose WebGPU.");
+            const {default: init, start} = await import("./web/lares.js");
             await init();
+            performance.mark("lares:wasm-ready");
             await start();
         } catch (error) {
             console.error("Lares could not start:", error);

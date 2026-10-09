@@ -21,7 +21,7 @@ rec {
         overlays = [ rust-overlay.overlays.default ];
       };
       # Rust-GPU requires this exact nightly and the compiler development components.
-      rust = pkgs.rust-bin.nightly."2026-07-03".default.override {
+      rust = pkgs.rust-bin.nightly."2026-08-15".default.override {
         extensions = [
           "clippy"
           "rustfmt"

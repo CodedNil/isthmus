@@ -1,23 +1,19 @@
 [package]
 name = "isthmus"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 
 [dependencies]
-isthmus_macros = { path = "../isthmus_macros" }
+isthmus_macros.workspace = true
 spirv-std.workspace = true
-
-[target.'cfg(target_arch = "spirv")'.dependencies]
-glam = { workspace = true, features = ["libm"] }
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
 bytemuck.workspace = true
-glam = { workspace = true, features = ["std"] }
 half = "2.7.1"
 slotmap = "1.1.1"
 smallvec.workspace = true
 thiserror = "2.0.21"
-web-time = "1.1.0"
+web-time.workspace = true
 wgpu = { workspace = true, features = ["std", "vulkan", "webgpu", "wgsl"] }
 
 [lints]

@@ -1,10 +1,10 @@
 [package]
 name = "isthmus_sdf"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 
 [dependencies]
-isthmus = { path = "../isthmus" }
+isthmus.workspace = true
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
 hashbrown = { version = "0.17.1", default-features = false, features = [
@@ -12,7 +12,7 @@ hashbrown = { version = "0.17.1", default-features = false, features = [
     "inline-more",
 ] }
 kurbo = "0.13.1"
-skrifa = { version = "0.47.0", default-features = false, features = ["std"] }
+skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

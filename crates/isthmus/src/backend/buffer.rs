@@ -4,11 +4,12 @@ pub struct UploadBuffer {
     pub buffer: wgpu::Buffer,
     pub words: Vec<u32>,
     uploaded: usize,
+    submitted: Vec<u32>,
 }
 
 impl UploadBuffer {
     pub fn new(device: &wgpu::Device) -> Self {
-        Self { buffer: Self::allocate(device, 4), words: Vec::new(), uploaded: 0 }
+        Self { buffer: Self::allocate(device, 4), words: Vec::new(), uploaded: 0, submitted: Vec::new() }
     }
 
     fn allocate(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
@@ -46,11 +47,15 @@ impl UploadBuffer {
     }
 
     pub fn flush(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.words == self.submitted {
+            return;
+        }
         self.grow(device, self.words.len());
         let bytes = bytemuck::cast_slice(&self.words);
         if !bytes.is_empty() {
             queue.write_buffer(&self.buffer, 0, bytes);
         }
+        self.submitted.clone_from(&self.words);
     }
 
     fn grow(&mut self, device: &wgpu::Device, words: usize) {
@@ -58,6 +63,7 @@ impl UploadBuffer {
         if self.buffer.size() < size {
             self.buffer = Self::allocate(device, size.next_power_of_two());
             self.uploaded = 0;
+            self.submitted.clear();
         }
     }
 }

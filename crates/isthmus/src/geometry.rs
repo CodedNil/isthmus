@@ -1,5 +1,7 @@
-use crate::{Fragment, Primitive, Program, ShaderData, Vertex, VertexInput};
-use glam::{Vec2, vec2};
+use crate::{
+    Fragment, Primitive, Program, ShaderData, Vertex, VertexInput,
+    glam::{Vec2, vec2},
+};
 
 /// Axis-aligned bounds in logical pixels; inverted corners represent an empty region.
 #[derive(Clone, Copy, Default, ShaderData)]

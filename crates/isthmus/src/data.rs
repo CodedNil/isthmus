@@ -1,6 +1,8 @@
-use crate::ResourceData;
+use crate::{
+    ResourceData,
+    glam::{Mat4, UVec2, UVec3, UVec4, Vec2, Vec3, Vec4},
+};
 use core::ops::Index;
-use glam::{Mat4, UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
 use isthmus_macros::ShaderData;
 use spirv_std::arch::IndexUnchecked;
 
@@ -227,13 +229,31 @@ codec!(bool, u32, false, |word| word != 0, u32::from);
 codec!(Unorm8x4, u32, Self(0), Self, |value: Self| value.0);
 codec!(F16x2, u32, Self(0), Self, |value: Self| value.0);
 codec!(Unorm16x2, u32, Self(0), Self, |value: Self| value.0);
-codec!(Vec2, [f32; 2], Self::ZERO, Self::from_array, |v: Self| v.to_array());
-codec!(Vec3, [f32; 3], Self::ZERO, Self::from_array, |v: Self| v.to_array());
-codec!(Vec4, [f32; 4], Self::ZERO, Self::from_array, |v: Self| v.to_array());
+// Fixed components avoid temporary arrays and dynamic indexing in shader decoders.
+macro_rules! vector_codec {
+    ($ty:ty, $scalar:ty, $count:expr, $($field:ident: $index:expr),+) => {
+        impl ShaderData for $ty {
+            type View<'a> = Self;
+            const WORDS: usize = $count;
+            const ZERO: Self = Self::ZERO;
+            fn resolve(self, _: ResourceData<'_>) -> Self { self }
+            unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
+                // SAFETY: Every component lies within the complete vector record.
+                Self::new($(unsafe { <$scalar>::read_unchecked(words, offset + $index) }),+)
+            }
+            fn write(self, words: &mut [u32], offset: usize) {
+                $(self.$field.write(words, offset + $index);)+
+            }
+        }
+    };
+}
+vector_codec!(Vec2, f32, 2, x: 0, y: 1);
+vector_codec!(Vec3, f32, 3, x: 0, y: 1, z: 2);
+vector_codec!(Vec4, f32, 4, x: 0, y: 1, z: 2, w: 3);
+vector_codec!(UVec2, u32, 2, x: 0, y: 1);
+vector_codec!(UVec3, u32, 3, x: 0, y: 1, z: 2);
+vector_codec!(UVec4, u32, 4, x: 0, y: 1, z: 2, w: 3);
 codec!(Mat4, [f32; 16], Self::ZERO, |v: [f32; 16]| Self::from_cols_array(&v), |v: Self| v.to_cols_array());
-codec!(UVec2, [u32; 2], Self::ZERO, Self::from_array, |v: Self| v.to_array());
-codec!(UVec3, [u32; 3], Self::ZERO, Self::from_array, |v: Self| v.to_array());
-codec!(UVec4, [u32; 4], Self::ZERO, Self::from_array, |v: Self| v.to_array());
 
 impl ShaderData for u32 {
     type View<'a> = Self;

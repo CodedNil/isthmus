@@ -35,7 +35,7 @@ rustPlatform.buildRustPackage {
       (rustPlatform.importCargoLock {
         lockFile = ../../Cargo.lock;
         outputHashes = {
-          "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-OL8FIC3YOuH5Xkfee1alGKl6V43jlGaPXS08EOga/W0=";
+          "rustc_codegen_spirv-0.10.0" = "sha256-QZ2GYt/6Q8xcVsr6yMlATNU474gKpWdMujcosLN8+z0=";
         };
       })
       (rustPlatform.importCargoLock {
