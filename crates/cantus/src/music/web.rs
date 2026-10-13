@@ -29,7 +29,8 @@ impl Spotify {
         }
         fastrand::shuffle(&mut queue);
         send_update(updater, move |app| {
-            app.music.replace_queue(queue, 3, 42_000.0, 1.0, Instant::now());
+            app.music.queue.replace(queue, 3, 42_000.0);
+            app.music.queue.observe(3, 42_000.0, 1.0, Instant::now());
             app.music.playing = true;
         });
         Self { updater: updater.clone(), responses: Arc::new(responses) }
@@ -38,8 +39,8 @@ impl Spotify {
     pub(super) fn command(&self, command: PlaybackCommand) {
         send_update(&self.updater, move |app| {
             let music = &mut app.music;
-            let mut index = music.timeline.index;
-            let mut position = music.timeline.position_now();
+            let mut index = music.queue.index;
+            let mut position = music.queue.timeline.position_now();
             match command {
                 PlaybackCommand::PlayPlaylist(id) => {
                     tracing::debug!(?id, "Playlist playback is unavailable in the demo")
@@ -47,7 +48,9 @@ impl Spotify {
                 PlaybackCommand::SetPlaying(playing) => music.playing = playing,
                 PlaybackCommand::Seek(milliseconds) => position = milliseconds as f32,
                 PlaybackCommand::Skip(offset) => {
-                    index = index.saturating_add_signed(isize::from(offset)).min(music.queue.len().saturating_sub(1));
+                    index = index
+                        .saturating_add_signed(isize::from(offset))
+                        .min(music.queue.tracks.len().saturating_sub(1));
                     position = 0.0;
                 }
                 PlaybackCommand::UpdateLibrary { track_id, playlists, liked } => {
@@ -63,8 +66,8 @@ impl Spotify {
                     tracing::debug!(%track_id, ?liked, "Browser demo does not persist Spotify library changes");
                 }
             }
-            let duration = music.queue.get(index).map_or(0.0, |track| track.duration_ms as f32);
-            music.observe(index, position.clamp(0.0, duration), f32::from(music.playing), Instant::now());
+            let duration = music.queue.tracks.get(index).map_or(0.0, |track| track.duration_ms as f32);
+            music.queue.observe(index, position.clamp(0.0, duration), f32::from(music.playing), Instant::now());
         });
     }
 
@@ -87,15 +90,15 @@ struct FixtureTrack {
 impl super::Music {
     pub(crate) fn advance_demo(&mut self) {
         while self.playing {
-            let index = self.timeline.index;
-            let Some(track) = self.queue.get(index) else { break };
+            let index = self.queue.index;
+            let Some(track) = self.queue.tracks.get(index) else { break };
             let duration = track.duration_ms as f32;
-            let position = self.timeline.position_now();
+            let position = self.queue.timeline.position_now();
             if position < duration {
                 break;
             }
-            self.playing = index + 1 < self.queue.len();
-            self.observe(
+            self.playing = index + 1 < self.queue.tracks.len();
+            self.queue.observe(
                 index + usize::from(self.playing),
                 if self.playing { position - duration } else { duration },
                 f32::from(self.playing),

@@ -83,6 +83,8 @@ pub enum Kind {
     Leaf,
     Petal,
     Stem,
+    Downlight,
+    Lamp,
 }
 
 /// One representation for architecture and procedural furniture.
@@ -94,11 +96,13 @@ pub struct Object {
     pub rotation: Vec2,
     pub kind: Kind,
     pub material: Material,
+    /// Preview light output; zero for objects that do not emit light.
+    pub emission: f32,
 }
 impl Object {
     pub fn extent(self) -> Vec3 {
         match self.kind {
-            Kind::Box => self.size * 0.5,
+            Kind::Box | Kind::Ceiling | Kind::Downlight | Kind::Lamp => self.size * 0.5,
             Kind::KitchenSink => self.size * 0.5 + Vec3::new(0.06, 0.06, 0.32),
             Kind::Rug => self.size * 0.5 + Vec3::splat(0.005) + Vec3::Z * 0.01,
             Kind::Ottoman => self.size * 0.5 + Vec3::splat(0.04),
@@ -137,6 +141,12 @@ bitflags::bitflags! {
     pub struct Walls: u32 { const LEFT=1; const TOP=2; const RIGHT=4; const BOTTOM=8; }
 }
 
+/// A fixture and its future Home Assistant binding. Shared IDs control a group.
+pub struct Light {
+    pub entity_id: &'static str,
+    pub fixture: Object,
+}
+
 pub struct Room {
     pub position: Vec2,
     pub outline: Vec<Vec2>,
@@ -144,6 +154,7 @@ pub struct Room {
     pub floor: Material,
     pub furniture: Vec<Object>,
     pub openings: Vec<Opening>,
+    pub lights: Vec<Light>,
 }
 impl Room {
     pub fn new(position: Vec2, size: Vec2, floor: Material) -> Self {
@@ -155,6 +166,7 @@ impl Room {
             walls: Walls::all(),
             furniture: vec![],
             openings: vec![],
+            lights: vec![],
         }
     }
 
@@ -208,6 +220,41 @@ impl Room {
         self
     }
 
+    /// Room-local ceiling fixtures, all driven by the same entity. Positions are
+    /// explicit so the same helper works for rectangular and irregular rooms.
+    pub fn downlights(mut self, entity_id: &'static str, positions: &[(f32, f32)]) -> Self {
+        for &(x, y) in positions {
+            self.lights.push(Light {
+                entity_id,
+                fixture: Object {
+                    pos: Vec3::new(x, y, super::render::WALL_HEIGHT - 0.032),
+                    size: Vec3::new(0.11, 0.11, 0.032),
+                    rotation: Vec2::Y,
+                    kind: Kind::Downlight,
+                    material: Material::Paint,
+                    emission: 1.0,
+                },
+            });
+        }
+        self
+    }
+
+    /// A table lamp resting on a surface at the supplied room-local height.
+    pub fn lamp(mut self, entity_id: &'static str, position: impl Into<Vec3>) -> Self {
+        self.lights.push(Light {
+            entity_id,
+            fixture: Object {
+                pos: position.into(),
+                size: Vec3::new(0.24, 0.24, 0.38),
+                rotation: Vec2::Y,
+                kind: Kind::Lamp,
+                material: Material::Metal,
+                emission: 1.0,
+            },
+        });
+        self
+    }
+
     pub fn furniture(mut self, kind: Kind, pos: impl Into<Vec3>, size: impl Into<Vec3>, rotation: f32) -> Self {
         let (sin, cos) = rotation.to_radians().sin_cos();
         self.furniture.push(Object {
@@ -216,6 +263,7 @@ impl Room {
             size: size.into(),
             rotation: vec2(sin, cos),
             material: Material::Wood,
+            emission: 0.0,
         });
         self
     }
@@ -226,8 +274,8 @@ pub fn rooms() -> Vec<Room> {
         hall(),
         lounge(),
         kitchen(),
-        storage(vec2(-1.65, 2.5)),
-        storage(vec2(-1.65, 1.4)),
+        storage(vec2(-1.65, 2.5), "light.storage_top_downlight"),
+        storage(vec2(-1.65, 1.4), "light.storage_bottom_downlight"),
         bedroom(),
         ensuite(),
         boiler_room(),
@@ -240,6 +288,7 @@ pub fn rooms() -> Vec<Room> {
 fn hall() -> Room {
     Room::new(vec2(1.35, 0.5), vec2(4.5, 1.1), Material::Floorboards)
         .walls(Walls::TOP)
+        .downlights("light.hall_downlights", &[(-1.675, 0.0), (0.0, 0.0), (1.675, 0.0), (-1.7, 1.55)])
         .outline(&[(-2.25, -0.55), (2.25, -0.55), (2.25, 0.55), (-1.15, 0.55), (-1.15, 2.55), (-2.25, 2.55)])
         .door(vec2(-1.7, 2.55), 0.0)
         .furniture(Kind::EntryDoor, (-1.7, 2.55, 0.0), (0.79, 0.045, 2.04), 0.0)
@@ -253,6 +302,8 @@ fn hall() -> Room {
 fn lounge() -> Room {
     Room::new(vec2(-2.75, -1.4), vec2(6.1, 2.7), Material::Floorboards)
         .walls(Walls::LEFT | Walls::BOTTOM)
+        .downlights("light.lounge_left_downlights", &[(0.795, -0.95), (2.345, -0.95), (0.795, 0.95), (2.345, 0.95)])
+        .downlights("light.lounge_right_downlights", &[(-2.345, -0.95), (-0.795, -0.95), (-2.345, 0.95), (-0.795, 0.95)])
         .cut_wall(vec2(-2.2, 1.35), vec2(1.6, 0.3))
         .cut_wall(vec2(-0.15, 1.8), vec2(0.2, 1.0))
         .outline(&[
@@ -295,10 +346,10 @@ fn lounge() -> Room {
 fn kitchen() -> Room {
     Room::new(vec2(-4.2, 1.5), vec2(3.2, 3.1), Material::Floorboards)
         .walls(Walls::LEFT | Walls::RIGHT | Walls::TOP)
+        .downlights("light.kitchen_downlights", &[(-0.5, 0.0), (0.7, 0.0)])
         .cut_wall(vec2(1.3, -1.10), vec2(0.3, 0.95))
         .outline(&[(-1.6, -1.55), (1.3, -1.55), (1.3, -0.65), (1.8, -0.65), (1.8, 1.55), (-1.6, 1.55)])
         .window_width(vec2(0.3, 1.55), 180.0, 1.4)
-        .furniture(Kind::Ceiling, (0.1, 0.0, 2.395), (3.4, 3.1, 0.04), 0.0)
         .furniture(Kind::Counter, (-1.275, 1.225, 0.0), (0.55, 0.55, 0.9), 0.0)
         .furniture(Kind::Counter, (1.475, 1.225, 0.0), (0.55, 0.55, 0.9), 0.0)
         .furniture(Kind::Counter, (-1.275, -0.975, 0.0), (0.55, 0.55, 0.9), -90.0)
@@ -335,12 +386,14 @@ fn kitchen() -> Room {
         .furniture(Kind::AirFryer, (-1.27, -0.75, 0.905), (0.36, 0.38, 0.42), -90.0)
 }
 
-fn storage(pos: Vec2) -> Room {
-    Room::new(pos, vec2(1.5, 1.1), Material::Carpet).door(vec2(0.75, 0.0), -90.0)
+fn storage(pos: Vec2, entity_id: &'static str) -> Room {
+    Room::new(pos, vec2(1.5, 1.1), Material::Carpet).downlights(entity_id, &[(0.0, 0.0)]).door(vec2(0.75, 0.0), -90.0)
 }
 
 fn bedroom() -> Room {
     Room::new(vec2(3.85, -0.95), vec2(3.9, 3.6), Material::Carpet)
+        .downlights("light.bedroom_downlights", &[(-0.95, -0.95), (0.95, -0.95), (-0.95, 0.15), (0.95, 0.15)])
+        .lamp("light.bedside_light", (1.65, -1.45, 0.5))
         .outline(&[(-1.95, -1.8), (1.95, -1.8), (1.95, 1.8), (-0.25, 1.8), (-0.25, 0.9), (-1.95, 0.9)])
         .door(vec2(-0.25, 1.35), -90.0)
         .window(vec2(0.0, -1.8), 0.0)
@@ -353,6 +406,8 @@ fn bedroom() -> Room {
 
 fn ensuite() -> Room {
     Room::new(vec2(1.1, -1.4), vec2(1.6, 2.7), Material::Tile)
+        .downlights("light.ensuite_downlight", &[(0.0, -0.4)])
+        .downlights("light.ensuite_shower_downlight", &[(-0.4, 0.7)])
         .door(vec2(0.8, -0.85), 90.0)
         .window(vec2(0.0, -1.35), 0.0)
         .furniture(Kind::Shower, (-0.4, 0.65, 0.0), (0.7, 1.3, 2.0), 0.0)
@@ -362,16 +417,15 @@ fn ensuite() -> Room {
 }
 
 fn boiler_room() -> Room {
-    Room::new(vec2(1.5, -0.55), vec2(0.8, 1.0), Material::Tile).door_width(vec2(0.0, 0.5), 180.0, 0.6).furniture(
-        Kind::Appliance,
-        (0.0, -0.1, 0.0),
-        (0.6, 0.6, 1.6),
-        0.0,
-    )
+    Room::new(vec2(1.5, -0.55), vec2(0.8, 1.0), Material::Tile)
+        .downlights("light.boiler_room_downlight", &[(0.0, 0.0)])
+        .door_width(vec2(0.0, 0.5), 180.0, 0.6)
+        .furniture(Kind::Appliance, (0.0, -0.1, 0.0), (0.6, 0.6, 1.6), 0.0)
 }
 
 fn spare_room() -> Room {
     Room::new(vec2(4.2, 1.95), vec2(3.2, 2.2), Material::Carpet)
+        .downlights("light.office_downlights", &[(-0.725, -0.1), (0.725, -0.1)])
         .outline(&[(-1.6, -0.9), (-0.6, -0.9), (-0.6, -1.1), (1.6, -1.1), (1.6, 1.1), (-1.6, 1.1)])
         .door(vec2(-1.1, -0.9), 180.0)
         .window(vec2(1.6, 0.0), -90.0)
@@ -381,6 +435,8 @@ fn spare_room() -> Room {
 
 fn bathroom() -> Room {
     Room::new(vec2(1.4, 2.05), vec2(2.4, 2.0), Material::Tile)
+        .downlights("light.bathroom_downlight", &[(0.0, 0.0)])
+        .downlights("light.bathroom_shower_downlight", &[(0.85, 0.55)])
         .door(vec2(0.7, -1.0), 180.0)
         .furniture(Kind::Shower, (0.85, 0.525, 0.0), (0.6, 0.85, 2.0), 0.0)
         .furniture(Kind::Bath, (-0.75, 0.0, 0.0), (0.8, 1.9, 0.55), 0.0)

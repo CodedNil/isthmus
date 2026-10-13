@@ -1,2 +1,6 @@
 repeat/shuffle button
 mouse gestures generic across programs
+
+weirdly shows extra tiny tracks when playing locally sometimes, also sometimes for a few frames it flickers to that
+time is offset and opening phone app syncs it
+lyrics should have 0 opacity when right of the playhead

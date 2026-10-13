@@ -1,5 +1,5 @@
 //! Compile orthogonal room outlines into exact floor and wall boxes.
-use super::{FLOOR_THICKNESS, WALL_HEIGHT, WALL_THICKNESS};
+use super::{CEILING_THICKNESS, FLOOR_THICKNESS, WALL_HEIGHT, WALL_THICKNESS};
 use crate::home::{Kind, Material, Object, Room, Walls};
 use isthmus::glam::{Vec2, Vec3, vec2, vec3};
 
@@ -8,7 +8,7 @@ fn point(room: &Room, local: Vec3, origin: Vec2) -> Vec3 {
     vec3(p.x, -p.y, p.z)
 }
 fn solid(min: Vec3, max: Vec3, material: Material) -> Object {
-    Object { pos: (min + max) * 0.5, size: max - min, rotation: Vec2::Y, kind: Kind::Box, material }
+    Object { pos: (min + max) * 0.5, size: max - min, rotation: Vec2::Y, kind: Kind::Box, material, emission: 0.0 }
 }
 
 /// Cut a box into at most six disjoint slabs; no GPU CSG or opening lists.
@@ -65,6 +65,7 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
                         rotation: Vec2::Y,
                         kind: Kind::Box,
                         material: Material::Paint,
+                        emission: 0.0,
                     });
                     // Interior trim follows each authored wall, sharing its opening cuts.
                     let normal = match side {
@@ -94,6 +95,16 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
                     center + size.extend(0.0) * 0.5,
                     room.floor,
                 ));
+                // The cutaway hides these from overhead camera rays only.
+                // Daylight and GI still see the real, closed room envelope.
+                objects.push(Object {
+                    kind: Kind::Ceiling,
+                    ..solid(
+                        center - size.extend(0.0) * 0.5 + Vec3::Z * WALL_HEIGHT,
+                        center + size.extend(0.0) * 0.5 + Vec3::Z * (WALL_HEIGHT + CEILING_THICKNESS),
+                        Material::Paint,
+                    )
+                });
             }
         });
         for cut in &cuts {
@@ -106,6 +117,7 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
         objects.extend(
             room.furniture
                 .iter()
+                .chain(room.lights.iter().map(|light| &light.fixture))
                 .map(|item| Object { pos: point(room, item.pos + Vec3::Z * item.size.z * 0.5, origin), ..*item }),
         );
     }

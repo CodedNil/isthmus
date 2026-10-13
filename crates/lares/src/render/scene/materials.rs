@@ -102,23 +102,45 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
             } else {
                 0.0
             };
-            let seams = if boards {
-                let f = uv.y / 0.19;
-                let d = (f - f.floor()).min_num(1.0 - (f - f.floor())) * 0.19;
-                edge(d, 0.0006, pixel) * 0.08
+            // Staggered end joints and a tiny bevel give boards physical scale.
+            // Both fade with the pixel footprint, avoiding distant grid shimmer.
+            let joint = vec2((uv.x + offset) / 1.65, uv.y / 0.19).fract();
+            let joint = joint - joint.floor();
+            let distance = joint.min_num(Vec2::ONE - joint) * vec2(1.65, 0.19);
+            let seams = if boards { edge(distance.min_element(), 0.0007, pixel) * 0.18 } else { 0.0 };
+            let bevel = if boards {
+                let ramp = (Vec2::ONE - distance / 0.003).max_num(Vec2::ZERO);
+                let filtered = (1.0 - pixel / 0.006).clamp(0.0, 1.0);
+                Vec2::select(joint.cmpge(Vec2::splat(0.5)), Vec2::ONE, -Vec2::ONE) * ramp * (0.075 * filtered)
             } else {
-                0.0
+                Vec2::ZERO
             };
             surface.albedo = tint
                 * tone
-                * (1.0 + grain.x * 0.11 + growth.x * 0.10 + pores.x * 0.04 + rings * 0.025 + knot * 0.04 - seams);
-            surface.roughness = (if maple { 0.48 } else { 0.38 }) + grain.x * 0.09 + pores.x * 0.05;
-            surface.coat = if boards { 0.22 } else { 0.12 };
+                * (1.0
+                    + grain.x * if maple { 0.06 } else { 0.11 }
+                    + growth.x * if maple { 0.04 } else { 0.10 }
+                    + pores.x * 0.04
+                    + rings * if maple { 0.008 } else { 0.025 }
+                    + knot * 0.04
+                    - seams);
+            surface.roughness = (if maple { 0.38 } else { 0.40 })
+                + grain.x * 0.07
+                + pores.x * 0.04
+                + if boards { (seed - 0.5) * 0.06 + seams } else { 0.0 };
+            surface.coat = if boards {
+                0.24
+            } else if maple {
+                0.18
+            } else {
+                0.12
+            };
             let grain_gradient = grain.yz() + warp.yz() * (3.0 * (grain.y / grain_scale.x + grain.z / grain_scale.y));
             surface.gradient = (growth.yz() * 0.0004 + grain_gradient * 0.0006 + pores.yz() * 0.00015).extend(0.0);
             if maple {
-                surface.gradient *= 0.25;
+                surface.gradient *= 0.18;
             }
+            surface.gradient += bevel.extend(0.0);
         }
         Material::Carpet | Material::Shag | Material::Fabric | Material::Knit => {
             let shag = kind == Material::Shag;
@@ -149,12 +171,18 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
                 * base
                 * (1.0
                     + mottling.x * 0.04
-                    + pile.x * if shag { 0.07 } else { 0.012 }
+                    + pile.x * if shag { 0.07 } else { 0.035 }
                     + fibre.x * 0.025
                     + weave * 0.02
                     + knit * 0.055);
             surface.roughness = if carpet { 0.96 } else { 0.84 };
-            surface.sheen = if shag { 0.65 } else { 0.3 };
+            surface.sheen = if shag {
+                0.65
+            } else if carpet {
+                0.35
+            } else {
+                0.5
+            };
             surface.occlusion = if shag { 0.92 + pile.x * 0.12 } else { 1.0 };
             let mut gradient = pile.yz() * if shag { 0.0008 } else { 0.0001 } + fibre.yz() * 0.000_035;
             let phase = uv * vec2(750.0, 680.0) * TAU;
@@ -196,8 +224,8 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
         }
         Material::Emissive => {}
         Material::Ceramic => {
-            surface.roughness = 0.2;
-            surface.coat = 0.45;
+            surface.roughness = 0.17;
+            surface.coat = 0.35;
         }
         Material::Metal | Material::Mirror => {
             let brushed = detail(uv, vec2(220.0, 4.0), pixel);
@@ -207,7 +235,7 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
             surface.gradient = (brushed.yz() * 0.00015).extend(0.0);
         }
         Material::Paint => {
-            surface.roughness = 0.86;
+            surface.roughness = 0.78;
             surface.gradient = (detail(uv, Vec2::splat(120.0), pixel).yz() * 0.00015).extend(0.0);
         }
         Material::Foliage => {
@@ -274,4 +302,38 @@ pub(super) fn sample(kind: Material, tint: Vec3, p: Vec3, n: Vec3, pixel: f32) -
 pub(super) fn bump(n: Vec3, gradient: Vec3) -> Vec3 {
     let tangent = gradient - n * gradient.dot(n);
     (n - tangent / (tangent.length() / 0.25).max_num(1.0)).normalize()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materials_remain_finite_across_projection_and_filter_scales() {
+        for material in [
+            Material::Floorboards,
+            Material::Maple,
+            Material::MapleHorizontal,
+            Material::Fabric,
+            Material::Knit,
+            Material::Shag,
+            Material::Carpet,
+            Material::Stone,
+            Material::Tile,
+            Material::Ceramic,
+            Material::Metal,
+            Material::Paint,
+        ] {
+            for normal in [Vec3::X, -Vec3::Y, Vec3::Z, vec3(1.0, -1.0, 1.0).normalize()] {
+                for pixel in [0.0001, 0.005, 0.1] {
+                    let surface = sample(material, Vec3::ONE, vec3(-1.65, -0.19, 0.4), normal, pixel);
+                    assert!(surface.albedo.is_finite() && surface.gradient.is_finite());
+                    assert!((0.12..=1.0).contains(&surface.roughness));
+                    assert!(surface.albedo.cmpge(Vec3::ZERO).all() && surface.albedo.cmple(Vec3::ONE).all());
+                }
+            }
+        }
+        let distant = sample(Material::Floorboards, Vec3::ONE, vec3(-1.65, -0.19, 0.0), Vec3::Z, 0.1);
+        assert_eq!(distant.gradient, Vec3::ZERO, "subpixel grain and bevels must filter away");
+    }
 }

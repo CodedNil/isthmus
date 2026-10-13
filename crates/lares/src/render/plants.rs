@@ -16,6 +16,7 @@ impl Growth<'_> {
             size,
             rotation: vec2(sin * r.y + cos * r.x, cos * r.y - sin * r.x),
             kind,
+            emission: 0.0,
             material: if kind == Kind::Stem && self.plant.kind != Kind::Palm && self.plant.kind != Kind::SillPlant {
                 Material::Wood
             } else {

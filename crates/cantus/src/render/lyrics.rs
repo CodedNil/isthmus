@@ -243,6 +243,10 @@ fn ink_width(bounds: Text) -> f32 {
     bounds.width.max(bounds.max.x) - bounds.min.x.min(0.0)
 }
 
+fn history_opacity(x: f32, playhead_x: f32) -> f32 {
+    x.smoothstep(0.0, playhead_x.max(1.0))
+}
+
 #[cfg(target_os = "linux")]
 pub fn height(music: &Music) -> f32 {
     let rows = music
@@ -258,10 +262,10 @@ pub fn height(music: &Music) -> f32 {
 
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     let (tracks, index, time) = if let Some(local) = music.local.as_ref().filter(|_| music.local_foreground()) {
-        (slice::from_ref(&local.track), 0, -local.timeline.queue_start_ms)
+        (slice::from_ref(&local.track), 0, -local.timeline.start_ms)
     } else {
-        let Some((index, time)) = music.timeline.span_at_playhead(&music.queue) else { return };
-        (music.queue.as_slice(), index, time)
+        let Some((index, time)) = music.queue.span_at_playhead() else { return };
+        (music.queue.tracks.as_slice(), index, time)
     };
     let resources = &mut music.resources;
     let silence = PreparedLyrics::default();
@@ -290,12 +294,14 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                 context
                     .frame
                     .upload({
+                        let playhead_x: f32 = layout.playhead_x;
                         let line: Text = context.frame.resources.place(&label, origin).outlined(SECTION_SHADOW);
                     })
                     .primitive(line)
                     .fragment(|_, surface| {
                         let shadow = (-surface.distance.max(0.0) * 0.7).exp() * SECTION_SHADOW_STRENGTH;
                         surface.paint(TEXT_COLOR.extend(0.9), TEXT_SHADOW.with_w(TEXT_SHADOW.w * shadow))
+                            * vec4(1.0, 1.0, 1.0, history_opacity(surface.pixel.x, playhead_x))
                     })
             );
         }
@@ -349,7 +355,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                                     * surface.distance.smoothstep(GLOW_REACH, GLOW_REACH - 2.0);
                                 halo = source_over(color.truncate().lerp(Vec3::ONE, 0.7).extend(glow), halo);
                             }
-                            let opacity = 0.6 + 0.4 * (fragment.pixel.x - playhead_x).smoothstep(-8.0, 0.0);
+                            let opacity = history_opacity(fragment.pixel.x, playhead_x);
                             surface.paint(ink.extend(1.0), halo) * vec4(1.0, 1.0, 1.0, opacity)
                         })
                 );
