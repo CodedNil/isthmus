@@ -86,7 +86,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         next_frame().await;
         let (size, physical) = dimensions();
         gpu.resize(surface, physical);
-        let app = app.borrow();
+        let mut app = app.borrow_mut();
+        app.scene.update_time(crate::render::sun::utc_now());
         gpu.render(|render| app.draw(render, surface, size))?;
     }
 }

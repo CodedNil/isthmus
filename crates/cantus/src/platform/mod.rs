@@ -1,6 +1,6 @@
 pub use backend::{
-    Task, captions, current_location, desktop_apps, media_command, open_url, run, run_power_action, set_volume, sleep,
-    spawn, spawn_task, start_launcher_listener, start_mpris, start_status_monitor, trigger_launcher,
+    Task, captions, current_location, desktop_apps, open_url, run, run_power_action, set_volume, sleep, spawn,
+    spawn_task, start_launcher_listener, start_status_monitor, trigger_launcher,
 };
 use image::imageops::FilterType;
 use isthmus::Image;

@@ -1,4 +1,4 @@
-use super::{LocalTrack, MusicResult, PlaybackCommand, Timeline, Track, TrackRuntime};
+use super::{LocalTrack, MusicResult, PlaybackCommand, Track, TrackRuntime, queue::Timeline};
 use crate::{
     app::{AppUpdater, send_update},
     platform::spawn_task,
@@ -28,7 +28,9 @@ pub fn start(updater: AppUpdater) {
     });
 }
 
-pub fn command(source: String, track: String, command: PlaybackCommand) {
+pub fn command(local: &LocalTrack, command: PlaybackCommand) {
+    let source = local.source.clone();
+    let track = local.mpris_id.clone();
     spawn_task(async move {
         let result = timeout(Duration::from_secs(2), async {
             let connection = Connection::session().await?;
@@ -79,7 +81,7 @@ async fn monitor(updater: AppUpdater) -> MusicResult<()> {
             {
                 local.track.runtime = previous.track.runtime.clone();
                 local.track.interaction_id = previous.track.interaction_id;
-                local.timeline.queue_start_ms = previous.timeline.queue_start_ms;
+                local.timeline.start_ms = previous.timeline.start_ms;
                 local.timeline.movement = previous.timeline.movement;
                 reconcile_position(local, previous);
             }
@@ -142,6 +144,7 @@ fn parse_player(source: &str, mut properties: Properties) -> Option<LocalTrack> 
             image: take(&mut metadata, "mpris:artUrl"),
             duration_ms: (take::<i64>(&mut metadata, "mpris:length").unwrap_or(0).max(0) / 1000)
                 .min(i64::from(u32::MAX)) as u32,
+            queue_uid: String::new(),
             interaction_id: Track::next_interaction_id(),
             runtime: TrackRuntime::default(),
         },
@@ -149,7 +152,7 @@ fn parse_player(source: &str, mut properties: Properties) -> Option<LocalTrack> 
             position_ms: position,
             rate: if playing { rate } else { 0.0 },
             observed_at: Instant::now(),
-            queue_start_ms: -position,
+            start_ms: -position,
             ..
         },
         playing,

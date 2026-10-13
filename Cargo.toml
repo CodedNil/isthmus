@@ -19,9 +19,9 @@ pollster = "1.0.1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 serde = { version = "1.0.229", features = ["derive"] }
-smallvec = "1.16.2"
-spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "d83e251c46a0d8e87a8b861ba984e2775e520409" }
-spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "d83e251c46a0d8e87a8b861ba984e2775e520409" }
+smallvec = "1.16.3"
+spirv-builder = "0.11.0"
+spirv-std = "0.11.0"
 syn = { version = "3", features = ["full"] }
 tokio = { version = "1.53.2", default-features = false }
 toml = { version = "1.1.8", default-features = false, features = [

@@ -3,15 +3,18 @@ use acceleration::Node;
 pub use acceleration::Scene;
 use isthmus::prelude::*;
 pub use scene::shade;
+pub use sun::{Sun, SunSettings};
 
 pub mod acceleration;
 mod layout;
 mod plants;
 pub(crate) mod scene;
+pub mod sun;
 
 pub const WALL_HEIGHT: f32 = 2.4;
 pub const WALL_THICKNESS: f32 = 0.1;
 pub const FLOOR_THICKNESS: f32 = 0.12;
+pub const CEILING_THICKNESS: f32 = 0.04;
 pub const DOOR_HEIGHT: f32 = 2.05;
 pub const WINDOW_SILL: f32 = 0.9;
 pub const WINDOW_HEAD: f32 = 2.05;
@@ -28,6 +31,7 @@ pub struct Globals {
     pub up: Vec3,
     /// Vertical camera angle per pixel, in radians.
     pub pixel_angle: f32,
+    pub sun: Sun,
 }
 
 isthmus::program!(Globals, ());
@@ -39,6 +43,7 @@ pub fn draw(frame: &mut Frame<'_>, scene: &Scene) {
             .upload({
                 let nodes: &[Node] = &scene.nodes;
                 let objects: &[Object] = &scene.objects;
+                let lights: &[u32] = &scene.lights;
                 let probes: &[scene::irradiance::Probe] = &scene.probes;
                 let grid: scene::irradiance::Grid = scene.grid;
             })
@@ -52,7 +57,7 @@ pub fn draw(frame: &mut Frame<'_>, scene: &Scene) {
                     let ndc = (surface.pixel + offset) / frame.screen_size * 2.0 - 1.0;
                     let direction =
                         (frame.globals.forward + frame.globals.right * ndc.x - frame.globals.up * ndc.y).normalize();
-                    color += shade(frame.globals, nodes, objects, grid, probes, direction, frame.time, sample)
+                    color += shade(frame.globals, nodes, objects, lights, grid, probes, direction, frame.time, sample)
                         .truncate()
                         .powf(2.2);
                     sample += 1;

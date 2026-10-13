@@ -2,7 +2,7 @@ use super::{DesktopApp, STATUS_SAMPLE_INTERVAL};
 use crate::{
     app::{AppUpdater, View, send_update},
     interaction::InputEvent,
-    music::{MusicResult, PlaybackCommand},
+    music::MusicResult,
     platform::CaptionFile,
     render::{
         Renderer,
@@ -34,10 +34,6 @@ pub fn spawn_task(task: impl Task<Output = ()>) {
 pub async fn captions(_url: String) -> MusicResult<CaptionFile> {
     Err("External captions are unavailable on this platform".into())
 }
-
-pub fn start_mpris(_updater: AppUpdater) {}
-
-pub fn media_command(_source: String, _track: String, _command: PlaybackCommand) {}
 
 /// Entry point used by the generated browser glue.
 #[wasm_bindgen::prelude::wasm_bindgen]
@@ -105,7 +101,7 @@ pub fn set_volume(_volume: f32) {}
 
 pub fn run_power_action(_action: super::PowerAction) {}
 
-pub fn desktop_apps() -> Vec<DesktopApp> {
+pub async fn desktop_apps() -> Vec<DesktopApp> {
     [
         ("Example Notes", "A small example application"),
         ("Example Calendar", "A browser calendar example"),
@@ -209,7 +205,8 @@ async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
             let event = event.unchecked_ref::<web_sys::KeyboardEvent>();
             let mut app = key_app.borrow_mut();
             if event.ctrl_key() && event.key() == "k" {
-                app.launcher.toggle();
+                let background = app.background.clone();
+                app.launcher.toggle(&background);
                 event.prevent_default();
                 return;
             }

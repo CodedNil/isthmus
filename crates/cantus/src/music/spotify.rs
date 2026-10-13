@@ -38,7 +38,7 @@ use reqwest::{
 };
 use serde_json::json;
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::HashMap,
     io,
     path::PathBuf,
     str,
@@ -57,6 +57,7 @@ use web_time::Instant;
 
 const CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 const REDIRECT_URI: &str = "http://127.0.0.1:8898/login";
+const METADATA_CACHE_LIMIT: usize = 512;
 const RATING_PLAYLISTS: [&str; 10] = ["0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0"];
 
 #[derive(Clone)]
@@ -167,20 +168,17 @@ async fn run_spotify(
         tokio::select! {
             Some(command) = commands.recv() => worker.command(command).await,
             Some((requested, mut values)) = worker.pending.next() => {
-                    let mut changed = false;
-                    for uri in requested {
-                        if let Entry::Occupied(mut slot) = worker.track_metadata.entry(uri.clone()) {
-                            if let Some(value) = values.remove(&uri) {
-                                slot.insert(Some(value));
-                                changed = true;
-                            } else if slot.get().is_none() {
-                                slot.remove();
-                            }
-                        }
+                let changed = !values.is_empty();
+                for uri in requested {
+                    if let Some(value) = values.remove(&uri) {
+                        worker.track_metadata.insert(uri, Some(value));
+                    } else {
+                        worker.track_metadata.remove(&uri);
                     }
-                    if changed {
-                        worker.publish_snapshot(true);
-                    }
+                }
+                if changed {
+                    worker.publish(false);
+                }
             },
             Some(message) = connections.next() => match message {
                 Ok(message) => {
@@ -335,57 +333,64 @@ impl SpotifyWorker {
         };
         self.active_device = (!cluster.active_device_id.is_empty()).then_some(cluster.active_device_id);
         let tracks = player.prev_tracks.iter().chain(player.track.as_ref()).chain(&player.next_tracks);
-        self.track_metadata.retain(|uri, _| tracks.clone().any(|track| track.uri == *uri));
+        // Keep recent metadata across temporary queue gaps.
+        if self.track_metadata.len() > METADATA_CACHE_LIMIT {
+            self.track_metadata.retain(|uri, value| value.is_none() || tracks.clone().any(|track| track.uri == *uri));
+        }
         self.schedule_metadata(tracks);
-        let rebuild_queue = self.player.as_ref().is_none_or(|previous| {
-            previous.prev_tracks != player.prev_tracks
-                || previous.track != player.track
-                || previous.next_tracks != player.next_tracks
-                || previous.duration != player.duration
-        });
         self.player = Some(player);
-        self.publish_snapshot(rebuild_queue);
+        self.publish(true);
     }
 
-    fn publish_snapshot(&self, rebuild_queue: bool) {
+    /// Publish queue metadata; only a new player report may reset the playback clock.
+    fn publish(&self, observe_playback: bool) {
         let Some(player) = &self.player else { return };
         let index = player.prev_tracks.iter().filter(|track| !track.uri.ends_with(":delimiter")).count();
-        let queue = rebuild_queue.then(|| {
-            player
-                .prev_tracks
-                .iter()
-                .chain(player.track.as_ref())
-                .chain(&player.next_tracks)
-                .enumerate()
-                .filter(|(_, track)| !track.uri.ends_with(":delimiter"))
-                .map(|(provided_index, track)| {
-                    track_from_provided(
-                        track,
-                        self.track_metadata.get(&track.uri).and_then(Option::as_ref),
-                        u32::try_from(player.duration).ok().filter(|_| provided_index == player.prev_tracks.len()),
-                    )
-                })
-                .collect()
-        });
+        let convert = |track: &ProvidedTrack, duration| {
+            track_from_provided(track, self.track_metadata.get(&track.uri).and_then(Option::as_ref), duration)
+        };
+        let mut tracks: Vec<Track> = player
+            .prev_tracks
+            .iter()
+            .map(|track| convert(track, None))
+            .chain(player.track.iter().map(|track| convert(track, u32::try_from(player.duration).ok())))
+            .chain(player.next_tracks.iter().map(|track| convert(track, None)))
+            .filter(|track| !track.uri.ends_with(":delimiter"))
+            .collect();
         let playing = player.is_playing && !player.is_paused;
-        let rate = if playing { player.playback_speed.max(0.0) as f32 } else { 0.0 };
-        let observed_at = Instant::now();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-        let age_ms = now.saturating_sub(player.timestamp).max(0);
-        let position_ms = (player.position_as_of_timestamp.max(0) as f64 + age_ms as f64 * f64::from(rate)) as f32;
+        let observation = observe_playback.then(|| {
+            // Spotify timestamps use its server clock, not this machine's wall clock.
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+                + self.session.time_delta() * 1000;
+            let speed = player.playback_speed;
+            let rate =
+                if playing && !player.is_buffering && speed.is_finite() && speed > 0.0 { speed as f32 } else { 0.0 };
+            // A missing timestamp supplies no elapsed time.
+            let age_ms = if player.timestamp > 0 { now.saturating_sub(player.timestamp).max(0) } else { 0 };
+            let position = (player.position_as_of_timestamp.max(0) as f64 + age_ms as f64 * f64::from(rate)) as f32;
+            (position, rate, Instant::now())
+        });
         send_update(&self.updater, move |app| {
-            if let Some(queue) = queue {
-                app.music.replace_queue(queue, index, position_ms, rate, observed_at);
-            } else {
-                app.music.observe(index, position_ms, rate, observed_at);
+            let music = &mut app.music;
+            // Queue reports can change artwork sizes/URLs for the same recording.
+            // Reuse loaded art before enrichment prunes the previous URL.
+            for track in &mut tracks {
+                if let Some(previous) = music.queue.tracks.iter().find(|previous| {
+                    previous.uri == track.uri && music.resources.art(previous.image.as_deref()).is_some()
+                }) {
+                    track.image = previous.image.clone();
+                }
             }
-            if playing && !app.music.playing {
-                app.music.last_toggle = Instant::now();
+            let position = observation.map_or_else(|| music.queue.timeline.position_now(), |(position, ..)| position);
+            music.queue.replace(tracks, index, position);
+            if let Some((position, rate, observed_at)) = observation {
+                music.queue.observe(index, position, rate, observed_at);
+                if playing && !music.playing {
+                    music.last_toggle = observed_at;
+                }
+                music.playing = playing;
             }
-            app.music.playing = playing;
-            if rebuild_queue {
-                app.refresh_enrichment();
-            }
+            app.refresh_enrichment();
         });
     }
 
@@ -630,9 +635,8 @@ fn track_from_provided(
     let mut artists: Vec<_> = catalog
         .into_iter()
         .flat_map(|track| track.artists.iter())
-        .map(|artist| &artist.name)
-        .filter(|name| !name.is_empty())
-        .cloned()
+        .filter(|artist| !artist.name.is_empty())
+        .map(|artist| artist.name.clone())
         .collect();
     if artists.is_empty() {
         artists.extend(track.metadata.get("artist_name").filter(|s| !s.is_empty()).cloned());
@@ -642,20 +646,15 @@ fn track_from_provided(
             Ok(SpotifyUri::Track { id }) => id.to_base62().ok().and_then(|id| id.parse().ok()),
             _ => None,
         },
-        isrc: catalog.and_then(|track| {
-            track
-                .external_ids
-                .iter()
-                .find(|external| external.external_type.eq_ignore_ascii_case("isrc"))
-                .map(|external| external.id.clone())
-        }),
+        isrc: catalog
+            .and_then(|track| track.external_ids.iter().find(|id| id.external_type.eq_ignore_ascii_case("isrc")))
+            .map(|id| id.id.clone()),
         uri: track.uri.clone(),
+        queue_uid: track.uid.clone(),
         original_title: catalog.map(|track| track.original_title.clone()),
         name: catalog
-            .map(|track| &track.name)
-            .filter(|name| !name.is_empty())
-            .cloned()
-            .unwrap_or_else(|| text("title", "")),
+            .filter(|track| !track.name.is_empty())
+            .map_or_else(|| text("title", ""), |track| track.name.clone()),
         artists,
         album: text("album_title", catalog.map_or("", |track| track.album.name.as_str())),
         image: ["image_url", "image_large_url", "image_xlarge_url"]
@@ -671,13 +670,15 @@ fn track_from_provided(
                     .min_by_key(|image| image.width.abs_diff(ART_SIZE as i32))?;
                 Some(format!("https://i.scdn.co/image/{}", image.id))
             }),
-        duration_ms: track
-            .metadata
-            .get("duration")
-            .and_then(|duration| duration.parse().ok())
-            .or(fallback_duration_ms)
-            .or_else(|| catalog.and_then(|track| u32::try_from(track.duration).ok()))
-            .unwrap_or_default(),
+        duration_ms: [
+            track.metadata.get("duration").and_then(|duration| duration.parse().ok()),
+            fallback_duration_ms,
+            catalog.and_then(|track| u32::try_from(track.duration).ok()),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|duration| *duration > 0)
+        .unwrap_or_default(),
         interaction_id: Track::next_interaction_id(),
         runtime: TrackRuntime::default(),
     }

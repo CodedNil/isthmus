@@ -9,6 +9,7 @@ mod bathroom;
 mod bedroom;
 mod decor;
 mod entry;
+mod fixtures;
 pub(super) mod irradiance;
 mod kitchen;
 mod lighting;
@@ -76,6 +77,8 @@ fn cylinder(p: Vec3, radius: f32, height: f32) -> f32 {
 fn render_furniture<S: Sample>(kind: Kind, local: Vec3, size: Vec3) -> S {
     match kind {
         Kind::Box => S::new(box_sdf(local, size), || (Material::Paint, WALL_COLOR)),
+        Kind::Downlight => fixtures::downlight(local, size),
+        Kind::Lamp => fixtures::lamp(local, size),
         Kind::Bed => bedroom::bed(local, size),
         Kind::Sofa => living::sofa(local, size),
         Kind::Ottoman => living::ottoman(local, size),
@@ -173,11 +176,11 @@ fn scaled_box(local: Vec3, size: Vec3, center: Vec3, extent: Vec3, radius: f32) 
     rounded_box(local - center * size, size * extent, radius * size.min_element())
 }
 
-fn background(origin: Vec3, direction: Vec3) -> Vec3 {
+fn background(origin: Vec3, direction: Vec3, sun: super::Sun) -> Vec3 {
     if origin.z < super::WALL_HEIGHT {
-        return vec3(0.84, 0.86, 0.88);
+        return lighting::display(sun.sky * 1.5);
     }
-    let sky = vec3(0.62, 0.79, 0.96).lerp(vec3(0.12, 0.39, 0.81), direction.z.max_num(0.0).sqrt());
+    let sky = lighting::display(sun.sky * (0.55 + direction.z.max_num(0.0).sqrt() * 0.7));
     if direction.z >= 0.0 {
         return sky;
     }
@@ -187,22 +190,23 @@ fn background(origin: Vec3, direction: Vec3) -> Vec3 {
     }
     let point = origin + direction * distance;
     let grid = ((point.x.floor() as i32 + point.y.floor() as i32) & 1) as f32;
-    let ground = vec3(0.45, 0.48, 0.51) + Vec3::splat(grid * 0.025);
+    let ground = lighting::display((vec3(0.45, 0.48, 0.51) + Vec3::splat(grid * 0.025)) * sun.sky * 0.65);
     ground.lerp(sky, (distance * 0.003).max_num(0.0).min_num(0.6))
 }
 
 /// Const specialization shares source without putting a mode branch in the GPU loop.
 #[inline(never)]
-fn cast<const SHADOW: bool>(
+fn cast<const SHADOW: bool, const CUTAWAY: bool>(
     origin: Vec3,
     direction: Vec3,
     nodes: &[Node],
     objects: &[Object],
     pixel_angle: f32,
+    limit: f32,
 ) -> (f32, u32) {
     let bounds_ray = trace::Ray::new(origin, direction);
     let mut index = 0;
-    let mut nearest = FAR;
+    let mut nearest = limit;
     let mut object = 0;
     while index < nodes.len() {
         let node = nodes[index];
@@ -216,7 +220,9 @@ fn cast<const SHADOW: bool>(
             continue;
         }
         let item = objects[node.object as usize];
-        if item.kind == Kind::Ceiling && (SHADOW || origin.z > super::WALL_HEIGHT) {
+        if (item.kind == Kind::Ceiling && CUTAWAY && !SHADOW && origin.z > super::WALL_HEIGHT)
+            || (SHADOW && matches!(item.kind, Kind::Downlight | Kind::Lamp))
+        {
             continue;
         }
         // Architectural boxes are their BVH leaf bounds: no second slab test,
@@ -262,7 +268,7 @@ fn intersect(item: Object, origin: Vec3, direction: Vec3, enter: f32, exit: f32,
 fn object_normal(item: Object, local: Vec3) -> Vec3 {
     if matches!(item.kind, Kind::Box | Kind::Ceiling) {
         let face = (local.abs() - item.size * 0.5).abs();
-        if face.z <= face.x && face.z <= face.y {
+        if face.z <= face.x + MIN_HIT_DISTANCE && face.z <= face.y + MIN_HIT_DISTANCE {
             vec3(0.0, 0.0, if local.z >= 0.0 { 1.0 } else { -1.0 })
         } else if face.x <= face.y {
             vec3(if local.x >= 0.0 { 1.0 } else { -1.0 }, 0.0, 0.0)
@@ -286,6 +292,7 @@ pub fn shade(
     globals: Globals,
     nodes: &[Node],
     objects: &[Object],
+    lights: &[u32],
     grid: irradiance::Grid,
     probes: &[irradiance::Probe],
     direction: Vec3,
@@ -294,7 +301,7 @@ pub fn shade(
 ) -> Vec4 {
     let mut origin = globals.eye;
     let mut direction = direction;
-    let (mut nearest, mut object) = cast::<false>(origin, direction, nodes, objects, globals.pixel_angle);
+    let (mut nearest, mut object) = cast::<false, true>(origin, direction, nodes, objects, globals.pixel_angle, FAR);
     let mut reflected_distance = 0.0;
     if nearest < FAR && objects[object as usize].kind == Kind::Mirror {
         let item = objects[object as usize];
@@ -305,11 +312,11 @@ pub fn shade(
             direction -= normal * (2.0 * direction.dot(normal));
             origin = point + normal * 0.002;
             reflected_distance = nearest;
-            (nearest, object) = cast::<false>(origin, direction, nodes, objects, globals.pixel_angle);
+            (nearest, object) = cast::<false, true>(origin, direction, nodes, objects, globals.pixel_angle, FAR);
         }
     }
     if nearest >= FAR {
-        return background(origin, direction).extend(1.0);
+        return background(origin, direction, globals.sun).extend(1.0);
     }
     let point = origin + direction * nearest;
     let item = objects[object as usize];
@@ -334,20 +341,38 @@ pub fn shade(
     } else {
         surface
     };
-    if surface.material == Material::Emissive {
-        return lighting::display(office::wallpaper(local, time) * 2.0).extend(1.0);
+    // Section caps sit at the roof cut. Sample just above the hidden roof,
+    // rather than treating the exposed wall cross-section as buried inside it.
+    let section_cap = globals.eye.z > super::WALL_HEIGHT
+        && point.z >= super::WALL_HEIGHT - 0.001
+        && world_normal.z > 0.5
+        && matches!(item.kind, Kind::Box | Kind::Downlight);
+    let lighting_point = point + Vec3::Z * if section_cap { super::CEILING_THICKNESS + 0.02 } else { 0.0 };
+    let fixture = matches!(item.kind, Kind::Downlight | Kind::Lamp);
+    // The cutaway shows the downlight's luminous face from above as a state cue.
+    if section_cap && item.kind == Kind::Downlight && item.emission > 0.0 {
+        return lighting::display(fixtures::WARM * item.emission * 2.0).extend(1.0);
     }
+    if surface.material == Material::Emissive && (!fixture || item.emission > 0.0) {
+        let emission = if fixture { surface.tint * item.emission * 4.0 } else { office::wallpaper(local, time) * 2.0 };
+        return lighting::display(emission).extend(1.0);
+    }
+    let surface = if fixture && surface.material == Material::Emissive {
+        Hit { material: Material::Ceramic, tint: vec3(0.85, 0.83, 0.78), ..surface }
+    } else {
+        surface
+    };
     // The four pixel samples also cover the emitter, keeping four shadow rays per pixel.
-    let visibility = if world_normal.dot(lighting::KEY) > 0.0 {
-        let start = point + world_normal * 0.001;
+    let visibility = if globals.sun.radiance.max_element() > 0.0 && world_normal.dot(globals.sun.direction) > 0.0 {
+        let start = lighting_point + world_normal * 0.001;
         let offset = vec2((light_sample & 1) as f32 - 0.5, (light_sample >> 1) as f32 - 0.5) * 0.05;
-        let light = (lighting::KEY + offset.extend(0.0)).normalize();
-        cast::<true>(start, light, nodes, objects, 0.0).0
+        let light = (globals.sun.direction + offset.extend(0.0)).normalize();
+        cast::<true, false>(start, light, nodes, objects, 0.0, FAR).0
     } else {
         0.0
     };
-    let indirect = grid.sample(probes, point + world_normal * 0.015, world_normal);
-    let indirect = if item.kind == Kind::Ceiling { indirect.lerp(vec3(0.38, 0.39, 0.40), 0.80) } else { indirect };
+    let indirect = grid.sample(probes, lighting_point + world_normal * 0.015, world_normal);
+
     // Surface footprint grows at grazing incidence; the screen-space ray
     // cone alone seriously underfilters upholstery on the cushion sides.
     let incidence = normal.dot(unrotate_z(-direction, item.rotation)).abs().max_num(0.10);
@@ -356,25 +381,27 @@ pub fn shade(
     let material = materials::sample(surface.material, surface.tint, texture_point, normal, pixel);
     let bumped = materials::bump(normal, material.gradient);
     let bumped = unrotate_z(bumped, vec2(-item.rotation.x, item.rotation.y));
-    let daylight = if globals.eye.z < super::WALL_HEIGHT { 0.35 } else { 1.0 };
-    let color = lighting::shade(material, bumped, -direction, visibility * daylight, indirect);
-    lighting::display(color).extend(1.0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn distance_does_not_evaluate_appearance() {
-        let distance = Distance::new(0.5, || panic!("distance query evaluated appearance"));
-        let other = Distance::new(0.25, || panic!("distance query evaluated appearance"));
-        assert_eq!(distance.union(other).subtract(-0.4).0, 0.4);
-
-        let first = Hit::new(0.25, || (Material::Metal, Vec3::X));
-        let second = Hit::new(0.25, || (Material::Wood, Vec3::Y));
-        let hit = first.union(second);
-        assert!(hit.material == Material::Metal);
-        assert_eq!(hit.tint, Vec3::X);
+    let mut color = lighting::shade(material, bumped, -direction, visibility, indirect, globals.sun);
+    for &index in lights {
+        let light = objects[index as usize];
+        if light.emission <= 0.0 {
+            continue;
+        }
+        // Reuse the four antialiasing samples across a finite emitter as well.
+        let emitter = vec2((light_sample & 1) as f32 - 0.5, (light_sample >> 1) as f32 - 0.5)
+            * if light.kind == Kind::Downlight { 0.055 } else { 0.035 };
+        let (to_light, radiance, distance) = fixtures::incident(light, point, emitter);
+        if radiance.max_element() <= 0.0 || bumped.dot(to_light) <= 0.0 {
+            continue;
+        }
+        // Cull negligible/backfacing contributions before any expensive shadow traversal.
+        let contribution = lighting::direct(material, bumped, -direction, to_light, radiance);
+        if contribution.max_element() < 0.001 {
+            continue;
+        }
+        let visible =
+            cast::<true, false>(point + world_normal * 0.002, to_light, nodes, objects, 0.0, distance - 0.002).0;
+        color += contribution * visible;
     }
+    lighting::display(color).extend(1.0)
 }

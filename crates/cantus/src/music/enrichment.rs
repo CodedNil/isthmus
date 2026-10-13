@@ -128,22 +128,23 @@ impl CantusApp {
         let now = Instant::now();
         let music = &mut self.music;
         let resources = &mut music.resources;
-        let tracks = music.queue.iter().chain(music.local.iter().map(|local| &local.track));
+        let queue = &music.queue;
+        let tracks = queue.tracks.iter().chain(music.local.iter().map(|local| &local.track));
         resources.art.retain(|url, state| {
             matches!(state, Fetch::Fetching)
                 || tracks.clone().any(|track| track.image.as_ref() == Some(url))
                 || music.playlists.iter().any(|playlist| playlist.image_url.as_ref() == Some(url))
         });
         resources.audio.retain(|id, state| {
-            matches!(state, Fetch::Fetching) || music.queue.iter().any(|track| track.id == Some(*id))
+            matches!(state, Fetch::Fetching) || queue.tracks.iter().any(|track| track.id == Some(*id))
         });
         resources
             .lyrics
             .retain(|uri, state| matches!(state, Fetch::Fetching) || tracks.clone().any(|track| &track.uri == uri));
         if self.config.lyrics_enabled {
-            let current = music.timeline.index.min(music.queue.len());
-            let end = (current + 3).min(music.queue.len());
-            let candidates = music.queue[current..end].iter().chain(&music.queue[current.saturating_sub(1)..current]);
+            let current = queue.index.min(queue.tracks.len());
+            let end = (current + 3).min(queue.tracks.len());
+            let candidates = queue.tracks[current..end].iter().chain(&queue.tracks[current.saturating_sub(1)..current]);
             if let Some(track) = candidates
                 .filter(|track| {
                     !track.name.trim().is_empty() && !track.primary_artist().trim().is_empty() && track.duration_ms > 0
@@ -160,8 +161,8 @@ impl CantusApp {
                 );
             }
         }
-        for id in music
-            .queue
+        for id in queue
+            .tracks
             .iter()
             .filter_map(|track| track.id)
             .filter(|id| resources.audio.entry(*id).or_default().request(now))

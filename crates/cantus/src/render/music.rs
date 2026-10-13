@@ -220,18 +220,18 @@ impl MusicView {
             }
         }
         let playhead_track = music
-            .timeline
-            .span_at_playhead(&music.queue)
-            .filter(|(index, elapsed)| *elapsed < music.queue[*index].duration_ms as f32);
+            .queue
+            .span_at_playhead()
+            .filter(|(index, elapsed)| *elapsed < music.queue.tracks[*index].duration_ms as f32);
 
         let panel_height = context.config.height;
         let future_end = HISTORY_WIDTH + context.config.timeline_future_minutes * 60_000.0 * bar.px_per_ms;
         let gap = GAP.max(TRACK_SPACING_MS * bar.px_per_ms);
         let trim = gap - TRACK_SPACING_MS * bar.px_per_ms;
-        let mut start_ms = music.timeline.queue_start_ms + music.queue.iter().map(Track::queue_span_ms).sum::<f32>();
+        let mut start_ms = music.queue.timeline.start_ms + music.queue.offset_ms(music.queue.tracks.len());
         let mut next_left = None;
         let mut visible = SmallVec::<[TrackLayout; 16]>::new();
-        for (queue_index, track) in music.queue.iter_mut().enumerate().rev() {
+        for (queue_index, track) in music.queue.tracks.iter_mut().enumerate().rev() {
             start_ms -= track.queue_span_ms();
             let mut layout = TrackLayout::new(Some(queue_index), track, start_ms, bar, future_end, trim, HISTORY_WIDTH);
             if layout.natural_start >= future_end {
@@ -258,7 +258,7 @@ impl MusicView {
             let mut layout = TrackLayout::new(
                 None,
                 &mut local.track,
-                local.timeline.queue_start_ms,
+                local.timeline.start_ms,
                 BarLayout { px_per_ms: scale, ..bar },
                 future_end,
                 trim,
@@ -406,7 +406,7 @@ impl MusicView {
                 let scale = layout.scale;
                 let fraction = if !is_local
                     && (layout.natural_start + track.duration_ms as f32 * scale <= HISTORY_WIDTH
-                        || layout.queue_index == Some(music.timeline.index) && mouse_pos.x <= x + pill.size().x * 0.05)
+                        || layout.queue_index == Some(music.queue.index) && mouse_pos.x <= x + pill.size().x * 0.05)
                 {
                     0.0
                 } else {
@@ -652,7 +652,7 @@ impl MusicView {
             music.toggle_playlist(track_id, playlist_id);
         }
 
-        if !music.queue.is_empty() || music.local.is_some() {
+        if !music.queue.tracks.is_empty() || music.local.is_some() {
             let elevation = if music.local_foreground() {
                 self.local_back
             } else {
@@ -675,7 +675,7 @@ impl MusicView {
                 };
             }
         }
-        self.show_particles(context, music, bar, playhead_track.map(|(index, _)| &music.queue[index]));
+        self.show_particles(context, music, bar, playhead_track.map(|(index, _)| &music.queue.tracks[index]));
     }
 
     fn show_particles(&mut self, context: &mut UiContext, music: &Music, bar: BarLayout, track: Option<&Track>) {
@@ -684,11 +684,12 @@ impl MusicView {
         if let Some(track) = track {
             let audio = music.resources.audio(track.id);
             self.particles_debt = (self.particles_debt + context.frame.delta_time * (20.0 + audio.energy * 35.0))
-                * f32::from(music.timeline.movement.abs() > 0.00001);
+                * f32::from(music.queue.timeline.movement.abs() > 0.00001);
             let emit_count = self.particles_debt.floor() as usize;
             self.particles_debt -= emit_count as f32;
-            let horizontal_bias =
-                (music.timeline.movement.abs().powf(0.2) * music.timeline.movement.signum()).clamp(-3.0, 3.0);
+            let horizontal_bias = (music.queue.timeline.movement.abs().powf(0.2)
+                * music.queue.timeline.movement.signum())
+            .clamp(-3.0, 3.0);
             let palette = music.resources.palette(track.image.as_deref());
             for particle in self.particles.iter_mut().filter(|particle| particle.expires_at <= time).take(emit_count) {
                 let y = fastrand::f32();

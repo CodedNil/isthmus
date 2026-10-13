@@ -4,7 +4,7 @@ use crate::{
     interaction::key,
     platform::{self, DesktopApp},
     render::{
-        GAP, PADDING, PANEL_RADIUS, Program, TEXT_COLOR, TEXT_HEADING, TEXT_SMALL, TEXT_TITLE, UNIT, UiContext,
+        GAP, PADDING, Program, TEXT_COLOR, TEXT_HEADING, TEXT_SMALL, TEXT_TITLE, UNIT, UiContext,
         sdf::{deform, glass, presence},
     },
     timer::{self, Request},
@@ -19,6 +19,7 @@ use unicode_segmentation::UnicodeSegmentation;
 const PANEL_WIDTH: f32 = 520.0;
 const ROW_HEIGHT: f32 = UNIT * 12.0;
 const HEADER_HEIGHT: f32 = ROW_HEIGHT + PADDING;
+pub(crate) const CORNER_RADIUS: f32 = HEADER_HEIGHT * 0.5;
 pub const MAX_VISIBLE: usize = 8;
 
 /// Side of the square icon tile at the left of every row.
@@ -256,14 +257,6 @@ impl LauncherState {
             .into_iter()
             .map(|config| SearchEngine { label: format!("Search with {}", config.name), config, icon: None })
             .collect::<Vec<_>>();
-        background.spawn_update(async move {
-            let mut apps = platform::desktop_apps();
-            apps.sort_by_key(|app| app.name.to_lowercase());
-            Some(move |app: &mut CantusApp| {
-                app.launcher.apps = apps;
-                app.launcher.refresh_matches();
-            })
-        });
         for (index, provider) in providers.iter().enumerate() {
             let icon = provider.config.icon.clone();
             let http = background.http.clone();
@@ -278,10 +271,24 @@ impl LauncherState {
         Self { calc, providers, ..Default::default() }
     }
 
-    pub fn toggle(&mut self) {
+    pub fn toggle(&mut self, background: &Background) {
         self.session = self.session.wrapping_add(1);
         self.open = Self::ALWAYS_OPEN || !self.open;
+        self.apps.clear();
         self.edit(|field| *field = TextField { touched: true, ..Default::default() });
+        if self.open {
+            let session = self.session;
+            background.spawn_update(async move {
+                let mut apps = platform::desktop_apps().await;
+                apps.sort_by_key(|app| app.name.to_lowercase());
+                Some(move |app: &mut CantusApp| {
+                    if app.launcher.open && app.launcher.session == session {
+                        app.launcher.apps = apps;
+                        app.launcher.refresh_matches();
+                    }
+                })
+            });
+        }
     }
 
     /// Runs one edit against the search field, then re-runs the query.
@@ -407,7 +414,8 @@ impl LauncherState {
 
     pub(crate) fn bounds(&self, screen_size: Vec2) -> (Vec2, Vec2) {
         let rows = self.entries.len();
-        let height = HEADER_HEIGHT + PADDING * 2.0 + rows as f32 * ROW_HEIGHT + rows.saturating_sub(1) as f32 * GAP;
+        let height = HEADER_HEIGHT
+            + if rows == 0 { 0.0 } else { PADDING * 2.0 + rows as f32 * ROW_HEIGHT + (rows - 1) as f32 * GAP };
         let size = vec2(PANEL_WIDTH, height);
         ((screen_size - size) * 0.5, size)
     }
@@ -437,7 +445,7 @@ impl LauncherState {
         }
         let (origin, size) = self.bounds(context.frame.screen_size);
         let rect = Rect::new(origin, origin + size);
-        let panel = Shape::rounded_rect(rect, PANEL_RADIUS);
+        let panel = Shape::rounded_rect(rect, CORNER_RADIUS);
         if !Self::ALWAYS_OPEN {
             let screen = Rect::new(Vec2::ZERO, context.frame.screen_size);
             context.interaction.input_region(screen);
@@ -483,7 +491,7 @@ impl LauncherState {
                     let selection: Vec2;
                     let rect: Rect;
                 })
-                .primitive(|frame| deform(Shape::rounded_rect(rect, PANEL_RADIUS), frame))
+                .primitive(|frame| deform(Shape::rounded_rect(rect, CORNER_RADIUS), frame))
                 .fragment(|_, surface| {
                     let point = surface.content - rect.min;
                     let mut color = Vec3::splat(0.09)
@@ -499,7 +507,7 @@ impl LauncherState {
         );
         context.paint_text(
             rect,
-            PANEL_RADIUS,
+            CORNER_RADIUS,
             line.translated(origin),
             (if empty { MUTED_COLOR } else { TEXT_COLOR }).extend(1.0),
         );
@@ -653,6 +661,21 @@ impl LauncherState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_panel_is_a_centered_pill() {
+        let mut launcher = LauncherState::default();
+        let screen = vec2(1920.0, 1080.0);
+        let (origin, size) = launcher.bounds(screen);
+        assert_eq!(size, vec2(PANEL_WIDTH, HEADER_HEIGHT));
+        assert_eq!(origin + size * 0.5, screen * 0.5);
+        assert_eq!(CORNER_RADIUS, size.y * 0.5);
+
+        launcher.entries.push(Entry::Answer("4".into()));
+        assert_eq!(launcher.bounds(screen).1.y, HEADER_HEIGHT + PADDING * 2.0 + ROW_HEIGHT);
+        launcher.entries.clear();
+        assert_eq!(launcher.bounds(screen).1, size);
+    }
 
     #[test]
     fn ranks_name_matches() {

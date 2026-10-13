@@ -1,4 +1,3 @@
-pub use crate::music::mpris::{command as media_command, start as start_mpris};
 use crate::{
     app::{AppUpdater, CantusApp, View, send_update},
     config,
@@ -6,7 +5,9 @@ use crate::{
     music::MusicResult,
     platform::{CaptionFile, STATUS_SAMPLE_INTERVAL},
     render::{
-        PANEL_RADIUS, PANEL_START, Renderer, lyrics,
+        PANEL_START, Renderer,
+        launcher::CORNER_RADIUS,
+        lyrics,
         status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
         text_cache, weathertime,
     },
@@ -228,7 +229,11 @@ pub fn run_power_action(action: super::PowerAction) {
     });
 }
 
-pub fn desktop_apps() -> Vec<super::DesktopApp> {
+pub async fn desktop_apps() -> Vec<super::DesktopApp> {
+    spawn_blocking(scan_desktop_apps).await.expect("desktop app scan panicked")
+}
+
+fn scan_desktop_apps() -> Vec<super::DesktopApp> {
     let mut seen = HashSet::new();
     let locales = get_languages_from_env();
     desktop_entries(&locales)
@@ -306,7 +311,7 @@ pub fn start_launcher_listener(updater: &AppUpdater) {
         };
         let mut buffer = [0u8; 1];
         while socket.recv(&mut buffer).await.is_ok() {
-            if !send_update(&updater, |app| app.launcher.toggle()) {
+            if !send_update(&updater, |app| app.launcher.toggle(&app.background)) {
                 warn!("Launcher toggle update was discarded");
                 break;
             }
@@ -956,7 +961,7 @@ impl LayerShellApp {
         let y = origin.y.ceil() as i32 + 1;
         let width = (origin.x + size.x).floor() as i32 - 1 - x;
         let height = (origin.y + size.y).floor() as i32 - 1 - y;
-        let radius = (PANEL_RADIUS as i32 - 1).min(width / 2).min(height / 2);
+        let radius = (CORNER_RADIUS as i32 - 1).min(width / 2).min(height / 2);
         region.add(x, y + radius, width, height - radius * 2);
         for row in 0..radius {
             let dy = radius as f32 - row as f32 - 0.5;

@@ -43,7 +43,7 @@ impl App {
     pub fn draw(&self, render: &mut Render<'_, Program>, surface: SurfaceHandle, size: Vec2) {
         let (eye, forward, right, up) = self.camera.rays(size.x / size.y.max(1.0));
         let pixel_angle = self.camera.fov / size.y.max(1.0);
-        let globals = Globals { eye, forward, right, up, pixel_angle };
+        let globals = Globals { eye, forward, right, up, pixel_angle, sun: self.scene.sun };
         render.surface(surface, size, globals, |mut frame: Frame<'_>| {
             render::draw(&mut frame, &self.scene);
         });
