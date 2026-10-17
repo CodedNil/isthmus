@@ -19,7 +19,7 @@ use unicode_segmentation::UnicodeSegmentation;
 const PANEL_WIDTH: f32 = 520.0;
 const ROW_HEIGHT: f32 = UNIT * 12.0;
 const HEADER_HEIGHT: f32 = ROW_HEIGHT + PADDING;
-pub(crate) const CORNER_RADIUS: f32 = HEADER_HEIGHT * 0.5;
+pub const CORNER_RADIUS: f32 = HEADER_HEIGHT * 0.5;
 pub const MAX_VISIBLE: usize = 8;
 
 /// Side of the square icon tile at the left of every row.
