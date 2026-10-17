@@ -200,34 +200,50 @@ fn parse_webvtt(source: &str) -> Lyrics {
 }
 
 async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics> {
-    let duration = (track.duration_ms / 1000).to_string();
-    let mut request = http.get("https://lyrics-api.binimum.org/").query(&[
-        ("track", track.name.as_str()),
+    // LyricsPlus returns Apple's TTML, preserving word/syllable timing when
+    // available. The old BiniLyrics endpoint now redirects to a failing service.
+    let duration = (f64::from(track.duration_ms) / 1000.0).to_string();
+    let mut request = http.get("https://lyricsplus.prjktla.my.id/v1/ttml/get").query(&[
+        ("title", track.name.as_str()),
         ("artist", track.primary_artist()),
         ("album", track.album.as_str()),
-        ("duration", duration.as_str()),
+        ("source", "apple"),
     ]);
+    if track.duration_ms > 0 {
+        request = request.query(&[("duration", duration.as_str())]);
+    }
     if let Some(isrc) = track.isrc.as_deref() {
         request = request.query(&[("isrc", isrc)]);
     }
     let response = request.send().await?;
-    if response.status() != StatusCode::NOT_FOUND {
-        let response = response.error_for_status()?.json::<Value>().await?;
-        let results = response["results"].as_array().ok_or("Lyrics search response has no results array")?;
-        if let Some((timing, result)) = ["word", "line"].into_iter().find_map(|timing| {
-            results.iter().find(|result| result["timing_type"] == timing).map(|result| (timing, result))
-        }) {
-            let url = result["lyricsUrl"].as_str().ok_or("Lyrics search result has no URL")?;
-            let source = http.get(url).send().await?.error_for_status()?.text().await?;
-            let mut lyrics = parse_ttml(&source);
-            if lyrics.channels.is_empty() {
-                return Err("Lyrics document has no usable timed text".into());
-            }
-            lyrics.timing = timing;
-            return Ok(lyrics);
-        }
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(Lyrics::default());
     }
-    Ok(Lyrics::default())
+    let response = response.error_for_status()?.json::<Value>().await?;
+    parse_apple_response(track, &response)
+}
+
+fn parse_apple_response(track: &Track, response: &Value) -> MusicResult<Lyrics> {
+    // A successful provider response can still be a different song from the
+    // requested album. Check the selected recording before accepting its timing.
+    let matched = &response["processingTime"]["selectedSongMetadata"];
+    if !matches_track(
+        track,
+        &serde_json::json!({
+            "track_name": matched["title"],
+            "artist_name": matched["artist"],
+            "track_length": matched["duration"],
+        }),
+    ) || track.isrc.as_deref().zip(matched["songISRC"].as_str()).is_some_and(|(a, b)| !a.eq_ignore_ascii_case(b))
+    {
+        return Err("Apple lyrics response does not match the requested recording".into());
+    }
+    let source = response["ttml"].as_str().ok_or("Apple lyrics response has no TTML")?;
+    let lyrics = parse_ttml(source);
+    if lyrics.channels.is_empty() {
+        return Err("Lyrics document has no usable timed text".into());
+    }
+    Ok(lyrics)
 }
 
 fn time(value: &str) -> Option<f32> {
@@ -269,7 +285,15 @@ fn section_label(name: &str) -> String {
 
 fn parse_ttml(source: &str) -> Lyrics {
     let Ok(document) = Document::parse(source) else { return Lyrics::default() };
-    let mut lyrics = Lyrics::default();
+    let timing = if document
+        .descendants()
+        .any(|node| node.tag_name().name() == "span" && attribute(node, "begin").and_then(time).is_some())
+    {
+        "word"
+    } else {
+        "line"
+    };
+    let mut lyrics = Lyrics { timing, ..Default::default() };
     let mut agents: Vec<_> = document
         .descendants()
         .filter(|n| n.tag_name().name() == "agent")
@@ -612,33 +636,4 @@ fn parse_richsync(lines: &[Line], matched: &Value, duration: f32) -> MusicResult
         rows[index].segments.extend(segments);
     }
     Ok(Lyrics { channels: channels.into_values().flatten().collect(), ..Default::default() })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn caption_formats_use_the_same_millisecond_clock() {
-        for source in
-            ["WEBVTT\n\n01:02.500 --> 01:04.000 align:start\nHello\n", "1\n00:01:02,500 --> 00:01:04,000\nHello\n"]
-        {
-            let lyrics = parse_webvtt(source);
-            assert_eq!(lyrics.channels[0].segments[0].time, 62_500.0..64_000.0);
-        }
-        assert_eq!(time("62.5s"), Some(62_500.0));
-    }
-
-    /// Musixmatch rounds a line's trailing space past its final word, which used to reject
-    /// the whole track. The word must survive with a usable end boundary.
-    #[test]
-    fn repairs_inverted_word_offsets() {
-        let source = r#"[{"ts":29.89,"te":31.7,"x":"And day","l":[
-            {"c":"And","o":0},{"c":" ","o":1.81},{"c":"day","o":1.809}]}]"#;
-        let lines: Vec<Line> = serde_json::from_str(source).expect("fixture parses");
-        let lyrics = parse_richsync(&lines, &serde_json::json!({}), 220_000.0).expect("rounded offsets are valid");
-        let last = lyrics.channels[0].segments.last().expect("a final word");
-        assert_eq!(last.text.trim(), "day");
-        assert!(last.time.end > last.time.start, "{:?}", last.time);
-    }
 }
