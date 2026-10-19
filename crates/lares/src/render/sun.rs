@@ -3,7 +3,7 @@
 use core::f64::consts::TAU;
 use isthmus::{
     ShaderData,
-    glam::{Vec3, vec3},
+    glam::{FloatExt, Vec3, vec3},
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,7 +32,8 @@ impl Default for SunSettings {
 
 impl Sun {
     pub fn at_utc(unix_seconds: f64, settings: SunSettings) -> Self {
-        let unix_seconds = if unix_seconds.is_finite() { unix_seconds } else { 0.0 };
+        let finite = |value: f64| if value.is_finite() { value } else { 0.0 };
+        let unix_seconds = finite(unix_seconds);
         let mut day = (unix_seconds / 86_400.0).floor() as i64;
         let hour = unix_seconds.rem_euclid(86_400.0) / 3600.0;
         let mut year = 1970;
@@ -53,9 +54,9 @@ impl Sun {
         let declination = 0.006_918 - 0.399_912 * cos + 0.070_257 * sin - 0.006_758 * cos2 + 0.000_907 * sin2
             - 0.002_697 * cos3
             + 0.001_48 * sin3;
-        let latitude = if settings.latitude.is_finite() { settings.latitude.clamp(-90.0, 90.0) } else { 0.0 };
-        let longitude = if settings.longitude.is_finite() { settings.longitude.rem_euclid(360.0) } else { 0.0 };
-        let north = if settings.north_degrees.is_finite() { settings.north_degrees } else { 0.0 };
+        let latitude = finite(settings.latitude).clamp(-90.0, 90.0);
+        let longitude = finite(settings.longitude).rem_euclid(360.0);
+        let north = finite(settings.north_degrees);
         let angle = (hour * 15.0 + equation * 0.25 + longitude - 180.0).to_radians();
         let (sin_h, cos_h) = angle.sin_cos();
         let (sin_d, cos_d) = declination.sin_cos();
@@ -68,10 +69,8 @@ impl Sun {
             vec3((east * cos_n + northward * sin_n) as f32, (east * sin_n - northward * cos_n) as f32, up as f32)
                 .normalize();
         let elevation = direction.z;
-        let daylight = ((elevation + 0.10) / 0.55).clamp(0.0, 1.0);
-        let daylight = daylight * daylight * (3.0 - 2.0 * daylight);
-        let horizon = (elevation / 0.10).clamp(0.0, 1.0);
-        let horizon = horizon * horizon * (3.0 - 2.0 * horizon);
+        let daylight = (elevation + 0.10).smoothstep(0.0, 0.55);
+        let horizon = elevation.smoothstep(0.0, 0.10);
         let temperature = (elevation / 0.40).clamp(0.0, 1.0);
         let radiance = vec3(1.0, 0.43, 0.17).lerp(vec3(1.0, 0.98, 0.94), temperature) * (6.8 * horizon);
         let sky = vec3(0.0015, 0.0025, 0.006).lerp(vec3(1.20, 1.44, 1.90), daylight);

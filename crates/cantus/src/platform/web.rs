@@ -1,6 +1,6 @@
 use super::{DesktopApp, STATUS_SAMPLE_INTERVAL};
 use crate::{
-    app::{AppUpdater, View, send_update},
+    app::{AppUpdater, CantusApp, View, send_update},
     interaction::InputEvent,
     music::MusicResult,
     platform::CaptionFile,
@@ -16,13 +16,16 @@ use gloo_timers::future::TimeoutFuture;
 use isthmus::{glam::vec2, wgpu::SurfaceTarget};
 use std::{
     cell::RefCell,
+    error::Error,
     future::Future,
+    io, panic,
     rc::Rc,
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, atomic::Ordering, mpsc},
     time::Duration,
 };
 use tokio::sync::oneshot;
 use wasm_bindgen::JsCast;
+use web_sys::console;
 use web_time::Instant;
 
 pub trait Task = Future + 'static;
@@ -38,8 +41,8 @@ pub async fn captions(_url: String) -> MusicResult<CaptionFile> {
 /// Entry point used by the generated browser glue.
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
-    std::panic::set_hook(Box::new(|panic| {
-        web_sys::console::error_1(&format!("Cantus panic: {panic}").into());
+    panic::set_hook(Box::new(|panic| {
+        console::error_1(&format!("Cantus panic: {panic}").into());
     }));
     run_web().await.map_err(|error| error.to_string().into())
 }
@@ -89,7 +92,7 @@ pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
     });
 }
 
-pub async fn current_location() -> Result<[f32; 2], Box<dyn std::error::Error + Send + Sync>> {
+pub async fn current_location() -> Result<[f32; 2], Box<dyn Error + Send + Sync>> {
     Err("Browser geolocation is disabled; using the browser timezone".into())
 }
 
@@ -97,9 +100,9 @@ pub async fn sleep(duration: Duration) {
     TimeoutFuture::new(duration.as_millis() as u32).await;
 }
 
-pub fn set_volume(_volume: f32) {}
+pub const fn set_volume(_volume: f32) {}
 
-pub fn run_power_action(_action: super::PowerAction) {}
+pub const fn run_power_action(_action: super::PowerAction) {}
 
 pub async fn desktop_apps() -> Vec<DesktopApp> {
     [
@@ -120,7 +123,7 @@ pub async fn desktop_apps() -> Vec<DesktopApp> {
     .collect()
 }
 
-pub fn spawn(_command: &[String]) {}
+pub const fn spawn(_command: &[String]) {}
 
 pub fn open_url(url: &str) {
     if let Some(window) = web_sys::window() {
@@ -128,16 +131,16 @@ pub fn open_url(url: &str) {
     }
 }
 
-pub fn start_launcher_listener(_updater: &AppUpdater) {}
+pub const fn start_launcher_listener(_updater: &AppUpdater) {}
 
 /// Returns an error when a native Cantus instance cannot be reached.
-pub fn trigger_launcher() -> std::io::Result<()> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Cantus launcher triggering requires a native session"))
+pub fn trigger_launcher() -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "Cantus launcher triggering requires a native session"))
 }
 
-pub fn run() {}
+pub const fn run() {}
 
-async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_web() -> Result<(), Box<dyn Error>> {
     let window = web_sys::window().ok_or("browser window is unavailable")?;
     let canvas = window
         .document()
@@ -153,8 +156,8 @@ async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
     };
     let (_, physical) = dimensions();
     let (mut gpu, surface) = Renderer::new(SurfaceTarget::Canvas(canvas.clone()), physical, text_cache()).await?;
-    let (updater, updates) = std::sync::mpsc::channel();
-    let app = Rc::new(RefCell::new(crate::app::CantusApp::new(updater)));
+    let (updater, pending) = mpsc::channel();
+    let app = Rc::new(RefCell::new(CantusApp::new(updater)));
 
     let _pointer =
         ["pointerenter", "pointermove", "pointerdown", "pointerup", "pointerleave", "pointercancel"].map(|name| {
@@ -249,7 +252,7 @@ async fn run_web() -> Result<(), Box<dyn std::error::Error>> {
         gpu.resize(surface, physical);
         {
             let mut app = app.borrow_mut();
-            while let Ok(update) = updates.try_recv() {
+            while let Ok(update) = pending.try_recv() {
                 update(&mut app);
             }
             app.music.advance_demo();

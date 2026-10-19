@@ -105,6 +105,22 @@ impl Bamboo {
     }
 }
 
+fn scene_point(pixel: Vec2, size: Vec2) -> Vec2 {
+    (pixel - vec2(size.x * 0.5, 0.0)) / size.y
+}
+
+fn screen_point(point: Vec2, size: Vec2) -> Vec2 {
+    point * size.y + vec2(size.x * 0.5, 0.0)
+}
+
+fn over(color: Vec3, alpha: f32, layer: Vec3, mask: f32) -> (Vec3, f32) {
+    (color * (1.0 - mask) + layer * mask, alpha + mask * (1.0 - alpha))
+}
+
+fn recede(color: Vec3, haze: Vec3, depth: f32) -> Vec3 {
+    color.lerp(haze, (1.0 - depth).powi(2) * 0.35)
+}
+
 fn atmosphere(uv: Vec2) -> Vec3 {
     let warmth = (uv.x * 0.85 + (1.0 - uv.y) * 0.25).smoothstep(0.15, 0.85);
     vec3(0.61, 0.72, 0.8).lerp(vec3(0.97, 0.82, 0.65), warmth)

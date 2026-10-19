@@ -1,3 +1,4 @@
+use crate::render::{DOOR_HEIGHT, WALL_HEIGHT, WALL_THICKNESS, WINDOW_HEAD, WINDOW_SILL};
 use isthmus::{
     ShaderData,
     glam::{Vec2, Vec3, vec2},
@@ -100,6 +101,16 @@ pub struct Object {
     pub emission: f32,
 }
 impl Object {
+    /// An unrotated, non-emissive object centred at `pos`.
+    pub const fn new(kind: Kind, pos: Vec3, size: Vec3, material: Material) -> Self {
+        Self { pos, size, rotation: Vec2::Y, kind, material, emission: 0.0 }
+    }
+
+    /// Ceiling downlights and table lamps, bound to Home Assistant entities.
+    pub const fn is_light(self) -> bool {
+        matches!(self.kind, Kind::Downlight | Kind::Lamp)
+    }
+
     pub fn extent(self) -> Vec3 {
         match self.kind {
             Kind::Box | Kind::Ceiling | Kind::Downlight | Kind::Lamp => self.size * 0.5,
@@ -182,10 +193,7 @@ impl Room {
     }
 
     pub fn cut_wall(mut self, pos: Vec2, size: Vec2) -> Self {
-        self.openings.push(Opening {
-            pos: pos.extend(super::render::WALL_HEIGHT * 0.5),
-            size: size.extend(super::render::WALL_HEIGHT * 2.0),
-        });
+        self.openings.push(Opening { pos: pos.extend(WALL_HEIGHT * 0.5), size: size.extend(WALL_HEIGHT * 2.0) });
         self
     }
 
@@ -198,21 +206,21 @@ impl Room {
     }
 
     pub fn door_width(self, pos: Vec2, rotation: f32, width: f32) -> Self {
-        self.opening(pos, rotation, width, 0.0, super::render::DOOR_HEIGHT)
+        self.opening(pos, rotation, width, 0.0, DOOR_HEIGHT)
     }
 
     pub fn window_width(self, pos: Vec2, rotation: f32, width: f32) -> Self {
-        self.opening(pos, rotation, width, super::render::WINDOW_SILL, super::render::WINDOW_HEAD).furniture(
+        self.opening(pos, rotation, width, WINDOW_SILL, WINDOW_HEAD).furniture(
             Kind::Window,
-            pos.extend(super::render::WINDOW_SILL),
-            (width, 0.28, super::render::WINDOW_HEAD - super::render::WINDOW_SILL),
+            pos.extend(WINDOW_SILL),
+            (width, 0.28, WINDOW_HEAD - WINDOW_SILL),
             rotation,
         )
     }
 
     fn opening(mut self, pos: Vec2, rotation: f32, width: f32, bottom: f32, top: f32) -> Self {
         let (sin, cos) = rotation.to_radians().sin_cos();
-        let depth = super::render::WALL_THICKNESS * 4.0;
+        let depth = WALL_THICKNESS * 4.0;
         self.openings.push(Opening {
             pos: pos.extend(f32::midpoint(bottom, top)),
             size: Vec3::new(cos.abs() * width + sin.abs() * depth, sin.abs() * width + cos.abs() * depth, top - bottom),
@@ -222,49 +230,27 @@ impl Room {
 
     /// Room-local ceiling fixtures, all driven by the same entity. Positions are
     /// explicit so the same helper works for rectangular and irregular rooms.
-    pub fn downlights(mut self, entity_id: &'static str, positions: &[(f32, f32)]) -> Self {
-        for &(x, y) in positions {
-            self.lights.push(Light {
-                entity_id,
-                fixture: Object {
-                    pos: Vec3::new(x, y, super::render::WALL_HEIGHT - 0.032),
-                    size: Vec3::new(0.11, 0.11, 0.032),
-                    rotation: Vec2::Y,
-                    kind: Kind::Downlight,
-                    material: Material::Paint,
-                    emission: 1.0,
-                },
-            });
-        }
-        self
+    pub fn downlights(self, entity_id: &'static str, positions: &[(f32, f32)]) -> Self {
+        positions.iter().fold(self, |room, &(x, y)| {
+            let pos = Vec3::new(x, y, WALL_HEIGHT - 0.032);
+            room.light(entity_id, Object::new(Kind::Downlight, pos, Vec3::new(0.11, 0.11, 0.032), Material::Paint))
+        })
     }
 
     /// A table lamp resting on a surface at the supplied room-local height.
-    pub fn lamp(mut self, entity_id: &'static str, position: impl Into<Vec3>) -> Self {
-        self.lights.push(Light {
-            entity_id,
-            fixture: Object {
-                pos: position.into(),
-                size: Vec3::new(0.24, 0.24, 0.38),
-                rotation: Vec2::Y,
-                kind: Kind::Lamp,
-                material: Material::Metal,
-                emission: 1.0,
-            },
-        });
+    pub fn lamp(self, entity_id: &'static str, position: impl Into<Vec3>) -> Self {
+        self.light(entity_id, Object::new(Kind::Lamp, position.into(), Vec3::new(0.24, 0.24, 0.38), Material::Metal))
+    }
+
+    fn light(mut self, entity_id: &'static str, fixture: Object) -> Self {
+        self.lights.push(Light { entity_id, fixture: Object { emission: 1.0, ..fixture } });
         self
     }
 
     pub fn furniture(mut self, kind: Kind, pos: impl Into<Vec3>, size: impl Into<Vec3>, rotation: f32) -> Self {
         let (sin, cos) = rotation.to_radians().sin_cos();
-        self.furniture.push(Object {
-            kind,
-            pos: pos.into(),
-            size: size.into(),
-            rotation: vec2(sin, cos),
-            material: Material::Wood,
-            emission: 0.0,
-        });
+        self.furniture
+            .push(Object { rotation: vec2(sin, cos), ..Object::new(kind, pos.into(), size.into(), Material::Wood) });
         self
     }
 }

@@ -9,8 +9,7 @@ fn leaf(p: Vec3, length: f32, width: f32) -> f32 {
     let profile = width * (1.0 - t * t).max_num(0.0);
     let edge = (p.y.abs() - profile).max_num(p.x.abs() - length);
     let sheet = p.z + 0.18 * p.x * t - 0.32 * p.y.abs();
-    let d = vec2(edge, sheet.abs() - 0.0025);
-    (d.max_num(Vec2::ZERO).length() + d.max_element().min_num(0.0)) * 0.55
+    super::extrude(vec2(edge, sheet.abs() - 0.0025)) * 0.55
 }
 fn flower(p: Vec3, radius: f32) -> f32 {
     // Polar repetition produces five overlapping petals, with a cupped profile.
@@ -20,8 +19,7 @@ fn flower(p: Vec3, radius: f32) -> f32 {
     let r = p.xy().length();
     let q = vec3(r * a.cos() - radius * 0.45, r * a.sin(), p.z - 0.16 * r);
     let outline = ((q.xy() / vec2(radius * 0.65, radius * 0.40)).length() - 1.0) * radius * 0.40;
-    let shell = vec2(outline, q.z.abs() - 0.0025);
-    let petal = shell.max_num(Vec2::ZERO).length() + shell.max_element().min_num(0.0);
+    let petal = super::extrude(vec2(outline, q.z.abs() - 0.0025));
     petal.min_num(p.length() - radius * 0.18) * 0.85
 }
 #[inline(never)]
@@ -50,20 +48,19 @@ pub(super) fn plant<S: Sample>(kind: Kind, p: Vec3, size: Vec3) -> S {
             ))
     };
     let soil = super::cylinder(p - Vec3::Z * (top - 0.025), scale * if blossom { 0.043 } else { 0.145 }, 0.025);
+    let glaze = match kind {
+        Kind::Blossom => vec3(0.19, 0.14, 0.12),
+        Kind::Palm | Kind::SillPlant => vec3(0.10, 0.115, 0.11),
+        _ => vec3(0.78, 0.75, 0.67),
+    };
     let hit =
-        S::new(pot, || (Material::Ceramic, if blossom { vec3(0.19, 0.14, 0.12) } else { vec3(0.78, 0.75, 0.67) }))
-            .union(S::new(soil, || (Material::Soil, vec3(0.22, 0.17, 0.10))));
-    if blossom {
+        S::new(pot, || (Material::Ceramic, glaze)).union(S::new(soil, || (Material::Soil, vec3(0.22, 0.17, 0.10))));
+    if kind != Kind::Plant {
         return hit;
     }
-    if kind == Kind::Palm || kind == Kind::SillPlant {
-        return S::new(pot, || (Material::Ceramic, vec3(0.10, 0.115, 0.11)))
-            .union(S::new(soil, || (Material::Soil, vec3(0.22, 0.17, 0.10))));
-    }
-    let wood = vec3(0.36, 0.28, 0.19);
     let trunk =
         super::taper(p, vec3(0.0, 0.0, top - 0.01), vec3(0.025, -0.025, size.z * 0.38), scale * 0.022, scale * 0.003);
-    hit.union(S::new(trunk, || (Material::Wood, wood)))
+    hit.union(S::new(trunk, || (Material::Wood, vec3(0.36, 0.28, 0.19))))
 }
 #[inline(never)]
 pub(super) fn hanging_planter<S: Sample>(p: Vec3, size: Vec3) -> S {
@@ -72,11 +69,17 @@ pub(super) fn hanging_planter<S: Sample>(p: Vec3, size: Vec3) -> S {
     let hook = super::capsule(p, vec3(0.0, -0.035, top - 0.01), vec3(0.0, 0.015, top - 0.045), 0.003);
     S::new(mount.min_num(hook), || (Material::Metal, vec3(0.18, 0.17, 0.14)))
 }
-#[inline(never)]
-pub(super) fn leaf_frame(p: Vec3, size: Vec3) -> Vec3 {
-    let lean = -(size.z / size.x).max_num(-0.95).min_num(0.95);
+/// Rotates into a sheet tilted in xz by `lean`, the sine of its slope.
+fn tilt(p: Vec3, lean: f32) -> Vec3 {
     let upright = (1.0 - lean * lean).sqrt();
     vec3(p.x * upright + p.z * lean, p.y, p.z * upright - p.x * lean)
+}
+fn leaf_lean(size: Vec3) -> f32 {
+    -(size.z / size.x).max_num(-0.95).min_num(0.95)
+}
+#[inline(never)]
+pub(super) fn leaf_frame(p: Vec3, size: Vec3) -> Vec3 {
+    tilt(p, leaf_lean(size))
 }
 #[inline(never)]
 pub(super) fn leaf_normal(p: Vec3, size: Vec3) -> Vec3 {
@@ -92,9 +95,7 @@ pub(super) fn leaf_normal(p: Vec3, size: Vec3) -> Vec3 {
         vec3(0.36 * q.x / length, -0.32 * sign, 1.0) * if sheet >= 0.0 { 1.0 } else { -1.0 }
     };
     // The inverse is the transpose of the leaf frame.
-    let lean = -(size.z / size.x).max_num(-0.95).min_num(0.95);
-    let upright = (1.0 - lean * lean).sqrt();
-    vec3(gradient.x * upright - gradient.z * lean, gradient.y, gradient.z * upright + gradient.x * lean).normalize()
+    tilt(gradient, -leaf_lean(size)).normalize()
 }
 #[inline(never)]
 pub(super) fn blade<S: Sample>(kind: Kind, p: Vec3, size: Vec3) -> S {
@@ -105,8 +106,7 @@ pub(super) fn blade<S: Sample>(kind: Kind, p: Vec3, size: Vec3) -> S {
     }
     if kind == Kind::Petal {
         let lean = (size.z / size.x).max_num(0.15).min_num(0.95);
-        let upright = (1.0 - lean * lean).sqrt();
-        return S::new(flower(vec3(p.x * upright + p.z * lean, p.y, p.z * upright - p.x * lean), size.x * 0.5), || {
+        return S::new(flower(tilt(p, lean), size.x * 0.5), || {
             (
                 Material::Fabric,
                 vec3(0.98, 0.92, 0.93).lerp(vec3(0.72, 0.30, 0.46), (1.0 - p.length() / (size.x * 0.28)).max_num(0.0)),
@@ -256,8 +256,7 @@ fn swallow(p: Vec3) -> f32 {
     ));
     let head = triangle(profile, vec2(-0.02, 0.06), vec2(0.047, 0.105), vec2(0.025, 0.037));
     let outline = wings.min_num(tail).min_num(head);
-    let shell = vec2(outline, p.y.abs() - 0.009);
-    let carving = shell.max_num(Vec2::ZERO).length() + shell.max_element().min_num(0.0);
+    let carving = super::extrude(vec2(outline, p.y.abs() - 0.009));
     let feather = super::capsule(p, vec3(-0.055, -0.009, 0.025), vec3(-0.145, -0.009, 0.105), 0.002)
         .min_num(super::capsule(p, vec3(0.055, -0.009, 0.025), vec3(0.135, -0.009, 0.09), 0.002));
     let carving = carving.max_num(-feather);

@@ -272,8 +272,7 @@ impl Graph {
     fn follow(&mut self, scope: usize, refs: References) {
         self.methods.extend(refs.methods);
         for path in refs.paths {
-            let parts = path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>();
-            if let Some((scope, index)) = self.resolve(scope, &parts, &mut HashSet::new())
+            if let Some((scope, index)) = self.resolve(scope, &segments(&path).collect::<Vec<_>>(), &mut HashSet::new())
                 && self.modules[scope].selected.insert(index)
             {
                 self.pending.push_back((scope, index));
@@ -305,25 +304,15 @@ impl Graph {
         }
         if let Some(path) = self.modules[scope].imports.get(first).cloned() {
             self.modules[scope].used_imports.insert(first.clone());
-            let path = path
-                .segments
-                .iter()
-                .map(|segment| segment.ident.to_string())
-                .chain(rest.iter().cloned())
-                .collect::<Vec<_>>();
-            return self.resolve(scope, &path, seen);
+            return self.resolve(scope, &segments(&path).chain(rest.iter().cloned()).collect::<Vec<_>>(), seen);
         }
         for glob in self.modules[scope].globs.clone() {
             if !seen.insert((scope, vec!["*".into(), glob.to_token_stream().to_string()])) {
                 continue;
             }
-            let path = glob
-                .segments
-                .iter()
-                .map(|segment| segment.ident.to_string())
-                .chain(parts.iter().cloned())
-                .collect::<Vec<_>>();
-            if let Some(target) = self.resolve(scope, &path, seen) {
+            if let Some(target) =
+                self.resolve(scope, &segments(&glob).chain(parts.iter().cloned()).collect::<Vec<_>>(), seen)
+            {
                 return Some(target);
             }
         }
@@ -406,6 +395,10 @@ fn rewrite_slices(signature: &mut syn::Signature, block: &mut syn::Block) {
         names.insert(ident.to_string());
     }
     SliceIndices(names).visit_block_mut(block);
+}
+
+fn segments(path: &syn::Path) -> impl Iterator<Item = String> + '_ {
+    path.segments.iter().map(|segment| segment.ident.to_string())
 }
 
 fn item_name(item: &Item) -> Option<String> {

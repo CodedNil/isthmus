@@ -1,7 +1,7 @@
 use super::{
     Frame, Placement, Program, daylight, hash,
     landscape::{reflected_point, water_mask},
-    noise, pigment, undergrowth, wash, wind,
+    noise, over, pigment, recede, scene_point, screen_point, undergrowth, wash, wind,
 };
 use isthmus::{prelude::*, spirv_std::arch::kill};
 
@@ -42,23 +42,12 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
             .primitive({
                 let start = if reflected { root } else { top };
                 let end = if reflected { vec2(top.x, root.y * 2.0 - top.y) } else { root };
-                Rect::new(
-                    start.min(end) * size.y + vec2(size.x * 0.5, 0.0),
-                    start.max(end) * size.y + vec2(size.x * 0.5, 0.0),
-                )
-                .expanded((width * 1.5 + curvature.abs() * 1.44 + 0.006) * size.y)
+                Rect::new(screen_point(start.min(end), size), screen_point(start.max(end), size))
+                    .expanded((width * 1.5 + curvature.abs() * 1.44 + 0.006) * size.y)
             })
             .fragment(|frame, surface| {
-                let original = (surface.pixel - vec2(size.x * 0.5, 0.0)) / size.y;
-                let reflection_mask = if reflected { water_mask(original, 1.0 / size.y) } else { 1.0 };
-                if reflection_mask == 0.0 {
-                    kill();
-                }
-                let mut point = original;
-                if reflected {
-                    point = reflected_point(point, root, frame.time);
-                }
-                point.x -= curvature * ((root.y - point.y) / height).clamp(0.0, 1.2).powi(2);
+                let (point, reflection_mask) = plant_point(surface.pixel, size, root, frame.time, reflected);
+                let point = bend(point, root, curvature, height);
                 let along = root.y - point.y;
                 let t = (along / height).saturate();
                 let across = point.x - root.x.lerp(top.x, t);
@@ -92,10 +81,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                 stem = stem.lerp(vec3(0.79, 0.82, 0.58), collar * (0.18 + panel * 0.4) * (0.65 + texture * 0.35));
                 let sheath = (along / width).smoothstep(4.8, 0.0) * (normal + texture * 0.5).smoothstep(0.15, 0.75);
                 stem = stem.lerp(vec3(0.46, 0.45, 0.25), sheath * 0.7);
-                let uv = vec2(original.x * size.y / size.x + 0.5, original.y);
-                daylight(pigment(stem, vec2(along, across) + seed, aa), uv)
-                    .lerp(vec3(0.51, 0.69, 0.61), (1.0 - depth).powi(2) * 0.35)
-                    .extend(mask * reflection_mask * if reflected { 0.2 } else { 1.0 })
+                let alpha = mask * reflection_mask * if reflected { 0.2 } else { 1.0 };
+                plant_color(pigment(stem, vec2(along, across) + seed, aa), surface.pixel / size, depth, alpha)
             })
     );
     let branches = if young { 3 } else { 4 + (hash(plant.seed + 11.0) * 3.0) as u32 };
@@ -131,31 +118,21 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                 .primitive({
                     let center = origin + (direction * 0.78 + direction.perp() * 0.35) * reach;
                     Quad::new(
-                        (if reflected { vec2(center.x, root.y * 2.0 - center.y) } else { center }) * size.y
-                            + vec2(size.x * 0.5, 0.0),
+                        screen_point(if reflected { vec2(center.x, root.y * 2.0 - center.y) } else { center }, size),
                         (vec2(2.0, 2.4) * reach + curvature.abs() * 2.88 + 0.012) * size.y,
                         if reflected { vec2(direction.x, -direction.y) } else { direction },
                     )
                 })
                 .fragment(|frame, surface| {
-                    let original = (surface.pixel - vec2(size.x * 0.5, 0.0)) / size.y;
-                    let reflection_mask = if reflected { water_mask(original, 1.0 / size.y) } else { 1.0 };
-                    if reflection_mask == 0.0 {
-                        kill();
-                    }
-                    let mut point = original;
-                    if reflected {
-                        point = reflected_point(point, root, frame.time);
-                    }
-                    point.x -= curvature * ((root.y - point.y) / height).clamp(0.0, 1.2).powi(2);
+                    let (point, reflection_mask) = plant_point(surface.pixel, size, root, frame.time, reflected);
+                    let point = bend(point, root, curvature, height);
                     let delta = point - origin;
                     let mut local = vec2(delta.dot(direction), delta.dot(direction.perp()));
                     let droop = (0.08 + hash(seed + 2.0) * 0.2) + wind(origin, frame.time) * 0.045;
                     local.y -= reach * droop * (local.x / reach).powi(2);
                     let aa = 1.0 / size.y;
                     let stem = (local.y.abs() - reach * 0.008).max(-local.x).max(local.x - reach).smoothstep(aa, -aa);
-                    let mut alpha = stem;
-                    let mut color = vec3(0.025, 0.09, 0.04) * stem;
+                    let (mut color, mut alpha) = (vec3(0.025, 0.09, 0.04) * stem, stem);
                     for leaf in 0..7 {
                         let random = hash(seed + leaf as f32 * 7.3);
                         let angle = (if leaf % 2 == 0 { 1.0 } else { -1.0 }) * (0.28 + random * 0.85)
@@ -181,21 +158,39 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                         let blade = vec3(0.055, 0.24, 0.16)
                             .lerp(vec3(0.63, 0.73, 0.33), light)
                             .lerp(vec3(0.94, 0.96, 0.71), dew * 0.8);
-                        color = color * (1.0 - mask) + blade * mask;
-                        alpha += mask * (1.0 - alpha);
+                        (color, alpha) = over(color, alpha, blade, mask);
                     }
                     if alpha == 0.0 {
                         kill();
                     }
-                    let straight = pigment(color / alpha, local + seed, aa);
-                    let uv = vec2(original.x * size.y / size.x + 0.5, original.y);
-                    daylight(straight, uv)
-                        .lerp(vec3(0.51, 0.69, 0.61), (1.0 - depth).powi(2) * 0.35)
-                        .extend(alpha * reflection_mask * if reflected { 0.28 } else { 1.0 })
+                    let opacity = alpha * reflection_mask * if reflected { 0.28 } else { 1.0 };
+                    plant_color(pigment(color / alpha, local + seed, aa), surface.pixel / size, depth, opacity)
                 })
         );
     }
     if !reflected {
         undergrowth::draw(frame, root, plant.depth, plant.seed);
     }
+}
+
+/// Mirrors and ripples reflected fragments, returning the scene point and water coverage.
+fn plant_point(pixel: Vec2, size: Vec2, root: Vec2, time: f32, reflected: bool) -> (Vec2, f32) {
+    let original = scene_point(pixel, size);
+    if !reflected {
+        return (original, 1.0);
+    }
+    let mask = water_mask(original, 1.0 / size.y);
+    if mask == 0.0 {
+        kill();
+    }
+    (reflected_point(original, root, time), mask)
+}
+
+fn bend(mut point: Vec2, root: Vec2, curvature: f32, height: f32) -> Vec2 {
+    point.x -= curvature * ((root.y - point.y) / height).clamp(0.0, 1.2).powi(2);
+    point
+}
+
+fn plant_color(color: Vec3, uv: Vec2, depth: f32, alpha: f32) -> Vec4 {
+    recede(daylight(color, uv), vec3(0.51, 0.69, 0.61), depth).extend(alpha)
 }

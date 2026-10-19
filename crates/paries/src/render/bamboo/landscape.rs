@@ -1,4 +1,4 @@
-use super::{Frame, Program, atmosphere, daylight, hash, noise, pigment, wash, wind};
+use super::{Frame, Program, atmosphere, daylight, hash, noise, pigment, scene_point, wash, wind};
 use isthmus::{prelude::*, spirv_std::arch::kill};
 
 pub(super) fn river(y: f32) -> Vec2 {
@@ -40,7 +40,7 @@ pub(super) fn draw(frame: &mut Frame<'_>) {
             })
             .primitive(Quad::new(size * 0.5, size, Vec2::X))
             .fragment(|frame, surface| {
-                let point = (surface.pixel - vec2(size.x * 0.5, 0.0)) / size.y;
+                let point = scene_point(surface.pixel, size);
                 let uv = surface.pixel / size;
                 let glow = (-((point - vec2(0.08, 0.3)) * vec2(1.5, 0.8)).length_squared() * 3.0).exp();
                 let clouds = wash(point * 3.0 + vec2(frame.time * 0.003, 0.0));
@@ -145,7 +145,7 @@ pub(super) fn water(frame: &mut Frame<'_>) {
             })
             .primitive(Rect::new(vec2(0.0, size.y * 0.35), size))
             .fragment(|frame, surface| {
-                let point = (surface.pixel - vec2(size.x * 0.5, 0.0)) / size.y;
+                let point = scene_point(surface.pixel, size);
                 let mask = water_mask(point, 1.0 / size.y);
                 if mask == 0.0 {
                     kill();
@@ -181,17 +181,15 @@ pub(super) fn haze(frame: &mut Frame<'_>, layer: f32) {
             })
             .primitive(Quad::new(size * 0.5, size, Vec2::X))
             .fragment(|frame, surface| {
-                let point = (surface.pixel - vec2(size.x * 0.5, 0.0)) / size.y;
+                let point = scene_point(surface.pixel, size);
                 let fog = noise(point * vec2(3.0, 8.0) + vec2(frame.time * 0.018 + layer * 13.0, layer * 3.0));
                 let height = (-(point.y - 0.52 - layer * 0.12).powi(2) * 35.0).exp();
                 let offset = point - vec2(0.08, 0.22);
                 let shaft = wash(vec2((point.x + point.y * 0.24) * 3.0, frame.time * 0.012 + layer * 4.0));
                 let light = shaft.smoothstep(0.35, 0.75) * (-offset.length_squared() * 2.0).exp();
-                let cell = (point * 65.0 + vec2(wind(point, frame.time) * 0.3, frame.time * 0.1)).floor();
-                let speck = ((point * 65.0 + vec2(wind(point, frame.time) * 0.3, frame.time * 0.1)).fract()
-                    - vec2(hash(cell.x), hash(cell.y)))
-                .length()
-                .smoothstep(0.09, 0.015)
+                let drift = point * 65.0 + vec2(wind(point, frame.time) * 0.3, frame.time * 0.1);
+                let cell = drift.floor();
+                let speck = (drift.fract() - vec2(hash(cell.x), hash(cell.y))).length().smoothstep(0.09, 0.015)
                     * hash(cell.dot(vec2(17.0, 43.0))).smoothstep(0.985, 1.0);
                 atmosphere(surface.pixel / size)
                     .lerp(vec3(1.0, 0.86, 0.48), light)

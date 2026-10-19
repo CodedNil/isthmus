@@ -3,13 +3,14 @@ use crate::{
     app::{AppUpdater, send_update},
     config::Config,
 };
+use serde_json::value::RawValue;
 use std::{collections::HashMap, sync::Arc};
 use web_time::Instant;
 
 #[derive(Clone)]
 pub struct Spotify {
     updater: AppUpdater,
-    responses: Arc<HashMap<String, Box<serde_json::value::RawValue>>>,
+    responses: Arc<HashMap<String, Box<RawValue>>>,
 }
 
 impl Spotify {
@@ -43,7 +44,7 @@ impl Spotify {
             let mut position = music.queue.timeline.position_now();
             match command {
                 PlaybackCommand::PlayPlaylist(id) => {
-                    tracing::debug!(?id, "Playlist playback is unavailable in the demo")
+                    tracing::debug!(?id, "Playlist playback is unavailable in the demo");
                 }
                 PlaybackCommand::SetPlaying(playing) => music.playing = playing,
                 PlaybackCommand::Seek(milliseconds) => position = milliseconds as f32,
@@ -71,6 +72,7 @@ impl Spotify {
         });
     }
 
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl, reason = "matches the native Spotify client")]
     pub(super) async fn get_json(&self, path: &str) -> MusicResult<&str> {
         self.responses
             .get(path)
@@ -84,7 +86,7 @@ impl Spotify {
 struct FixtureTrack {
     #[serde(flatten)]
     track: Track,
-    audio: Box<serde_json::value::RawValue>,
+    audio: Box<RawValue>,
 }
 
 impl super::Music {

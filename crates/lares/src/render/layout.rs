@@ -1,35 +1,37 @@
 //! Compile orthogonal room outlines into exact floor and wall boxes.
 use super::{CEILING_THICKNESS, FLOOR_THICKNESS, WALL_HEIGHT, WALL_THICKNESS};
-use crate::home::{Kind, Material, Object, Room, Walls};
+use crate::home::{Kind, Material, Object, Opening, Room, Walls};
 use isthmus::glam::{Vec2, Vec3, vec2, vec3};
 
 fn point(room: &Room, local: Vec3, origin: Vec2) -> Vec3 {
     let p = room.position.extend(0.0) + local - origin.extend(0.0);
     vec3(p.x, -p.y, p.z)
 }
-fn solid(min: Vec3, max: Vec3, material: Material) -> Object {
-    Object { pos: (min + max) * 0.5, size: max - min, rotation: Vec2::Y, kind: Kind::Box, material, emission: 0.0 }
+const fn solid(center: Vec3, size: Vec3, material: Material) -> Object {
+    Object::new(Kind::Box, center, size, material)
 }
 
 /// Cut a box into at most six disjoint slabs; no GPU CSG or opening lists.
-fn subtract(mut min: Vec3, mut max: Vec3, cut: &Object, material: Material) -> Vec<Object> {
+fn subtract(wall: Object, cut: &Opening) -> Vec<Object> {
+    let (mut min, mut max) = (wall.pos - wall.size * 0.5, wall.pos + wall.size * 0.5);
     let lo = min.max(cut.pos - cut.size * 0.5);
     let hi = max.min(cut.pos + cut.size * 0.5);
     if !lo.cmplt(hi).all() {
-        return vec![solid(min, max, material)];
+        return vec![wall];
     }
+    let slab = |min: Vec3, max: Vec3| solid((min + max) * 0.5, max - min, wall.material);
     let mut pieces = Vec::new();
     for axis in 0..3 {
         if min[axis] < lo[axis] {
             let mut end = max;
             end[axis] = lo[axis];
-            pieces.push(solid(min, end, material));
+            pieces.push(slab(min, end));
             min[axis] = lo[axis];
         }
         if max[axis] > hi[axis] {
             let mut start = min;
             start[axis] = hi[axis];
-            pieces.push(solid(start, max, material));
+            pieces.push(slab(start, max));
             max[axis] = hi[axis];
         }
     }
@@ -44,10 +46,7 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
     let cuts: Vec<_> = rooms
         .iter()
         .flat_map(|room| {
-            room.openings.iter().map(move |opening| {
-                let center = point(room, opening.pos, origin);
-                solid(center - opening.size * 0.5, center + opening.size * 0.5, Material::Paint)
-            })
+            room.openings.iter().map(move |opening| Opening { pos: point(room, opening.pos, origin), ..*opening })
         })
         .collect();
     let mut objects = Vec::new();
@@ -59,14 +58,7 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
             if let Some(side) = side {
                 if room.walls.contains(Walls::from_bits_retain(1 << side)) {
                     let size = (size + Vec2::splat(WALL_THICKNESS)).extend(WALL_HEIGHT);
-                    walls.push(Object {
-                        pos: center + Vec3::Z * WALL_HEIGHT * 0.5,
-                        size,
-                        rotation: Vec2::Y,
-                        kind: Kind::Box,
-                        material: Material::Paint,
-                        emission: 0.0,
-                    });
+                    walls.push(solid(center + Vec3::Z * WALL_HEIGHT * 0.5, size, Material::Paint));
                     // Interior trim follows each authored wall, sharing its opening cuts.
                     let normal = match side {
                         0 => Vec3::X,
@@ -86,32 +78,23 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
                         }
                         let pos =
                             center + normal * (WALL_THICKNESS * 0.5 + depth * 0.5) + Vec3::Z * (base + height * 0.5);
-                        walls.push(solid(pos - trim_size * 0.5, pos + trim_size * 0.5, material));
+                        walls.push(solid(pos, trim_size, material));
                     }
                 }
             } else {
-                objects.push(solid(
-                    center - size.extend(0.0) * 0.5 - Vec3::Z * FLOOR_THICKNESS,
-                    center + size.extend(0.0) * 0.5,
-                    room.floor,
-                ));
+                objects.push(solid(center - Vec3::Z * FLOOR_THICKNESS * 0.5, size.extend(FLOOR_THICKNESS), room.floor));
                 // The cutaway hides these from overhead camera rays only.
                 // Daylight and GI still see the real, closed room envelope.
-                objects.push(Object {
-                    kind: Kind::Ceiling,
-                    ..solid(
-                        center - size.extend(0.0) * 0.5 + Vec3::Z * WALL_HEIGHT,
-                        center + size.extend(0.0) * 0.5 + Vec3::Z * (WALL_HEIGHT + CEILING_THICKNESS),
-                        Material::Paint,
-                    )
-                });
+                objects.push(Object::new(
+                    Kind::Ceiling,
+                    center + Vec3::Z * (WALL_HEIGHT + CEILING_THICKNESS * 0.5),
+                    size.extend(CEILING_THICKNESS),
+                    Material::Paint,
+                ));
             }
         });
         for cut in &cuts {
-            walls = walls
-                .into_iter()
-                .flat_map(|wall| subtract(wall.pos - wall.size * 0.5, wall.pos + wall.size * 0.5, cut, wall.material))
-                .collect();
+            walls = walls.into_iter().flat_map(|wall| subtract(wall, cut)).collect();
         }
         objects.extend(walls);
         objects.extend(

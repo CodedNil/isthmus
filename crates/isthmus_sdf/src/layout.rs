@@ -153,16 +153,18 @@ impl TextCache {
         let metrics = faces.first().expect("at least one font").metrics(Size::unscaled(), LocationRef::default());
         let span = metrics.ascent - metrics.descent;
         let baseline = f32::midpoint(metrics.ascent, metrics.descent) / span;
-        let weight_range =
-            faces.iter().map(|face| axis_range(face, WGHT, 400.0)).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1))).unwrap();
-        let width_range =
-            faces.iter().map(|face| axis_range(face, WDTH, 100.0)).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1))).unwrap();
-        let outlines = Outlines::default();
+        let range = |tag, fallback| {
+            faces
+                .iter()
+                .map(|face| axis_range(face, tag, fallback))
+                .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+                .unwrap()
+        };
         Self {
             fonts: fonts.iter().map(|font| (*font).into()).collect(),
-            weight_range,
-            width_range,
-            outlines,
+            weight_range: range(WGHT, 400.0),
+            width_range: range(WDTH, 100.0),
+            outlines: Outlines::default(),
             runs: RunCache::default(),
             span: span / f32::from(metrics.units_per_em),
             baseline,
@@ -190,28 +192,20 @@ impl TextCache {
             *used = true;
             return Arc::clone(line);
         }
-        let line = Arc::new(self.shape_positioned_width([(text, Vec2::ZERO)], size, weight, width));
+        let line = Arc::new(self.shape_uncached(text, size, weight, width));
         self.runs.entry_ref(text).or_default().insert(key, (Arc::clone(&line), true));
         line
     }
 
-    /// Combines independently positioned text parts into one run using logical pixel offsets.
-    fn shape_positioned_width<'a>(
-        &mut self,
-        parts: impl IntoIterator<Item = (&'a str, Vec2)>,
-        size: f32,
-        font_weight: f32,
-        font_width: f32,
-    ) -> ShapedLine {
+    fn shape_uncached(&mut self, text: &str, size: f32, font_weight: f32, font_width: f32) -> ShapedLine {
+        if !size.is_finite() || size <= 0.0 {
+            return ShapedLine::default();
+        }
         let mut min = Vec2::splat(f32::MAX);
         let mut max = Vec2::splat(f32::MIN);
         let weight = font_weight.clamp(self.weight_range.0, self.weight_range.1);
         let width_axis = font_width.clamp(self.width_range.0, self.width_range.1);
-        let mut width: f32 = 0.0;
         let mut glyphs = Vec::new();
-        if !size.is_finite() || size <= 0.0 {
-            return ShapedLine::default();
-        }
         let faces: Vec<_> = self.fonts.iter().map(|font| FontRef::new(font).expect("parse font")).collect();
         let locations: Vec<_> =
             faces.iter().map(|face| face.axes().location([(WGHT, weight), (WDTH, width_axis)])).collect();
@@ -226,29 +220,23 @@ impl TextCache {
                 )
             })
             .collect();
-        for (text, position) in parts {
-            let mut x = position.x / size;
-            let y = position.y / size;
-            for character in text.chars() {
-                if matches!(character, '\u{fe0e}' | '\u{fe0f}') {
-                    continue;
-                }
-                let (font, id) = fonts
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, (charmap, ..))| charmap.map(character).map(|id| (index, id)))
-                    .unwrap_or_default();
-                let (_, metrics, span) = &fonts[font];
-                let (glyph, data) = self.outlines.glyph(&faces[font], weight, width_axis, *span, font, id.to_u32());
-                if data.count > 0 {
-                    min = min.min(vec2(x + data.min.x, y - data.max.y));
-                    max = max.max(vec2(x + data.max.x, y - data.min.y));
-                    glyphs.push(PlacedGlyph { x, y: -y, glyph, left: x + data.min.x, right: x + data.max.x });
-                }
-                x += metrics.advance_width(id).unwrap_or(0.0) / span;
+        let mut x = 0.0;
+        for character in text.chars().filter(|character| !matches!(character, '\u{fe0e}' | '\u{fe0f}')) {
+            let (font, id) = fonts
+                .iter()
+                .enumerate()
+                .find_map(|(index, (charmap, ..))| charmap.map(character).map(|id| (index, id)))
+                .unwrap_or_default();
+            let (_, metrics, span) = &fonts[font];
+            let (glyph, data) = self.outlines.glyph(&faces[font], weight, width_axis, *span, font, id.to_u32());
+            if data.count > 0 {
+                min = min.min(vec2(x + data.min.x, -data.max.y));
+                max = max.max(vec2(x + data.max.x, -data.min.y));
+                glyphs.push(PlacedGlyph { x, y: 0.0, glyph, left: x + data.min.x, right: x + data.max.x });
             }
-            width = width.max(x * size);
+            x += metrics.advance_width(id).unwrap_or(0.0) / span;
         }
+        let width = x.max(0.0) * size;
         glyphs.sort_by(|a, b| a.left.total_cmp(&b.left));
         let mut right = f32::NEG_INFINITY;
         for glyph in &mut glyphs {

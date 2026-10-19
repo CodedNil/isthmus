@@ -41,18 +41,18 @@ fn shader_entry(
     let stage = if vertex { format_ident!("vertex") } else { format_ident!("fragment") };
     let interface = if vertex {
         quote! {
-            #[spirv(vertex_index)] index: u32,
-            #[spirv(instance_index)] draw_index: u32,
-            #[spirv(position)] out_position: &mut #isthmus::glam::Vec4,
-            #[spirv(location = 0)] out_uv: &mut #isthmus::glam::Vec2,
-            #[spirv(location = 1, flat)] out_draw_index: &mut u32,
+            #[spirv(vertex_index)] __index: u32,
+            #[spirv(instance_index)] __draw_index: u32,
+            #[spirv(position)] __out_position: &mut #isthmus::glam::Vec4,
+            #[spirv(location = 0)] __out_uv: &mut #isthmus::glam::Vec2,
+            #[spirv(location = 1, flat)] __out_draw_index: &mut u32,
         }
     } else {
         quote! {
-            #[spirv(frag_coord)] pixel: #isthmus::glam::Vec4,
-            #[spirv(location = 0)] uv: #isthmus::glam::Vec2,
-            #[spirv(location = 1, flat)] draw_index: u32,
-            #[spirv(location = 0)] out_color: &mut #isthmus::glam::Vec4,
+            #[spirv(frag_coord)] __pixel: #isthmus::glam::Vec4,
+            #[spirv(location = 0)] __uv: #isthmus::glam::Vec2,
+            #[spirv(location = 1, flat)] __draw_index: u32,
+            #[spirv(location = 0)] __out_color: &mut #isthmus::glam::Vec4,
         }
     };
     let name = format_ident!("{}", entry_name.value());
@@ -77,26 +77,26 @@ fn shader_entry(
         pub fn #name(
             #interface
             #[spirv(storage_buffer, descriptor_set = 0, binding = #draws_binding)]
-            draws: &[u32],
+            __draws: &[u32],
             #[spirv(storage_buffer, descriptor_set = 0, binding = #frames_binding)]
-            frame: &[u32],
+            __frames: &[u32],
             #[spirv(storage_buffer, descriptor_set = 0, binding = #payload_binding)]
-            payload: &[u32],
+            __payload: &[u32],
             #[spirv(storage_buffer, descriptor_set = 0, binding = #transient_binding)]
-            _transient: &[u32],
+            __transient: &[u32],
             #[spirv(storage_buffer, descriptor_set = 0, binding = #persistent_binding)]
-            _persistent: &[u32],
+            __persistent: &[u32],
             #(#image_resources)*
         ) {
-            type FrameData = #isthmus::__private::FrameData<<Program as #isthmus::Program>::Globals>;
+            type __FrameData = #isthmus::__private::FrameData<<Program as #isthmus::Program>::Globals>;
             // SAFETY: Renderer draw ranges and frame uploads use these generated codecs.
-            let (draw, frame) = unsafe {
-                (<u32 as #isthmus::ShaderData>::read_unchecked(draws, draw_index as usize),
-                 <FrameData as #isthmus::ShaderData>::read_unchecked(frame, 0))
+            let (__draw, __frame_data) = unsafe {
+                (<u32 as #isthmus::ShaderData>::read_unchecked(__draws, __draw_index as usize),
+                 <__FrameData as #isthmus::ShaderData>::read_unchecked(__frames, 0))
             };
             // SAFETY: Draw offsets address complete payloads encoded by this generated shader interface.
-            let _instance = unsafe {
-                <#payload as #isthmus::ShaderData>::read_unchecked(payload, draw as usize)
+            let __instance = unsafe {
+                <#payload as #isthmus::ShaderData>::read_unchecked(__payload, __draw as usize)
             };
             #body
         }

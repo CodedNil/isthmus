@@ -4,7 +4,7 @@ use image::RgbImage;
 use isthmus::glam::{Vec3, vec2, vec3};
 use lares::{
     home,
-    render::{Globals, Scene, SunSettings, shade, sun::utc_now},
+    render::{Globals, Scene, SunSettings, pixel, sun::utc_now},
 };
 use std::{env, error::Error, fs, thread, time::Instant};
 
@@ -66,32 +66,22 @@ fn pixels(scene: &Scene, eye: Vec3, focus: Vec3, width: usize, height: usize) ->
     thread::scope(|scope| {
         for (chunk, pixels) in pixels.chunks_mut(rows * width * 3).enumerate() {
             scope.spawn(move || {
-                for (index, pixel) in pixels.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                for (index, rgb) in pixels.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                     let x = index % width;
                     let y = chunk * rows + index / width;
-                    let mut color = Vec3::ZERO;
-                    for sample in 0..4 {
-                        let offset = vec2((sample & 1) as f32 - 0.5, (sample >> 1) as f32 - 0.5) * 0.5;
-                        let ndc = (vec2(x as f32 + 0.5, y as f32 + 0.5) + offset) / vec2(width as f32, height as f32)
-                            * 2.0
-                            - 1.0;
-                        let ray = (forward + right * ndc.x - up * ndc.y).normalize();
-                        color += shade(
-                            globals,
-                            &scene.nodes,
-                            &scene.objects,
-                            &scene.lights,
-                            scene.grid,
-                            &scene.probes,
-                            ray,
-                            0.0,
-                            sample,
-                        )
-                        .truncate()
-                        .powf(2.2);
-                    }
-                    let color = (color * 0.25).powf(1.0 / 2.2);
-                    pixel.copy_from_slice(&color.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+                    let color = pixel(
+                        globals,
+                        &scene.nodes,
+                        &scene.objects,
+                        &scene.lights,
+                        scene.grid,
+                        &scene.probes,
+                        vec2(x as f32 + 0.5, y as f32 + 0.5),
+                        vec2(width as f32, height as f32),
+                        1.0,
+                        0.0,
+                    );
+                    rgb.copy_from_slice(&color.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
                 }
             });
         }

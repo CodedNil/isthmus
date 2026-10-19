@@ -2,7 +2,7 @@ use crate::home::Object;
 use acceleration::Node;
 pub use acceleration::Scene;
 use isthmus::prelude::*;
-pub use scene::shade;
+pub use scene::pixel;
 pub use sun::{Sun, SunSettings};
 
 pub mod acceleration;
@@ -47,22 +47,11 @@ pub fn draw(frame: &mut Frame<'_>, scene: &Scene) {
                 let probes: &[scene::irradiance::Probe] = &scene.probes;
                 let grid: scene::irradiance::Grid = scene.grid;
             })
-            .primitive(|frame| { Rect::new(Vec2::ZERO, frame.screen_size) })
+            .primitive(|frame| Rect::new(Vec2::ZERO, frame.screen_size))
             .fragment(|frame, surface| {
-                // Four fixed subpixel rays cover thin geometry without temporal jitter.
-                let mut color = Vec3::ZERO;
-                let mut sample = 0;
-                while sample < 4 {
-                    let offset = vec2((sample & 1) as f32 - 0.5, (sample >> 1) as f32 - 0.5) * 0.5 * frame.pixel_size;
-                    let ndc = (surface.pixel + offset) / frame.screen_size * 2.0 - 1.0;
-                    let direction =
-                        (frame.globals.forward + frame.globals.right * ndc.x - frame.globals.up * ndc.y).normalize();
-                    color += shade(frame.globals, nodes, objects, lights, grid, probes, direction, frame.time, sample)
-                        .truncate()
-                        .powf(2.2);
-                    sample += 1;
-                }
-                (color * 0.25).powf(1.0 / 2.2).extend(1.0)
+                let (globals, size) = (frame.globals, frame.screen_size);
+                pixel(globals, nodes, objects, lights, grid, probes, surface.pixel, size, frame.pixel_size, frame.time)
+                    .extend(1.0)
             })
     );
 }

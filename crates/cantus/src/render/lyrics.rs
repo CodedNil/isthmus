@@ -18,6 +18,7 @@ const ROW_SPACING: f32 = 12.0;
 /// Distance from the panel's bottom edge to the first lyric row.
 const LYRIC_INSET: f32 = 12.0;
 /// Space reserved below the panel for one lyric row and the label beneath it.
+#[cfg(target_os = "linux")]
 pub const EXTENSION: f32 = LYRIC_INSET + ROW_SPACING;
 const GROUP_COLOR: Vec3 = vec3(1.00, 0.72, 0.79); // rose, reserved for groups
 const SECTION_SHADOW: f32 = 7.0;

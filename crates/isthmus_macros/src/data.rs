@@ -5,24 +5,29 @@ use syn::{Data, DeriveInput, Member};
 pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
     let name = &input.ident;
     let isthmus = isthmus_path();
+    // Bitflags and unit enums occupy one word, differing only in how they convert it.
+    let word = |zero, decode, encode| {
+        quote! {
+            impl #isthmus::ShaderData for #name {
+                type View<'a> = Self;
+                const WORDS: usize = 1;
+                const ZERO: Self = #zero;
+                fn resolve(self, _: #isthmus::ResourceData<'_>) -> Self { self }
+                unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
+                    let value = unsafe { <u32 as #isthmus::ShaderData>::read_unchecked(words, offset) };
+                    #decode
+                }
+                fn write(self, words: &mut [u32], offset: usize) {
+                    <u32 as #isthmus::ShaderData>::write(#encode, words, offset);
+                }
+            }
+        }
+    };
     if input.attrs.iter().any(|attribute| {
         attribute.path().is_ident("shader_data")
             && attribute.parse_args::<syn::Ident>().is_ok_and(|option| option == "bitflags")
     }) {
-        return quote! {
-            impl #isthmus::ShaderData for #name {
-                type View<'a> = Self;
-                const WORDS: usize = 1;
-                const ZERO: Self = Self::empty();
-                fn resolve(self, _: #isthmus::ResourceData<'_>) -> Self { self }
-                unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
-                    Self::from_bits_retain(unsafe { <u32 as #isthmus::ShaderData>::read_unchecked(words, offset) })
-                }
-                fn write(self, words: &mut [u32], offset: usize) {
-                    <u32 as #isthmus::ShaderData>::write(self.bits(), words, offset);
-                }
-            }
-        };
+        return word(quote!(Self::empty()), quote!(Self::from_bits_retain(value)), quote!(self.bits()));
     }
     if let Data::Enum(data) = &input.data {
         let repr_u32 = input.attrs.iter().any(|attribute| {
@@ -32,7 +37,6 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
             return syn::Error::new_spanned(input, "ShaderData enums must be nonempty unit enums with #[repr(u32)]")
                 .to_compile_error();
         }
-        let name = &input.ident;
         let variants: Vec<_> = data.variants.iter().map(|variant| &variant.ident).collect();
         let first = variants[0];
         let decode = if data.variants.iter().all(|variant| variant.discriminant.is_none()) {
@@ -46,21 +50,7 @@ pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
         } else {
             quote! { match value { #(value if value == Self::#variants as u32 => Self::#variants,)* _ => Self::ZERO } }
         };
-        return quote! {
-            impl #isthmus::ShaderData for #name {
-                type View<'a> = Self;
-                const WORDS: usize = 1;
-                const ZERO: Self = Self::#first;
-                fn resolve(self, _: #isthmus::ResourceData<'_>) -> Self { self }
-                unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
-                    let value = unsafe { <u32 as #isthmus::ShaderData>::read_unchecked(words, offset) };
-                    #decode
-                }
-                fn write(self, words: &mut [u32], offset: usize) {
-                    <u32 as #isthmus::ShaderData>::write(self as u32, words, offset);
-                }
-            }
-        };
+        return word(quote!(Self::#first), decode, quote!(self as u32));
     }
     let Data::Struct(data) = &input.data else {
         return syn::Error::new_spanned(input, "ShaderData requires a struct or #[repr(u32)] unit enum")

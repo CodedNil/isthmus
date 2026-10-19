@@ -44,7 +44,9 @@ pub struct LocalTrack {
     pub track: Track,
     pub timeline: Timeline,
     pub playing: bool,
+    #[cfg(target_os = "linux")]
     pub source: String,
+    #[cfg(target_os = "linux")]
     pub(crate) mpris_id: String,
     #[cfg(target_os = "linux")]
     pub(crate) reported_position: Option<f32>,

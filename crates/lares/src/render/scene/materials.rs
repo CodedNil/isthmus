@@ -3,7 +3,7 @@ use crate::home::Material;
 use core::f32::consts::TAU;
 use isthmus::prelude::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct Surface {
     pub albedo: Vec3,
     pub roughness: f32,
@@ -63,15 +63,7 @@ fn linear(color: Vec3) -> Vec3 {
 }
 #[inline(never)]
 fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
-    let mut surface = Surface {
-        albedo: tint,
-        roughness: 0.65,
-        metallic: 0.0,
-        sheen: 0.0,
-        coat: 0.0,
-        gradient: Vec3::ZERO,
-        occlusion: 1.0,
-    };
+    let mut surface = Surface { albedo: tint, roughness: 0.65, occlusion: 1.0, ..Surface::default() };
     match kind {
         Material::Wood | Material::Floorboards | Material::Maple | Material::MapleHorizontal => {
             let maple = matches!(kind, Material::Maple | Material::MapleHorizontal);
@@ -262,15 +254,7 @@ pub(super) fn sample(kind: Material, tint: Vec3, p: Vec3, n: Vec3, pixel: f32) -
     }
     let weights = n.abs().powf(4.0);
     let weights = weights / weights.element_sum().max_num(0.0001);
-    let mut result = Surface {
-        albedo: Vec3::ZERO,
-        roughness: 0.0,
-        metallic: 0.0,
-        sheen: 0.0,
-        coat: 0.0,
-        gradient: Vec3::ZERO,
-        occlusion: 0.0,
-    };
+    let mut result = Surface::default();
     for axis in 0..3 {
         let (uv, weight, facing) = match axis {
             0 => (p.yz(), weights.x, n.x),
@@ -286,13 +270,12 @@ pub(super) fn sample(kind: Material, tint: Vec3, p: Vec3, n: Vec3, pixel: f32) -
         result.metallic += surface.metallic * weight;
         result.sheen += surface.sheen * weight;
         result.coat += surface.coat * weight;
-        let g = surface.gradient.xy();
-        result.gradient += if axis == 0 {
-            vec3(0.0, g.x, g.y)
-        } else if axis == 1 {
-            vec3(g.x, 0.0, g.y)
-        } else {
-            vec3(g.x, g.y, 0.0)
+        // Plane gradients are tangent to their projection, so z is always zero.
+        let g = surface.gradient;
+        result.gradient += match axis {
+            0 => g.zxy(),
+            1 => g.xzy(),
+            _ => g,
         } * weight;
         result.occlusion += surface.occlusion * weight;
     }

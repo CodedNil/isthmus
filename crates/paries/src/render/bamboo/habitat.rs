@@ -1,7 +1,7 @@
 use super::{
     Frame, Program, atmosphere, daylight, hash,
     landscape::{river, water_mask},
-    noise, pigment, undergrowth, wash,
+    noise, over, pigment, recede, scene_point, screen_point, undergrowth, wash,
 };
 use isthmus::{prelude::*, spirv_std::arch::kill};
 
@@ -14,13 +14,13 @@ pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                     let depth: f32;
                     let seed: f32 = seed + index as f32 * 17.0;
                     let quad: Quad = Quad::new(
-                        (root
-                            + vec2(
+                        screen_point(
+                            root + vec2(
                                 (index as f32 - 1.0) * (0.035 + depth * 0.055),
                                 -0.03 - depth * 0.035 + index as f32 * 0.009 + hash(seed + index as f32) * 0.015,
-                            ))
-                            * frame.screen_size.y
-                            + vec2(frame.screen_size.x * 0.5, 0.0),
+                            ),
+                            frame.screen_size,
+                        ),
                         vec2(0.11 + depth * 0.2, 0.08 + depth * 0.12)
                             * (0.75 + hash(seed + index as f32) * 0.3)
                             * frame.screen_size.y,
@@ -51,9 +51,8 @@ pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                     let stone = vec3(0.21, 0.31, 0.35).lerp(vec3(0.68, 0.62, 0.49), facet * 0.68 + texture * 0.2)
                         * (1.0 - crack * 0.45);
                     let color = stone.lerp(vec3(0.34, 0.51, 0.32).lerp(vec3(0.64, 0.7, 0.4), texture), moss * 0.88);
-                    daylight(pigment(color, point + seed, aa * 0.1), surface.pixel / size)
-                        .lerp(atmosphere(surface.pixel / size), (1.0 - depth).powi(2) * 0.35)
-                        .extend(mask)
+                    let uv = surface.pixel / size;
+                    recede(daylight(pigment(color, point + seed, aa * 0.1), uv), atmosphere(uv), depth).extend(mask)
                 })
         );
     }
@@ -69,7 +68,7 @@ pub(super) fn deadwood(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32)
                 let seed: f32;
                 let depth: f32;
                 let quad: Quad = Quad::new(
-                    (root - vec2(0.0, 0.017)) * frame.screen_size.y + vec2(frame.screen_size.x * 0.5, 0.0),
+                    screen_point(root - vec2(0.0, 0.017), frame.screen_size),
                     vec2(0.2 + depth * 0.32, 0.06 + depth * 0.06) * frame.screen_size.y,
                     Vec2::from_angle(-0.18 + hash(seed) * 0.35),
                 );
@@ -94,14 +93,13 @@ pub(super) fn deadwood(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32)
                         .max(offset.y * 5.0 - 0.1);
                     let mask = cap.smoothstep(aa * 5.0, -aa * 5.0);
                     let tint = vec3(0.7, 0.54, 0.42).lerp(vec3(0.92, 0.82, 0.65), (-offset.y).smoothstep(0.0, 0.18));
-                    color = color * (1.0 - mask) + tint * mask;
-                    alpha += mask * (1.0 - alpha);
+                    (color, alpha) = over(color, alpha, tint, mask);
                 }
                 if alpha == 0.0 {
                     kill();
                 }
-                daylight(pigment(color / alpha, point + seed, aa * 0.1), surface.pixel / size)
-                    .lerp(atmosphere(surface.pixel / size), (1.0 - depth).powi(2) * 0.35)
+                let uv = surface.pixel / size;
+                recede(daylight(pigment(color / alpha, point + seed, aa * 0.1), uv), atmosphere(uv), depth)
                     .extend(alpha)
             })
     );
@@ -127,7 +125,7 @@ pub(super) fn fish(frame: &mut Frame<'_>) {
                     let seed: f32;
                     let beat: f32 = frame.time * (6.0 + hash(seed) * 2.0) + (phase * 2.0).sin() * 0.8 + seed;
                     let quad: Quad = Quad::oriented(
-                        center * frame.screen_size.y + vec2(frame.screen_size.x * 0.5, 0.0),
+                        screen_point(center, frame.screen_size),
                         vec2(0.055 + hash(seed + 2.0) * 0.018, 0.027) * frame.screen_size.y,
                         velocity,
                     );
@@ -152,8 +150,7 @@ pub(super) fn fish(frame: &mut Frame<'_>) {
                     let color = vec3(0.075, 0.21, 0.23).lerp(vec3(0.7, 0.73, 0.6), belly * 0.72 + sheen * 0.23)
                         * (0.91 + scales * 0.16)
                         * (1.0 - eye * 0.8);
-                    let pixel = (surface.pixel - vec2(size.x * 0.5, 0.0)) / size.y;
-                    color.extend(alpha * water_mask(pixel, 1.0 / size.y) * 0.86)
+                    color.extend(alpha * water_mask(scene_point(surface.pixel, size), 1.0 / size.y) * 0.86)
                 })
         );
     }
