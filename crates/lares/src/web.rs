@@ -1,10 +1,14 @@
-use crate::{app::App, render::Renderer};
+use crate::{
+    app::App,
+    render::{Renderer, sun::utc_now},
+};
 use gloo_events::EventListener;
 use gloo_render::request_animation_frame;
 use isthmus::{glam::vec2, wgpu::SurfaceTarget};
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, error::Error, panic, rc::Rc};
 use tokio::sync::oneshot;
 use wasm_bindgen::JsCast;
+use web_sys::console;
 
 #[wasm_bindgen::prelude::wasm_bindgen]
 extern "C" {
@@ -13,38 +17,34 @@ extern "C" {
 
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
-    std::panic::set_hook(Box::new(|panic| {
-        web_sys::console::error_1(&format!("Lares panic: {panic}").into());
+    panic::set_hook(Box::new(|panic| {
+        console::error_1(&format!("Lares panic: {panic}").into());
     }));
     run().await.map_err(|error| error.to_string().into())
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn Error>> {
     let window = web_sys::window().ok_or("browser window is unavailable")?;
     let canvas = window
         .document()
         .and_then(|document| document.get_element_by_id("lares"))
         .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
         .ok_or("#lares is not a canvas")?;
-    let dimensions = || {
-        let viewport = vec2(
-            window.inner_width().ok().and_then(|value| value.as_f64()).unwrap_or(1.0) as f32,
-            window.inner_height().ok().and_then(|value| value.as_f64()).unwrap_or(1.0) as f32,
-        );
-        let scale = window.device_pixel_ratio() as f32;
-        let physical = [(viewport.x * scale).round().max(1.0) as u32, (viewport.y * scale).round().max(1.0) as u32];
-        (vec2(physical[0] as f32, physical[1] as f32), physical)
+    let physical_size = || {
+        let scale = window.device_pixel_ratio();
+        [window.inner_width(), window.inner_height()]
+            .map(|length| (length.ok().and_then(|value| value.as_f64()).unwrap_or(1.0) * scale).round().max(1.0) as u32)
     };
+    let to_vec2 = |[width, height]: [u32; 2]| vec2(width as f32, height as f32);
     laresProgress("Preparing the scene…");
     next_frame().await;
-    let app = App::template();
-    let app = Rc::new(RefCell::new(app));
+    let app = Rc::new(RefCell::new(App::template()));
     laresProgress("Preparing graphics…");
     next_frame().await;
-    let (_, physical) = dimensions();
+    let physical = physical_size();
     let (mut gpu, surface) = Renderer::new(SurfaceTarget::Canvas(canvas.clone()), physical, ()).await?;
     laresProgress("Drawing the first view…");
-    gpu.render(|render| app.borrow().draw(render, surface, vec2(physical[0] as f32, physical[1] as f32)))?;
+    gpu.render(|render| app.borrow().draw(render, surface, to_vec2(physical)))?;
     let (sender, ready) = oneshot::channel();
     gpu.queue().on_submitted_work_done(move || {
         let _ = sender.send(());
@@ -84,11 +84,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         next_frame().await;
-        let (size, physical) = dimensions();
+        let physical = physical_size();
         gpu.resize(surface, physical);
         let mut app = app.borrow_mut();
-        app.scene.update_time(crate::render::sun::utc_now());
-        gpu.render(|render| app.draw(render, surface, size))?;
+        app.scene.update_time(utc_now());
+        gpu.render(|render| app.draw(render, surface, to_vec2(physical)))?;
     }
 }
 

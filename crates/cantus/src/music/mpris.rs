@@ -7,16 +7,13 @@ use std::{collections::HashMap, error::Error, time::Duration};
 use tokio::time::{interval, timeout};
 use tracing::warn;
 use web_time::Instant;
-use zbus::{
-    Connection, Proxy,
-    zvariant::{OwnedObjectPath, OwnedValue},
-};
+use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy};
 
 const PLAYER: &str = "org.mpris.MediaPlayer2.Player";
 const PATH: &str = "/org/mpris/MediaPlayer2";
-type Properties = HashMap<String, OwnedValue>;
+type Properties = HashMap<String, OwnedVariant>;
 
-fn take<T: TryFrom<OwnedValue>>(values: &mut Properties, key: &str) -> Option<T> {
+fn take<T: TryFrom<OwnedVariant>>(values: &mut Properties, key: &str) -> Option<T> {
     values.remove(key).and_then(|value| T::try_from(value).ok())
 }
 

@@ -34,12 +34,11 @@ impl Binding {
         {
             let name = name.ident.clone();
             let value = local.init.as_ref().map_or_else(|| parse_quote!(#name), |init| (*init.expr).clone());
+            let image = |ty: &Type| matches!(ty, Type::Path(path) if path.path.segments.last().is_some_and(|s| s.ident == "Image"));
             let kind = match &*pat.ty {
-                Type::Path(path) if path.path.segments.last().is_some_and(|s| s.ident == "Image") => CaptureKind::Image,
-                Type::Reference(reference) if matches!(&*reference.elem, Type::Path(path) if path.path.segments.last().is_some_and(|s| s.ident == "Image")) => {
-                    CaptureKind::Image
-                }
                 Type::Reference(reference) if matches!(&*reference.elem, Type::Slice(_)) => CaptureKind::Slice,
+                Type::Reference(reference) if image(&reference.elem) => CaptureKind::Image,
+                ty if image(ty) => CaptureKind::Image,
                 _ => CaptureKind::Data,
             };
             return Ok(Self { name, ty: (*pat.ty).clone(), value, kind });
@@ -252,9 +251,9 @@ impl Shader {
                     let (image, sampler) = image_names(name);
                     quote!(#isthmus::Image::new(#image, *#sampler))
                 }
-                CaptureKind::Slice => quote!(crate::ShaderSlice::from_words(payload, _instance.#name)),
-                CaptureKind::Data => quote!(#isthmus::ShaderData::resolve(_instance.#name, #isthmus::ResourceData {
-                    transient: _transient, persistent: _persistent,
+                CaptureKind::Slice => quote!(crate::ShaderSlice::from_words(__payload, __instance.#name)),
+                CaptureKind::Data => quote!(#isthmus::ShaderData::resolve(__instance.#name, #isthmus::ResourceData {
+                    transient: __transient, persistent: __persistent,
                 })),
             };
             let annotation = (*kind == CaptureKind::Slice).then(|| {
@@ -270,8 +269,8 @@ impl Shader {
             type __Program = Program;
             #(#bindings)*
             let __frame = #isthmus::ShaderFrame::<__Program> {
-                time: frame.time, screen_size: frame.screen_size,
-                pixel_size: frame.pixel_scale.max_element(), globals: frame.globals,
+                time: __frame_data.time, screen_size: __frame_data.screen_size,
+                pixel_size: __frame_data.pixel_scale.max_element(), globals: __frame_data.globals,
             };
             let __stage = (#stage)(__frame);
         };
@@ -279,18 +278,18 @@ impl Shader {
         let vertex_name = syn::LitStr::new(&self.vertex_entry(), self.entry.span());
         let vertex = shader_entry(isthmus, &vertex_name, true, &images, &payload_name, &quote! {
             #setup
-            let vertex = #isthmus::Primitive::vertex(__stage, #isthmus::VertexInput::<__Program> {
-                index, frame: __frame,
+            let __vertex = #isthmus::Primitive::vertex(__stage, #isthmus::VertexInput::<__Program> {
+                index: __index, frame: __frame,
             });
-            *out_position = vertex.position;
-            *out_uv = vertex.uv;
-            *out_draw_index = draw_index;
+            *__out_position = __vertex.position;
+            *__out_uv = __vertex.uv;
+            *__out_draw_index = __draw_index;
         });
         let fragment = shader_entry(isthmus, &self.entry, false, &images, &payload_name, &quote! {
             #setup
             let __fragment = #isthmus::Fragment {
-                pixel: #isthmus::glam::vec2(pixel.x, pixel.y) * frame.pixel_scale,
-                uv,
+                pixel: #isthmus::glam::vec2(__pixel.x, __pixel.y) * __frame_data.pixel_scale,
+                uv: __uv,
                 sample: (),
                 coverage: 1.0,
             };
@@ -299,10 +298,10 @@ impl Shader {
                 pixel: __fragment.pixel, uv: __fragment.uv, sample: __sample, coverage: __coverage,
             };
             let #frame_input = __frame;
-            let color: #isthmus::glam::Vec4 = (|| #body)();
+            let __color: #isthmus::glam::Vec4 = (|| #body)();
             if __coverage <= 0.0 { #isthmus::spirv_std::arch::kill(); }
-            let alpha = color.w * __coverage;
-            *out_color = (color.truncate() * alpha).extend(alpha);
+            let __alpha = __color.w * __coverage;
+            *__out_color = (__color.truncate() * __alpha).extend(__alpha);
         });
         quote!(#payload #vertex #fragment)
     }

@@ -37,7 +37,7 @@ resvg = { version = "0.48.1", default-features = false, features = [
 ] }
 roxmltree = "0.21.1"
 serde.workspace = true
-serde_json = { version = "1.0.151", features = ["raw_value"] }
+serde_json = { version = "1.0.154", features = ["raw_value"] }
 smallvec.workspace = true
 tokio = { workspace = true, features = ["macros", "sync"] }
 toml.workspace = true
@@ -51,7 +51,7 @@ bytemuck.workspace = true
 calloop = "0.14"
 calloop-wayland-source = "0.4.1"
 flate2 = "1.1.10"
-freedesktop-desktop-entry = { version = "0.8.3", default-features = false }
+freedesktop-desktop-entry = { version = "0.8.4", default-features = false }
 freedesktop-icons = "0.4.0"
 librespot-core = { version = "0.8.0", default-features = false, features = [
     "rustls-tls-webpki-roots",
@@ -70,7 +70,7 @@ microfft = { version = "0.6.0", default-features = false, features = [
 nvml-wrapper = "0.13.0"
 pollster.workspace = true
 protobuf = "3.7.2"
-schemars = { version = "1.2.2", features = ["arrayvec07", "preserve_order"] }
+schemars = { version = "1.2.3", features = ["arrayvec07", "preserve_order"] }
 smithay-clipboard = { version = "0.7.3", default-features = false }
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "time"] }
 wayland-backend.workspace = true
@@ -78,7 +78,7 @@ wayland-client.workspace = true
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 xkbcommon = { version = "0.9.0", default-features = false }
-zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
+zbus = { version = "6.0.0", default-features = false, features = ["proxy", "tokio"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-events.workspace = true

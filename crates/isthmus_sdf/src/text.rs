@@ -223,13 +223,7 @@ fn curve_winding(start: Vec2, control: Vec2, end: Vec2, point: Vec2) -> i32 {
         let direction = 2.0 * a * t + b;
         let crosses = if direction > 0.0 { (0.0..1.0).contains(&t) } else { t > 0.0 && t <= 1.0 };
         if crosses && quadratic(start, control, end, t).x > point.x {
-            if direction > 0.0 {
-                1
-            } else if direction < 0.0 {
-                -1
-            } else {
-                0
-            }
+            i32::from(direction > 0.0) - i32::from(direction < 0.0)
         } else {
             0
         }

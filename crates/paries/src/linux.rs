@@ -17,7 +17,7 @@ use wayland_client::{
     Connection, Proxy, QueueHandle,
     backend::Backend,
     delegate_noop,
-    globals::{GlobalListContents, registry_queue_init},
+    globals::{Global, GlobalListContents, registry_queue_init},
     protocol::{
         wl_callback::{self, WlCallback},
         wl_compositor::WlCompositor,
@@ -108,10 +108,13 @@ struct Wallpaper {
 }
 
 impl Wallpaper {
-    fn add_output(&mut self, id: OutputId, output: WlOutput, qhandle: &QueueHandle<Self>) {
-        if self.outputs.contains_key(&id) {
+    fn add_output(&mut self, registry: &WlRegistry, global: &Global, qhandle: &QueueHandle<Self>) {
+        let id = global.name;
+        if global.interface != "wl_output" || self.outputs.contains_key(&id) {
             return;
         }
+        assert!(global.version >= 4, "missing wl_output v4");
+        let output: WlOutput = registry.bind(id, 4, qhandle, id);
         let wl = self.compositor.create_surface(qhandle, id);
         let layer =
             self.shell.get_layer_surface(&wl, Some(&output), Layer::Background, format!("paries-{id}"), qhandle, id);
@@ -210,13 +213,8 @@ pub fn run() {
         bamboo: Bamboo::default(),
         outputs: BTreeMap::new(),
     };
-    let registry = globals.registry();
     for global in globals.contents().clone_list() {
-        if global.interface == "wl_output" {
-            assert!(global.version >= 4, "missing wl_output v4");
-            let output = registry.bind(global.name, 4, &qhandle, global.name);
-            app.add_output(global.name, output, &qhandle);
-        }
+        app.add_output(globals.registry(), &global, &qhandle);
     }
     connection.flush().expect("failed to create wallpaper surfaces");
     loop {
@@ -274,10 +272,8 @@ dispatch!(Wallpaper, WlOutput, OutputId, _data, |_state, _proxy, _event, _queue|
 
 dispatch!(Wallpaper, WlRegistry, GlobalListContents, _data, |state, proxy, event, qhandle| {
     match event {
-        wl_registry::Event::Global { name, interface, version } if interface == "wl_output" => {
-            assert!(version >= 4, "missing wl_output v4");
-            let output = proxy.bind(name, 4, qhandle, name);
-            state.add_output(name, output, qhandle);
+        wl_registry::Event::Global { name, interface, version } => {
+            state.add_output(proxy, &Global { name, interface, version }, qhandle);
         }
         wl_registry::Event::GlobalRemove { name } => state.remove_output(name),
         _ => {}

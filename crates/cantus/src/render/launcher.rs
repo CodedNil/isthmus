@@ -663,6 +663,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "layout constants are exact sums of small multiples")]
     fn empty_panel_is_a_centered_pill() {
         let mut launcher = LauncherState::default();
         let screen = vec2(1920.0, 1080.0);

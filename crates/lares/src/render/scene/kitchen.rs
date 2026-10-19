@@ -4,6 +4,16 @@ use isthmus::prelude::*;
 const MAPLE: Vec3 = vec3(0.98, 0.98, 0.96);
 const STEEL: Vec3 = vec3(0.64, 0.66, 0.65);
 const BLACK: Vec3 = vec3(0.055, 0.065, 0.07);
+const WORKTOP: Vec3 = vec3(0.065, 0.072, 0.078);
+
+/// The stone worktop and recessed carcass shared by base units.
+fn worktop(p: Vec3, size: Vec3) -> f32 {
+    rounded_box(p - Vec3::Z * (size.z * 0.5 - 0.016), vec3(size.x, size.y + 0.025, 0.032), 0.004)
+}
+fn base_unit<S: Sample>(p: Vec3, size: Vec3) -> S {
+    let body = rounded_box(p - vec3(0.0, -0.018, 0.05), size - vec3(0.014, 0.036, 0.14), 0.002);
+    S::new(body, || (Material::Maple, MAPLE)).union(S::new(worktop(p, size), || (Material::Stone, WORKTOP)))
+}
 
 fn pull(p: Vec3, width: f32) -> f32 {
     capsule(p, vec3(-width * 0.5, 0.025, 0.0), vec3(width * 0.5, 0.025, 0.0), 0.006).min_num(capsule(
@@ -45,11 +55,7 @@ fn fronts<S: Sample>(p: Vec3, size: Vec3, drawers: bool) -> S {
 }
 #[inline(never)]
 pub(super) fn counter<S: Sample>(p: Vec3, size: Vec3) -> S {
-    let body = rounded_box(p - vec3(0.0, -0.018, 0.05), size - vec3(0.014, 0.036, 0.14), 0.002);
-    let top = rounded_box(p - Vec3::Z * (size.z * 0.5 - 0.016), vec3(size.x, size.y + 0.025, 0.032), 0.004);
-    S::new(body, || (Material::Maple, MAPLE))
-        .union(fronts(p - Vec3::Z * 0.048, vec3(size.x - 0.01, size.y - 0.006, size.z - 0.17), true))
-        .union(S::new(top, || (Material::Stone, vec3(0.065, 0.072, 0.078))))
+    base_unit::<S>(p, size).union(fronts(p - Vec3::Z * 0.048, vec3(size.x - 0.01, size.y - 0.006, size.z - 0.17), true))
 }
 #[inline(never)]
 pub(super) fn cabinet<S: Sample>(kind: Kind, p: Vec3, size: Vec3) -> S {
@@ -82,12 +88,11 @@ pub(super) fn oven<S: Sample>(p: Vec3, size: Vec3) -> S {
     let handle = pull(front - vec3(0.0, 0.024, size.z * 0.24), size.x * 0.80);
     let dial = cylinder(vec3(front.x.abs() - size.x * 0.35, front.z - size.z * 0.36, front.y - 0.015), 0.018, 0.023);
     let display = rounded_box(front - vec3(0.0, 0.012, size.z * 0.36), vec3(0.12, 0.008, 0.030), 0.001);
-    let top = rounded_box(p - Vec3::Z * (size.z * 0.5 - 0.016), vec3(size.x, size.y + 0.025, 0.032), 0.004);
     let hob = rounded_box(p - Vec3::Z * (size.z * 0.5 + 0.004), vec3(size.x - 0.018, size.y - 0.018, 0.008), 0.003);
     let ring_p = vec2(p.x.abs() - size.x * 0.24, p.y.abs() - size.y * 0.23);
     let rings = (ring_p.length() - 0.073).abs() < 0.0025 && p.z > size.z * 0.5;
     S::new(body.min_num(handle).min_num(dial), || (Material::Metal, STEEL))
-        .union(S::new(top, || (Material::Stone, vec3(0.065, 0.072, 0.078))))
+        .union(S::new(worktop(p, size), || (Material::Stone, WORKTOP)))
         .union(S::new(glass.min_num(hob), || (Material::Ceramic, if rings { vec3(0.23, 0.24, 0.24) } else { BLACK })))
         .union(S::new(display, || (Material::Ceramic, vec3(0.08, 0.20, 0.06))))
 }
@@ -218,10 +223,7 @@ pub(super) fn entry_door<S: Sample>(p: Vec3, size: Vec3) -> S {
 
 #[inline(never)]
 pub(super) fn drawers<S: Sample>(p: Vec3, size: Vec3) -> S {
-    let body = rounded_box(p - vec3(0.0, -0.018, 0.05), size - vec3(0.014, 0.036, 0.14), 0.002);
-    let top = rounded_box(p - Vec3::Z * (size.z * 0.5 - 0.016), vec3(size.x, size.y + 0.025, 0.032), 0.004);
-    let mut hit =
-        S::new(body, || (Material::Maple, MAPLE)).union(S::new(top, || (Material::Stone, vec3(0.065, 0.072, 0.078))));
+    let mut hit = base_unit::<S>(p, size);
     let mut row = 0;
     while row < 3 {
         let height = if row == 0 { 0.16 } else { 0.27 };

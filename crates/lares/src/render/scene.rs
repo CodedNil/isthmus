@@ -69,7 +69,11 @@ impl Sample for Hit {
 }
 #[inline(never)]
 fn cylinder(p: Vec3, radius: f32, height: f32) -> f32 {
-    let d = vec2(p.xy().length() - radius, p.z.abs() - height * 0.5);
+    extrude(vec2(p.xy().length() - radius, p.z.abs() - height * 0.5))
+}
+
+/// Exact distance to the intersection of two independent slabs.
+fn extrude(d: Vec2) -> f32 {
     d.max_num(Vec2::ZERO).length() + d.max_element().min_num(0.0)
 }
 
@@ -130,6 +134,15 @@ const FAR: f32 = 1000.0;
 fn unrotate_z(point: Vec3, rotation: Vec2) -> Vec3 {
     let (sin, cos) = (rotation.x, rotation.y);
     vec3(point.x * cos + point.y * sin, -point.x * sin + point.y * cos, point.z)
+}
+
+fn rotate_z(point: Vec3, rotation: Vec2) -> Vec3 {
+    unrotate_z(point, vec2(-rotation.x, rotation.y))
+}
+
+/// One of four fixed offsets in [-0.5, 0.5], shared by pixel, sun and emitter samples.
+fn subpixel(sample: u32) -> Vec2 {
+    vec2((sample & 1) as f32 - 0.5, (sample >> 1) as f32 - 0.5)
 }
 
 fn box_sdf(point: Vec3, size: Vec3) -> f32 {
@@ -221,24 +234,17 @@ fn cast<const SHADOW: bool, const CUTAWAY: bool>(
         }
         let item = objects[node.object as usize];
         if (item.kind == Kind::Ceiling && CUTAWAY && !SHADOW && origin.z > super::WALL_HEIGHT)
-            || (SHADOW && matches!(item.kind, Kind::Downlight | Kind::Lamp))
+            || (SHADOW && item.is_light())
         {
             continue;
         }
         // Architectural boxes are their BVH leaf bounds: no second slab test,
         // transform or SDF evaluation is needed, including for shadow rays.
-        if matches!(item.kind, Kind::Box | Kind::Ceiling) && item.rotation == Vec2::Y {
-            let hit = if enter > 0.0 { enter } else { exit };
-            if hit < nearest {
-                if SHADOW {
-                    return (0.0, node.object);
-                }
-                nearest = hit;
-                object = node.object;
-            }
-            continue;
-        }
-        let hit = intersect(item, origin, direction, enter, exit.min_num(nearest), pixel_angle);
+        let hit = if matches!(item.kind, Kind::Box | Kind::Ceiling) && item.rotation == Vec2::Y {
+            if enter > 0.0 { enter } else { exit }
+        } else {
+            intersect(item, origin, direction, enter, exit.min_num(nearest), pixel_angle)
+        };
         if hit < nearest {
             if SHADOW {
                 return (0.0, node.object);
@@ -287,8 +293,42 @@ fn object_normal(item: Object, local: Vec3) -> Vec3 {
     }
 }
 
+/// Averages four fixed subpixel rays in linear light, covering thin geometry without temporal jitter.
+pub fn pixel(
+    globals: Globals,
+    nodes: &[Node],
+    objects: &[Object],
+    lights: &[u32],
+    grid: irradiance::Grid,
+    probes: &[irradiance::Probe],
+    pixel: Vec2,
+    screen_size: Vec2,
+    pixel_size: f32,
+    time: f32,
+) -> Vec3 {
+    let mut color = Vec3::ZERO;
+    let mut sample = 0;
+    while sample < 4 {
+        let ndc = (pixel + subpixel(sample) * 0.5 * pixel_size) / screen_size * 2.0 - 1.0;
+        let direction = (globals.forward + globals.right * ndc.x - globals.up * ndc.y).normalize();
+        color += shade(globals, nodes, objects, lights, grid, probes, direction, time, sample).truncate().powf(2.2);
+        sample += 1;
+    }
+    (color * 0.25).powf(1.0 / 2.2)
+}
+
+/// Architectural boxes have a uniform finish; furniture evaluates its model.
+fn surface_at(item: Object, local: Vec3) -> Hit {
+    if item.kind == Kind::Box {
+        let tint = if item.material == Material::Paint { WALL_COLOR } else { Vec3::ONE };
+        Hit::new(0.0, || (item.material, tint))
+    } else {
+        render_furniture::<Hit>(item.kind, local, item.size)
+    }
+}
+
 #[inline(never)]
-pub fn shade(
+fn shade(
     globals: Globals,
     nodes: &[Node],
     objects: &[Object],
@@ -308,7 +348,7 @@ pub fn shade(
         let point = origin + direction * nearest;
         let local = unrotate_z(point - item.pos, item.rotation);
         if entry::mirror::<Hit>(local, item.size).material == Material::Mirror {
-            let normal = unrotate_z(object_normal(item, local), vec2(-item.rotation.x, item.rotation.y));
+            let normal = rotate_z(object_normal(item, local), item.rotation);
             direction -= normal * (2.0 * direction.dot(normal));
             origin = point + normal * 0.002;
             reflected_distance = nearest;
@@ -322,25 +362,16 @@ pub fn shade(
     let item = objects[object as usize];
     let local = unrotate_z(point - item.pos, item.rotation);
     let normal = object_normal(item, local);
-    let world_normal = unrotate_z(normal, vec2(-item.rotation.x, item.rotation.y));
-
-    let (surface, texture_point) = if item.kind == Kind::Box {
-        let tint = if item.material == Material::Paint { WALL_COLOR } else { Vec3::ONE };
-        (Hit::new(0.0, || (item.material, tint)), point)
-    } else {
-        (render_furniture::<Hit>(item.kind, local, item.size), local)
-    };
-    let surface = if item.kind == Kind::PosterBlue {
+    let world_normal = rotate_z(normal, item.rotation);
+    let texture_point = if item.kind == Kind::Box { point } else { local };
+    let mut surface = surface_at(item, local);
+    if item.kind == Kind::PosterBlue {
         let tint = surface.tint;
-        Hit { tint: vec3(tint.z * 0.72, tint.x * 0.72 + tint.y * 0.28, tint.x * 0.55 + tint.z * 0.60), ..surface }
-    } else {
-        surface
-    };
-    let surface = if item.kind == Kind::Stem && item.material == Material::Foliage {
-        Hit::new(surface.distance, || (Material::Foliage, vec3(0.25, 0.38, 0.12)))
-    } else {
-        surface
-    };
+        surface.tint = vec3(tint.z * 0.72, tint.x * 0.72 + tint.y * 0.28, tint.x * 0.55 + tint.z * 0.60);
+    }
+    if item.kind == Kind::Stem && item.material == Material::Foliage {
+        (surface.material, surface.tint) = (Material::Foliage, vec3(0.25, 0.38, 0.12));
+    }
     // Section caps sit at the roof cut. Sample just above the hidden roof,
     // rather than treating the exposed wall cross-section as buried inside it.
     let section_cap = globals.eye.z > super::WALL_HEIGHT
@@ -348,7 +379,7 @@ pub fn shade(
         && world_normal.z > 0.5
         && matches!(item.kind, Kind::Box | Kind::Downlight);
     let lighting_point = point + Vec3::Z * if section_cap { super::CEILING_THICKNESS + 0.02 } else { 0.0 };
-    let fixture = matches!(item.kind, Kind::Downlight | Kind::Lamp);
+    let fixture = item.is_light();
     // The cutaway shows the downlight's luminous face from above as a state cue.
     if section_cap && item.kind == Kind::Downlight && item.emission > 0.0 {
         return lighting::display(fixtures::WARM * item.emission * 2.0).extend(1.0);
@@ -357,15 +388,13 @@ pub fn shade(
         let emission = if fixture { surface.tint * item.emission * 4.0 } else { office::wallpaper(local, time) * 2.0 };
         return lighting::display(emission).extend(1.0);
     }
-    let surface = if fixture && surface.material == Material::Emissive {
-        Hit { material: Material::Ceramic, tint: vec3(0.85, 0.83, 0.78), ..surface }
-    } else {
-        surface
-    };
+    if fixture && surface.material == Material::Emissive {
+        (surface.material, surface.tint) = (Material::Ceramic, vec3(0.85, 0.83, 0.78));
+    }
     // The four pixel samples also cover the emitter, keeping four shadow rays per pixel.
     let visibility = if globals.sun.radiance.max_element() > 0.0 && world_normal.dot(globals.sun.direction) > 0.0 {
         let start = lighting_point + world_normal * 0.001;
-        let offset = vec2((light_sample & 1) as f32 - 0.5, (light_sample >> 1) as f32 - 0.5) * 0.05;
+        let offset = subpixel(light_sample) * 0.05;
         let light = (globals.sun.direction + offset.extend(0.0)).normalize();
         cast::<true, false>(start, light, nodes, objects, 0.0, FAR).0
     } else {
@@ -380,7 +409,7 @@ pub fn shade(
     // Keep procedural material state out of the traversal loops' live registers.
     let material = materials::sample(surface.material, surface.tint, texture_point, normal, pixel);
     let bumped = materials::bump(normal, material.gradient);
-    let bumped = unrotate_z(bumped, vec2(-item.rotation.x, item.rotation.y));
+    let bumped = rotate_z(bumped, item.rotation);
     let mut color = lighting::shade(material, bumped, -direction, visibility, indirect, globals.sun);
     for &index in lights {
         let light = objects[index as usize];
@@ -388,8 +417,7 @@ pub fn shade(
             continue;
         }
         // Reuse the four antialiasing samples across a finite emitter as well.
-        let emitter = vec2((light_sample & 1) as f32 - 0.5, (light_sample >> 1) as f32 - 0.5)
-            * if light.kind == Kind::Downlight { 0.055 } else { 0.035 };
+        let emitter = subpixel(light_sample) * if light.kind == Kind::Downlight { 0.055 } else { 0.035 };
         let (to_light, radiance, distance) = fixtures::incident(light, point, emitter);
         if radiance.max_element() <= 0.0 || bumped.dot(to_light) <= 0.0 {
             continue;

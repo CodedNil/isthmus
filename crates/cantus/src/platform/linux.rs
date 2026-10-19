@@ -83,10 +83,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 use xkbcommon::xkb;
-use zbus::{
-    proxy::CacheProperties,
-    zvariant::{OwnedObjectPath, OwnedValue, Value as DbusValue},
-};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant, proxy::CacheProperties};
 
 macro_rules! dispatch {
     ($app:ty, $proxy:ty, |$state:ident, $object:ident, $value:ident, $queue:ident| $body:block) => {
@@ -412,9 +409,9 @@ pub async fn current_location() -> Result<[f32; 2], Box<dyn Error + Send + Sync>
         let connection = &connection;
         async move {
             zbus::proxy::Builder::new(connection)
-                .destination("org.freedesktop.portal.Desktop")?
-                .path(path)?
-                .interface(interface)?
+                .destination("org.freedesktop.portal.Desktop")
+                .path(path)
+                .interface(interface)
                 .cache_properties(CacheProperties::No)
                 .build()
                 .await
@@ -423,8 +420,7 @@ pub async fn current_location() -> Result<[f32; 2], Box<dyn Error + Send + Sync>
     let location: zbus::Proxy<'_> =
         proxy(OwnedObjectPath::try_from("/org/freedesktop/portal/desktop")?, "org.freedesktop.portal.Location").await?;
     let token = "cantus";
-    let options =
-        HashMap::from([("session_handle_token", DbusValue::from(token)), ("accuracy", DbusValue::from(2u32))]);
+    let options = HashMap::from([("session_handle_token", Variant::from(token)), ("accuracy", Variant::from(2u32))]);
     let session: OwnedObjectPath = location.call("CreateSession", &(options,)).await?;
     let mut updates = location.receive_signal("LocationUpdated").await?;
 
@@ -433,20 +429,20 @@ pub async fn current_location() -> Result<[f32; 2], Box<dyn Error + Send + Sync>
     let path = OwnedObjectPath::try_from(format!("/org/freedesktop/portal/desktop/request/{name}/{token}"))?;
     let request = proxy(path.clone(), "org.freedesktop.portal.Request").await?;
     let mut responses = request.receive_signal("Response").await?;
-    let options = HashMap::from([("handle_token", DbusValue::from(token))]);
+    let options = HashMap::from([("handle_token", Variant::from(token))]);
     let handle: OwnedObjectPath = location.call("Start", &(&session, "", options)).await?;
     if handle != path {
         return Err("Location portal returned an unexpected request handle".into());
     }
     let response = responses.next().await.ok_or("Location portal closed before responding")?;
-    let (status, _): (u32, HashMap<String, OwnedValue>) = response.body().deserialize()?;
+    let (status, _): (u32, HashMap<String, OwnedVariant>) = response.body().deserialize()?;
     if status != 0 {
         return Err(
             format!("Location request was {}", if status == 1 { "cancelled" } else { "denied or failed" }).into()
         );
     }
     while let Some(update) = updates.next().await {
-        let (handle, values): (OwnedObjectPath, HashMap<String, OwnedValue>) = update.body().deserialize()?;
+        let (handle, values): (OwnedObjectPath, HashMap<String, OwnedVariant>) = update.body().deserialize()?;
         if handle == session {
             let latitude = f64::try_from(values.get("Latitude").ok_or("Location has no latitude")?)?;
             let longitude = f64::try_from(values.get("Longitude").ok_or("Location has no longitude")?)?;
@@ -800,50 +796,41 @@ impl LayerShellApp {
     }
 
     fn create_surface(&self, kind: SurfaceKind, qhandle: &QueueHandle<Self>) -> WaylandSurface {
-        let launcher = matches!(kind, SurfaceKind::Launcher);
         let config = &self.cantus.config;
-        let height = if launcher { 0.0 } else { self.bar_height() };
-        let wl = self.compositor.create_surface(qhandle, kind);
-        let layer = self.shell.get_layer_surface(
-            &wl,
-            if launcher { None } else { self.output.as_ref() },
-            if launcher {
-                Layer::Overlay
-            } else {
+        let (output, layer, namespace, anchor, height, exclusive, keyboard) = match kind {
+            SurfaceKind::Launcher => (
+                None,
+                Layer::Overlay,
+                "cantus-launcher",
+                Anchor::Top | Anchor::Bottom,
+                0.0,
+                0.0,
+                KeyboardInteractivity::Exclusive,
+            ),
+            SurfaceKind::Bar => (
+                self.output.as_ref(),
                 match config.layer {
                     config::Layer::Background => Layer::Background,
                     config::Layer::Bottom => Layer::Bottom,
                     config::Layer::Top => Layer::Top,
                     config::Layer::Overlay => Layer::Overlay,
-                }
-            },
-            if launcher { "cantus-launcher" } else { "cantus" }.into(),
-            qhandle,
-            kind,
-        );
-        layer.set_anchor(
-            Anchor::Left
-                | Anchor::Right
-                | if launcher {
-                    Anchor::Top | Anchor::Bottom
-                } else {
-                    match config.layer_anchor {
-                        config::LayerAnchor::Top => Anchor::Top,
-                        config::LayerAnchor::Bottom => Anchor::Bottom,
-                    }
                 },
-        );
+                "cantus",
+                match config.layer_anchor {
+                    config::LayerAnchor::Top => Anchor::Top,
+                    config::LayerAnchor::Bottom => Anchor::Bottom,
+                },
+                self.bar_height(),
+                PANEL_START + config.height + f32::from(config.lyrics_enabled) * lyrics::EXTENSION,
+                KeyboardInteractivity::None,
+            ),
+        };
+        let wl = self.compositor.create_surface(qhandle, kind);
+        let layer = self.shell.get_layer_surface(&wl, output, layer, namespace.into(), qhandle, kind);
+        layer.set_anchor(Anchor::Left | Anchor::Right | anchor);
         layer.set_size(0, height as u32);
-        layer.set_exclusive_zone(if launcher {
-            0
-        } else {
-            (PANEL_START + config.height + f32::from(config.lyrics_enabled) * lyrics::EXTENSION) as i32
-        });
-        layer.set_keyboard_interactivity(if launcher {
-            KeyboardInteractivity::Exclusive
-        } else {
-            KeyboardInteractivity::None
-        });
+        layer.set_exclusive_zone(exclusive as i32);
+        layer.set_keyboard_interactivity(keyboard);
         let surface = WaylandSurface {
             effect: self.background_manager.as_ref().map(|manager| manager.get_background_effect(&wl, qhandle, ())),
             viewport: self.viewporter.get_viewport(&wl, qhandle, ()),

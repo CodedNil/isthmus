@@ -9,12 +9,18 @@ pub struct Grid {
     pub origin: Vec3,
     pub size: UVec3,
 }
+/// First-order directional irradiance.
 #[derive(Clone, Copy, Default, ShaderData)]
-pub struct Probe {
+pub struct Irradiance {
     pub constant: Vec3,
     pub x: Vec3,
     pub y: Vec3,
     pub z: Vec3,
+}
+#[derive(Clone, Copy, Default, ShaderData)]
+pub struct Probe {
+    pub light: Irradiance,
+    /// Clearance to the nearest surface along each positive and negative axis.
     pub positive: Vec3,
     pub negative: Vec3,
 }
@@ -36,7 +42,8 @@ impl Grid {
             }
             let w = Vec3::ONE - (offset.as_vec3() - fraction).abs();
             let weight = w.x * w.y * w.z;
-            color += (probe.constant + probe.x * normal.x + probe.y * normal.y + probe.z * normal.z)
+            let light = probe.light;
+            color += (light.constant + light.x * normal.x + light.y * normal.y + light.z * normal.z)
                 .max_num(Vec3::ZERO)
                 * weight;
             total += weight;

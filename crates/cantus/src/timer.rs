@@ -2,7 +2,7 @@
 
 use crate::render::launcher::similarity;
 use jiff::Zoned;
-use std::{mem, time::Duration};
+use std::time::Duration;
 use web_time::Instant;
 
 /// Words which clear the running timer instead of starting one.
@@ -107,25 +107,13 @@ pub fn parse(query: &str) -> Option<(Request, f32)> {
 
 /// Splits a query into lowercase number and unit tokens, so `1h30m` reads as `1 h 30 m`.
 fn tokens(query: &str) -> Vec<String> {
-    let numeric = |c: char| c.is_ascii_digit() || c == '.';
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    for c in query.chars() {
-        if !c.is_alphanumeric() && c != '.' {
-            if !current.is_empty() {
-                tokens.push(mem::take(&mut current).to_lowercase());
-            }
-            continue;
-        }
-        if current.chars().next().is_some_and(|first| numeric(first) != numeric(c)) {
-            tokens.push(mem::take(&mut current).to_lowercase());
-        }
-        current.push(c);
-    }
-    if !current.is_empty() {
-        tokens.push(current.to_lowercase());
-    }
-    tokens
+    let numeric = |c: &char| c.is_ascii_digit() || *c == '.';
+    let chars: Vec<char> = query.chars().collect();
+    chars
+        .split(|c| !c.is_alphanumeric() && *c != '.')
+        .flat_map(|word| word.chunk_by(|a, b| numeric(a) == numeric(b)))
+        .map(|token| token.iter().collect::<String>().to_lowercase())
+        .collect()
 }
 
 /// Seconds in a unit name, or `None` when the word is not a unit.

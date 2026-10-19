@@ -434,19 +434,12 @@ impl SpotifyWorker {
                 warn!(%playlist_id, "Spotify playlist is not loaded");
                 continue;
             };
-            let item = Item { uri: Some(uri.clone()), ..Default::default() };
-            let operation = if add {
-                Op {
-                    kind: Some(op::Kind::ADD.into()),
-                    add: MessageField::some(Add { items: vec![item], add_last: Some(true), ..Default::default() }),
-                    ..Default::default()
-                }
-            } else {
-                Op {
-                    kind: Some(op::Kind::REM.into()),
-                    rem: MessageField::some(Rem { items: vec![item], items_as_key: Some(true), ..Default::default() }),
-                    ..Default::default()
-                }
+            let items = vec![Item { uri: Some(uri.clone()), ..Default::default() }];
+            let operation = Op {
+                kind: Some(if add { op::Kind::ADD } else { op::Kind::REM }.into()),
+                add: add.then(|| Add { items: items.clone(), add_last: Some(true), ..Default::default() }).into(),
+                rem: (!add).then(|| Rem { items, items_as_key: Some(true), ..Default::default() }).into(),
+                ..Default::default()
             };
             let request = ListChanges {
                 base_revision: Some(revision.clone()),
@@ -541,14 +534,11 @@ impl SpotifyWorker {
                     })
                 },
             );
-        let mut updates = Vec::new();
         let mut playlists = try_join_all(requests).await?;
         playlists.sort_unstable_by_key(|(_, _, name)| *name);
-        self.playlist_revisions.clear();
-        for (playlist, revision, _) in playlists {
-            self.playlist_revisions.insert(playlist.id, revision);
-            updates.push(playlist);
-        }
+        self.playlist_revisions =
+            playlists.iter().map(|(playlist, revision, _)| (playlist.id, revision.clone())).collect();
+        let updates: Vec<_> = playlists.into_iter().map(|(playlist, ..)| playlist).collect();
 
         send_update(&self.updater, move |app| {
             app.music.playlists = updates;

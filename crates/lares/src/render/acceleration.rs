@@ -1,5 +1,5 @@
 //! One stackless tree for the fixed overhead camera; leaves index render objects.
-use crate::home::{Kind, Object, Room};
+use crate::home::{Object, Room};
 use isthmus::{ShaderData, glam::Vec3};
 
 #[derive(Clone, Copy, ShaderData)]
@@ -37,10 +37,7 @@ impl Scene {
         let objects = super::plants::compile(super::layout::compile(rooms));
         let mut names = rooms.iter().flat_map(|room| room.lights.iter().map(|light| light.entity_id));
         // Plant expansion preserves fixture order; retain bindings through BVH reordering.
-        let entities: Vec<_> = objects
-            .iter()
-            .map(|o| if matches!(o.kind, Kind::Downlight | Kind::Lamp) { names.next() } else { None })
-            .collect();
+        let entities: Vec<_> = objects.iter().map(|o| if o.is_light() { names.next() } else { None }).collect();
         let mut leaves: Vec<_> = objects
             .iter()
             .copied()
@@ -72,12 +69,7 @@ impl Scene {
         let radius = nodes.first().map_or(0.0, |node| node.min.abs().max(node.max.abs()).length());
         let min = nodes.first().map_or(Vec3::ZERO, |n| n.min);
         let max = nodes.first().map_or(Vec3::ONE, |n| n.max);
-        let lights: Box<[u32]> = objects
-            .iter()
-            .enumerate()
-            .filter(|(_, o)| matches!(o.kind, Kind::Downlight | Kind::Lamp))
-            .map(|(i, _)| i as u32)
-            .collect();
+        let lights: Box<[u32]> = (0..objects.len() as u32).filter(|&i| objects[i as usize].is_light()).collect();
         let (grid, probes, indirect) = super::scene::irradiance::bake(&objects, &nodes, &lights, min, max, sun);
         Self {
             sun,
@@ -109,7 +101,7 @@ impl Scene {
             }
         }
         if changed {
-            self.indirect.compose(self.sun, &self.objects, &self.lights, self.grid, &mut self.probes);
+            self.indirect.compose(self.sun, &self.objects, &mut self.probes);
         }
         found
     }
@@ -128,13 +120,13 @@ impl Scene {
         if jumped {
             // A restored tab can cross sunrise or sunset. Update source colors
             // immediately; visibility then converges within the normal budget.
-            self.indirect.compose(self.sun, &self.objects, &self.lights, self.grid, &mut self.probes);
+            self.indirect.compose(self.sun, &self.objects, &mut self.probes);
         }
         if jumped || (!self.indirect.updating() && (unix_seconds - self.last_bake).abs() >= 60.0) {
             self.indirect.begin_update();
             self.last_bake = unix_seconds;
         }
-        self.indirect.step(self.sun, &self.objects, &self.nodes, &self.lights, self.grid, &mut self.probes);
+        self.indirect.step(self.sun, &self.objects, &self.nodes, &mut self.probes);
     }
 
     /// Synchronous relight for explicit time jumps, captures and configuration.
@@ -145,7 +137,7 @@ impl Scene {
         self.clock = unix_seconds;
         self.last_bake = unix_seconds;
         self.sun = super::Sun::at_utc(unix_seconds, self.sun_settings);
-        self.indirect.relight(self.sun, &self.objects, &self.nodes, &self.lights, self.grid, &mut self.probes);
+        self.indirect.relight(self.sun, &self.objects, &self.nodes, &mut self.probes);
     }
 
     pub fn set_sun_settings(&mut self, settings: super::SunSettings) {

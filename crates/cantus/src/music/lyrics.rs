@@ -76,10 +76,8 @@ pub(super) async fn fetch(track: &Track, http: &Client, session: &Mutex<Session>
         };
         match result {
             Ok(lyrics) if !lyrics.channels.is_empty() => {
-                let timing = lyrics.timing;
+                let (timing, lanes, sections) = (lyrics.timing, lyrics.channels.len(), lyrics.sections.len());
                 let segments: usize = lyrics.channels.iter().map(|c| c.segments.len()).sum();
-                let lanes = lyrics.channels.len();
-                let sections = lyrics.sections.len();
                 info!(
                     "{source} ({timing}): {title:.28} — {artist:.20} · {segments} seg · {lanes} lanes · {sections} sections"
                 );
