@@ -39,6 +39,7 @@ roxmltree = "0.21.1"
 serde.workspace = true
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 smallvec.workspace = true
+strum_macros = "0.28.0"
 tokio = { workspace = true, features = ["macros", "sync"] }
 toml.workspace = true
 tracing.workspace = true

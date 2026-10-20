@@ -32,16 +32,6 @@ impl<T> Default for Fetch<T> {
 }
 
 impl<T> Fetch<T> {
-    fn from_result(result: MusicResult<T>, key: impl Display) -> Self {
-        match result {
-            Ok(value) => Self::Ready(value),
-            Err(error) => {
-                warn!(%error, %key, "Failed to fetch music resource");
-                Self::Missing(Instant::now() + RETRY_DELAY)
-            }
-        }
-    }
-
     pub fn request(&mut self, now: Instant) -> bool {
         let Self::Missing(retry_at) = self else { return false };
         if *retry_at > now {
@@ -67,7 +57,13 @@ impl Background {
         cache: fn(&mut TrackCache) -> &mut HashMap<K, Fetch<T>>,
     ) {
         self.spawn_update(async move {
-            let result = Fetch::from_result(task.await, &key);
+            let result = match task.await {
+                Ok(value) => Fetch::Ready(value),
+                Err(error) => {
+                    warn!(%error, %key, "Failed to fetch music resource");
+                    Fetch::Missing(Instant::now() + RETRY_DELAY)
+                }
+            };
             Some(move |app: &mut CantusApp| {
                 if let Some(slot @ Fetch::Fetching) = cache(&mut app.music.resources).get_mut(&key) {
                     *slot = result;
@@ -154,9 +150,10 @@ impl CantusApp {
                 let track = track.clone();
                 let session = Arc::clone(&resources.lyrics_session);
                 let http = self.background.http.clone();
+                let spotify = music.spotify.clone();
                 self.background.fetch(
                     track.uri.clone(),
-                    async move { lyrics::fetch(&track, &http, &session).await.map(PreparedLyrics::new) },
+                    async move { lyrics::fetch(&track, &http, &session, &spotify).await.map(PreparedLyrics::new) },
                     |cache| &mut cache.lyrics,
                 );
             }

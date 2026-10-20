@@ -202,10 +202,7 @@ pub fn set_volume(volume: f32) {
 
 /// Calls logind directly, which is what `systemctl poweroff` does under the hood.
 pub fn run_power_action(action: super::PowerAction) {
-    let method = match action {
-        super::PowerAction::PowerOff => "PowerOff",
-        super::PowerAction::Reboot => "Reboot",
-    };
+    let method: &str = action.into();
     spawn_task(async move {
         let result = async {
             zbus::Connection::system()

@@ -27,7 +27,7 @@ enum Pointer {
 #[derive(Clone, Copy)]
 enum ButtonEvent {
     Press(Vec2),
-    Release { id: Active, position: Vec2, drag_origin: Vec2, was_dragging: bool },
+    Release { id: Active, drag_offset: Option<Vec2> },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -161,9 +161,7 @@ impl Interaction {
             return Some((id, position - origin, false));
         }
         self.events.iter().rev().find_map(|event| match event {
-            ButtonEvent::Release { id: Active::Drag(id), position, drag_origin, was_dragging: true } => {
-                Some((*id, *position - *drag_origin, true))
-            }
+            ButtonEvent::Release { id: Active::Drag(id), drag_offset: Some(offset) } => Some((*id, *offset, true)),
             _ => None,
         })
     }
@@ -215,12 +213,7 @@ impl Interaction {
                     && let Some(id) = self.active.take()
                     && (matches!(id, Active::Drag(_)) || self.hit_test(position) == Some(id))
                 {
-                    self.events.push(ButtonEvent::Release {
-                        id,
-                        position,
-                        drag_origin: origin,
-                        was_dragging: dragging,
-                    });
+                    self.events.push(ButtonEvent::Release { id, drag_offset: dragging.then_some(position - origin) });
                 }
                 let position = self.mouse_pos();
                 self.pointer = Pointer::Hovering(position);
@@ -259,9 +252,10 @@ impl Interaction {
             && if dragging && active { shape.contains(self.mouse_pos()) } else { self.hot == Some(id) };
         Response {
             hovered,
-            clicked: self.events.iter().any(
-                |event| matches!(event, ButtonEvent::Release { id: target, was_dragging: false, .. } if *target == id),
-            ),
+            clicked: self
+                .events
+                .iter()
+                .any(|event| matches!(event, ButtonEvent::Release { id: target, drag_offset: None } if *target == id)),
             held: active && self.down(),
             scroll: if hovered { mem::take(&mut self.scroll) } else { 0 },
             held_seconds: self.held_seconds,
@@ -281,5 +275,31 @@ impl Interaction {
 
     const fn down(&self) -> bool {
         matches!(self.pointer, Pointer::Held { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isthmus_sdf::Shape;
+
+    #[test]
+    fn distinguishes_clicks_from_drags_released_outside_the_widget() {
+        for (offset, dragged) in [(1.0, false), (20.0, true)] {
+            let mut interaction = Interaction::default();
+            let shape = Shape::rectangle(Rect::new(Vec2::ZERO, Vec2::splat(10.0)));
+            interaction.begin_frame(0.0, 0.0);
+            interaction.drag(7, shape);
+            interaction.apply(InputEvent::Enter(Vec2::splat(5.0)));
+            interaction.apply(InputEvent::Press);
+            interaction.apply(InputEvent::Motion(Vec2::new(5.0 + offset, 5.0)));
+            interaction.apply(InputEvent::Release);
+
+            assert_eq!(interaction.drag_motion(), dragged.then_some((7, Vec2::new(offset, 0.0), true)));
+            interaction.begin_frame(0.0, 0.0);
+            assert_eq!(interaction.drag(7, shape).clicked, !dragged);
+            interaction.end_frame();
+            assert!(interaction.drag_motion().is_none());
+        }
     }
 }

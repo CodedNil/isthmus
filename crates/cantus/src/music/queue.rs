@@ -51,14 +51,14 @@ impl Queue {
         self.timeline.start_ms = -progress - self.offset_ms(origin);
     }
 
-    pub fn update(&mut self, drag_offset_ms: f32, dragging: bool, delta_time: f32) {
+    pub fn update(&mut self, drag_offset_ms: Option<f32>, delta_time: f32) {
         if self.tracks.is_empty() {
             self.timeline.start_ms = 0.0;
             self.timeline.movement = 0.0;
             return;
         }
-        let target = -self.timeline.position_now() - self.offset_ms(self.index) + drag_offset_ms;
-        self.timeline.update(target, dragging, delta_time);
+        let target = -self.timeline.position_now() - self.offset_ms(self.index) + drag_offset_ms.unwrap_or(0.0);
+        self.timeline.update(target, drag_offset_ms.is_some(), delta_time);
     }
 
     /// Queue entry covering the rendered playhead, including its trailing spacing.

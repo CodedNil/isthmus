@@ -34,7 +34,6 @@ pub fn command(local: &LocalTrack, command: PlaybackCommand) {
             let player = Proxy::new(&connection, source.as_str(), PATH, PLAYER).await?;
             match command {
                 PlaybackCommand::Seek(ms) => {
-                    let track = OwnedObjectPath::try_from(track)?;
                     player.call::<_, _, ()>("SetPosition", &(track, i64::from(ms) * 1000)).await?;
                 }
                 PlaybackCommand::SetPlaying(playing) => {
@@ -154,7 +153,7 @@ fn parse_player(source: &str, mut properties: Properties) -> Option<LocalTrack> 
         },
         playing,
         source: source.into(),
-        mpris_id: track_id.to_string(),
+        mpris_id: track_id,
         reported_position,
         can_seek: control && take::<bool>(&mut properties, "CanSeek").unwrap_or(false),
         can_toggle: control

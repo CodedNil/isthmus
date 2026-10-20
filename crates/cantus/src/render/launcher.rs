@@ -560,7 +560,7 @@ impl LauncherState {
                     }
                 }
                 Entry::Timer { request, label } => {
-                    EntryView { icon_kind: TIMER_ICON, name: label, action: request.action(), ..Default::default() }
+                    EntryView { icon_kind: TIMER_ICON, name: label, action: request.into(), ..Default::default() }
                 }
             };
 

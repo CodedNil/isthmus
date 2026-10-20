@@ -10,6 +10,8 @@ use std::{
 };
 use tracing::{info, warn};
 use web_time::Instant;
+#[cfg(target_os = "linux")]
+use zbus::OwnedObjectPath;
 
 pub mod enrichment;
 pub mod lyrics;
@@ -47,7 +49,7 @@ pub struct LocalTrack {
     #[cfg(target_os = "linux")]
     pub source: String,
     #[cfg(target_os = "linux")]
-    pub(crate) mpris_id: String,
+    pub(crate) mpris_id: OwnedObjectPath,
     #[cfg(target_os = "linux")]
     pub(crate) reported_position: Option<f32>,
     pub can_seek: bool,
@@ -78,11 +80,7 @@ impl Music {
     pub fn update_playback(&mut self, drag: Option<(u64, f32, bool)>, delta_time: f32) {
         let local_drag =
             self.local.as_ref().is_some_and(|local| drag.is_some_and(|(id, ..)| id == local.track.interaction_id));
-        self.queue.update(
-            drag.filter(|_| !local_drag).map_or(0.0, |(_, offset, _)| offset),
-            drag.is_some() && !local_drag,
-            delta_time,
-        );
+        self.queue.update(drag.filter(|_| !local_drag).map(|(_, offset, _)| offset), delta_time);
         if let Some(local) = &mut self.local {
             let offset = drag.filter(|_| local_drag).map_or(0.0, |(_, offset, _)| offset);
             let mut position = (local.timeline.position_now() - offset).max(0.0);

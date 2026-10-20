@@ -32,21 +32,17 @@ const HISTORY_TRACK_WIDTH: f32 = 12.0;
 /// Transparent texture used while artwork is unavailable and for rating icons.
 static EMPTY_ART: LazyLock<Image> = LazyLock::new(|| Image::rgba8([1, 1], vec![0; 4]));
 
-struct TrackLayout<'a> {
-    track: &'a mut Track,
+struct TrackLayout {
     queue_index: Option<usize>,
-    can_seek: bool,
-    scale: f32,
     start_ms: f32,
-    natural_start: f32,
     width: f32,
     right: f32,
 }
 
-impl<'a> TrackLayout<'a> {
+impl TrackLayout {
     fn new(
         index: Option<usize>,
-        track: &'a mut Track,
+        duration_ms: u32,
         start_ms: f32,
         bar: BarLayout,
         future_end: f32,
@@ -54,19 +50,10 @@ impl<'a> TrackLayout<'a> {
         left: f32,
     ) -> Self {
         let natural_start = bar.playhead_x + start_ms * bar.px_per_ms;
-        let end = natural_start + (track.duration_ms as f32 * bar.px_per_ms - trim).max(0.0);
+        let end = natural_start + (duration_ms as f32 * bar.px_per_ms - trim).max(0.0);
         let clipped = end.min(future_end) - natural_start.max(left);
         let width = clipped.max(if natural_start < left { HISTORY_TRACK_WIDTH } else { 0.0 });
-        Self {
-            track,
-            queue_index: index,
-            can_seek: true,
-            scale: bar.px_per_ms,
-            start_ms,
-            natural_start,
-            width,
-            right: end.clamp(left, future_end),
-        }
+        Self { queue_index: index, start_ms, width, right: end.clamp(left, future_end) }
     }
 }
 
@@ -230,21 +217,21 @@ impl MusicView {
         let trim = gap - TRACK_SPACING_MS * bar.px_per_ms;
         let mut start_ms = music.queue.timeline.start_ms + music.queue.offset_ms(music.queue.tracks.len());
         let mut next_left = None;
-        let mut visible = SmallVec::<[TrackLayout; 16]>::new();
+        let mut visible = SmallVec::<[_; 16]>::new();
         for (queue_index, track) in music.queue.tracks.iter_mut().enumerate().rev() {
             start_ms -= track.queue_span_ms();
-            let mut layout = TrackLayout::new(Some(queue_index), track, start_ms, bar, future_end, trim, HISTORY_WIDTH);
-            if layout.natural_start >= future_end {
-                layout.track.runtime.track_expansion = 0.0;
+            let mut layout =
+                TrackLayout::new(Some(queue_index), track.duration_ms, start_ms, bar, future_end, trim, HISTORY_WIDTH);
+            if bar.playhead_x + start_ms * bar.px_per_ms >= future_end {
+                track.runtime.track_expansion = 0.0;
                 continue;
             }
-            let gap =
-                if layout.right <= HISTORY_WIDTH { gap } else { gap.min(layout.track.queue_span_ms() * bar.px_per_ms) };
+            let gap = if layout.right <= HISTORY_WIDTH { gap } else { gap.min(track.queue_span_ms() * bar.px_per_ms) };
             if let Some(left) = next_left {
                 layout.right = left - gap;
             }
             next_left = Some(layout.right - layout.width);
-            visible.push(layout);
+            visible.push((layout, track));
         }
         visible.reverse();
 
@@ -253,29 +240,29 @@ impl MusicView {
         let mut seek_action = None;
         let mut rated_track = None;
         let mut playlist_toggle = None;
+        let local_can_seek = music.local.as_ref().is_some_and(|local| local.can_seek);
         let local_layout = music.local.as_mut().map(|local| {
             let scale = bar.local_scale(local.track.duration_ms);
             let mut layout = TrackLayout::new(
                 None,
-                &mut local.track,
+                local.track.duration_ms,
                 local.timeline.start_ms,
                 BarLayout { px_per_ms: scale, ..bar },
                 future_end,
                 trim,
                 tracks_left,
             );
-            layout.can_seek = local.can_seek && layout.track.duration_ms > 0;
-            if layout.track.duration_ms == 0 {
+            if local.track.duration_ms == 0 {
                 // Missing/live duration has no meaningful end; keep its card at the playhead.
                 layout.right = (bar.playhead_x + 240.0).min(future_end);
             }
             layout.width = layout.width.max(240.0).min(future_end);
-            layout
+            (layout, &mut local.track)
         });
-        let local_region = local_layout.as_ref().map(|layout| (layout.right - layout.width, layout.right));
+        let local_region = local_layout.as_ref().map(|(layout, _)| (layout.right - layout.width, layout.right));
         visible.extend(local_layout);
-        visible.sort_by_key(|layout| {
-            (layout.queue_index.is_none() == (self.local_back < 0.5), layout.track.runtime.track_expansion.to_bits())
+        visible.sort_by_key(|(layout, track)| {
+            (layout.queue_index.is_none() == (self.local_back < 0.5), track.runtime.track_expansion.to_bits())
         });
         let playhead_index = playhead_track.map(|(index, _)| index);
         let curve = |x: f32| {
@@ -283,15 +270,16 @@ impl MusicView {
                 (x - left + 60.0).smoothstep(0.0, 60.0) * (right + 60.0 - x).smoothstep(0.0, 60.0)
             })
         };
-        for layout in visible {
+        for (layout, track) in visible {
             let is_local = layout.queue_index.is_none();
-            let can_seek = layout.can_seek;
-            let track = layout.track;
+            let can_seek = !is_local || local_can_seek && track.duration_ms > 0;
+            let scale = if is_local { bar.local_scale(track.duration_ms) } else { bar.px_per_ms };
+            let natural_start = bar.playhead_x + layout.start_ms * scale;
             if layout.right <= tracks_left {
                 track.runtime.track_expansion = 0.0;
                 continue;
             }
-            let opacity = (future_end - layout.natural_start).smoothstep(0.0, panel_height)
+            let opacity = (future_end - natural_start).smoothstep(0.0, panel_height)
                 * (layout.right - tracks_left).smoothstep(0.0, panel_height);
             let can_expand = layout.width > panel_height;
             if !can_expand {
@@ -403,14 +391,13 @@ impl MusicView {
             };
             let mut hovered = body.hovered;
             if body.clicked && can_seek && track.duration_ms > 0 {
-                let scale = layout.scale;
                 let fraction = if !is_local
-                    && (layout.natural_start + track.duration_ms as f32 * scale <= HISTORY_WIDTH
+                    && (natural_start + track.duration_ms as f32 * scale <= HISTORY_WIDTH
                         || layout.queue_index == Some(music.queue.index) && mouse_pos.x <= x + pill.size().x * 0.05)
                 {
                     0.0
                 } else {
-                    ((mouse_pos.x - layout.natural_start) / (track.duration_ms as f32 * scale)).saturate()
+                    ((mouse_pos.x - natural_start) / (track.duration_ms as f32 * scale)).saturate()
                 };
                 seek_action = Some((layout.queue_index, track.duration_ms as f32 * fraction));
             }
@@ -790,5 +777,22 @@ impl MusicView {
                     color.extend(alpha)
                 })
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clips_tracks_and_preserves_collapsed_history() {
+        let bar = BarLayout { playhead_x: 200.0, px_per_ms: 0.1 };
+        for (start_ms, width, right) in
+            [(0.0, 80.0, 280.0), (-500.0, 42.0, 242.0), (-2000.0, HISTORY_TRACK_WIDTH, 200.0), (1000.0, 0.0, 280.0)]
+        {
+            let layout = TrackLayout::new(Some(0), 1000, start_ms, bar, 280.0, 8.0, 200.0);
+            assert!((layout.width - width).abs() < 0.001, "unexpected width at {start_ms} ms");
+            assert!((layout.right - right).abs() < 0.001, "unexpected right edge at {start_ms} ms");
+        }
     }
 }
