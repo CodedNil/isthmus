@@ -3,6 +3,7 @@
 use crate::render::launcher::similarity;
 use jiff::Zoned;
 use std::time::Duration;
+use strum_macros::IntoStaticStr;
 use web_time::Instant;
 
 /// Words which clear the running timer instead of starting one.
@@ -13,7 +14,7 @@ const TRIGGER: f32 = 0.7;
 const MAX_SECONDS: f64 = 86_400.0;
 
 /// What the launcher asks of the timer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, IntoStaticStr)]
 pub enum Request {
     Start(Duration),
     Cancel,
@@ -25,14 +26,6 @@ impl Request {
         match self {
             Self::Start(duration) => format!("Start {} Timer", describe(*duration)),
             Self::Cancel => "Cancel Timer".to_owned(),
-        }
-    }
-
-    /// Action label for the row.
-    pub const fn action(&self) -> &'static str {
-        match self {
-            Self::Start(_) => "Start",
-            Self::Cancel => "Cancel",
         }
     }
 }
@@ -57,24 +50,20 @@ impl Timer {
 
     /// Readout for the weather pill, reporting completion once the deadline passes.
     pub fn readout(&self) -> Option<String> {
-        let (start, _) = self.start.as_ref()?;
+        let (start, clock_start) = self.start.as_ref()?;
         let end = start.checked_add(self.duration).ok()?;
-        Some(if self.expired() {
+        let elapsed = clock_start.elapsed();
+        Some(if elapsed >= self.duration {
             format!("{} Timer Complete at {}", describe(self.duration), clock(&end))
         } else {
             // Remaining first, since that is what you glance for. The deadline is the useful
             // context; the start time is not.
-            format!("{} · ends {}", countdown(self.remaining()), clock(&end))
+            format!("{} · ends {}", countdown(self.duration.saturating_sub(elapsed)), clock(&end))
         })
     }
 
     pub fn expired(&self) -> bool {
         self.start.as_ref().is_some_and(|(_, start)| start.elapsed() >= self.duration)
-    }
-
-    /// Remaining time, zero once the deadline passes.
-    fn remaining(&self) -> Duration {
-        self.start.as_ref().map_or(Duration::ZERO, |(_, start)| self.duration.saturating_sub(start.elapsed()))
     }
 }
 

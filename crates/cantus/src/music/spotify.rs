@@ -13,7 +13,7 @@ use futures_util::{
 };
 use librespot_core::{
     FileId, Session, SessionConfig, SpotifyId, SpotifyUri, authentication::Credentials, cache::Cache,
-    dealer::protocol::Message as DealerMessage,
+    dealer::protocol::Message as DealerMessage, error::ErrorKind,
 };
 use librespot_metadata::{Metadata as _, Playlist, Track as CatalogTrack};
 use librespot_oauth::OAuthClientBuilder;
@@ -36,7 +36,7 @@ use reqwest::{
     Method,
     header::{self, HeaderMap},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     io,
@@ -50,7 +50,7 @@ use tokio::{
         watch,
     },
     task::spawn_blocking,
-    time::{Instant as TokioInstant, sleep, sleep_until},
+    time::{Instant as TokioInstant, sleep, sleep_until, timeout},
 };
 use tracing::{error, info, warn};
 use web_time::Instant;
@@ -58,6 +58,7 @@ use web_time::Instant;
 const CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 const REDIRECT_URI: &str = "http://127.0.0.1:8898/login";
 const METADATA_CACHE_LIMIT: usize = 512;
+
 const RATING_PLAYLISTS: [&str; 10] = ["0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0"];
 
 #[derive(Clone)]
@@ -109,6 +110,21 @@ impl Spotify {
     pub(super) async fn get_json(&self, path: &str) -> MusicResult<impl AsRef<[u8]>> {
         let session = self.session.borrow().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
         Ok(session.spclient().request_as_json(&Method::GET, path, None, None).await?)
+    }
+
+    pub(super) async fn get_lyrics(&self, id: TrackId) -> MusicResult<Value> {
+        let Some(session) = self.session.borrow().clone() else { return Ok(Value::Null) };
+        let mut headers = HeaderMap::new();
+        headers.insert("app-platform", "WebPlayer".parse()?);
+        let path = format!("/color-lyrics/v2/track/{id}?format=json&vocalRemoval=false&market=from_token");
+        let spclient = session.spclient();
+        let response =
+            timeout(Duration::from_secs(8), spclient.request_as_json(&Method::GET, &path, Some(headers), None)).await?;
+        match response {
+            Ok(body) => Ok(serde_json::from_slice(&body)?),
+            Err(error) if error.kind == ErrorKind::NotFound => Ok(Value::Null),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -337,7 +353,24 @@ impl SpotifyWorker {
         if self.track_metadata.len() > METADATA_CACHE_LIMIT {
             self.track_metadata.retain(|uri, value| value.is_none() || tracks.clone().any(|track| track.uri == *uri));
         }
-        self.schedule_metadata(tracks);
+        let requested = tracks
+            .filter_map(|track| {
+                if !matches!(SpotifyUri::from_uri(&track.uri), Ok(SpotifyUri::Track { .. }))
+                    || self.track_metadata.contains_key(&track.uri)
+                {
+                    return None;
+                }
+                self.track_metadata.insert(track.uri.clone(), None);
+                Some(track.uri.clone())
+            })
+            .collect::<Vec<_>>();
+        if !requested.is_empty() {
+            let session = self.session.clone();
+            self.pending.push(Box::pin(async move {
+                let metadata = fetch_track_metadata(&session, &requested).await;
+                (requested, metadata)
+            }));
+        }
         self.player = Some(player);
         self.publish(true);
     }
@@ -394,28 +427,6 @@ impl SpotifyWorker {
         });
     }
 
-    fn schedule_metadata<'a>(&mut self, tracks: impl Iterator<Item = &'a ProvidedTrack>) {
-        let requested = tracks
-            .filter_map(|track| {
-                if !matches!(SpotifyUri::from_uri(&track.uri), Ok(SpotifyUri::Track { .. }))
-                    || self.track_metadata.contains_key(&track.uri)
-                {
-                    return None;
-                }
-                self.track_metadata.insert(track.uri.clone(), None);
-                Some(track.uri.clone())
-            })
-            .collect::<Vec<_>>();
-        if requested.is_empty() {
-            return;
-        }
-        let session = self.session.clone();
-        self.pending.push(Box::pin(async move {
-            let metadata = fetch_track_metadata(&session, &requested).await;
-            (requested, metadata)
-        }));
-    }
-
     async fn refresh_playlists(&mut self) {
         if let Err(error) = self.load_playlists().await {
             warn!(%error, "Spotify library refresh failed");
@@ -435,11 +446,18 @@ impl SpotifyWorker {
                 continue;
             };
             let items = vec![Item { uri: Some(uri.clone()), ..Default::default() }];
-            let operation = Op {
-                kind: Some(if add { op::Kind::ADD } else { op::Kind::REM }.into()),
-                add: add.then(|| Add { items: items.clone(), add_last: Some(true), ..Default::default() }).into(),
-                rem: (!add).then(|| Rem { items, items_as_key: Some(true), ..Default::default() }).into(),
-                ..Default::default()
+            let operation = if add {
+                Op {
+                    kind: Some(op::Kind::ADD.into()),
+                    add: MessageField::some(Add { items, add_last: Some(true), ..Default::default() }),
+                    ..Default::default()
+                }
+            } else {
+                Op {
+                    kind: Some(op::Kind::REM.into()),
+                    rem: MessageField::some(Rem { items, items_as_key: Some(true), ..Default::default() }),
+                    ..Default::default()
+                }
             };
             let request = ListChanges {
                 base_revision: Some(revision.clone()),

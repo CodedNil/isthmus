@@ -1,4 +1,4 @@
-use super::{MusicResult, Track};
+use super::{MusicResult, Track, spotify::Spotify};
 use crate::{app::fetch_json, platform::captions};
 use reqwest::{Client, StatusCode};
 use roxmltree::{Document, Node};
@@ -9,11 +9,13 @@ use std::{
     ops::Range,
     time::Duration,
 };
+use strum_macros::{AsRefStr, Display};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 use web_time::Instant;
 
 pub struct LyricSegment {
+    /// Playback position in milliseconds.
     pub time: Range<f32>,
     pub text: String,
 }
@@ -22,7 +24,18 @@ pub struct LyricSegment {
 pub struct Lyrics {
     pub channels: Vec<Channel>,
     pub sections: Vec<LyricSegment>,
-    pub(crate) timing: &'static str = "word",
+    pub timing: Timing,
+    /// Subtitles keep a fixed text size rather than stretching sung fragments.
+    pub is_caption: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, AsRefStr, Display)]
+#[strum(serialize_all = "lowercase")]
+pub enum Timing {
+    #[default]
+    Line,
+    Word,
+    Syllable,
 }
 
 #[derive(Default)]
@@ -31,7 +44,122 @@ pub struct Channel {
     pub segments: Vec<LyricSegment>,
 }
 
-pub(super) async fn fetch(track: &Track, http: &Client, session: &Mutex<Session>) -> MusicResult<Lyrics> {
+impl Lyrics {
+    fn from_segments(segments: Vec<LyricSegment>, timing: Timing) -> Self {
+        let channels = if segments.is_empty() { Vec::new() } else { vec![Channel { segments, ..Default::default() }] };
+        Self { channels, timing, ..Default::default() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.channels.iter().all(|channel| channel.segments.is_empty())
+    }
+}
+
+// Timing quality wins; ties retain provider priority. Keep errors only when no lyrics exist.
+fn prefer_lyrics(previous: MusicResult<Lyrics>, next: MusicResult<Lyrics>) -> MusicResult<Lyrics> {
+    match (previous, next) {
+        (Ok(previous), Ok(next)) if !next.is_empty() && (previous.is_empty() || next.timing > previous.timing) => {
+            Ok(next)
+        }
+        (Ok(lyrics), _) | (_, Ok(lyrics)) if !lyrics.is_empty() => Ok(lyrics),
+        (_, Err(error)) => Err(error),
+        (previous, _) => previous,
+    }
+}
+
+fn fragment_timing(channels: &[Channel]) -> Timing {
+    if channels.iter().any(|channel| {
+        channel.segments.windows(2).any(|pair| {
+            pair[0].text.ends_with(char::is_alphabetic)
+                && pair[1].text.starts_with(char::is_alphabetic)
+                && pair[0].time.start < pair[1].time.start
+        })
+    }) {
+        Timing::Syllable
+    } else {
+        Timing::Word
+    }
+}
+
+fn milliseconds(value: &Value) -> Option<f32> {
+    value.as_str()?.parse().ok()
+}
+
+fn spotify_fragments(line: &Value, time: &Range<f32>) -> Option<Vec<LyricSegment>> {
+    let mut remaining = line["words"].as_str()?.trim();
+    let mut parts: Vec<LyricSegment> = Vec::new();
+    for part in items(&line["syllables"]) {
+        let Some(text) = part["text"].as_str().map(str::trim).filter(|text| !text.is_empty()) else { continue };
+        let prefix = remaining.len() - remaining.trim_start().len();
+        if let Some(previous) = parts.last_mut() {
+            previous.text.push_str(&remaining[..prefix]);
+        }
+        remaining = remaining.trim_start().strip_prefix(text)?;
+        let start = milliseconds(&part["startTimeMs"])?;
+        let end = milliseconds(&part["endTimeMs"])?;
+        if !(time.start..end).contains(&start)
+            || !(start..=time.end).contains(&end)
+            || parts.last().is_some_and(|previous| previous.time.start > start)
+        {
+            return None;
+        }
+        parts.push(LyricSegment { time: start..end, text: text.into() });
+    }
+    if parts.is_empty() || !remaining.trim().is_empty() {
+        return None;
+    }
+    separate(&mut parts);
+    Some(parts)
+}
+
+fn parse_spotify(response: &Value, duration: u32) -> MusicResult<Lyrics> {
+    let sheet = &response["lyrics"];
+    if !matches!(sheet["syncType"].as_str(), Some("LINE_SYNCED" | "WORD_SYNCED" | "SYLLABLE_SYNCED")) {
+        return Ok(Lyrics::default());
+    }
+    let lines = items(&sheet["lines"]);
+    let mut phrases = Vec::new();
+    let mut fragments = Some(Vec::new());
+    for (index, line) in lines.iter().enumerate() {
+        let text = line["words"].as_str().unwrap_or_default().trim();
+        if text.is_empty() || matches!(text, "♪" | "♫") {
+            continue;
+        }
+        let start = milliseconds(&line["startTimeMs"]).ok_or("Spotify line has no start time")?;
+        let end = milliseconds(&line["endTimeMs"])
+            .filter(|&end| end > start)
+            .or_else(|| lines.get(index + 1).and_then(|line| milliseconds(&line["startTimeMs"])))
+            .unwrap_or(duration as f32);
+        if !(0.0..end).contains(&start) || !(0.0..=duration as f32 + 1000.0).contains(&end) {
+            return Err("Spotify line has invalid timing".into());
+        }
+        fragments = fragments.and_then(|mut all| {
+            all.extend(spotify_fragments(line, &(start..end))?);
+            Some(all)
+        });
+        phrases.push(LyricSegment { time: start..end, text: format!("{text} ") });
+    }
+    let Some(fragments) = fragments.filter(|parts| !parts.is_empty()) else {
+        return Ok(Lyrics::from_segments(phrases, Timing::Line));
+    };
+    let mut lyrics = Lyrics::from_segments(fragments, Timing::Word);
+    lyrics.timing = fragment_timing(&lyrics.channels);
+    Ok(lyrics)
+}
+
+#[derive(Clone, Copy, Display)]
+enum Source {
+    Spotify,
+    Musixmatch,
+    Apple,
+}
+
+pub(super) async fn fetch(
+    track: &Track,
+    http: &Client,
+    session: &Mutex<Session>,
+    spotify: &Spotify,
+) -> MusicResult<Lyrics> {
     let youtube_url = reqwest::Url::parse(&track.uri).is_ok_and(|url| {
         matches!(
             url.host_str(),
@@ -50,8 +178,8 @@ pub(super) async fn fetch(track: &Track, http: &Client, session: &Mutex<Session>
                     "vtt" | "srt" => parse_webvtt(&file.source),
                     _ => Lyrics::default(),
                 };
-                if !lyrics.channels.is_empty() {
-                    return Ok(Lyrics { timing: "caption", ..lyrics });
+                if !lyrics.is_empty() {
+                    return Ok(Lyrics { is_caption: true, ..lyrics });
                 }
             }
             Err(error) => tracing::debug!(%error, url = %track.uri, "caption extraction unavailable"),
@@ -61,36 +189,43 @@ pub(super) async fn fetch(track: &Track, http: &Client, session: &Mutex<Session>
     if youtube_url {
         return Ok(Lyrics::default());
     }
-    let mut session = session.lock().await;
-    let mut failure = None;
+    let mut best = Ok(Lyrics::default());
     let title = track.compact_title().split(" (").next().unwrap_or(&track.name);
     let artist = track.primary_artist();
-    for source in ["MXM", "APL"] {
-        let result = if source == "MXM" {
-            if cfg!(target_arch = "wasm32") || session.retry_after.is_some_and(|time| Instant::now() < time) {
-                continue;
+    for source in [Source::Spotify, Source::Musixmatch, Source::Apple] {
+        let result = match source {
+            Source::Spotify => {
+                let Some(id) = track.id else { continue };
+                spotify.get_lyrics(id).await.and_then(|response| parse_spotify(&response, track.duration_ms))
             }
-            session.fetch(track, http).await
-        } else {
-            fetch_apple_lyrics(track, http).await
+            Source::Musixmatch => {
+                let mut session = session.lock().await;
+                if cfg!(target_arch = "wasm32") || session.retry_after.is_some_and(|time| Instant::now() < time) {
+                    continue;
+                }
+                session.fetch(track, http).await
+            }
+            Source::Apple => fetch_apple_lyrics(track, http).await,
         };
-        match result {
-            Ok(lyrics) if !lyrics.channels.is_empty() => {
+        match &result {
+            Ok(lyrics) if !lyrics.is_empty() => {
                 let (timing, lanes, sections) = (lyrics.timing, lyrics.channels.len(), lyrics.sections.len());
                 let segments: usize = lyrics.channels.iter().map(|c| c.segments.len()).sum();
                 info!(
                     "{source} ({timing}): {title:.28} — {artist:.20} · {segments} seg · {lanes} lanes · {sections} sections"
                 );
-                return Ok(lyrics);
             }
             Ok(_) => {}
             Err(error) => {
                 warn!("{source}: {title:?} — {artist} · {error}");
-                failure = Some(error);
             }
         }
+        best = prefer_lyrics(best, result);
+        if best.as_ref().is_ok_and(|lyrics| lyrics.timing == Timing::Syllable) {
+            break;
+        }
     }
-    failure.map_or_else(|| Ok(Lyrics::default()), Err)
+    best
 }
 
 // JSON3 contains each phrase once, unlike rolling WebVTT captions.
@@ -151,8 +286,7 @@ fn parse_json3(source: &str) -> Lyrics {
         segments.push(LyricSegment { time: start..event.start + event.duration, text: format!("{text} ") });
     }
     segments.retain(|segment| !segment.text.trim().is_empty() && segment.time.end > segment.time.start);
-    let channels = if segments.is_empty() { Vec::new() } else { vec![Channel { segments, ..Default::default() }] };
-    Lyrics { channels, ..Default::default() }
+    Lyrics::from_segments(segments, Timing::Line)
 }
 
 fn clean_caption(text: &str) -> String {
@@ -181,31 +315,25 @@ fn parse_webvtt(source: &str) -> Lyrics {
     let mut segments = Vec::new();
     for block in source.replace("\r\n", "\n").split("\n\n") {
         let mut lines = block.lines();
-        let timing = lines.find(|line| line.contains("-->"));
-        let Some(timing) = timing else { continue };
-        let mut times = timing.split("-->");
-        let Some(start) = times.next().and_then(time) else { continue };
-        let Some(end) = times.next().and_then(|value| time(value.split_whitespace().next().unwrap_or_default())) else {
-            continue;
-        };
+        let Some((start, end)) = lines.find_map(|line| line.split_once("-->")) else { continue };
+        let Some(start) = time(start) else { continue };
+        let Some(end) = time(end.split_whitespace().next().unwrap_or_default()) else { continue };
         let text = clean_caption(&lines.collect::<Vec<_>>().join(" "));
         if !text.is_empty() && end > start {
             segments.push(LyricSegment { time: start..end, text: format!("{text} ") });
         }
     }
-    let channels = if segments.is_empty() { Vec::new() } else { vec![Channel { segments, ..Default::default() }] };
-    Lyrics { channels, ..Default::default() }
+    Lyrics::from_segments(segments, Timing::Line)
 }
 
 async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics> {
-    // LyricsPlus returns Apple's TTML, preserving word/syllable timing when
-    // available. The old BiniLyrics endpoint now redirects to a failing service.
-    let duration = (f64::from(track.duration_ms) / 1000.0).to_string();
-    let mut request = http.get("https://lyricsplus.prjktla.my.id/v1/ttml/get").query(&[
-        ("title", track.name.as_str()),
+    // BiniLyrics now redirects to lrc.red, which serves the same search/TTML API.
+    // This endpoint requires integer seconds, unlike LyricsPlus.
+    let duration = (track.duration_ms / 1000).to_string();
+    let mut request = http.get("https://lyrics-api.binimum.org/").query(&[
+        ("track", track.name.as_str()),
         ("artist", track.primary_artist()),
         ("album", track.album.as_str()),
-        ("source", "apple"),
     ]);
     if track.duration_ms > 0 {
         request = request.query(&[("duration", duration.as_str())]);
@@ -218,30 +346,34 @@ async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics>
         return Ok(Lyrics::default());
     }
     let response = response.error_for_status()?.json::<Value>().await?;
-    parse_apple_response(track, &response)
+    let results = response["results"].as_array().ok_or("Apple lyrics response has no results array")?;
+    let mut best = Ok(Lyrics::default());
+    for timing in [Timing::Syllable, Timing::Word, Timing::Line] {
+        for result in results.iter().filter(|result| {
+            result["timing_type"].as_str() == Some(timing.as_ref()) && matches_apple_result(track, result)
+        }) {
+            let Some(url) = result["lyricsUrl"].as_str() else { continue };
+            let fetched: MusicResult<Lyrics> = async {
+                let source = http.get(url).send().await?.error_for_status()?.text().await?;
+                let lyrics = parse_ttml(&source);
+                if lyrics.is_empty() {
+                    return Err("Lyrics document has no usable timed text".into());
+                }
+                Ok(lyrics)
+            }
+            .await;
+            best = prefer_lyrics(best, fetched);
+            if best.as_ref().is_ok_and(|lyrics| lyrics.timing == Timing::Syllable) {
+                return best;
+            }
+        }
+    }
+    best
 }
 
-fn parse_apple_response(track: &Track, response: &Value) -> MusicResult<Lyrics> {
-    // A successful provider response can still be a different song from the
-    // requested album. Check the selected recording before accepting its timing.
-    let matched = &response["processingTime"]["selectedSongMetadata"];
-    if !matches_track(
-        track,
-        &serde_json::json!({
-            "track_name": matched["title"],
-            "artist_name": matched["artist"],
-            "track_length": matched["duration"],
-        }),
-    ) || track.isrc.as_deref().zip(matched["songISRC"].as_str()).is_some_and(|(a, b)| !a.eq_ignore_ascii_case(b))
-    {
-        return Err("Apple lyrics response does not match the requested recording".into());
-    }
-    let source = response["ttml"].as_str().ok_or("Apple lyrics response has no TTML")?;
-    let lyrics = parse_ttml(source);
-    if lyrics.channels.is_empty() {
-        return Err("Lyrics document has no usable timed text".into());
-    }
-    Ok(lyrics)
+fn matches_apple_result(track: &Track, matched: &Value) -> bool {
+    matches_track(track, matched, "duration")
+        && track.isrc.as_deref().zip(matched["isrc"].as_str()).is_none_or(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 fn time(value: &str) -> Option<f32> {
@@ -287,9 +419,9 @@ fn parse_ttml(source: &str) -> Lyrics {
         .descendants()
         .any(|node| node.tag_name().name() == "span" && attribute(node, "begin").and_then(time).is_some())
     {
-        "word"
+        Timing::Word
     } else {
-        "line"
+        Timing::Line
     };
     let mut lyrics = Lyrics { timing, ..Default::default() };
     let mut agents: Vec<_> = document
@@ -346,6 +478,9 @@ fn parse_ttml(source: &str) -> Lyrics {
     }
     lyrics.sections.sort_by(|a, b| a.time.start.total_cmp(&b.time.start));
     lyrics.channels = channels.into_values().filter(|c| !c.segments.is_empty()).collect();
+    if lyrics.timing == Timing::Word {
+        lyrics.timing = fragment_timing(&lyrics.channels);
+    }
     lyrics
 }
 const API: &str = "https://apic-appmobile.musixmatch.com/ws/1.1/";
@@ -379,15 +514,14 @@ impl Session {
             Err(error) => Err(error.without_url().into()),
         };
         if result.is_err() {
-            self.token.clear();
-            self.retry_after = Some(Instant::now() + BACKOFF);
+            self.backoff();
         }
         result
     }
 
     async fn fetch(&mut self, track: &Track, http: &Client) -> MusicResult<Lyrics> {
         if self.token.is_empty() {
-            self.retry_after = Some(Instant::now() + BACKOFF);
+            self.backoff();
             let response = self.request(http, "token.get", &[]).await?;
             response["user_token"]
                 .as_str()
@@ -415,39 +549,42 @@ impl Session {
             .await?;
         let mut calls = response["macro_calls"].take();
         let matched = self.body(calls["matcher.track.get"].take())?["track"].take();
-        if !matches_track(track, &matched) || flag(&matched["restricted"]) || flag(&matched["instrumental"]) {
-            return Ok(Lyrics::default());
-        }
-        if flag(&calls["track.lyrics.get"]["message"]["body"]["lyrics"]["restricted"]) {
-            return Ok(Lyrics::default());
-        }
-        // The current mobile client bundles richsync; avoid another lookup when no word timing exists.
-        let richsync = self.body(calls["track.richsync.get"].take())?["richsync"].take();
-        if richsync.is_null()
-            || flag(&richsync["restricted"])
-            || richsync["richsync_length"]
-                .as_f64()
-                .is_some_and(|length| (length - f64::from(track.duration_ms) / 1000.0).abs() > 5.0)
+        if !matches_track(track, &matched, "track_length")
+            || flag(&matched["restricted"])
+            || flag(&matched["instrumental"])
+            || flag(&calls["track.lyrics.get"]["message"]["body"]["lyrics"]["restricted"])
         {
             return Ok(Lyrics::default());
         }
-        let lines: Vec<Line> =
-            serde_json::from_str(richsync["richsync_body"].as_str().ok_or("Musixmatch richsync body missing")?)?;
-        let mut lyrics = parse_richsync(&lines, &matched, track.duration_ms as f32)?;
-        if lyrics.channels.is_empty() {
-            return Ok(lyrics);
-        }
-        if flag(&matched["has_track_structure"])
-            && let Some(id) = matched["commontrack_id"].as_u64()
-        {
+        let subtitles =
+            self.body(calls["track.subtitles.get"].take()).and_then(|body| parse_subtitles(&body, track.duration_ms));
+        // An unavailable or malformed richsync must not discard usable line timing.
+        let words = async {
+            let richsync = self.body(calls["track.richsync.get"].take())?["richsync"].take();
+            if richsync.is_null()
+                || flag(&richsync["restricted"])
+                || richsync["richsync_length"]
+                    .as_f64()
+                    .is_some_and(|length| (length - f64::from(track.duration_ms) / 1000.0).abs() > 5.0)
+            {
+                return Ok(Lyrics::default());
+            }
+            let lines: Vec<RichsyncLine> =
+                serde_json::from_str(richsync["richsync_body"].as_str().ok_or("Musixmatch richsync body missing")?)?;
+            let mut lyrics = parse_richsync(&lines, &matched, track.duration_ms as f32)?;
             // Structure is optional: an unavailable annotation must not discard valid word timing.
-            if let Ok(metadata) =
-                self.request(http, "crowd.track.metadata.get", &[("commontrack_id", &id.to_string())]).await
+            if !lyrics.is_empty()
+                && flag(&matched["has_track_structure"])
+                && let Some(id) = matched["commontrack_id"].as_u64()
+                && let Ok(metadata) =
+                    self.request(http, "crowd.track.metadata.get", &[("commontrack_id", &id.to_string())]).await
             {
                 lyrics.sections = sections(&lines, &metadata);
             }
+            Ok(lyrics)
         }
-        Ok(lyrics)
+        .await;
+        prefer_lyrics(subtitles, words)
     }
 
     fn body(&mut self, mut response: Value) -> MusicResult<Value> {
@@ -456,13 +593,62 @@ impl Session {
             Some(404) => Ok(Value::Null),
             None if response.is_null() => Ok(response),
             Some(code) => {
-                self.token.clear();
-                self.retry_after = Some(Instant::now() + BACKOFF);
+                self.backoff();
                 Err(format!("Musixmatch API status {code}").into())
             }
             None => Err("Musixmatch response has no status code".into()),
         }
     }
+
+    fn backoff(&mut self) {
+        self.token.clear();
+        self.retry_after = Some(Instant::now() + BACKOFF);
+    }
+}
+
+fn parse_subtitles(body: &Value, duration: u32) -> MusicResult<Lyrics> {
+    #[derive(Deserialize)]
+    struct SubtitleLine {
+        text: String,
+        time: SubtitleTime,
+    }
+    #[derive(Deserialize)]
+    struct SubtitleTime {
+        total: f32,
+    }
+    for entry in items(&body["subtitle_list"]) {
+        let subtitle = &entry["subtitle"];
+        if flag(&subtitle["restricted"])
+            || subtitle["subtitle_length"].as_f64().is_some_and(|length| {
+                duration > 0 && length > 0.0 && (length - f64::from(duration) / 1000.0).abs() > 5.0
+            })
+        {
+            continue;
+        }
+        let Some(source) = subtitle["subtitle_body"].as_str() else { continue };
+        let lines: Vec<SubtitleLine> = serde_json::from_str(source)?;
+        let mut segments = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            if line.text.trim().is_empty() {
+                continue;
+            }
+            let start = line.time.total * 1000.0;
+            let end = lines.get(index + 1).map_or(duration as f32, |line| line.time.total * 1000.0);
+            if !start.is_finite()
+                || !end.is_finite()
+                || start < 0.0
+                || end <= start
+                || (duration > 0 && end > duration as f32 + 1000.0)
+            {
+                return Err("Musixmatch subtitle has invalid timing".into());
+            }
+            segments.push(LyricSegment { time: start..end, text: format!("{} ", line.text.trim()) });
+        }
+        if !segments.is_empty() {
+            return Ok(Lyrics::from_segments(segments, Timing::Line));
+        }
+    }
+    Ok(Lyrics::default())
 }
 
 fn flag(value: &Value) -> bool {
@@ -481,30 +667,36 @@ fn normalize(text: &str) -> String {
     text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
-fn matches_track(track: &Track, matched: &Value) -> bool {
+fn matches_track(track: &Track, matched: &Value, duration_key: &str) -> bool {
     let title = normalize(matched["track_name"].as_str().unwrap_or_default());
     let artist = normalize(matched["artist_name"].as_str().unwrap_or_default());
     !title.is_empty()
         && !artist.is_empty()
         && (title == normalize(&track.name) || title == normalize(track.compact_title()))
-        && track.artists.iter().any(|name| normalize(name) == artist)
-        && matched["track_length"]
+        && (track.artists.iter().any(|name| normalize(name) == artist) || normalize(&track.artists.join("")) == artist)
+        && matched[duration_key]
             .as_f64()
             .is_none_or(|length| length == 0.0 || (length - f64::from(track.duration_ms) / 1000.0).abs() <= 5.0)
 }
 
 #[derive(Deserialize)]
-struct Line {
-    ts: f32,
-    te: f32,
-    l: Vec<Chunk>,
-    x: String,
+struct RichsyncLine {
+    #[serde(rename = "ts")]
+    start: f32,
+    #[serde(rename = "te")]
+    end: f32,
+    #[serde(rename = "l")]
+    chunks: Vec<RichsyncChunk>,
+    #[serde(rename = "x")]
+    text: String,
 }
 
 #[derive(Deserialize)]
-struct Chunk {
-    c: String,
-    o: f32,
+struct RichsyncChunk {
+    #[serde(rename = "c")]
+    text: String,
+    #[serde(rename = "o")]
+    offset: f32,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -514,21 +706,21 @@ struct Voice {
 }
 
 // Section snippets must match in sequence, so repeated choruses cannot shift their labels.
-fn sections(lines: &[Line], metadata: &Value) -> Vec<LyricSegment> {
+fn sections(lines: &[RichsyncLine], metadata: &Value) -> Vec<LyricSegment> {
     let mut index = 0;
     let mut sections = Vec::new();
     for part in items(&metadata["metadata"]["track_structure"]) {
         let Some(description) = part["description"].as_str() else { return Vec::new() };
         let first = index;
         for text in snippet_lines(&part["snippet"]) {
-            if lines.get(index).is_none_or(|line| normalize(&line.x) != text) {
+            if lines.get(index).is_none_or(|line| normalize(&line.text) != text) {
                 return Vec::new();
             }
             index += 1;
         }
         if index > first {
             sections.push(LyricSegment {
-                time: lines[first].ts * 1000.0..lines[index - 1].te * 1000.0,
+                time: lines[first].start * 1000.0..lines[index - 1].end * 1000.0,
                 text: section_label(description),
             });
         }
@@ -536,7 +728,7 @@ fn sections(lines: &[Line], metadata: &Value) -> Vec<LyricSegment> {
     if index == lines.len() { sections } else { Vec::new() }
 }
 
-fn performers(lines: &[Line], matched: &Value) -> Vec<Voice> {
+fn performers(lines: &[RichsyncLine], matched: &Value) -> Vec<Voice> {
     let mut artists = BTreeMap::new();
     let mut tagged = Vec::new();
     for entry in items(&matched["performer_tagging"]["content"]) {
@@ -562,7 +754,7 @@ fn performers(lines: &[Line], matched: &Value) -> Vec<Voice> {
         tagged.extend(snippet_lines(&entry["snippet"]).map(|text| (text, voice)));
     }
     let aligned =
-        tagged.len() == lines.len() && tagged.iter().zip(lines).all(|((text, _), line)| *text == normalize(&line.x));
+        tagged.len() == lines.len() && tagged.iter().zip(lines).all(|((text, _), line)| *text == normalize(&line.text));
     lines
         .iter()
         .enumerate()
@@ -571,7 +763,7 @@ fn performers(lines: &[Line], matched: &Value) -> Vec<Voice> {
                 return tagged[index].1;
             }
             // Different line breaks/editions may still have unambiguous singer annotations.
-            let text = normalize(&line.x);
+            let text = normalize(&line.text);
             let mut candidates = tagged.iter().filter(|(snippet, _)| *snippet == text).map(|(_, voice)| *voice);
             let first = candidates.next().unwrap_or_default();
             if candidates.all(|voice| voice == first) { first } else { Voice::default() }
@@ -579,39 +771,39 @@ fn performers(lines: &[Line], matched: &Value) -> Vec<Voice> {
         .collect()
 }
 
-fn parse_richsync(lines: &[Line], matched: &Value, duration: f32) -> MusicResult<Lyrics> {
+fn parse_richsync(lines: &[RichsyncLine], matched: &Value, duration: f32) -> MusicResult<Lyrics> {
     let mut channels: BTreeMap<Voice, Vec<Channel>> = BTreeMap::new();
     for (index, (line, voice)) in lines.iter().zip(performers(lines, matched)).enumerate() {
-        if !(0.0..line.te).contains(&line.ts) || !(0.0..=duration / 1000.0 + 1.0).contains(&line.te) {
+        if !(0.0..line.end).contains(&line.start) || !(0.0..=duration / 1000.0 + 1.0).contains(&line.end) {
             return Err("Musixmatch line has invalid timing".into());
         }
         // Offsets can invert by a rounding millisecond, so order them rather than rejecting the line.
-        if line.l.iter().any(|c| !(-0.05..=line.te - line.ts + 0.05).contains(&c.o)) {
+        if line.chunks.iter().any(|c| !(-0.05..=line.end - line.start + 0.05).contains(&c.offset)) {
             return Err("Musixmatch word has invalid timing".into());
         }
-        if normalize(&line.l.iter().map(|c| c.c.as_str()).collect::<String>()) != normalize(&line.x) {
+        if normalize(&line.chunks.iter().map(|c| c.text.as_str()).collect::<String>()) != normalize(&line.text) {
             return Err("Musixmatch word timing does not cover the line text".into());
         }
         let mut cursor = 0.0;
         let mut segments: Vec<LyricSegment> = Vec::new();
-        for chunk in &line.l {
-            cursor = chunk.o.max(cursor);
-            if chunk.c.trim().is_empty() {
+        for chunk in &line.chunks {
+            cursor = chunk.offset.max(cursor);
+            if chunk.text.trim().is_empty() {
                 separate(&mut segments);
                 continue;
             }
-            let start = (line.ts + cursor) * 1000.0;
+            let start = (line.start + cursor) * 1000.0;
             if let Some(previous) = segments.last_mut() {
                 // Space offsets are not vocal boundaries: hold until the next sung chunk.
                 previous.time.end = start;
             }
-            segments.push(LyricSegment { time: start..line.te * 1000.0, text: chunk.c.clone() });
+            segments.push(LyricSegment { time: start..line.end * 1000.0, text: chunk.text.clone() });
         }
         // Some editions place the final word at the line's end, leaving its end unspecified.
         if let Some(last) = segments.last_mut().filter(|last| last.time.end <= last.time.start) {
             last.time.end = lines[index + 1..]
                 .iter()
-                .map(|line| line.ts * 1000.0)
+                .map(|line| line.start * 1000.0)
                 .filter(|&start| start > last.time.start)
                 .fold(duration, f32::min);
             if last.time.end <= last.time.start {
@@ -633,5 +825,115 @@ fn parse_richsync(lines: &[Line], matched: &Value, duration: f32) -> MusicResult
             });
         rows[index].segments.extend(segments);
     }
-    Ok(Lyrics { channels: channels.into_values().flatten().collect(), ..Default::default() })
+    let channels: Vec<_> = channels.into_values().flatten().collect();
+    let timing = fragment_timing(&channels);
+    Ok(Lyrics { channels, timing, ..Default::default() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn track() -> Track {
+        serde_json::from_value(json!({
+            "id":"4SJuENxvGDMBrjRJJjbYVe", "name":"Lego Bricks", "album":"Lego Bricks",
+            "artists":["Euan Allison", "Lily Williams"], "duration_ms":236_000, "isrc":"NL2VN2000027"
+        }))
+        .expect("track fixture")
+    }
+
+    fn candidate(timing: Timing, text: &str) -> Lyrics {
+        Lyrics::from_segments(vec![LyricSegment { time: 0.0..1000.0, text: text.into() }], timing)
+    }
+
+    #[test]
+    fn quality_beats_provider_order_and_ties_keep_first() {
+        for (first, second, expected) in [
+            (Timing::Line, Timing::Word, "second"),
+            (Timing::Word, Timing::Syllable, "second"),
+            (Timing::Syllable, Timing::Word, "first"),
+            (Timing::Word, Timing::Line, "first"),
+            (Timing::Line, Timing::Line, "first"),
+            (Timing::Word, Timing::Word, "first"),
+            (Timing::Syllable, Timing::Syllable, "first"),
+        ] {
+            let chosen =
+                prefer_lyrics(Ok(candidate(first, "first")), Ok(candidate(second, "second"))).expect("timed lyrics");
+            assert_eq!(chosen.channels[0].segments[0].text, expected);
+        }
+        let chosen =
+            prefer_lyrics(Ok(candidate(Timing::Line, "line")), Err("provider down".into())).expect("keep lines");
+        assert_eq!(chosen.timing, Timing::Line);
+        assert!(prefer_lyrics(Err("provider down".into()), Ok(Lyrics::default())).is_err());
+    }
+
+    #[test]
+    fn joint_artist_credit_matches_the_recording() {
+        let track = track();
+        let mut result = json!({"track_name":"Lego Bricks", "artist_name":"Euan Allison, Lily Williams",
+            "duration":236,"isrc":"NL2VN2000027"});
+        assert!(matches_apple_result(&track, &result));
+        result["artist_name"] = json!("Euan Allison, Someone Else");
+        assert!(!matches_apple_result(&track, &result));
+        result["artist_name"] = json!("Euan Allison, Lily Williams");
+        result["isrc"] = json!("OTHER");
+        assert!(!matches_apple_result(&track, &result));
+        result["isrc"] = json!("NL2VN2000027");
+        result["duration"] = json!(210);
+        assert!(!matches_apple_result(&track, &result));
+    }
+
+    #[test]
+    fn spotify_uses_silence_markers_and_track_end_as_boundaries() {
+        let response = json!({"lyrics":{"syncType":"LINE_SYNCED","lines":[
+            {"startTimeMs":"1000","endTimeMs":"0","words":"First"},
+            {"startTimeMs":"2000","endTimeMs":"0","words":"♪"},
+            {"startTimeMs":"3000","endTimeMs":"0","words":"Last"}
+        ]}});
+        let lyrics = parse_spotify(&response, 5000).expect("line timing");
+        assert_eq!(lyrics.timing, Timing::Line);
+        let segments = &lyrics.channels[0].segments;
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].time, 1000.0..2000.0);
+        assert_eq!(segments[1].time, 3000.0..5000.0);
+        assert!(parse_spotify(&json!({"lyrics":{"syncType":"UNSYNCED"}}), 5000).expect("no sync").is_empty());
+    }
+
+    #[test]
+    fn spotify_syllables_must_cover_the_line_and_keep_word_spaces() {
+        let mut response = json!({"lyrics":{"syncType":"LINE_SYNCED","lines":[
+            {"startTimeMs":"1000","endTimeMs":"4000","words":"Hello world","syllables":[
+                {"startTimeMs":"1000","endTimeMs":"1500","text":"Hel"},
+                {"startTimeMs":"1500","endTimeMs":"2000","text":"lo"},
+                {"startTimeMs":"2500","endTimeMs":"4000","text":"world"}
+            ]}
+        ]}});
+        let lyrics = parse_spotify(&response, 5000).expect("syllable timing");
+        assert_eq!(lyrics.timing, Timing::Syllable);
+        let segments = &lyrics.channels[0].segments;
+        assert_eq!(segments.iter().map(|segment| segment.text.as_str()).collect::<String>(), "Hello world ");
+        assert_eq!(segments[1].time, 1500.0..2000.0);
+        response["lyrics"]["lines"][0]["syllables"][2]["text"] = json!("wrong");
+        let lyrics = parse_spotify(&response, 5000).expect("fallback to whole line");
+        assert_eq!(lyrics.timing, Timing::Line);
+        assert_eq!(lyrics.channels[0].segments[0].text, "Hello world ");
+    }
+
+    #[test]
+    fn ttml_distinguishes_syllables_from_words() {
+        for (source, expected) in [
+            (r#"<tt><body><p begin="1s" end="3s">Hello world</p></body></tt>"#, Timing::Line),
+            (
+                r#"<tt><body><p><span begin="1s" end="2s">Hello</span> <span begin="2s" end="3s">world</span></p></body></tt>"#,
+                Timing::Word,
+            ),
+            (
+                r#"<tt><body><p><span begin="1s" end="1.5s">Hel</span><span begin="1.5s" end="2s">lo</span> <span begin="2s" end="3s">world</span></p></body></tt>"#,
+                Timing::Syllable,
+            ),
+        ] {
+            assert_eq!(parse_ttml(source).timing, expected);
+        }
+    }
 }

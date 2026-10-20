@@ -1,9 +1,9 @@
-use super::{MusicResult, PlaybackCommand, Track};
+use super::{MusicResult, PlaybackCommand, Track, TrackId};
 use crate::{
     app::{AppUpdater, send_update},
     config::Config,
 };
-use serde_json::value::RawValue;
+use serde_json::{Value, value::RawValue};
 use std::{collections::HashMap, sync::Arc};
 use web_time::Instant;
 
@@ -14,6 +14,11 @@ pub struct Spotify {
 }
 
 impl Spotify {
+    #[allow(clippy::unused_async, reason = "matches the native Spotify client")]
+    pub(super) async fn get_lyrics(&self, _id: TrackId) -> MusicResult<Value> {
+        Ok(Value::Null)
+    }
+
     pub(super) fn new(_config: &Config, updater: &AppUpdater) -> Self {
         let tracks: Vec<FixtureTrack> =
             serde_json::from_str(include_str!("../../assets/tracks.json")).unwrap_or_else(|error| {

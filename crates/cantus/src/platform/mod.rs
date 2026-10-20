@@ -10,12 +10,13 @@ use resvg::{
     usvg::{self, Tree},
 };
 use std::time::Duration;
+use strum_macros::IntoStaticStr;
 
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
 #[cfg_attr(target_arch = "wasm32", path = "web.rs")]
 mod backend;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, IntoStaticStr)]
 pub enum PowerAction {
     PowerOff,
     Reboot,

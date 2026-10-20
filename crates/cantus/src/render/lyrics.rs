@@ -46,7 +46,6 @@ struct Channel {
 
 struct Run {
     time: Range<f32>,
-    text: String,
     x: f32,
     width: f32,
     line: Arc<ShapedLine>,
@@ -75,6 +74,7 @@ impl PreparedLyrics {
         // Leave visible air between words even with their dark readability outlines.
         let space = text.shape(" ", TEXT_BODY, 700.0).text.width.max(6.0);
         let mut channels = Vec::new();
+        let mut run_text = Vec::new();
         for source in &mut self.source.channels {
             let mut channel = Channel { singer: source.singer, runs: Vec::new() };
             let segments = &mut source.segments;
@@ -103,15 +103,8 @@ impl PreparedLyrics {
                 let separated = value.ends_with(char::is_whitespace)
                     || next.is_some_and(|s| s.text.starts_with(char::is_whitespace));
                 let width = ink_width(bounds) + space * f32::from(separated);
-                channel.runs.push(Run {
-                    time: start..end,
-                    text: value.trim().to_owned(),
-                    x: 0.0,
-                    width,
-                    line,
-                    scale: 1.0,
-                    lane: 0,
-                });
+                channel.runs.push(Run { time: start..end, x: 0.0, width, line, scale: 1.0, lane: 0 });
+                run_text.push(value);
             }
             channels.push(channel);
         }
@@ -124,15 +117,14 @@ impl PreparedLyrics {
             .collect();
         pace.sort_by(f32::total_cmp);
         let typical = pace.get(pace.len() / 2).copied().unwrap_or(1.0);
-        for run in channels.iter_mut().flat_map(|c| &mut c.runs) {
+        for (run, value) in channels.iter_mut().flat_map(|c| &mut c.runs).zip(run_text) {
             let bounds = run.line.text;
             let held = (run.time.end - run.time.start) / bounds.width.max(1.0) / typical;
-            let target_scale =
-                if self.source.timing == "caption" { 1.0 } else { 1.0 + ((held - 1.0) * 0.25).clamp(0.0, 0.25) };
+            let target_scale = if self.source.is_caption { 1.0 } else { 1.0 + ((held - 1.0) * 0.25).clamp(0.0, 0.25) };
             // Resolve the width in the font; anything past its wdth range scales geometrically.
             if target_scale > 1.0 {
                 let separator = run.width - ink_width(bounds);
-                run.line = text.shape_width(&run.text, bounds.size, 700.0, target_scale * 100.0);
+                run.line = text.shape_width(value.trim(), bounds.size, 700.0, target_scale * 100.0);
                 let shaped = run.line.text;
                 run.scale = (target_scale * bounds.width.max(1.0) / shaped.width.max(1.0)).max(1.0);
                 run.width = ink_width(shaped) * run.scale + separator;
@@ -363,5 +355,70 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
             }
         }
         x += lyrics.position(track.queue_span_ms(), track.duration_ms as f32);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        music::lyrics::{Channel as SourceChannel, LyricSegment},
+        render::text_cache,
+    };
+
+    #[test]
+    fn prepares_text_in_channel_order_across_empty_channels() {
+        let mut text = text_cache();
+        let source = Lyrics {
+            is_caption: true,
+            channels: vec![
+                SourceChannel::default(),
+                SourceChannel {
+                    segments: vec![LyricSegment { time: 0.0..100.0, text: "  ".into() }, LyricSegment {
+                        time: 100.0..200.0,
+                        text: "🎵 ".into(),
+                    }],
+                    ..
+                },
+                SourceChannel::default(),
+                SourceChannel { segments: vec![LyricSegment { time: 200.0..1000.0, text: "Hello ".into() }], .. },
+            ],
+            ..Default::default()
+        };
+        let mut lyrics = PreparedLyrics::new(source);
+        lyrics.prepare(1000.0, &mut text);
+        assert_eq!(lyrics.channels.len(), 2);
+        for (channel, value) in lyrics.channels.iter().zip(["♪", "Hello"]) {
+            assert_eq!(channel.runs.len(), 1);
+            let run = &channel.runs[0];
+            assert!(Arc::ptr_eq(&run.line, &text.shape(value, TEXT_BODY, 700.0)));
+        }
+
+        lyrics.prepare(0.0, &mut text);
+        assert!(lyrics.channels.is_empty());
+        assert_eq!(lyrics.scroll.len(), 0);
+    }
+
+    #[test]
+    fn stretches_held_words_without_losing_their_text() {
+        let mut text = text_cache();
+        let source = Lyrics {
+            channels: vec![SourceChannel {
+                segments: vec![
+                    LyricSegment { time: 0.0..100.0, text: "sing ".into() },
+                    LyricSegment { time: 100.0..200.0, text: "sing ".into() },
+                    LyricSegment { time: 200.0..2000.0, text: "sing ".into() },
+                ],
+                ..
+            }],
+            ..Default::default()
+        };
+        let normal_width = text.shape("sing", TEXT_BODY, 700.0).text.width;
+        let mut lyrics = PreparedLyrics::new(source);
+        lyrics.prepare(2000.0, &mut text);
+        let runs = &lyrics.channels[0].runs;
+        assert_eq!(runs.len(), 3);
+        assert!(runs[2].line.text.width * runs[2].scale > normal_width * 1.2);
+        assert!(runs.windows(2).all(|pair| pair[0].x < pair[1].x));
     }
 }
