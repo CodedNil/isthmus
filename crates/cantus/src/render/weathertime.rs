@@ -134,16 +134,8 @@ fn precipitation(background: Vec3, p: Vec2, time: f32, kind: i32, strength: f32)
     let rain = kind == 0;
     let snow = kind == 1;
     let (velocity, cell_size, radius, density, trail) = if rain {
-        // A square-root response keeps light drizzle legible while preserving
-        // a clear increase in speed and density as precipitation gets heavier.
-        let amount = strength.sqrt().saturate();
-        (
-            vec2(15.0 + amount * 8.0, 75.0 + amount * 85.0),
-            vec2(15.0, 25.0),
-            0.62 + amount * 0.1,
-            0.35 + amount * 0.65,
-            7.0 + amount * 9.0,
-        )
+        // Rain intensity changes the number of drops, not their falling speed.
+        (vec2(33.0, 220.0), vec2(15.0, 25.0), 0.55, strength.saturate() * 0.9, 14.0)
     } else if snow {
         (vec2(5.0, 14.0), Vec2::splat(20.0), 1.15, 0.7, 0.4)
     } else {
@@ -153,15 +145,27 @@ fn precipitation(background: Vec3, p: Vec2, time: f32, kind: i32, strength: f32)
     let cell = (q / cell_size).floor();
     let random = hash(cell + kind as f32 * 31.7);
     let center = (cell + 0.15 + random * 0.7) * cell_size;
-    let angle = 0.08 + random.x * 0.3;
-    let length = trail * (0.8 + random.y * 0.4);
-    let drift = vec2(
-        (time * (0.55 + random.x * 0.45) + random.y * PI * 2.0).sin() * 1.5,
-        (time * (3.5 + random.y * 1.5) + random.x * PI * 2.0).sin() * 8.0,
-    );
-    let distance = Shape::segment(Vec2::ZERO, vec2(angle, 1.0) * length, 0.0).distance_at(q - center - drift);
-    let particle =
-        distance.smoothstep(radius + 0.45, radius - 0.15) * hash(cell + 19.3).x.smoothstep(1.0 - density, 1.0);
+    let angle = if rain { 0.15 + (random.x - 0.5) * 0.025 } else { 0.08 + random.x * 0.3 };
+    let length = trail * if rain { 0.9 + random.y * 0.2 } else { 0.8 + random.y * 0.4 };
+    let drift = if rain {
+        Vec2::ZERO
+    } else {
+        vec2(
+            (time * (0.55 + random.x * 0.45) + random.y * PI * 2.0).sin() * 1.5,
+            (time * (3.5 + random.y * 1.5) + random.x * PI * 2.0).sin() * 8.0,
+        )
+    };
+    // Keep rain streaks inside their cells so they do not clip as they move.
+    let center = if rain { (cell + 0.12 + random * vec2(0.65, 0.24)) * cell_size } else { center };
+    let local = q - center - drift;
+    let distance = Shape::segment(Vec2::ZERO, vec2(angle, 1.0) * length, 0.0).distance_at(local);
+    let presence = if rain {
+        hash(cell + 19.3).x.smoothstep(1.0 - density, 1.025 - density)
+    } else {
+        hash(cell + 19.3).x.smoothstep(1.0 - density, 1.0)
+    };
+    let taper = if rain { 0.3 + local.y.smoothstep(0.0, length) * 0.7 } else { 1.0 };
+    let particle = distance.smoothstep(radius + 0.45, radius - 0.15) * presence * taper;
     let color = if rain {
         vec3(0.18, 0.3, 0.43)
     } else if snow {
@@ -172,11 +176,11 @@ fn precipitation(background: Vec3, p: Vec2, time: f32, kind: i32, strength: f32)
     background.lerp(
         color,
         (particle
-            * if rain { strength.sqrt() } else { strength }
+            * if rain { strength.smoothstep(0.0, 0.025) } else { strength }
             * if snow {
                 0.92
             } else if rain {
-                0.95
+                0.72
             } else {
                 0.7
             })
@@ -227,12 +231,13 @@ pub fn scene(time: f32, cloud_scale: f32, p: Vec2, width: f32, phase: Vec3, weat
         let mass = cloud_noise(p / cloud_scale * 0.14 + vec2(time * 0.012, 6.1));
         let billows = cloud_noise(p / cloud_scale * 0.8 + vec2(time * 0.018, -3.7));
         let threshold = 0.68 - weather.cloud * 0.4;
-        let cloud_shape = (mass + (billows - 0.5) * 0.24).smoothstep(threshold, threshold + 0.16);
-        let cloud_light = billows.smoothstep(0.42, 0.72) * 0.55 + mass.smoothstep(0.48, 0.7) * 0.45;
-        let cloud_color = vec3(0.16, 0.2, 0.28)
-            .lerp(vec3(0.32, 0.36, 0.43), cloud_light)
-            .lerp(vec3(0.62, 0.7, 0.78).lerp(vec3(0.92, 0.94, 0.96), cloud_light), phase.x)
-            .lerp(vec3(0.5, 0.36, 0.4).lerp(vec3(0.76, 0.59, 0.56), cloud_light), phase.z * 0.45);
+        let cloud_shape = (mass + (billows - 0.5) * 0.18).smoothstep(threshold - 0.04, threshold + 0.2);
+        // Broad, low-contrast lighting keeps the billows soft instead of mottled.
+        let cloud_light = (billows * 0.35 + mass * 0.65).smoothstep(0.28, 0.82);
+        let cloud_color = vec3(0.20, 0.24, 0.31)
+            .lerp(vec3(0.30, 0.34, 0.41), cloud_light)
+            .lerp(vec3(0.74, 0.79, 0.84).lerp(vec3(0.88, 0.91, 0.94), cloud_light), phase.x)
+            .lerp(vec3(0.58, 0.43, 0.46).lerp(vec3(0.73, 0.58, 0.57), cloud_light), phase.z * 0.45);
         let cloud_coverage = weather.rain.smoothstep(0.0, 0.025);
         let cloud_amount = (cloud_shape * (0.75 + weather.cloud * 0.2)).lerp(0.98, cloud_coverage);
         color = color.lerp(cloud_color, cloud_amount);
