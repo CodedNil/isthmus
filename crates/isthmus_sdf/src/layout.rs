@@ -1,8 +1,8 @@
-use crate::text::{Curve, Glyph, PlacedGlyph, Text};
+use crate::text::{Curve, FIELD_PADDING, FIELD_RESOLUTION, Glyph, PlacedGlyph, Text, glyph_distance};
 use hashbrown::HashMap;
 use isthmus::{
     F16x2, ResourceData, Resources, ShaderData,
-    glam::{Vec2, vec2},
+    glam::{UVec2, Vec2, vec2},
 };
 use kurbo::{PathEl, PathSeg, Point, QuadBez, Rect, Shape, cubics_to_quadratic_splines, segments};
 use skrifa::{
@@ -13,7 +13,10 @@ use skrifa::{
         pen::{PathElement, PathStyle},
     },
 };
-use std::{mem, sync::Arc};
+use std::{
+    mem,
+    sync::{Arc, OnceLock},
+};
 
 impl Curve {
     fn new(quad: QuadBez) -> Self {
@@ -65,6 +68,8 @@ impl Outlines {
             count: curves.len() as u32,
             min: vec2(bounds.x0 as f32, bounds.y0 as f32),
             max: vec2(bounds.x1 as f32, bounds.y1 as f32),
+            field_start: 0,
+            field_size: UVec2::ZERO,
         };
         for curve in curves {
             curve.append(&mut self.words);
@@ -82,6 +87,7 @@ const WDTH: Tag = Tag::new(b"wdth");
 struct Outlines {
     glyphs: HashMap<(usize, u32, u32, u32), (u32, Glyph)>,
     words: Vec<u32>,
+    fields: HashMap<u32, u32>,
 }
 
 fn axis_range(face: &FontRef<'_>, tag: Tag, fallback: f32) -> (f32, f32) {
@@ -108,6 +114,7 @@ fn outline_segments(outline: Vec<PathElement>, span: f32) -> impl Iterator<Item 
 #[derive(Default)]
 pub struct ShapedLine {
     glyphs: Box<[PlacedGlyph]>,
+    cached: OnceLock<Arc<Self>>,
     /// Unplaced text geometry and metrics.
     pub text: Text,
 }
@@ -141,6 +148,55 @@ impl Resources for TextCache {
 }
 
 impl TextCache {
+    /// Caches a bilinearly sampled glyph distance field for small animated text.
+    /// Font outlines remain the default; this trades a bounded approximation and
+    /// additional persistent storage for four field reads per glyph sample.
+    /// Builds each font/weight/width glyph once, preserving append-only uploads.
+    pub fn cached_distance(&mut self, line: &Arc<ShapedLine>) -> Arc<ShapedLine> {
+        if line.text.size > 32.0 {
+            return Arc::clone(line);
+        }
+        if let Some(cached) = line.cached.get() {
+            return Arc::clone(cached);
+        }
+        let mut glyphs = line.glyphs.to_vec();
+        for placed in &mut glyphs {
+            let source = placed.glyph;
+            placed.glyph = if let Some(&offset) = self.outlines.fields.get(&source) {
+                offset
+            } else {
+                let mut glyph = Glyph::read(&self.outlines.words, source as usize);
+                if glyph.field_size.x > 0 {
+                    continue;
+                }
+                let size = ((glyph.max - glyph.min + FIELD_PADDING * 2.0) * FIELD_RESOLUTION).ceil();
+                glyph.field_size = UVec2::new(size.x as u32 + 1, size.y as u32 + 1);
+                glyph.field_start = self.outlines.words.len() as u32;
+                let count = glyph.field_size.x * glyph.field_size.y;
+                for index in (0..count).step_by(2) {
+                    let sample = |index: u32| {
+                        let grid = vec2((index % glyph.field_size.x) as f32, (index / glyph.field_size.x) as f32);
+                        glyph_distance(
+                            &self.outlines.words,
+                            glyph.start,
+                            glyph.count,
+                            glyph.min - FIELD_PADDING + grid / FIELD_RESOLUTION,
+                        )
+                    };
+                    let pair = vec2(sample(index), sample((index + 1).min(count - 1)));
+                    F16x2::from_vec2(pair).append(&mut self.outlines.words);
+                }
+                let offset = glyph.append(&mut self.outlines.words);
+                self.outlines.fields.insert(source, offset);
+                offset
+            };
+        }
+        let cached =
+            Arc::new(ShapedLine { glyphs: glyphs.into_boxed_slice(), text: line.text, cached: OnceLock::new() });
+        let _ = line.cached.set(Arc::clone(&cached));
+        cached
+    }
+
     /// Prepares text at an ascent-to-descent pixel size and font-axis weight for placement.
     pub fn line(&mut self, content: &str, size: f32, weight: f32) -> Text {
         let shaped = self.shape(content, size, weight);
@@ -247,6 +303,7 @@ impl TextCache {
             text: Text { min: min * size, max: max * size, size, width, count: glyphs.len() as u32, ..Text::default() }
                 .translated(vec2(0.0, self.baseline * size)),
             glyphs: glyphs.into_boxed_slice(),
+            cached: OnceLock::new(),
         }
     }
 }

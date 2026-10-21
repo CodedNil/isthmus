@@ -26,6 +26,7 @@ use isthmus::{
 use microfft::real::rfft_1024;
 use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
 use serde_json::Value;
+use smallvec::SmallVec;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -235,6 +236,21 @@ fn scan_desktop_apps() -> Vec<super::DesktopApp> {
         .filter(|entry| seen.insert(entry.id().to_owned()))
         .filter(|entry| !entry.no_display() && !entry.hidden() && !entry.terminal())
         .filter_map(|entry| {
+            let exec = entry.parse_exec().ok()?;
+            let mut search_terms = vec![entry.appid.clone()];
+            for languages in [locales.as_slice(), &[]] {
+                search_terms.extend(entry.name(languages).map(std::borrow::Cow::into_owned));
+                search_terms.extend(entry.generic_name(languages).map(std::borrow::Cow::into_owned));
+                search_terms.extend(
+                    entry.keywords(languages).unwrap_or_default().into_iter().map(std::borrow::Cow::into_owned),
+                );
+            }
+            search_terms.extend(entry.startup_wm_class().map(str::to_owned));
+            if let Some(program) = exec.first().and_then(|s| Path::new(s).file_name()).and_then(|s| s.to_str()) {
+                search_terms.push(program.to_owned());
+            }
+            search_terms.sort();
+            search_terms.dedup();
             let action = entry.actions().and_then(|actions| {
                 let action = actions.into_iter().find(|action| !action.is_empty())?;
                 let name = entry.action_entry_localized(action, "Name", &locales)?;
@@ -242,7 +258,8 @@ fn scan_desktop_apps() -> Vec<super::DesktopApp> {
             });
             Some(super::DesktopApp {
                 name: entry.name(&locales)?.into_owned(),
-                exec: entry.parse_exec().ok()?,
+                search_terms,
+                exec,
                 comment: entry.comment(&locales).unwrap_or_default().into_owned(),
                 action,
                 icon: entry
@@ -771,6 +788,8 @@ struct WaylandSurface {
     effect: Option<ExtBackgroundEffectSurfaceV1>,
     gpu: Option<SurfaceHandle>,
     blur_bounds: Option<(Vec2, Vec2)>,
+    viewport_size: Option<[i32; 2]>,
+    input_regions: Option<SmallVec<[[i32; 4]; 16]>>,
 }
 
 impl Drop for WaylandSurface {
@@ -838,6 +857,8 @@ impl LayerShellApp {
             scale: 1.0,
             gpu: None,
             blur_bounds: None,
+            viewport_size: None,
+            input_regions: None,
         };
         surface.native.wl.commit();
         surface
@@ -889,7 +910,11 @@ impl LayerShellApp {
             return;
         }
         for surface in self.surfaces.iter_mut().flatten() {
-            surface.viewport.set_destination(surface.size.x as i32, surface.size.y as i32);
+            let destination = [surface.size.x as i32, surface.size.y as i32];
+            if surface.viewport_size != Some(destination) {
+                surface.viewport.set_destination(destination[0], destination[1]);
+                surface.viewport_size = Some(destination);
+            }
             let size = (surface.size * surface.scale).to_array().map(|size| size.round().max(1.0) as u32);
             if self.gpu.is_none() {
                 let (gpu, handle) = pollster::block_on(Renderer::new(Arc::clone(&surface.native), size, text_cache()))
@@ -916,14 +941,28 @@ impl LayerShellApp {
         }) {
             tracing::error!(%error, "Could not render frame");
         }
-        let region = self.compositor.create_region(qhandle, ());
-        for rect in self.cantus.interaction.input_regions.drain(..) {
-            let min = rect.min.floor();
-            let size = rect.max.ceil() - min;
-            region.add(min.x as i32, min.y as i32, size.x as i32, size.y as i32);
+        let input_regions: SmallVec<[[i32; 4]; 16]> = self
+            .cantus
+            .interaction
+            .input_regions
+            .drain(..)
+            .map(|rect| {
+                let min = rect.min.floor();
+                let size = rect.max.ceil() - min;
+                [min.x as i32, min.y as i32, size.x as i32, size.y as i32]
+            })
+            .collect();
+        let surface = self.surfaces.iter_mut().rev().flatten().next().expect("bar surface exists");
+        // Wayland keeps these across commits. Only resend when pixel bounds change.
+        if surface.input_regions.as_ref() != Some(&input_regions) {
+            let region = self.compositor.create_region(qhandle, ());
+            for &[x, y, width, height] in &input_regions {
+                region.add(x, y, width, height);
+            }
+            surface.native.wl.set_input_region(Some(&region));
+            region.destroy();
+            surface.input_regions = Some(input_regions);
         }
-        self.active_surface().native.wl.set_input_region(Some(&region));
-        region.destroy();
         self.update_blur_region(qhandle);
         self.frame_callback = Some(self.active_surface().native.wl.frame(qhandle, ()));
         self.active_surface().native.wl.commit();

@@ -83,15 +83,15 @@ impl Music {
         self.queue.update(drag.filter(|_| !local_drag).map(|(_, offset, _)| offset), delta_time);
         if let Some(local) = &mut self.local {
             let offset = drag.filter(|_| local_drag).map_or(0.0, |(_, offset, _)| offset);
-            let mut position = (local.timeline.position_now() - offset).max(0.0);
+            let mut position = (local.timeline.precise_position_now() - f64::from(offset)).max(0.0);
             if local.track.duration_ms > 0 {
-                position = position.min(local.track.duration_ms as f32);
+                position = position.min(f64::from(local.track.duration_ms));
             }
             local.timeline.update(-position, local_drag, delta_time);
         }
         if drag.is_some_and(|(_, _, released)| released) {
             let target = if local_drag {
-                self.local.as_ref().map(|local| (None, -local.timeline.start_ms))
+                self.local.as_ref().map(|local| (None, -local.timeline.start_ms as f32))
             } else {
                 self.queue.span_at_playhead().map(|(index, position)| (Some(index), position))
             };

@@ -164,17 +164,6 @@ pub fn simplex_noise(p: Vec2) -> f32 {
     70.0 * (contribution(Vec2::ZERO, a) + contribution(corner, b) + contribution(Vec2::ONE, c))
 }
 
-pub fn fbm(mut p: Vec2) -> f32 {
-    let mut density = 0.0;
-    let mut amplitude = 0.5;
-    for _ in 0..4 {
-        density += simplex_noise(p) * amplitude;
-        p = vec2(p.x * 1.6 + p.y * 1.2, p.y * 1.6 - p.x * 1.2);
-        amplitude *= 0.5;
-    }
-    0.5 + density * 0.5
-}
-
 /// 1.0 when positive, else 0.0; `f32::from(bool)` costs an extra conversion.
 pub fn presence(value: f32) -> f32 {
     if value > 0.0 { 1.0 } else { 0.0 }

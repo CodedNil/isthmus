@@ -15,6 +15,8 @@ use isthmus::{prelude::*, spirv_std::arch::kill};
 use isthmus_sdf::prelude::*;
 use serde::Deserialize;
 use smallvec::SmallVec;
+#[cfg(target_os = "linux")]
+use std::env;
 use std::{iter, sync::LazyLock};
 
 /// Number of colors extracted from album artwork.
@@ -144,7 +146,11 @@ impl MusicView {
         self.local_back += (f32::from(music.playing) - self.local_back) * blend;
     }
 
-    pub fn show(&mut self, context: &mut UiContext, music: &mut Music, bar: BarLayout) {
+    pub fn show(&mut self, context: &mut UiContext, music: &mut Music, bar: BarLayout, draw_text: bool) {
+        #[cfg(target_os = "linux")]
+        static ANALYTIC: LazyLock<bool> = LazyLock::new(|| env::args().any(|arg| arg == "--profile-analytic-tracks"));
+        #[cfg(not(target_os = "linux"))]
+        static ANALYTIC: LazyLock<bool> = LazyLock::new(|| false);
         let mut burst = false;
         let playlists = music.playlists.iter().filter(|playlist| playlist.rating_index.is_none());
         let count = playlists.clone().count();
@@ -219,10 +225,17 @@ impl MusicView {
         let mut next_left = None;
         let mut visible = SmallVec::<[_; 16]>::new();
         for (queue_index, track) in music.queue.tracks.iter_mut().enumerate().rev() {
-            start_ms -= track.queue_span_ms();
-            let mut layout =
-                TrackLayout::new(Some(queue_index), track.duration_ms, start_ms, bar, future_end, trim, HISTORY_WIDTH);
-            if bar.playhead_x + start_ms * bar.px_per_ms >= future_end {
+            start_ms -= f64::from(track.queue_span_ms());
+            let mut layout = TrackLayout::new(
+                Some(queue_index),
+                track.duration_ms,
+                start_ms as f32,
+                bar,
+                future_end,
+                trim,
+                HISTORY_WIDTH,
+            );
+            if bar.playhead_x + start_ms as f32 * bar.px_per_ms >= future_end {
                 track.runtime.track_expansion = 0.0;
                 continue;
             }
@@ -246,7 +259,7 @@ impl MusicView {
             let mut layout = TrackLayout::new(
                 None,
                 local.track.duration_ms,
-                local.timeline.start_ms,
+                local.timeline.start_ms as f32,
                 BarLayout { px_per_ms: scale, ..bar },
                 future_end,
                 trim,
@@ -308,10 +321,16 @@ impl MusicView {
                     (compact_details.as_str(), full_details.as_str(), TEXT_BODY),
                 ]
                 .map(|(compact, full, size)| {
-                    (
-                        context.frame.resources.shape(compact, size, 700.0),
-                        context.frame.resources.shape(full, size, 700.0),
-                    )
+                    let compact = context.frame.resources.shape(compact, size, 700.0);
+                    let full = context.frame.resources.shape(full, size, 700.0);
+                    if *ANALYTIC || !draw_text {
+                        (compact, full)
+                    } else {
+                        (
+                            context.frame.resources.cached_distance(&compact),
+                            context.frame.resources.cached_distance(&full),
+                        )
+                    }
                 })
             });
             if let Some(lines) = &track_text {
@@ -527,7 +546,7 @@ impl MusicView {
             );
 
             let (left, right) = (18.0, width - panel_height - 8.0);
-            if let Some(lines) = track_text.filter(|_| right > left) {
+            if let Some(lines) = track_text.filter(|_| draw_text && right > left) {
                 for ((compact, full), y) in lines.into_iter().zip([0.26, 0.57]) {
                     let text_width = compact.text.width.lerp(full.text.width, expansion);
                     let origin = pill.min
@@ -556,8 +575,13 @@ impl MusicView {
                                     - f32::midpoint(pill.size().y, surface.bulge))
                                 .smoothstep(2.0, 18.0);
                                 // Shared glyphs stay opaque while the additional text fades in.
-                                let ink =
-                                    compact.fill_at(surface.content).lerp(full.fill_at(surface.content), expansion);
+                                let ink = if expansion <= 0.0 {
+                                    compact.fill_at(surface.content)
+                                } else if expansion >= 1.0 {
+                                    full.fill_at(surface.content)
+                                } else {
+                                    compact.fill_at(surface.content).lerp(full.fill_at(surface.content), expansion)
+                                };
                                 TEXT_COLOR.extend(alpha * opacity * ink / surface.coverage.max(f32::MIN_POSITIVE))
                             })
                     );

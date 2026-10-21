@@ -4,7 +4,7 @@ use core::ops::{Deref, Range};
 use isthmus::Float;
 use isthmus::{
     F16x2, Fragment, Primitive, Program, Rect, ResourceData, ShaderData, Vertex, VertexInput,
-    glam::{Vec2, vec2},
+    glam::{UVec2, Vec2, vec2},
     raster,
 };
 
@@ -150,7 +150,12 @@ impl Sdf for Glyphs<'_> {
             let glyph = Glyph::read(outlines, placed.glyph as usize);
             let glyph_point = vec2(line_point.x - placed.x, placed.y - line_point.y);
             if Shape::rectangle(Rect::new(glyph.min, glyph.max)).distance_at(glyph_point) < best {
-                best = best.min(glyph_distance(outlines, glyph.start, glyph.count, glyph_point));
+                let distance = if glyph.field_size.x > 0 {
+                    glyph.field_distance(outlines, glyph_point)
+                } else {
+                    glyph_distance(outlines, glyph.start, glyph.count, glyph_point)
+                };
+                best = best.min(distance);
             }
         }
         best * line.size
@@ -180,6 +185,34 @@ pub(crate) struct Glyph {
     pub(super) max: Vec2,
     pub(super) start: u32,
     pub(super) count: u32,
+    pub(super) field_start: u32,
+    pub(super) field_size: UVec2,
+}
+
+pub(crate) const FIELD_RESOLUTION: f32 = 48.0;
+pub(crate) const FIELD_PADDING: f32 = 1.0;
+
+impl Glyph {
+    fn field_distance(self, words: &[u32], point: Vec2) -> f32 {
+        let grid = (point - self.min + FIELD_PADDING) * FIELD_RESOLUTION;
+        let limit = vec2(self.field_size.x as f32 - 1.0, self.field_size.y as f32 - 1.0);
+        let bounded = grid.clamp(Vec2::ZERO, limit);
+        let base = bounded.floor().min(limit - 1.0);
+        let blend = bounded - base;
+        let x = base.x as u32;
+        let y = base.y as u32;
+        let top = field_sample(words, self.field_start, self.field_size.x, x, y) * (1.0 - blend.x)
+            + field_sample(words, self.field_start, self.field_size.x, x + 1, y) * blend.x;
+        let bottom = field_sample(words, self.field_start, self.field_size.x, x, y + 1) * (1.0 - blend.x)
+            + field_sample(words, self.field_start, self.field_size.x, x + 1, y + 1) * blend.x;
+        top * (1.0 - blend.y) + bottom * blend.y + grid.distance(bounded) / FIELD_RESOLUTION
+    }
+}
+
+fn field_sample(words: &[u32], start: u32, width: u32, x: u32, y: u32) -> f32 {
+    let index = y * width + x;
+    let pair = F16x2::read(words, (start + index / 2) as usize).to_vec2();
+    if index & 1 == 0 { pair.x } else { pair.y }
 }
 
 #[derive(Clone, Copy, PartialEq, ShaderData)]
@@ -283,7 +316,7 @@ fn curve_distance([start, control, end]: [Vec2; 3], point: Vec2, best: f32) -> (
     (distance, winding)
 }
 
-fn glyph_distance(curves: &[u32], start: u32, count: u32, point: Vec2) -> f32 {
+pub(crate) fn glyph_distance(curves: &[u32], start: u32, count: u32, point: Vec2) -> f32 {
     let mut distance_squared = f32::MAX;
     let mut winding = 0;
     // Rust-GPU cannot lower this runtime slice iterator without a pointer-to-integer conversion.
