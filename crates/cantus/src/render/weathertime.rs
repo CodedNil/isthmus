@@ -5,7 +5,7 @@ use crate::{
     render::{
         GAP, PANEL_RADIUS, PANEL_START, Program, SUPPORT_BLEND, TEXT_BODY, TEXT_COLOR, TEXT_DISPLAY, TEXT_HEADING,
         TEXT_SHADOW, TEXT_SMALL, TEXT_TITLE, UNIT, UiContext,
-        sdf::{VISIBLE_ALPHA, deform, fbm, glass, hash, refract, sample_deformation},
+        sdf::{VISIBLE_ALPHA, deform, glass, hash, refract, sample_deformation, simplex_noise},
         support_row,
     },
     timer::Timer,
@@ -19,6 +19,8 @@ use jiff::{
     civil::{DateTime, Time},
     tz::{Offset, TimeZone},
 };
+#[cfg(target_os = "linux")]
+use std::env;
 use std::{array::from_fn, fmt::Write};
 use tracing::warn;
 
@@ -132,7 +134,16 @@ fn precipitation(background: Vec3, p: Vec2, time: f32, kind: i32, strength: f32)
     let rain = kind == 0;
     let snow = kind == 1;
     let (velocity, cell_size, radius, density, trail) = if rain {
-        (vec2(20.0, 110.0), vec2(15.0, 25.0), 0.65, 0.78, 9.0)
+        // A square-root response keeps light drizzle legible while preserving
+        // a clear increase in speed and density as precipitation gets heavier.
+        let amount = strength.sqrt().saturate();
+        (
+            vec2(15.0 + amount * 8.0, 75.0 + amount * 85.0),
+            vec2(15.0, 25.0),
+            0.62 + amount * 0.1,
+            0.35 + amount * 0.65,
+            7.0 + amount * 9.0,
+        )
     } else if snow {
         (vec2(5.0, 14.0), Vec2::splat(20.0), 1.15, 0.7, 0.4)
     } else {
@@ -142,17 +153,46 @@ fn precipitation(background: Vec3, p: Vec2, time: f32, kind: i32, strength: f32)
     let cell = (q / cell_size).floor();
     let random = hash(cell + kind as f32 * 31.7);
     let center = (cell + 0.15 + random * 0.7) * cell_size;
-    let distance = Shape::segment(Vec2::ZERO, vec2(0.2, 1.0) * trail, 0.0).distance_at(q - center);
+    let angle = 0.08 + random.x * 0.3;
+    let length = trail * (0.8 + random.y * 0.4);
+    let drift = vec2(
+        (time * (0.55 + random.x * 0.45) + random.y * PI * 2.0).sin() * 1.5,
+        (time * (3.5 + random.y * 1.5) + random.x * PI * 2.0).sin() * 8.0,
+    );
+    let distance = Shape::segment(Vec2::ZERO, vec2(angle, 1.0) * length, 0.0).distance_at(q - center - drift);
     let particle =
         distance.smoothstep(radius + 0.45, radius - 0.15) * hash(cell + 19.3).x.smoothstep(1.0 - density, 1.0);
     let color = if rain {
-        vec3(0.52, 0.72, 0.9)
+        vec3(0.18, 0.3, 0.43)
     } else if snow {
         Vec3::splat(0.96)
     } else {
         vec3(0.75, 0.86, 0.94)
     };
-    background.lerp(color, (particle * strength * if snow { 0.92 } else { 0.7 }).saturate())
+    background.lerp(
+        color,
+        (particle
+            * if rain { strength.sqrt() } else { strength }
+            * if snow {
+                0.92
+            } else if rain {
+                0.95
+            } else {
+                0.7
+            })
+        .saturate(),
+    )
+}
+
+/// Three cloud octaves.
+fn cloud_noise(mut p: Vec2) -> f32 {
+    let mut density = simplex_noise(p) * 0.5;
+    for octave in 0..2 {
+        p = vec2(p.x * 1.6 + p.y * 1.2, p.y * 1.6 - p.x * 1.2);
+        let amplitude = if octave == 0 { 0.25 } else { 0.125 };
+        density += simplex_noise(p) * amplitude;
+    }
+    0.5 + density * 0.5
 }
 
 /// Daylight, blue-hour and twilight palette weights for a sun height.
@@ -174,22 +214,28 @@ pub fn scene(time: f32, cloud_scale: f32, p: Vec2, width: f32, phase: Vec3, weat
         .lerp(vec3(0.10, 0.16, 0.30).lerp(vec3(0.22, 0.25, 0.45), vertical), phase.y * 0.8)
         .lerp(vec3(0.78, 0.30, 0.20).lerp(vec3(0.38, 0.22, 0.42), vertical), phase.z * 0.9);
 
-    let star_cell = (p / 18.0).floor();
-    let star_center = (star_cell + 0.2 + hash(star_cell) * 0.6) * 18.0;
-    let stars =
-        p.distance(star_center).smoothstep(1.0, 0.4) * hash(star_cell + 31.7).x.smoothstep(0.75, 1.0) * (1.0 - phase.x);
-    color += Vec3::splat(stars * (1.0 - weather.cloud) * (0.3 + vertical * 0.7));
+    if phase.x < 0.99 && weather.cloud < 0.99 {
+        let star_cell = (p / 18.0).floor();
+        let star_center = (star_cell + 0.2 + hash(star_cell) * 0.6) * 18.0;
+        let stars = p.distance(star_center).smoothstep(1.0, 0.4)
+            * hash(star_cell + 31.7).x.smoothstep(0.75, 1.0)
+            * (1.0 - phase.x);
+        color += Vec3::splat(stars * (1.0 - weather.cloud) * (0.3 + vertical * 0.7));
+    }
 
     if weather.cloud > VISIBLE_ALPHA {
-        let mass = fbm(p / cloud_scale * 0.14 + vec2(time * 0.012, 6.1));
-        let billows = fbm(p / cloud_scale * 0.287 + vec2(time * 0.018, -3.7));
-        let cloud_shape = (mass + (billows - 0.5) * 0.24).smoothstep(0.35, 0.6);
+        let mass = cloud_noise(p / cloud_scale * 0.14 + vec2(time * 0.012, 6.1));
+        let billows = cloud_noise(p / cloud_scale * 0.8 + vec2(time * 0.018, -3.7));
+        let threshold = 0.68 - weather.cloud * 0.4;
+        let cloud_shape = (mass + (billows - 0.5) * 0.24).smoothstep(threshold, threshold + 0.16);
         let cloud_light = billows.smoothstep(0.42, 0.72) * 0.55 + mass.smoothstep(0.48, 0.7) * 0.45;
         let cloud_color = vec3(0.16, 0.2, 0.28)
             .lerp(vec3(0.32, 0.36, 0.43), cloud_light)
             .lerp(vec3(0.62, 0.7, 0.78).lerp(vec3(0.92, 0.94, 0.96), cloud_light), phase.x)
             .lerp(vec3(0.5, 0.36, 0.4).lerp(vec3(0.76, 0.59, 0.56), cloud_light), phase.z * 0.45);
-        color = color.lerp(cloud_color, weather.cloud * (0.12 + cloud_shape * 0.7));
+        let cloud_coverage = weather.rain.smoothstep(0.0, 0.025);
+        let cloud_amount = (cloud_shape * (0.75 + weather.cloud * 0.2)).lerp(0.98, cloud_coverage);
+        color = color.lerp(cloud_color, cloud_amount);
     }
 
     color = color.lerp(vec3(0.1, 0.17, 0.25), weather.rain * 0.2);
@@ -201,7 +247,7 @@ pub fn scene(time: f32, cloud_scale: f32, p: Vec2, width: f32, phase: Vec3, weat
     color = color.lerp(vec3(0.65, 0.74, 0.96), flash * 0.55);
 
     if weather.fog > VISIBLE_ALPHA {
-        let fog = fbm(vec2(p.x / width * 0.9 + time * 0.008, sky_y * 0.32 + 12.0));
+        let fog = 0.5 + simplex_noise(vec2(p.x / width * 0.9 + time * 0.008, sky_y * 0.32 + 12.0)) * 0.5;
         color = color.lerp(vec3(0.63, 0.69, 0.73), weather.fog * (0.58 + fog.smoothstep(0.35, 0.7) * 0.18));
     }
     color
@@ -236,6 +282,7 @@ pub struct WeatherPanel {
     arrow_hover: [f32; 2],
     /// Animated presence of the timer readout.
     timer_presence: f32,
+    profile_weather: Option<u8>,
 }
 
 /// Geometry shared by the panel and its text during one draw.
@@ -310,7 +357,7 @@ mod monitor {
 
     macro_rules! weather_codes {
 ($($code:literal => $name:literal { $($field:ident: $value:literal),* };)*) => {
-    fn weather(code: u8) -> (&'static str, WeatherCondition) {
+    pub(super) fn weather(code: u8) -> (&'static str, WeatherCondition) {
         match code {
             $($code => ($name, WeatherCondition {
                 $($field: $value,)*
@@ -322,35 +369,39 @@ mod monitor {
 };
 }
 
+    // Visual defaults inferred from the reported phenomenon, not measured cloud
+    // cover/visibility. Showers retain breaks; continuous precipitation is layered
+    // beneath stratus. Reduced visibility in heavy precipitation is a veil rather
+    // than an assertion that meteorological fog has also been observed.
     weather_codes! {
         0 => "Clear" { };
         1 => "Mainly Clear" { cloud: 0.25 };
         2 => "Partly Cloudy" { cloud: 0.55 };
-        3 => "Overcast" { cloud: 0.8 };
-        45 => "Fog" { fog: 0.6 };
-        48 => "Rime Fog" { fog: 0.75 };
-        51 => "Light Drizzle" { rain: 0.15 };
-        53 => "Moderate Drizzle" { rain: 0.3 };
-        55 => "Dense Drizzle" { rain: 0.45 };
-        56 => "Light Freezing Drizzle" { rain: 0.2 };
-        57 => "Dense Freezing Drizzle" { rain: 0.4 };
-        61 => "Light Rain" { rain: 0.3 };
-        63 => "Moderate Rain" { rain: 0.6 };
-        65 => "Heavy Rain" { rain: 1.0 };
-        66 => "Light Freezing Rain" { rain: 0.35 };
-        67 => "Heavy Freezing Rain" { rain: 0.9 };
-        71 => "Light Snow" { snow: 0.3 };
-        73 => "Moderate Snow" { snow: 0.6 };
-        75 => "Heavy Snow" { snow: 1.0 };
-        77 => "Snow Grains" { snow: 0.25 };
-        80 => "Light Rain Showers" { rain: 0.35 };
-        81 => "Moderate Rain Showers" { rain: 0.65 };
-        82 => "Violent Rain Showers" { rain: 1.0 };
-        85 => "Light Snow Showers" { snow: 0.35 };
-        86 => "Heavy Snow Showers" { snow: 0.9 };
-        95 => "Thunderstorm" { rain: 0.7, lightning: 1.0 };
-        96 => "Thunderstorm Light Hail" { rain: 0.75, lightning: 1.0, hail: 0.6 };
-        99 => "Thunderstorm Heavy Hail" { rain: 0.85, lightning: 1.0, hail: 1.0 };
+        3 => "Overcast" { cloud: 1.0 };
+        45 => "Fog" { fog: 0.6, cloud: 0.45 };
+        48 => "Rime Fog" { fog: 0.75, cloud: 0.5 };
+        51 => "Light Drizzle" { rain: 0.15, cloud: 0.85, fog: 0.08 };
+        53 => "Moderate Drizzle" { rain: 0.3, cloud: 0.95, fog: 0.14 };
+        55 => "Dense Drizzle" { rain: 0.45, cloud: 1.0, fog: 0.22 };
+        56 => "Light Freezing Drizzle" { rain: 0.2, cloud: 0.9, fog: 0.12 };
+        57 => "Dense Freezing Drizzle" { rain: 0.4, cloud: 1.0, fog: 0.24 };
+        61 => "Light Rain" { rain: 0.3, cloud: 0.8, fog: 0.04 };
+        63 => "Moderate Rain" { rain: 0.6, cloud: 0.95, fog: 0.1 };
+        65 => "Heavy Rain" { rain: 1.0, cloud: 1.0, fog: 0.25 };
+        66 => "Light Freezing Rain" { rain: 0.35, cloud: 0.9, fog: 0.08 };
+        67 => "Heavy Freezing Rain" { rain: 0.9, cloud: 1.0, fog: 0.24 };
+        71 => "Light Snow" { snow: 0.3, cloud: 0.85, fog: 0.08 };
+        73 => "Moderate Snow" { snow: 0.6, cloud: 0.95, fog: 0.2 };
+        75 => "Heavy Snow" { snow: 1.0, cloud: 1.0, fog: 0.45 };
+        77 => "Snow Grains" { snow: 0.25, cloud: 0.9, fog: 0.16 };
+        80 => "Light Rain Showers" { rain: 0.35, cloud: 0.6, fog: 0.02 };
+        81 => "Moderate Rain Showers" { rain: 0.65, cloud: 0.75, fog: 0.08 };
+        82 => "Violent Rain Showers" { rain: 1.0, cloud: 0.95, fog: 0.22 };
+        85 => "Light Snow Showers" { snow: 0.35, cloud: 0.65, fog: 0.06 };
+        86 => "Heavy Snow Showers" { snow: 0.9, cloud: 0.9, fog: 0.32 };
+        95 => "Thunderstorm" { rain: 0.7, cloud: 1.0, fog: 0.12, lightning: 1.0 };
+        96 => "Thunderstorm Light Hail" { rain: 0.75, cloud: 1.0, fog: 0.16, lightning: 1.0, hail: 0.6 };
+        99 => "Thunderstorm Heavy Hail" { rain: 0.85, cloud: 1.0, fog: 0.3, lightning: 1.0, hail: 1.0 };
     }
 
     pub(super) async fn run(timezones: Vec<String>, background: Background) {
@@ -497,6 +548,38 @@ mod monitor {
         }
         .map_err(|error| error.to_string())
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::weather;
+
+        #[test]
+        fn precipitation_has_clouds_and_heavier_weather_reduces_visibility() {
+            for code in [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 71, 73, 75, 77, 80, 81, 82, 85, 86, 95, 96, 99] {
+                let (_, scene) = weather(code);
+                assert!(scene.cloud >= 0.5, "precipitation without clouds: {code}");
+            }
+            for codes in [[51, 53, 55], [61, 63, 65], [71, 73, 75], [80, 81, 82]] {
+                assert!(codes.windows(2).all(|pair| weather(pair[0]).1.fog < weather(pair[1]).1.fog));
+            }
+            assert!(weather(80).1.cloud < weather(61).1.cloud);
+            assert!(weather(85).1.cloud < weather(71).1.cloud);
+        }
+
+        #[test]
+        fn clear_fog_and_thunder_remain_distinct() {
+            let clear = weather(0).1;
+            assert!(clear.cloud + clear.fog + clear.rain + clear.snow <= f32::EPSILON);
+            for code in [45, 48] {
+                let fog = weather(code).1;
+                assert!(fog.fog > 0.5 && fog.rain + fog.snow <= f32::EPSILON);
+            }
+            for code in [95, 96, 99] {
+                let storm = weather(code).1;
+                assert!(storm.cloud > 0.95 && storm.lightning > 0.5);
+            }
+        }
+    }
 }
 impl WeatherLayout {
     fn paint_text(&self, context: &mut UiContext, line: Text, color: Vec4, clip: bool) {
@@ -536,6 +619,13 @@ impl WeatherLayout {
 
 impl WeatherPanel {
     pub(crate) fn new(timezones: &[String], background: &Background) -> Self {
+        #[cfg(target_os = "linux")]
+        let profile_weather = env::args()
+            .skip_while(|arg| arg != "--profile-weather-code")
+            .nth(1)
+            .map(|code| code.parse().expect("--profile-weather-code requires a WMO weather code"));
+        #[cfg(not(target_os = "linux"))]
+        let profile_weather = None;
         let mut forecast_timezones = Vec::with_capacity(timezones.len());
         let timezones: ArrayVec<_, MAX_WORLD_CLOCKS> = timezones
             .iter()
@@ -548,7 +638,7 @@ impl WeatherPanel {
             })
             .collect();
         platform::spawn_task(monitor::run(forecast_timezones, background.clone()));
-        Self { timezones, details: "Weather unavailable".into(), ..Default::default() }
+        Self { timezones, details: "Weather unavailable".into(), profile_weather, ..Default::default() }
     }
 
     pub fn show(&mut self, context: &mut UiContext, status_width: f32, timer: &Timer) -> StatusSky {
@@ -567,10 +657,12 @@ impl WeatherPanel {
         let timer_support = vec2((width + TIMER_PADDING * 2.0) * presence, TIMER_DEPTH * presence);
         let hovered =
             context.interaction.pointer_in(weather_panel(pill, self.expansion.smoothstep(0.0, 1.0), timer_support));
-        self.expansion =
-            self.expansion.move_towards(f32::from(hovered), context.frame.delta_time.min(1.0 / 30.0) * 3.0);
+        self.expansion = self.expansion.move_towards(
+            f32::from(hovered || self.profile_weather.is_some()),
+            context.frame.delta_time.min(1.0 / 30.0) * 3.0,
+        );
         let (weather_label, hour) = self.collapsed_label();
-        let current = self.hourly[0].conditions;
+        let current = self.profile_weather.map_or(self.hourly[0].conditions, |code| monitor::weather(code).1);
         let sun = Vec2::from(sun_position(hour, self.sun_hours));
         let expansion = self.expansion.smoothstep(0.0, 1.0);
         let layout = WeatherLayout { pill, expansion, timer_support };
@@ -584,38 +676,27 @@ impl WeatherPanel {
                 .frame
                 .upload({
                     let current: WeatherCondition;
-                    let next: WeatherCondition = self.hourly[1].conditions;
                     let pill: Rect;
                     let expansion: f32;
                     let timer_support: Vec2;
                     let phase: Vec3 = sky_phase(sun.y);
                     let sun_center: Vec2 =
                         vec2(16.0 + sun.x * (pill.size().x - 32.0), pill.size().y * (0.72 - sun.y.saturate() * 0.45));
-                    let sun_color: Vec4 = vec3(0.96, 0.98, 1.0)
-                        .lerp(vec3(0.98, 0.74, 0.66), sun.y.smoothstep(0.55, 0.02))
-                        .extend(sun.y.smoothstep(-0.02, 0.04));
+                    let sun_color: Vec4 =
+                        vec3(0.96, 0.98, 1.0).lerp(vec3(0.98, 0.74, 0.66), sun.y.smoothstep(0.55, 0.02)).extend(
+                            sun.y.smoothstep(-0.02, 0.04) * (1.0 - current.cloud * 0.95) * (1.0 - current.fog * 0.85),
+                        );
                 })
                 .primitive(|frame| deform(weather_panel(pill, expansion, timer_support), frame))
                 .fragment(|frame, surface| {
                     let body_local = surface.pixel - pill.min;
-                    let edge = ((body_local.x / pill.size().x).clamp(0.0, 1.0) - 0.5).abs();
-                    let conditions = current.lerp(next, edge.smoothstep(0.05, 0.25)).lerp(current, expansion);
-                    let mut color = scene(
-                        frame.time,
-                        frame.globals.bar_height,
-                        surface.refracted - pill.min,
-                        pill.size().x,
-                        phase,
-                        conditions,
+                    let mut color =
+                        scene(frame.time, frame.globals.bar_height, body_local, pill.size().x, phase, current);
+                    let distance = body_local.distance(sun_center);
+                    color = color.lerp(
+                        sun_color.truncate(),
+                        (distance.smoothstep(62.0, 4.0) * 0.24 + distance.smoothstep(11.0, 1.0) * 0.7) * sun_color.w,
                     );
-                    if body_local.y <= pill.size().y {
-                        let distance = body_local.distance(sun_center);
-                        color = color.lerp(
-                            sun_color.truncate(),
-                            (distance.smoothstep(62.0, 4.0) * 0.24 + distance.smoothstep(11.0, 1.0) * 0.7)
-                                * sun_color.w,
-                        );
-                    }
                     glass(surface, color)
                 })
         );
@@ -743,11 +824,13 @@ impl WeatherPanel {
                         } else {
                             (start_hour + position * HOURLY_STEP_HOURS as f32) % 24.0
                         };
+                        let pane_center = forecast_pill.center() - pill.min;
+                        let p = pane_center + (surface.pixel - forecast_pill.center()) * 2.0;
                         let color = scene(
                             frame.time,
                             frame.globals.bar_height,
-                            surface.refracted - forecast_pill.min,
-                            forecast_pill.size().x,
+                            p,
+                            forecast_pill.size().x * 2.0,
                             sky_phase(sun_position(hour, sun_hours)[1]),
                             conditions,
                         );

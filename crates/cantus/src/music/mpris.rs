@@ -148,7 +148,7 @@ fn parse_player(source: &str, mut properties: Properties) -> Option<LocalTrack> 
             position_ms: position,
             rate: if playing { rate } else { 0.0 },
             observed_at: Instant::now(),
-            start_ms: -position,
+            start_ms: -f64::from(position),
             ..
         },
         playing,

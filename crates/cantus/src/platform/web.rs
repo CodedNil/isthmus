@@ -115,6 +115,7 @@ pub async fn desktop_apps() -> Vec<DesktopApp> {
     .into_iter()
     .map(|(name, comment)| DesktopApp {
         name: name.into(),
+        search_terms: Vec::new(),
         exec: vec![format!("demo:{name}")],
         comment: comment.into(),
         action: None,

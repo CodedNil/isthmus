@@ -56,6 +56,13 @@ pub fn confidence(query: &str, text: &str) -> f32 {
     similarity(&query, &text)
 }
 
+/// Rank names first, then desktop metadata and descriptions.
+fn app_confidence(query: &str, app: &DesktopApp) -> f32 {
+    let aliases = app.search_terms.iter().map(|term| confidence(query, term) * 0.95).fold(0.0, f32::max);
+    // Descriptions are useful for discovery, but should rank below names and aliases.
+    confidence(query, &app.name).max(aliases).max(confidence(query, &app.comment) * 0.9)
+}
+
 /// Normalized edit distance between two words, from 0 to 1.
 pub fn similarity(a: &str, b: &str) -> f32 {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
@@ -351,7 +358,7 @@ impl LauncherState {
                 scored.push((ANSWER_CONFIDENCE, Entry::Answer(answer)));
             }
             scored.extend(self.apps.iter().enumerate().filter_map(|(index, app)| {
-                let confidence = confidence(&query, &app.name);
+                let confidence = app_confidence(&query, app);
                 (confidence >= MIN_CONFIDENCE).then_some((confidence, Entry::App(index)))
             }));
         }
@@ -685,5 +692,22 @@ mod tests {
         // Containment must clear the listing threshold however little it covers.
         assert!(confidence("fox", "Firefox") >= MIN_CONFIDENCE);
         assert!(confidence("z", "Firefox") < MIN_CONFIDENCE);
+    }
+
+    #[test]
+    fn finds_apps_by_desktop_metadata() {
+        let app = DesktopApp {
+            name: "GNU Image Editor".into(),
+            search_terms: vec!["org.gimp.GIMP".into(), "gimp".into(), "photo".into()],
+            exec: vec!["gimp".into()],
+            comment: "Create images and edit photographs".into(),
+            action: None,
+            icon: None,
+        };
+        for query in ["gimp", "GIMP", "photo", "org.gimp", "GNU Image Editor"] {
+            assert!(app_confidence(query, &app) >= MIN_CONFIDENCE, "{query}");
+        }
+        assert!(app_confidence("GNU Image Editor", &app) > app_confidence("gimp", &app));
+        assert!(app_confidence("unrelated", &app) < MIN_CONFIDENCE);
     }
 }

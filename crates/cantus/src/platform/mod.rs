@@ -32,6 +32,7 @@ pub struct CaptionFile {
 /// One launchable application entry exposed to the launcher.
 pub struct DesktopApp {
     pub name: String,
+    pub search_terms: Vec<String>,
     pub exec: Vec<String>,
     pub comment: String,
     pub action: Option<(String, Vec<String>)>,

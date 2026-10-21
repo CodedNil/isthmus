@@ -1,34 +1,37 @@
 use crate::{
     music::{Music, TRACK_SPACING_MS, lyrics::Lyrics},
-    render::{BarLayout, PANEL_START, Program, TEXT_BODY, TEXT_COLOR, TEXT_SHADOW, TEXT_SMALL, UiContext},
+    render::{BarLayout, PANEL_START, Program, TEXT_SHADOW, TEXT_SMALL, UiContext},
 };
 use isthmus::prelude::*;
 use isthmus_sdf::{
     layout::{ShapedLine, TextCache},
     prelude::*,
 };
+#[cfg(target_os = "linux")]
+use std::env;
 use std::{ops::Range, slice, sync::Arc};
 
-const SHADOW_REACH: f32 = 5.0;
-/// Multiplier deepening the shared text shadow behind lyric runs.
-const SHADOW_STRENGTH: f32 = 2.6;
+const LYRIC_SIZE: f32 = 14.0;
+const LYRIC_WEIGHT: f32 = 800.0;
+const SHADOW_REACH: f32 = 2.0;
+/// Multiplier deepening the shared text shadow behind lyrics and section labels.
+const SHADOW_STRENGTH: f32 = 4.0;
+const BACKDROP_REACH: f32 = 12.0;
+const BACKDROP_OPACITY: f32 = 0.24;
+/// One physical pixel of coverage filtering prevents slow-moving stems from
+/// gaining/losing ink as they cross fractional pixel phases.
+const EDGE_WIDTH: f32 = 1.0;
 const GLOW_REACH: f32 = 6.0;
 const LANE_GAP: f32 = 96.0;
-const ROW_SPACING: f32 = 12.0;
+const ROW_SPACING: f32 = 16.0;
 /// Distance from the panel's bottom edge to the first lyric row.
 const LYRIC_INSET: f32 = 12.0;
 /// Space reserved below the panel for one lyric row and the label beneath it.
 #[cfg(target_os = "linux")]
 pub const EXTENSION: f32 = LYRIC_INSET + ROW_SPACING;
-const GROUP_COLOR: Vec3 = vec3(1.00, 0.72, 0.79); // rose, reserved for groups
-const SECTION_SHADOW: f32 = 7.0;
-/// Multiplier deepening the shared text shadow behind section labels.
-const SECTION_SHADOW_STRENGTH: f32 = 0.6;
-const CHANNEL_COLORS: [Vec3; 3] = [
-    TEXT_COLOR,
-    vec3(0.66, 0.82, 1.00), // blue
-    vec3(0.76, 0.94, 0.69), // sage
-];
+
+const GROUP_COLOR: Vec3 = vec3(1.00, 0.72, 0.79);
+const CHANNEL_COLORS: [Vec3; 3] = [Vec3::ONE, vec3(0.66, 0.82, 1.00), vec3(0.76, 0.94, 0.69)];
 
 #[derive(Default)]
 pub struct PreparedLyrics {
@@ -72,7 +75,7 @@ impl PreparedLyrics {
             return;
         }
         // Leave visible air between words even with their dark readability outlines.
-        let space = text.shape(" ", TEXT_BODY, 700.0).text.width.max(6.0);
+        let space = text.shape(" ", LYRIC_SIZE, LYRIC_WEIGHT).text.width.max(6.0);
         let mut channels = Vec::new();
         let mut run_text = Vec::new();
         for source in &mut self.source.channels {
@@ -91,7 +94,7 @@ impl PreparedLyrics {
             for (index, segment) in segments.iter().enumerate() {
                 let next = segments.get(index + 1);
                 let value = segment.text.replace('🎵', "♪").replace('🎶', "♫");
-                let line = text.shape(value.trim(), TEXT_BODY, 700.0);
+                let line = text.shape(value.trim(), LYRIC_SIZE, LYRIC_WEIGHT);
                 let bounds = line.text;
                 let start = segment.time.start.clamp(0.0, duration);
                 let end =
@@ -124,7 +127,7 @@ impl PreparedLyrics {
             // Resolve the width in the font; anything past its wdth range scales geometrically.
             if target_scale > 1.0 {
                 let separator = run.width - ink_width(bounds);
-                run.line = text.shape_width(value.trim(), bounds.size, 700.0, target_scale * 100.0);
+                run.line = text.shape_width(value.trim(), bounds.size, LYRIC_WEIGHT, target_scale * 100.0);
                 let shaped = run.line.text;
                 run.scale = (target_scale * bounds.width.max(1.0) / shaped.width.max(1.0)).max(1.0);
                 run.width = ink_width(shaped) * run.scale + separator;
@@ -199,6 +202,15 @@ impl PreparedLyrics {
             }
             occupied.push(phrases);
         }
+        #[cfg(target_os = "linux")]
+        let cache = !env::args().any(|arg| arg == "--profile-analytic-lyrics");
+        #[cfg(not(target_os = "linux"))]
+        let cache = true;
+        if cache {
+            for run in channels.iter_mut().flat_map(|channel| &mut channel.runs) {
+                run.line = text.cached_distance(&run.line);
+            }
+        }
         self.channels = channels;
     }
 
@@ -237,7 +249,23 @@ fn ink_width(bounds: Text) -> f32 {
 }
 
 fn history_opacity(x: f32, playhead_x: f32) -> f32 {
-    x.smoothstep(0.0, playhead_x.max(1.0))
+    if x >= playhead_x { 1.0 } else { x.smoothstep(0.0, playhead_x.max(1.0)) }
+}
+
+fn lyric_shadow(distance: f32) -> Vec4 {
+    let strength = distance.smoothstep(SHADOW_REACH, 0.0).powi(2) * SHADOW_STRENGTH;
+    let backdrop = (-distance.max(0.0) * 0.25).exp()
+        * (1.0 - distance.smoothstep(BACKDROP_REACH - 3.0, BACKDROP_REACH))
+        * BACKDROP_OPACITY;
+    source_over(TEXT_SHADOW.with_w(TEXT_SHADOW.w * strength), Vec3::ZERO.extend(backdrop))
+}
+
+fn lyric_sample(mut sample: Sample) -> Sample {
+    // The shared SDF uses |dx| + |dy|, widening diagonal edges. Use the
+    // Euclidean derivative magnitude here without changing other UI surfaces.
+    let sum = sample.gradient.abs().element_sum().max(f32::MIN_POSITIVE);
+    sample.gradient *= sample.gradient.length() * EDGE_WIDTH / sum;
+    sample
 }
 
 #[cfg(target_os = "linux")]
@@ -255,14 +283,14 @@ pub fn height(music: &Music) -> f32 {
 
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     let (tracks, index, time) = if let Some(local) = music.local.as_ref().filter(|_| music.local_foreground()) {
-        (slice::from_ref(&local.track), 0, -local.timeline.start_ms)
+        (slice::from_ref(&local.track), 0, -local.timeline.start_ms as f32)
     } else {
         let Some((index, time)) = music.queue.span_at_playhead() else { return };
         (music.queue.tracks.as_slice(), index, time)
     };
     let resources = &mut music.resources;
     let silence = PreparedLyrics::default();
-    let screen = -GLOW_REACH * 1.2..context.frame.screen_size.x + GLOW_REACH * 1.2;
+    let screen = -BACKDROP_REACH * 1.2..context.frame.screen_size.x + BACKDROP_REACH * 1.2;
     let current = &tracks[index];
     let lyrics = resources.lyrics(current, context.frame.resources).unwrap_or(&silence);
     let mut x = layout.playhead_x - lyrics.position(time, current.duration_ms as f32);
@@ -288,12 +316,13 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                     .frame
                     .upload({
                         let playhead_x: f32 = layout.playhead_x;
-                        let line: Text = context.frame.resources.place(&label, origin).outlined(SECTION_SHADOW);
+                        let line: Text = context.frame.resources.place(&label, origin).outlined(BACKDROP_REACH);
                     })
                     .primitive(line)
                     .fragment(|_, surface| {
-                        let shadow = (-surface.distance.max(0.0) * 0.7).exp() * SECTION_SHADOW_STRENGTH;
-                        surface.paint(TEXT_COLOR.extend(0.9), TEXT_SHADOW.with_w(TEXT_SHADOW.w * shadow))
+                        let sample = lyric_sample(surface.sample);
+                        let color = sample.paint(Vec4::ONE, lyric_shadow(sample.distance));
+                        color.with_w(color.w / surface.coverage.max(f32::MIN_POSITIVE))
                             * vec4(1.0, 1.0, 1.0, history_opacity(surface.pixel.x, playhead_x))
                     })
             );
@@ -312,7 +341,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                     origin + run.line.text.min * stretch,
                     origin + run.line.text.max * stretch + vec2(0.0, run.lane as f32 * ROW_SPACING),
                 )
-                .expanded(GLOW_REACH * run.scale + 2.0);
+                .expanded(BACKDROP_REACH * run.scale + 2.0);
                 // One continuous light field crosses every fragment and vocal lane at the playhead.
                 shader!(
                     context
@@ -325,7 +354,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                             let phase: f32 = context.frame.time;
                             let color: Vec4 = color.extend(1.0);
                             let bounds: Rect;
-                            let line: Text = context.frame.resources.place(&run.line, origin).outlined(GLOW_REACH);
+                            let line: Text = context.frame.resources.place(&run.line, origin).outlined(BACKDROP_REACH);
                         })
                         .primitive(raster(bounds))
                         .fragment(|_, fragment| {
@@ -335,10 +364,9 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                             let mut point = line.origin + (fragment.pixel - line.origin) / vec2(scale, 1.0);
                             point.y -= ROW_SPACING * row;
                             point.y += active * (0.6 + 0.4 * wave.sin());
-                            let surface = line.sample_at(point);
-                            let shadow = surface.distance.smoothstep(SHADOW_REACH, 0.0).powi(2) * SHADOW_STRENGTH;
+                            let surface = lyric_sample(line.sample_at(point));
                             let mut ink = color.truncate();
-                            let mut halo = TEXT_SHADOW.with_w(TEXT_SHADOW.w * shadow);
+                            let mut halo = lyric_shadow(surface.distance);
                             if active > 0.0 {
                                 let sheen = (wave + (fragment.pixel.y - baseline) * 0.25).sin().max(0.0).powi(8);
                                 ink = ink.lerp(Vec3::ONE, active * (0.3 + 0.7 * sheen));
@@ -365,6 +393,89 @@ mod tests {
         music::lyrics::{Channel as SourceChannel, LyricSegment},
         render::text_cache,
     };
+    use isthmus::Resources;
+    use isthmus_sdf::text::Glyphs;
+
+    #[test]
+    fn cached_glyph_fields_preserve_edges_and_reuse_storage() {
+        let mut cache = text_cache();
+        let original = cache.shape("AVOxy gj♪", LYRIC_SIZE, LYRIC_WEIGHT);
+        let prefix = cache.data().persistent.to_vec();
+        let cached = cache.cached_distance(&original);
+        assert_eq!(&cache.data().persistent[..prefix.len()], prefix.as_slice());
+        let words = cache.data().persistent.len();
+        let again = cache.cached_distance(&original);
+        assert!(Arc::ptr_eq(&cached, &again));
+        assert_eq!(cache.data().persistent.len(), words);
+        assert_eq!(again.text.width, original.text.width);
+        let exact = cache.place(&original, Vec2::ZERO);
+        let field = cache.place(&cached, Vec2::ZERO);
+        let data = cache.data();
+        let exact = Glyphs::new(exact, data);
+        let field = Glyphs::new(field, data);
+        let mut maximum_error = 0.0;
+        for y in -50..50 {
+            for x in -30..(original.text.width * 3.0) as i32 + 30 {
+                let point = vec2(x as f32 / 3.0 + 0.13, y as f32 / 3.0 + 0.07);
+                let reference = exact.distance_at(point);
+                if reference.abs() < BACKDROP_REACH {
+                    let error = (field.distance_at(point) - reference).abs();
+                    maximum_error = maximum_error.max(error);
+                }
+            }
+        }
+        assert!(maximum_error < 0.18, "cached field error: {maximum_error} px");
+    }
+
+    #[test]
+    fn lyric_edges_have_the_same_width_at_different_angles() {
+        for gradient in [Vec2::X, Vec2::Y, Vec2::ONE.normalize()] {
+            let sample = lyric_sample(Sample { distance: -0.2, gradient, coverage: 1.0 });
+            assert!((sample.gradient.abs().element_sum() - EDGE_WIDTH).abs() < 0.0001);
+            assert!((sample.fill() - (0.5 + 0.2 / EDGE_WIDTH)).abs() < 0.0001);
+        }
+    }
+
+    #[test]
+    fn moving_stems_preserve_coverage_across_pixel_phases() {
+        for width in [1.5, 2.3, 3.7] {
+            for phase in 0..16 {
+                let offset = phase as f32 / 16.0;
+                let coverage: f32 = (-8..9)
+                    .map(|pixel| {
+                        lyric_sample(Sample {
+                            distance: (pixel as f32 - offset).abs() - width * 0.5,
+                            gradient: Vec2::X,
+                            coverage: 1.0,
+                        })
+                        .fill()
+                    })
+                    .sum();
+                assert!((coverage - width).abs() < 0.0001, "coverage changed at phase {phase}");
+            }
+        }
+    }
+
+    #[test]
+    fn backdrop_follows_text_and_disappears_outside_its_reach() {
+        assert!(lyric_shadow(SHADOW_REACH + 1.0).w > 0.0);
+        assert!(lyric_shadow(0.0).w > lyric_shadow(SHADOW_REACH + 1.0).w);
+        assert!(lyric_shadow(0.0).w < 1.0);
+        assert_eq!(lyric_shadow(BACKDROP_REACH).w, 0.0);
+        assert_eq!(lyric_shadow(BACKDROP_REACH + 10.0).w, 0.0);
+    }
+
+    #[test]
+    fn fades_only_to_the_left_of_the_playhead() {
+        for playhead in [0.0, 0.5, 380.0] {
+            for offset in [0.0, 0.25, 100.0, 2000.0] {
+                assert_eq!(history_opacity(playhead + offset, playhead), 1.0);
+            }
+        }
+        assert_eq!(history_opacity(0.0, 380.0), 0.0);
+        assert_eq!(history_opacity(190.0, 380.0), 0.5);
+        assert!(history_opacity(300.0, 380.0) > history_opacity(100.0, 380.0));
+    }
 
     #[test]
     fn prepares_text_in_channel_order_across_empty_channels() {
@@ -391,7 +502,11 @@ mod tests {
         for (channel, value) in lyrics.channels.iter().zip(["♪", "Hello"]) {
             assert_eq!(channel.runs.len(), 1);
             let run = &channel.runs[0];
-            assert!(Arc::ptr_eq(&run.line, &text.shape(value, TEXT_BODY, 700.0)));
+            let expected = text.shape(value, LYRIC_SIZE, LYRIC_WEIGHT);
+            assert_eq!(run.line.text.width, expected.text.width);
+            assert_eq!(run.line.text.count, expected.text.count);
+            assert_eq!(run.line.text.min, expected.text.min);
+            assert_eq!(run.line.text.max, expected.text.max);
         }
 
         lyrics.prepare(0.0, &mut text);
@@ -413,7 +528,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let normal_width = text.shape("sing", TEXT_BODY, 700.0).text.width;
+        let normal_width = text.shape("sing", LYRIC_SIZE, LYRIC_WEIGHT).text.width;
         let mut lyrics = PreparedLyrics::new(source);
         lyrics.prepare(2000.0, &mut text);
         let runs = &lyrics.channels[0].runs;

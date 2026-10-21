@@ -2,6 +2,9 @@ use crate::{app::Background, config::Config, interaction::Interaction, music::Mu
 use isthmus::prelude::*;
 use isthmus_sdf::{layout::TextCache, prelude::*};
 use sdf::refract;
+#[cfg(target_os = "linux")]
+use std::env;
+use tracing::info;
 
 pub mod launcher;
 pub mod lyrics;
@@ -92,14 +95,30 @@ pub struct Bar {
     pub(crate) weather: Option<weathertime::WeatherPanel>,
     pub(crate) status: Option<status::StatusPanel>,
     music_view: music::MusicView,
+    profile_pass: Option<String>,
+    profile_last: f32,
+    profile_frames: u32,
 }
 
 impl Bar {
     pub fn new(config: &Config, background: &Background) -> Self {
+        #[cfg(target_os = "linux")]
+        let profile_pass = env::args().skip_while(|arg| arg != "--profile-pass").nth(1);
+        #[cfg(not(target_os = "linux"))]
+        let profile_pass = None;
+        if let Some(pass) = &profile_pass {
+            assert!(
+                matches!(pass.as_str(), "all" | "none" | "lyrics" | "weather" | "music" | "music-no-text" | "status"),
+                "unknown profiling pass: {pass}"
+            );
+        }
         Self {
             weather: config.weathertime_enabled.then(|| weathertime::WeatherPanel::new(&config.timezones, background)),
             status: config.status_enabled.then(|| status::StatusPanel::new(background)),
             music_view: music::MusicView::default(),
+            profile_pass,
+            profile_last: 0.0,
+            profile_frames: 0,
         }
     }
 
@@ -126,17 +145,45 @@ impl Bar {
             (id, offset.x / scale, released)
         });
         music.update_playback(drag, context.frame.delta_time);
-        if context.config.lyrics_enabled {
+        if self.profile_pass.is_some() {
+            self.profile_frames += 1;
+            let elapsed = context.frame.time - self.profile_last;
+            if elapsed >= 1.0 {
+                let timeline = music
+                    .local
+                    .as_ref()
+                    .filter(|_| music.local_foreground())
+                    .map_or(&music.queue.timeline, |local| &local.timeline);
+                info!(
+                    playing = music.foreground_playing(),
+                    rate = timeline.rate,
+                    rendered_start_ms = timeline.start_ms,
+                    fps = self.profile_frames as f32 / elapsed,
+                    "Frame profile"
+                );
+                self.profile_frames = 0;
+                self.profile_last = context.frame.time;
+            }
+        }
+        let enabled = |pass| self.profile_pass.as_ref().is_none_or(|selected| selected == "all" || selected == pass);
+        if context.config.lyrics_enabled && enabled("lyrics") {
             lyrics::show(context, music, layout);
         }
-        let sky = self
-            .weather
-            .as_mut()
-            .map_or_else(weathertime::StatusSky::default, |weather| weather.show(context, status_width, timer));
-        if let Some(status) = self.status.as_mut() {
+        let sky = if enabled("weather") {
+            self.weather
+                .as_mut()
+                .map_or_else(weathertime::StatusSky::default, |weather| weather.show(context, status_width, timer))
+        } else {
+            weathertime::StatusSky::default()
+        };
+        if enabled("status")
+            && let Some(status) = self.status.as_mut()
+        {
             status.show(context, sky);
         }
-        self.music_view.show(context, music, layout);
+        if enabled("music") || enabled("music-no-text") {
+            self.music_view.show(context, music, layout, self.profile_pass.as_deref() != Some("music-no-text"));
+        }
     }
 }
 

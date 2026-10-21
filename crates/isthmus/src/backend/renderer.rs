@@ -14,7 +14,7 @@ pub struct Renderer<P: Program> {
     gpu: Gpu,
     resources: P::Resources,
     started: Instant,
-    last_frame: f32,
+    last_frame: f64,
 }
 /// Records surfaces that will be submitted together in one frame.
 pub struct Render<'a, P: Program> {
@@ -83,10 +83,10 @@ impl<P: Program> Renderer<P> {
             surface.recorded = false;
         }
         self.resources.begin_frame();
-        let elapsed = self.started.elapsed().as_secs_f32();
-        let delta = (elapsed - self.last_frame).min(0.1);
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let delta = (elapsed - self.last_frame).min(0.1) as f32;
         self.last_frame = elapsed;
-        draw(&mut Render { renderer: self, time: elapsed, delta_time: delta });
+        draw(&mut Render { renderer: self, time: elapsed as f32, delta_time: delta });
         if !self.surfaces.values().any(|surface| surface.recorded) {
             return Ok(());
         }
