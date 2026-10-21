@@ -1,6 +1,6 @@
 pub use backend::{
-    Task, captions, current_location, desktop_apps, open_url, run, run_power_action, set_volume, sleep, spawn,
-    spawn_task, start_launcher_listener, start_status_monitor, trigger_launcher,
+    Task, current_location, desktop_apps, open_url, run, run_power_action, set_volume, sleep, spawn, spawn_task,
+    start_launcher_listener, start_status_monitor, trigger_launcher,
 };
 use image::imageops::FilterType;
 use isthmus::Image;
@@ -23,11 +23,6 @@ pub enum PowerAction {
 }
 
 pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
-
-pub struct CaptionFile {
-    pub format: String,
-    pub source: String,
-}
 
 /// One launchable application entry exposed to the launcher.
 pub struct DesktopApp {

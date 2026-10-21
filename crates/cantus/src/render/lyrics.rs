@@ -7,9 +7,7 @@ use isthmus_sdf::{
     layout::{ShapedLine, TextCache},
     prelude::*,
 };
-#[cfg(target_os = "linux")]
-use std::env;
-use std::{ops::Range, slice, sync::Arc};
+use std::{ops::Range, sync::Arc};
 
 const LYRIC_SIZE: f32 = 14.0;
 const LYRIC_WEIGHT: f32 = 800.0;
@@ -123,7 +121,7 @@ impl PreparedLyrics {
         for (run, value) in channels.iter_mut().flat_map(|c| &mut c.runs).zip(run_text) {
             let bounds = run.line.text;
             let held = (run.time.end - run.time.start) / bounds.width.max(1.0) / typical;
-            let target_scale = if self.source.is_caption { 1.0 } else { 1.0 + ((held - 1.0) * 0.25).clamp(0.0, 0.25) };
+            let target_scale = 1.0 + ((held - 1.0) * 0.25).clamp(0.0, 0.25);
             // Resolve the width in the font; anything past its wdth range scales geometrically.
             if target_scale > 1.0 {
                 let separator = run.width - ink_width(bounds);
@@ -202,14 +200,8 @@ impl PreparedLyrics {
             }
             occupied.push(phrases);
         }
-        #[cfg(target_os = "linux")]
-        let cache = !env::args().any(|arg| arg == "--profile-analytic-lyrics");
-        #[cfg(not(target_os = "linux"))]
-        let cache = true;
-        if cache {
-            for run in channels.iter_mut().flat_map(|channel| &mut channel.runs) {
-                run.line = text.cached_distance(&run.line);
-            }
+        for run in channels.iter_mut().flat_map(|channel| &mut channel.runs) {
+            run.line = text.cached_distance(&run.line);
         }
         self.channels = channels;
     }
@@ -282,12 +274,8 @@ pub fn height(music: &Music) -> f32 {
 }
 
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
-    let (tracks, index, time) = if let Some(local) = music.local.as_ref().filter(|_| music.local_foreground()) {
-        (slice::from_ref(&local.track), 0, -local.timeline.start_ms as f32)
-    } else {
-        let Some((index, time)) = music.queue.span_at_playhead() else { return };
-        (music.queue.tracks.as_slice(), index, time)
-    };
+    let Some((index, time)) = music.queue.span_at_playhead() else { return };
+    let tracks = music.queue.tracks.as_slice();
     let resources = &mut music.resources;
     let silence = PreparedLyrics::default();
     let screen = -BACKDROP_REACH * 1.2..context.frame.screen_size.x + BACKDROP_REACH * 1.2;
@@ -481,7 +469,6 @@ mod tests {
     fn prepares_text_in_channel_order_across_empty_channels() {
         let mut text = text_cache();
         let source = Lyrics {
-            is_caption: true,
             channels: vec![
                 SourceChannel::default(),
                 SourceChannel {

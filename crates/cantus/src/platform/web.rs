@@ -2,8 +2,6 @@ use super::{DesktopApp, STATUS_SAMPLE_INTERVAL};
 use crate::{
     app::{AppUpdater, CantusApp, View, send_update},
     interaction::InputEvent,
-    music::MusicResult,
-    platform::CaptionFile,
     render::{
         Renderer,
         status::{AudioMonitor, ProcessorSample, SystemSample},
@@ -32,10 +30,6 @@ pub trait Task = Future + 'static;
 
 pub fn spawn_task(task: impl Task<Output = ()>) {
     wasm_bindgen_futures::spawn_local(task);
-}
-
-pub async fn captions(_url: String) -> MusicResult<CaptionFile> {
-    Err("External captions are unavailable on this platform".into())
 }
 
 /// Entry point used by the generated browser glue.

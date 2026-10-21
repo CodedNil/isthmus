@@ -2,8 +2,7 @@ use crate::{
     app::{AppUpdater, CantusApp, View, send_update},
     config,
     interaction::{InputEvent, Interaction},
-    music::MusicResult,
-    platform::{CaptionFile, STATUS_SAMPLE_INTERVAL},
+    platform::STATUS_SAMPLE_INTERVAL,
     render::{
         PANEL_START, Renderer,
         launcher::CORNER_RADIUS,
@@ -128,46 +127,6 @@ impl Drop for NativeSurface {
     fn drop(&mut self) {
         self.wl.destroy();
     }
-}
-
-pub async fn captions(url: String) -> MusicResult<CaptionFile> {
-    spawn_blocking(move || {
-        let dir = env::temp_dir().join(format!("cantus-subs-{}-{:016x}", process::id(), fastrand::u64(..)));
-        fs::create_dir_all(&dir)?;
-        let template = dir.join("caption.%(ext)s");
-        let result = Command::new("yt-dlp")
-            .args([
-                "--ignore-config",
-                "--no-playlist",
-                "--skip-download",
-                "--write-subs",
-                "--write-auto-subs",
-                "--sub-langs",
-                "en.*",
-                "--sub-format",
-                "json3/ttml/srv3/vtt/srt/best",
-                "--output",
-                template.to_str().ok_or("invalid subtitle path")?,
-                &url,
-            ])
-            .output();
-        let caption = fs::read_dir(&dir)?.filter_map(Result::ok).find_map(|entry| {
-            let path = entry.path();
-            let format = path.extension()?.to_str()?.to_ascii_lowercase();
-            ["json3", "ttml", "vtt", "srt", "srv3"]
-                .contains(&format.as_str())
-                .then(|| Some((format, fs::read_to_string(path).ok()?)))
-                .flatten()
-        });
-        let _ = fs::remove_dir_all(&dir);
-        let output = result?;
-        if !output.status.success() && caption.is_none() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned().into());
-        }
-        let (format, source) = caption.unwrap_or_default();
-        Ok(CaptionFile { format, source })
-    })
-    .await?
 }
 
 const PANEL_OVERFLOW: f32 = 12.0;

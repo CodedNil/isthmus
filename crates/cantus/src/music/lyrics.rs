@@ -1,5 +1,5 @@
 use super::{MusicResult, Track, spotify::Spotify};
-use crate::{app::fetch_json, platform::captions};
+use crate::app::fetch_json;
 use reqwest::{Client, StatusCode};
 use roxmltree::{Document, Node};
 use serde::Deserialize;
@@ -25,8 +25,6 @@ pub struct Lyrics {
     pub channels: Vec<Channel>,
     pub sections: Vec<LyricSegment>,
     pub timing: Timing,
-    /// Subtitles keep a fixed text size rather than stretching sung fragments.
-    pub is_caption: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, AsRefStr, Display)]
@@ -160,35 +158,6 @@ pub(super) async fn fetch(
     session: &Mutex<Session>,
     spotify: &Spotify,
 ) -> MusicResult<Lyrics> {
-    let youtube_url = reqwest::Url::parse(&track.uri).is_ok_and(|url| {
-        matches!(
-            url.host_str(),
-            Some(
-                "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be" | "www.youtu.be"
-            )
-        )
-    });
-    if track.uri.starts_with("http://") || track.uri.starts_with("https://") {
-        match captions(track.uri.clone()).await {
-            Ok(file) if !file.source.is_empty() => {
-                let lyrics = match file.format.as_str() {
-                    "json3" => parse_json3(&file.source),
-                    "srv3" | "ttml" => parse_ttml(&file.source),
-                    // SubRip is WebVTT without a header, and both use `-->` cue timing.
-                    "vtt" | "srt" => parse_webvtt(&file.source),
-                    _ => Lyrics::default(),
-                };
-                if !lyrics.is_empty() {
-                    return Ok(Lyrics { is_caption: true, ..lyrics });
-                }
-            }
-            Err(error) => tracing::debug!(%error, url = %track.uri, "caption extraction unavailable"),
-            _ => {}
-        }
-    }
-    if youtube_url {
-        return Ok(Lyrics::default());
-    }
     let mut best = Ok(Lyrics::default());
     let title = track.compact_title().split(" (").next().unwrap_or(&track.name);
     let artist = track.primary_artist();
@@ -226,104 +195,6 @@ pub(super) async fn fetch(
         }
     }
     best
-}
-
-// JSON3 contains each phrase once, unlike rolling WebVTT captions.
-fn parse_json3(source: &str) -> Lyrics {
-    #[derive(Deserialize)]
-    struct Captions {
-        events: Vec<Event>,
-    }
-    #[derive(Deserialize)]
-    struct Event {
-        #[serde(rename = "tStartMs")]
-        start: f32,
-        #[serde(rename = "dDurationMs", default)]
-        duration: f32,
-        #[serde(default)]
-        segs: Vec<Part>,
-    }
-    #[derive(Deserialize)]
-    struct Part {
-        utf8: String,
-        #[serde(rename = "tOffsetMs", default)]
-        offset: f32,
-    }
-    let Ok(captions) = serde_json::from_str::<Captions>(source) else { return Lyrics::default() };
-    let mut segments = Vec::<LyricSegment>::new();
-    for event in captions.events {
-        if event.segs.iter().all(|part| part.utf8.trim().is_empty()) {
-            continue; // Window definitions and line breaks carry no speech.
-        }
-        if let Some(previous) = segments.last_mut() {
-            previous.time.end = previous.time.end.min(event.start);
-        }
-        let mut annotation = false;
-        let mut text = String::new();
-        let mut start = event.start;
-        for part in event.segs {
-            let spoken: String = part
-                .utf8
-                .chars()
-                .filter_map(|ch| match ch {
-                    '[' => {
-                        annotation = true;
-                        None
-                    }
-                    ']' => {
-                        annotation = false;
-                        Some(' ')
-                    }
-                    _ => (!annotation).then_some(ch),
-                })
-                .collect();
-            if text.trim().is_empty() && !spoken.trim().is_empty() {
-                start = event.start + part.offset;
-            }
-            text.push_str(&spoken);
-        }
-        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        segments.push(LyricSegment { time: start..event.start + event.duration, text: format!("{text} ") });
-    }
-    segments.retain(|segment| !segment.text.trim().is_empty() && segment.time.end > segment.time.start);
-    Lyrics::from_segments(segments, Timing::Line)
-}
-
-fn clean_caption(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut tag = false;
-    for ch in text.chars() {
-        match ch {
-            '<' => tag = true,
-            '>' if tag => tag = false,
-            _ if !tag => result.push(ch),
-            _ => {}
-        }
-    }
-    result
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn parse_webvtt(source: &str) -> Lyrics {
-    let mut segments = Vec::new();
-    for block in source.replace("\r\n", "\n").split("\n\n") {
-        let mut lines = block.lines();
-        let Some((start, end)) = lines.find_map(|line| line.split_once("-->")) else { continue };
-        let Some(start) = time(start) else { continue };
-        let Some(end) = time(end.split_whitespace().next().unwrap_or_default()) else { continue };
-        let text = clean_caption(&lines.collect::<Vec<_>>().join(" "));
-        if !text.is_empty() && end > start {
-            segments.push(LyricSegment { time: start..end, text: format!("{text} ") });
-        }
-    }
-    Lyrics::from_segments(segments, Timing::Line)
 }
 
 async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics> {

@@ -150,18 +150,18 @@ impl Interaction {
     }
 
     /// Captured drag displacement and release state, even when its widget is no longer drawn.
-    pub fn drag_motion(&self) -> Option<(u64, Vec2, bool)> {
+    pub fn drag_motion(&self) -> Option<(Vec2, bool)> {
         if !self.enabled {
             return None;
         }
-        if let Some(Active::Drag(id)) = self.active
+        if matches!(self.active, Some(Active::Drag(_)))
             && self.dragging()
             && let Pointer::Held { position, origin, .. } = self.pointer
         {
-            return Some((id, position - origin, false));
+            return Some((position - origin, false));
         }
         self.events.iter().rev().find_map(|event| match event {
-            ButtonEvent::Release { id: Active::Drag(id), drag_offset: Some(offset) } => Some((*id, *offset, true)),
+            ButtonEvent::Release { id: Active::Drag(_), drag_offset: Some(offset) } => Some((*offset, true)),
             _ => None,
         })
     }
@@ -295,7 +295,7 @@ mod tests {
             interaction.apply(InputEvent::Motion(Vec2::new(5.0 + offset, 5.0)));
             interaction.apply(InputEvent::Release);
 
-            assert_eq!(interaction.drag_motion(), dragged.then_some((7, Vec2::new(offset, 0.0), true)));
+            assert_eq!(interaction.drag_motion(), dragged.then_some((Vec2::new(offset, 0.0), true)));
             interaction.begin_frame(0.0, 0.0);
             assert_eq!(interaction.drag(7, shape).clicked, !dragged);
             interaction.end_frame();

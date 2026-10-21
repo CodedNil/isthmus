@@ -10,13 +10,9 @@ use std::{
 };
 use tracing::{info, warn};
 use web_time::Instant;
-#[cfg(target_os = "linux")]
-use zbus::OwnedObjectPath;
 
 pub mod enrichment;
 pub mod lyrics;
-#[cfg(target_os = "linux")]
-pub mod mpris;
 pub mod queue;
 #[cfg_attr(target_arch = "wasm32", path = "web.rs")]
 mod spotify;
@@ -38,28 +34,11 @@ pub struct Music {
     pub queue: Queue,
     pub playlists: Vec<CondensedPlaylist> = Vec::new(),
     pub last_toggle: Instant,
-    pub local: Option<LocalTrack> = None,
     pub(crate) spotify: spotify::Spotify,
-}
-
-pub struct LocalTrack {
-    pub track: Track,
-    pub timeline: Timeline,
-    pub playing: bool,
-    #[cfg(target_os = "linux")]
-    pub source: String,
-    #[cfg(target_os = "linux")]
-    pub(crate) mpris_id: OwnedObjectPath,
-    #[cfg(target_os = "linux")]
-    pub(crate) reported_position: Option<f32>,
-    pub can_seek: bool,
-    pub can_toggle: bool,
 }
 
 impl Music {
     pub(crate) fn new(config: &Config, updater: &AppUpdater) -> Self {
-        #[cfg(target_os = "linux")]
-        mpris::start(updater.clone());
         Self {
             resources: TrackCache::default(),
             queue: Queue { timeline: Timeline { observed_at: Instant::now(), .. }, .. },
@@ -69,69 +48,26 @@ impl Music {
         }
     }
 
-    pub const fn local_foreground(&self) -> bool {
-        self.local.is_some() && !self.playing
-    }
-
-    pub fn foreground_playing(&self) -> bool {
-        self.playing || self.local.as_ref().is_some_and(|local| local.playing)
-    }
-
-    pub fn update_playback(&mut self, drag: Option<(u64, f32, bool)>, delta_time: f32) {
-        let local_drag =
-            self.local.as_ref().is_some_and(|local| drag.is_some_and(|(id, ..)| id == local.track.interaction_id));
-        self.queue.update(drag.filter(|_| !local_drag).map(|(_, offset, _)| offset), delta_time);
-        if let Some(local) = &mut self.local {
-            let offset = drag.filter(|_| local_drag).map_or(0.0, |(_, offset, _)| offset);
-            let mut position = (local.timeline.precise_position_now() - f64::from(offset)).max(0.0);
-            if local.track.duration_ms > 0 {
-                position = position.min(f64::from(local.track.duration_ms));
-            }
-            local.timeline.update(-position, local_drag, delta_time);
-        }
-        if drag.is_some_and(|(_, _, released)| released) {
-            let target = if local_drag {
-                self.local.as_ref().map(|local| (None, -local.timeline.start_ms as f32))
-            } else {
-                self.queue.span_at_playhead().map(|(index, position)| (Some(index), position))
-            };
-            if let Some((index, position)) = target {
-                self.seek(index, position);
-            }
-        }
-    }
-
-    pub fn seek(&mut self, index: Option<usize>, position: f32) {
-        if let Some(index) = index {
-            let Some(track) = self.queue.tracks.get(index) else { return };
-            let skip = (index as i64 - self.queue.index as i64).clamp(-10, 10) as i8;
-            self.spotify.command(if skip == 0 {
-                PlaybackCommand::Seek(position.clamp(0.0, track.duration_ms as f32).round() as u32)
-            } else {
-                PlaybackCommand::Skip(skip)
-            });
-        } else if let Some(local) = &mut self.local
-            && local.can_seek
-            && local.track.duration_ms > 0
+    pub fn update_playback(&mut self, drag: Option<(f32, bool)>, delta_time: f32) {
+        self.queue.update(drag.map(|(offset, _)| offset), delta_time);
+        if drag.is_some_and(|(_, released)| released)
+            && let Some((index, position)) = self.queue.span_at_playhead()
         {
-            let position = position.clamp(0.0, local.track.duration_ms as f32).round();
-            #[cfg(target_os = "linux")]
-            mpris::command(local, PlaybackCommand::Seek(position as u32));
-            local.timeline.position_ms = position;
-            local.timeline.observed_at = Instant::now();
+            self.seek(index, position);
         }
+    }
+
+    pub fn seek(&self, index: usize, position: f32) {
+        let Some(track) = self.queue.tracks.get(index) else { return };
+        let skip = (index as i64 - self.queue.index as i64).clamp(-10, 10) as i8;
+        self.spotify.command(if skip == 0 {
+            PlaybackCommand::Seek(position.clamp(0.0, track.duration_ms as f32).round() as u32)
+        } else {
+            PlaybackCommand::Skip(skip)
+        });
     }
 
     pub fn toggle_playing(&self) {
-        if self.local_foreground()
-            && let Some(local) = &self.local
-        {
-            if local.can_toggle {
-                #[cfg(target_os = "linux")]
-                mpris::command(local, PlaybackCommand::SetPlaying(!local.playing));
-            }
-            return;
-        }
         let playing = !self.playing;
         info!("{} current track", if playing { "Playing" } else { "Pausing" });
         self.spotify.command(PlaybackCommand::SetPlaying(playing));

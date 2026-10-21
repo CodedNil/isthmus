@@ -19,8 +19,6 @@ use jiff::{
     civil::{DateTime, Time},
     tz::{Offset, TimeZone},
 };
-#[cfg(target_os = "linux")]
-use std::env;
 use std::{array::from_fn, fmt::Write};
 use tracing::warn;
 
@@ -287,7 +285,6 @@ pub struct WeatherPanel {
     arrow_hover: [f32; 2],
     /// Animated presence of the timer readout.
     timer_presence: f32,
-    profile_weather: Option<u8>,
 }
 
 /// Geometry shared by the panel and its text during one draw.
@@ -624,13 +621,6 @@ impl WeatherLayout {
 
 impl WeatherPanel {
     pub(crate) fn new(timezones: &[String], background: &Background) -> Self {
-        #[cfg(target_os = "linux")]
-        let profile_weather = env::args()
-            .skip_while(|arg| arg != "--profile-weather-code")
-            .nth(1)
-            .map(|code| code.parse().expect("--profile-weather-code requires a WMO weather code"));
-        #[cfg(not(target_os = "linux"))]
-        let profile_weather = None;
         let mut forecast_timezones = Vec::with_capacity(timezones.len());
         let timezones: ArrayVec<_, MAX_WORLD_CLOCKS> = timezones
             .iter()
@@ -643,7 +633,7 @@ impl WeatherPanel {
             })
             .collect();
         platform::spawn_task(monitor::run(forecast_timezones, background.clone()));
-        Self { timezones, details: "Weather unavailable".into(), profile_weather, ..Default::default() }
+        Self { timezones, details: "Weather unavailable".into(), ..Default::default() }
     }
 
     pub fn show(&mut self, context: &mut UiContext, status_width: f32, timer: &Timer) -> StatusSky {
@@ -662,12 +652,10 @@ impl WeatherPanel {
         let timer_support = vec2((width + TIMER_PADDING * 2.0) * presence, TIMER_DEPTH * presence);
         let hovered =
             context.interaction.pointer_in(weather_panel(pill, self.expansion.smoothstep(0.0, 1.0), timer_support));
-        self.expansion = self.expansion.move_towards(
-            f32::from(hovered || self.profile_weather.is_some()),
-            context.frame.delta_time.min(1.0 / 30.0) * 3.0,
-        );
+        self.expansion =
+            self.expansion.move_towards(f32::from(hovered), context.frame.delta_time.min(1.0 / 30.0) * 3.0);
         let (weather_label, hour) = self.collapsed_label();
-        let current = self.profile_weather.map_or(self.hourly[0].conditions, |code| monitor::weather(code).1);
+        let current = self.hourly[0].conditions;
         let sun = Vec2::from(sun_position(hour, self.sun_hours));
         let expansion = self.expansion.smoothstep(0.0, 1.0);
         let layout = WeatherLayout { pill, expansion, timer_support };

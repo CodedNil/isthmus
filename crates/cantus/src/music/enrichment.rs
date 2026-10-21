@@ -9,8 +9,6 @@ use image::{RgbaImage, imageops};
 use isthmus::{Image, Unorm8x4, glam::Vec3};
 use isthmus_sdf::layout::TextCache;
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
-#[cfg(not(target_arch = "wasm32"))]
-use std::fs;
 use std::{array, collections::HashMap, fmt::Display, hash::Hash, ops::Range, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
@@ -125,7 +123,7 @@ impl CantusApp {
         let music = &mut self.music;
         let resources = &mut music.resources;
         let queue = &music.queue;
-        let tracks = queue.tracks.iter().chain(music.local.iter().map(|local| &local.track));
+        let tracks = queue.tracks.iter();
         resources.art.retain(|url, state| {
             matches!(state, Fetch::Fetching)
                 || tracks.clone().any(|track| track.image.as_ref() == Some(url))
@@ -195,12 +193,6 @@ impl CantusApp {
             self.background.fetch(
                 url.clone(),
                 async move {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if url.starts_with("file:") {
-                        let path =
-                            reqwest::Url::parse(&url)?.to_file_path().map_err(|()| "Invalid artwork file URL")?;
-                        return spawn_blocking(move || -> MusicResult<_> { Ok(decode_art(&fs::read(path)?)?) }).await?;
-                    }
                     let bytes = http.get(&url).send().await?.error_for_status()?.bytes().await?;
                     #[cfg(not(target_arch = "wasm32"))]
                     let art = spawn_blocking(move || decode_art(&bytes)).await??;
