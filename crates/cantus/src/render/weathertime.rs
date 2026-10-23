@@ -124,17 +124,54 @@ fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
     }
 }
 
-/// One layer; `kind` is a literal at every call site, so the tables below fold away.
+/// Two depths of translucent rain, with independently moving fields of soft streaks.
+fn rainfall(background: Vec3, p: Vec2, time: f32, strength: f32) -> Vec3 {
+    if strength <= VISIBLE_ALPHA {
+        return background;
+    }
+    let mut coverage = 0.0;
+    for layer in 0..2 {
+        let depth = layer as f32;
+        let cell_size = vec2(22.0, 40.0) + vec2(6.0, 16.0) * depth;
+        let velocity = vec2(16.0, 145.0) + vec2(18.0, 95.0) * depth;
+        let q = p - velocity * time + vec2(41.7, 19.3) * depth;
+        let base = (q / cell_size - 0.5).floor();
+        // Sample neighbouring cells so feathered tails cross cell boundaries intact.
+        // Centres stay in the middle half; each streak fits within a half-cell.
+        for y in 0..2 {
+            for x in 0..2 {
+                let cell = base + vec2(x as f32, y as f32);
+                let random = hash(cell + depth * 71.3);
+                let detail = hash(cell + 19.3 + depth * 43.1);
+                let presence = detail.x.smoothstep(1.0 - strength * 0.82, 1.04 - strength * 0.82);
+                let center = (cell + vec2(0.25, 0.3) + random * vec2(0.5, 0.4)) * cell_size;
+                let local = q - center;
+                let length = (5.5 + detail.y * detail.y * 18.0) * (0.7 + depth * 0.3);
+                let direction = vec2(0.06 + random.x * 0.18, 1.0).normalize();
+                let along = local.dot(direction);
+                let across = (local.x * direction.y - local.y * direction.x).abs();
+                let width = 0.45 + random.y * 0.45 + (1.0 - depth) * 0.35;
+                // A small feather around the whole drop softens both sides and ends.
+                let blur = 0.5;
+                let body = across.smoothstep(width + 0.9 + blur, 0.0);
+                let tail = along.smoothstep(-length * 0.5 - blur, length * 0.25);
+                let head = along.smoothstep(length * 0.5 + 0.8 + blur, length * 0.2);
+                coverage += body * tail * head * presence * (0.30 + depth * 0.24) * (0.6 + random.y * 0.4);
+            }
+        }
+    }
+    // Keep the sky's palette, with enough contrast to read through the panel's glass.
+    let rain_color = background * 0.3 + vec3(0.06, 0.09, 0.12);
+    background.lerp(rain_color, coverage.saturate())
+}
+
+/// Snow and hail share a drifting particle field; `kind` is literal at each call site.
 fn precipitation(background: Vec3, p: Vec2, time: f32, kind: i32, strength: f32) -> Vec3 {
     if strength <= VISIBLE_ALPHA {
         return background;
     }
-    let rain = kind == 0;
     let snow = kind == 1;
-    let (velocity, cell_size, radius, density, trail) = if rain {
-        // Rain intensity changes the number of drops, not their falling speed.
-        (vec2(33.0, 220.0), vec2(15.0, 25.0), 0.55, strength.saturate() * 0.9, 14.0)
-    } else if snow {
+    let (velocity, cell_size, radius, density, trail) = if snow {
         (vec2(5.0, 14.0), Vec2::splat(20.0), 1.15, 0.7, 0.4)
     } else {
         (vec2(18.0, 85.0), Vec2::splat(23.0), 0.35, 0.3, 1.2)
@@ -143,47 +180,18 @@ fn precipitation(background: Vec3, p: Vec2, time: f32, kind: i32, strength: f32)
     let cell = (q / cell_size).floor();
     let random = hash(cell + kind as f32 * 31.7);
     let center = (cell + 0.15 + random * 0.7) * cell_size;
-    let angle = if rain { 0.15 + (random.x - 0.5) * 0.025 } else { 0.08 + random.x * 0.3 };
-    let length = trail * if rain { 0.9 + random.y * 0.2 } else { 0.8 + random.y * 0.4 };
-    let drift = if rain {
-        Vec2::ZERO
-    } else {
-        vec2(
-            (time * (0.55 + random.x * 0.45) + random.y * PI * 2.0).sin() * 1.5,
-            (time * (3.5 + random.y * 1.5) + random.x * PI * 2.0).sin() * 8.0,
-        )
-    };
-    // Keep rain streaks inside their cells so they do not clip as they move.
-    let center = if rain { (cell + 0.12 + random * vec2(0.65, 0.24)) * cell_size } else { center };
+    let angle = 0.08 + random.x * 0.3;
+    let length = trail * (0.8 + random.y * 0.4);
+    let drift = vec2(
+        (time * (0.55 + random.x * 0.45) + random.y * PI * 2.0).sin() * 1.5,
+        (time * (3.5 + random.y * 1.5) + random.x * PI * 2.0).sin() * 8.0,
+    );
     let local = q - center - drift;
     let distance = Shape::segment(Vec2::ZERO, vec2(angle, 1.0) * length, 0.0).distance_at(local);
-    let presence = if rain {
-        hash(cell + 19.3).x.smoothstep(1.0 - density, 1.025 - density)
-    } else {
-        hash(cell + 19.3).x.smoothstep(1.0 - density, 1.0)
-    };
-    let taper = if rain { 0.3 + local.y.smoothstep(0.0, length) * 0.7 } else { 1.0 };
-    let particle = distance.smoothstep(radius + 0.45, radius - 0.15) * presence * taper;
-    let color = if rain {
-        vec3(0.18, 0.3, 0.43)
-    } else if snow {
-        Vec3::splat(0.96)
-    } else {
-        vec3(0.75, 0.86, 0.94)
-    };
-    background.lerp(
-        color,
-        (particle
-            * if rain { strength.smoothstep(0.0, 0.025) } else { strength }
-            * if snow {
-                0.92
-            } else if rain {
-                0.72
-            } else {
-                0.7
-            })
-        .saturate(),
-    )
+    let presence = hash(cell + 19.3).x.smoothstep(1.0 - density, 1.0);
+    let particle = distance.smoothstep(radius + 0.45, radius - 0.15) * presence;
+    let color = if snow { Vec3::splat(0.96) } else { vec3(0.75, 0.86, 0.94) };
+    background.lerp(color, (particle * strength * if snow { 0.92 } else { 0.7 }).saturate())
 }
 
 /// Three cloud octaves.
@@ -242,7 +250,7 @@ pub fn scene(time: f32, cloud_scale: f32, p: Vec2, width: f32, phase: Vec3, weat
     }
 
     color = color.lerp(vec3(0.1, 0.17, 0.25), weather.rain * 0.2);
-    color = precipitation(color, p, time, 0, weather.rain);
+    color = rainfall(color, p, time, weather.rain);
     color = precipitation(color, p, time, 1, weather.snow);
     color = precipitation(color, p, time, 2, weather.hail);
 
