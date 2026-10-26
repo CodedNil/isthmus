@@ -12,7 +12,7 @@ use crate::{
     },
 };
 use calloop::{EventLoop, channel};
-use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
+pub use catalog::{load_desktop_icons, start_app_catalog};
 use futures_util::StreamExt;
 use isthmus::{
     SurfaceHandle,
@@ -27,7 +27,7 @@ use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
 use serde_json::Value;
 use smallvec::SmallVec;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     env,
     error::Error,
     fs::{self, File},
@@ -46,7 +46,7 @@ use std::{
     time::{Duration, Instant},
 };
 pub use tokio::time::sleep;
-use tokio::{net, runtime, sync::oneshot, task::spawn_blocking};
+use tokio::{net, runtime, sync::oneshot};
 use tracing::warn;
 use wayland_client::{
     Connection, Proxy, QueueHandle, WEnum,
@@ -84,6 +84,9 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 use xkbcommon::xkb;
 use zbus::{OwnedObjectPath, OwnedVariant, Variant, proxy::CacheProperties};
+
+#[path = "linux/catalog.rs"]
+mod catalog;
 
 macro_rules! dispatch {
     ($app:ty, $proxy:ty, |$state:ident, $object:ident, $value:ident, $queue:ident| $body:block) => {
@@ -183,63 +186,6 @@ pub fn run_power_action(action: super::PowerAction) {
     });
 }
 
-pub async fn desktop_apps() -> Vec<super::DesktopApp> {
-    spawn_blocking(scan_desktop_apps).await.expect("desktop app scan panicked")
-}
-
-fn scan_desktop_apps() -> Vec<super::DesktopApp> {
-    let mut seen = HashSet::new();
-    let locales = get_languages_from_env();
-    desktop_entries(&locales)
-        .into_iter()
-        .filter(|entry| seen.insert(entry.id().to_owned()))
-        .filter(|entry| !entry.no_display() && !entry.hidden() && !entry.terminal())
-        .filter_map(|entry| {
-            let exec = entry.parse_exec().ok()?;
-            let mut search_terms = vec![entry.appid.clone()];
-            for languages in [locales.as_slice(), &[]] {
-                search_terms.extend(entry.name(languages).map(std::borrow::Cow::into_owned));
-                search_terms.extend(entry.generic_name(languages).map(std::borrow::Cow::into_owned));
-                search_terms.extend(
-                    entry.keywords(languages).unwrap_or_default().into_iter().map(std::borrow::Cow::into_owned),
-                );
-            }
-            search_terms.extend(entry.startup_wm_class().map(str::to_owned));
-            if let Some(program) = exec.first().and_then(|s| Path::new(s).file_name()).and_then(|s| s.to_str()) {
-                search_terms.push(program.to_owned());
-            }
-            search_terms.sort();
-            search_terms.dedup();
-            let action = entry.actions().and_then(|actions| {
-                let action = actions.into_iter().find(|action| !action.is_empty())?;
-                let name = entry.action_entry_localized(action, "Name", &locales)?;
-                Some((name.into_owned(), entry.parse_exec_action(action).ok()?))
-            });
-            Some(super::DesktopApp {
-                name: entry.name(&locales)?.into_owned(),
-                search_terms,
-                exec,
-                comment: entry.comment(&locales).unwrap_or_default().into_owned(),
-                action,
-                icon: entry
-                    .icon()
-                    .and_then(|icon| {
-                        let path = Path::new(icon);
-                        if path.is_absolute() {
-                            Some(path.to_owned())
-                        } else {
-                            freedesktop_icons::lookup(icon).with_size(64).find()
-                        }
-                    })
-                    .and_then(|path| {
-                        let bytes = fs::read(path).ok()?;
-                        super::decode_icon(&bytes)
-                    }),
-            })
-        })
-        .collect()
-}
-
 pub fn spawn(command: &[String]) {
     let Some((program, args)) = command.split_first() else {
         return;
@@ -281,7 +227,7 @@ pub fn start_launcher_listener(updater: &AppUpdater) {
         };
         let mut buffer = [0u8; 1];
         while socket.recv(&mut buffer).await.is_ok() {
-            if !send_update(&updater, |app| app.launcher.toggle(&app.background)) {
+            if !send_update(&updater, |app| app.launcher.toggle()) {
                 warn!("Launcher toggle update was discarded");
                 break;
             }

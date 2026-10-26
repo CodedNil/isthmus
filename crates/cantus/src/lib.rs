@@ -6,6 +6,7 @@ pub use app::run;
 pub use config::generate_nix_options;
 
 mod app;
+mod catalog;
 pub(crate) mod config;
 pub(crate) mod interaction;
 pub(crate) mod music;
