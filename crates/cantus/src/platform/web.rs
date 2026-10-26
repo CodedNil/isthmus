@@ -98,24 +98,33 @@ pub const fn set_volume(_volume: f32) {}
 
 pub const fn run_power_action(_action: super::PowerAction) {}
 
-pub async fn desktop_apps() -> Vec<DesktopApp> {
-    [
-        ("Example Notes", "A small example application"),
-        ("Example Calendar", "A browser calendar example"),
-        ("Example Files", "A browser file manager example"),
-        ("Example Mail", "A browser mail example"),
-        ("Example Terminal", "A browser terminal example"),
-    ]
-    .into_iter()
-    .map(|(name, comment)| DesktopApp {
-        name: name.into(),
-        search_terms: Vec::new(),
-        exec: vec![format!("demo:{name}")],
-        comment: comment.into(),
-        action: None,
-        icon: None,
-    })
-    .collect()
+pub fn start_app_catalog(updater: &AppUpdater) {
+    let updater = updater.clone();
+    spawn_task(async move {
+        let apps = [
+            ("Example Notes", "A small example application"),
+            ("Example Calendar", "A browser calendar example"),
+            ("Example Files", "A browser file manager example"),
+            ("Example Mail", "A browser mail example"),
+            ("Example Terminal", "A browser terminal example"),
+        ]
+        .into_iter()
+        .map(|(name, comment)| DesktopApp {
+            id: format!("demo:{name}"),
+            name: name.into(),
+            search_terms: Vec::new(),
+            exec: vec![format!("demo:{name}")],
+            comment: comment.into(),
+            action: None,
+            icon: None,
+        })
+        .collect();
+        send_update(&updater, move |app| app.launcher.set_catalog(crate::catalog::AppCatalog::new(apps)));
+    });
+}
+
+pub async fn load_desktop_icons(sources: Vec<String>) -> Vec<(String, Option<isthmus::Image>)> {
+    sources.into_iter().map(|source| (source, None)).collect()
 }
 
 pub const fn spawn(_command: &[String]) {}
@@ -203,8 +212,7 @@ async fn run_web() -> Result<(), Box<dyn Error>> {
             let event = event.unchecked_ref::<web_sys::KeyboardEvent>();
             let mut app = key_app.borrow_mut();
             if event.ctrl_key() && event.key() == "k" {
-                let background = app.background.clone();
-                app.launcher.toggle(&background);
+                app.launcher.toggle();
                 event.prevent_default();
                 return;
             }

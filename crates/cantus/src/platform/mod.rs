@@ -1,6 +1,6 @@
 pub use backend::{
-    Task, current_location, desktop_apps, open_url, run, run_power_action, set_volume, sleep, spawn, spawn_task,
-    start_launcher_listener, start_status_monitor, trigger_launcher,
+    Task, current_location, load_desktop_icons, open_url, run, run_power_action, set_volume, sleep, spawn, spawn_task,
+    start_app_catalog, start_launcher_listener, start_status_monitor, trigger_launcher,
 };
 use image::imageops::FilterType;
 use isthmus::Image;
@@ -25,13 +25,16 @@ pub enum PowerAction {
 pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// One launchable application entry exposed to the launcher.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DesktopApp {
+    pub id: String,
     pub name: String,
     pub search_terms: Vec<String>,
     pub exec: Vec<String>,
     pub comment: String,
     pub action: Option<(String, Vec<String>)>,
-    pub icon: Option<Image>,
+    /// An icon name or absolute file path. Resolved and decoded only for visible results.
+    pub icon: Option<String>,
 }
 
 pub fn decode_icon(bytes: &[u8]) -> Option<Image> {

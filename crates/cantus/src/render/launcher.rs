@@ -1,8 +1,9 @@
 use crate::{
     app::{Background, CantusApp, fetch_json},
+    catalog::AppCatalog,
     config::SearchProvider,
     interaction::key,
-    platform::{self, DesktopApp},
+    platform,
     render::{
         GAP, PADDING, Program, TEXT_COLOR, TEXT_HEADING, TEXT_SMALL, TEXT_TITLE, UNIT, UiContext,
         sdf::{deform, glass, presence},
@@ -13,7 +14,12 @@ use fend_core::Context;
 use isthmus::prelude::*;
 use isthmus_sdf::prelude::*;
 use serde::Deserialize;
-use std::{collections::HashMap, error::Error, mem, ops::Range, sync::OnceLock};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    ops::Range,
+    sync::OnceLock,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 const PANEL_WIDTH: f32 = 520.0;
@@ -34,54 +40,6 @@ const SEARCH_ICON: u32 = 2;
 const TIMER_ICON: u32 = 3;
 /// Confidence given to a successful calculation; an exactly named app still wins.
 const ANSWER_CONFIDENCE: f32 = 0.9;
-/// Confidence below which an app name is not worth listing.
-const MIN_CONFIDENCE: f32 = 0.6;
-
-/// Confidence that `query` names `text`, from 0 to 1.
-///
-/// Containment ranks highest, scaled by how much of the name the query covers, so
-/// `code` still finds `Visual Studio Code`. Otherwise edit distance catches typos.
-pub fn confidence(query: &str, text: &str) -> f32 {
-    let (query, text) = (query.trim().to_lowercase(), text.to_lowercase());
-    if query.is_empty() || text.is_empty() {
-        return 0.0;
-    }
-    let coverage = query.len() as f32 / text.len() as f32;
-    if text.starts_with(&query) {
-        return 0.8 + 0.2 * coverage;
-    }
-    if text.contains(&query) {
-        return MIN_CONFIDENCE + 0.2 * coverage;
-    }
-    similarity(&query, &text)
-}
-
-/// Rank names first, then desktop metadata and descriptions.
-fn app_confidence(query: &str, app: &DesktopApp) -> f32 {
-    let aliases = app.search_terms.iter().map(|term| confidence(query, term) * 0.95).fold(0.0, f32::max);
-    // Descriptions are useful for discovery, but should rank below names and aliases.
-    confidence(query, &app.name).max(aliases).max(confidence(query, &app.comment) * 0.9)
-}
-
-/// Normalized edit distance between two words, from 0 to 1.
-pub fn similarity(a: &str, b: &str) -> f32 {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    if a.is_empty() || b.is_empty() {
-        return 0.0;
-    }
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    let mut current = vec![0; b.len() + 1];
-    for (row, left) in a.iter().enumerate() {
-        current[0] = row + 1;
-        for (column, right) in b.iter().enumerate() {
-            let substitute = previous[column] + usize::from(left != right);
-            current[column + 1] = substitute.min(previous[column + 1] + 1).min(current[column] + 1);
-        }
-        mem::swap(&mut previous, &mut current);
-    }
-    1.0 - previous[b.len()] as f32 / a.len().max(b.len()) as f32
-}
-
 /// Currency rates relative to USD, read by fend for conversions.
 static EXCHANGE_RATES: OnceLock<HashMap<String, f64>> = OnceLock::new();
 
@@ -217,7 +175,11 @@ pub struct LauncherState {
     /// Timer request waiting to be applied to the application's timer.
     pub pending_timer: Option<Request>,
     calc: Context,
-    apps: Vec<DesktopApp>,
+    catalog: AppCatalog,
+    background: Option<Background>,
+    icons: HashMap<String, Option<Image>>,
+    icon_requests: HashSet<String>,
+    icon_revision: u64,
     providers: Vec<SearchEngine>,
 }
 
@@ -264,6 +226,7 @@ impl LauncherState {
             .into_iter()
             .map(|config| SearchEngine { label: format!("Search with {}", config.name), config, icon: None })
             .collect::<Vec<_>>();
+        platform::start_app_catalog(&background.updater);
         for (index, provider) in providers.iter().enumerate() {
             let icon = provider.config.icon.clone();
             let http = background.http.clone();
@@ -275,27 +238,70 @@ impl LauncherState {
                 })
             });
         }
-        Self { calc, providers, ..Default::default() }
+        Self { calc, providers, background: Some(background.clone()), ..Default::default() }
     }
 
-    pub fn toggle(&mut self, background: &Background) {
+    pub fn toggle(&mut self) {
         self.session = self.session.wrapping_add(1);
         self.open = Self::ALWAYS_OPEN || !self.open;
-        self.apps.clear();
         self.edit(|field| *field = TextField { touched: true, ..Default::default() });
-        if self.open {
-            let session = self.session;
-            background.spawn_update(async move {
-                let mut apps = platform::desktop_apps().await;
-                apps.sort_by_key(|app| app.name.to_lowercase());
-                Some(move |app: &mut CantusApp| {
-                    if app.launcher.open && app.launcher.session == session {
-                        app.launcher.apps = apps;
-                        app.launcher.refresh_matches();
-                    }
-                })
-            });
+    }
+
+    /// Publish metadata atomically, preserving the user's highlighted application.
+    pub(crate) fn set_catalog(&mut self, catalog: AppCatalog) {
+        let selected = self.entries.get(self.selected).and_then(|entry| match entry {
+            Entry::App(index) => Some(self.catalog.apps[*index].id.clone()),
+            _ => None,
+        });
+        self.catalog = catalog;
+        self.icon_revision = self.icon_revision.wrapping_add(1);
+        self.icon_requests.clear();
+        let sources: HashSet<_> = self.catalog.apps.iter().filter_map(|app| app.icon.as_ref()).collect();
+        self.icons.retain(|source, _| sources.contains(source));
+        self.refresh_matches();
+        if let Some(selected) = selected
+            && let Some(index) = self.entries.iter().position(|entry| match entry {
+                Entry::App(index) => self.catalog.apps[*index].id == selected,
+                _ => false,
+            })
+        {
+            self.selected = index;
         }
+    }
+
+    fn request_visible_icons(&mut self) {
+        let Some(background) = self.background.as_ref().filter(|_| self.open) else {
+            return;
+        };
+        let sources: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::App(index) => self.catalog.apps[*index].icon.as_ref(),
+                _ => None,
+            })
+            .filter(|source| self.icon_requests.insert((*source).clone()))
+            .cloned()
+            .collect();
+        if sources.is_empty() {
+            return;
+        }
+        let revision = self.icon_revision;
+        background.spawn_update(async move {
+            let icons = platform::load_desktop_icons(sources).await;
+            Some(move |app: &mut CantusApp| {
+                if app.launcher.icon_revision == revision {
+                    app.launcher.icons.extend(icons);
+                }
+            })
+        });
+    }
+
+    /// Refresh visible icons in the background, keeping their current pixels on screen.
+    pub(crate) fn refresh_icons(&mut self) {
+        self.icon_revision = self.icon_revision.wrapping_add(1);
+        self.icon_requests.clear();
+        self.request_visible_icons();
     }
 
     /// Runs one edit against the search field, then re-runs the query.
@@ -357,10 +363,12 @@ impl LauncherState {
             if let Some(answer) = self.evaluate(&query) {
                 scored.push((ANSWER_CONFIDENCE, Entry::Answer(answer)));
             }
-            scored.extend(self.apps.iter().enumerate().filter_map(|(index, app)| {
-                let confidence = app_confidence(&query, app);
-                (confidence >= MIN_CONFIDENCE).then_some((confidence, Entry::App(index)))
-            }));
+            scored.extend(
+                self.catalog
+                    .search(&query, MAX_VISIBLE)
+                    .into_iter()
+                    .map(|(index, confidence)| (confidence, Entry::App(index))),
+            );
         }
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         scored.truncate(MAX_VISIBLE - usize::from(has_search));
@@ -369,6 +377,7 @@ impl LauncherState {
             self.entries.push(Entry::Search(provider.unwrap_or_default()));
         }
         self.selected = 0;
+        self.request_visible_icons();
     }
 
     /// Evaluates the query as an expression, unless the answer only echoes it.
@@ -389,7 +398,7 @@ impl LauncherState {
     pub fn activate(&mut self, index: usize, alternate: bool) {
         match self.entries.get(index) {
             Some(Entry::App(index)) => {
-                let app = &self.apps[*index];
+                let app = &self.catalog.apps[*index];
                 platform::spawn(app.action.as_ref().filter(|_| alternate).map_or(&app.exec, |(_, exec)| exec));
             }
             Some(Entry::Answer(answer)) => self.pending_copy = Some(answer.to_owned()),
@@ -530,7 +539,7 @@ impl LauncherState {
             let y = origin.y + HEADER_HEIGHT + PADDING + index as f32 * (ROW_HEIGHT + GAP);
             let pill = Rect::new(vec2(x, y), vec2(x + width, y + ROW_HEIGHT));
             let identity = match &self.entries[index] {
-                Entry::App(index) => key(("app", &self.apps[*index].exec)),
+                Entry::App(index) => key(("app", &self.catalog.apps[*index].id)),
                 Entry::Answer(answer) => key(("answer", answer)),
                 Entry::Search(index) => key(("search", &self.providers[*index].config.url, self.search_query().1)),
                 Entry::Timer { .. } => key("timer"),
@@ -544,9 +553,9 @@ impl LauncherState {
             }
             let entry = match &self.entries[index] {
                 Entry::App(index) => {
-                    let app = &self.apps[*index];
+                    let app = &self.catalog.apps[*index];
                     EntryView {
-                        image: app.icon.as_ref(),
+                        image: app.icon.as_ref().and_then(|source| self.icons.get(source)).and_then(Option::as_ref),
                         name: &app.name,
                         detail: &app.comment,
                         alternate: app.action.as_ref().map(|(label, _)| label.as_str()),
@@ -668,6 +677,7 @@ impl LauncherState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::DesktopApp;
 
     #[test]
     #[expect(clippy::float_cmp_const, reason = "layout constants are exact sums of small multiples")]
@@ -686,28 +696,37 @@ mod tests {
     }
 
     #[test]
-    fn ranks_name_matches() {
-        assert!(confidence("firefox", "Firefox") > confidence("fire", "Firefox"));
-        assert!(confidence("fire", "Firefox") > confidence("fox", "Firefox"));
-        // Containment must clear the listing threshold however little it covers.
-        assert!(confidence("fox", "Firefox") >= MIN_CONFIDENCE);
-        assert!(confidence("z", "Firefox") < MIN_CONFIDENCE);
-    }
-
-    #[test]
-    fn finds_apps_by_desktop_metadata() {
-        let app = DesktopApp {
-            name: "GNU Image Editor".into(),
-            search_terms: vec!["org.gimp.GIMP".into(), "gimp".into(), "photo".into()],
-            exec: vec!["gimp".into()],
-            comment: "Create images and edit photographs".into(),
+    fn warm_catalog_survives_reopening_and_updates_preserve_selection() {
+        let make_app = |id: &str, name: &str| DesktopApp {
+            id: id.into(),
+            name: name.into(),
+            search_terms: vec![],
+            exec: vec![id.into()],
+            comment: String::new(),
             action: None,
             icon: None,
         };
-        for query in ["gimp", "GIMP", "photo", "org.gimp", "GNU Image Editor"] {
-            assert!(app_confidence(query, &app) >= MIN_CONFIDENCE, "{query}");
-        }
-        assert!(app_confidence("GNU Image Editor", &app) > app_confidence("gimp", &app));
-        assert!(app_confidence("unrelated", &app) < MIN_CONFIDENCE);
+        let mut launcher = LauncherState::default();
+        launcher.set_catalog(AppCatalog::new(vec![make_app("steam", "Steam"), make_app("tools", "Steam Tools")]));
+        launcher.toggle();
+        launcher.edit(|field| field.insert("stea"));
+        assert!(matches!(launcher.entries[0], Entry::App(_)));
+        launcher.selected = 1;
+        launcher.set_catalog(AppCatalog::new(vec![
+            make_app("new", "Stea"),
+            make_app("tools", "Steam Tools"),
+            make_app("steam", "Steam"),
+        ]));
+        assert_eq!(launcher.field.text, "stea");
+        let Entry::App(index) = launcher.entries[launcher.selected] else {
+            panic!("selection lost");
+        };
+        assert_eq!(launcher.catalog.apps[index].id, "tools");
+        launcher.toggle();
+        launcher.toggle();
+        launcher.edit(|field| field.insert("steam"));
+        assert!(matches!(launcher.entries[0], Entry::App(_)));
+        launcher.set_catalog(AppCatalog::new(vec![]));
+        assert!(!launcher.entries.iter().any(|entry| matches!(entry, Entry::App(_))));
     }
 }
