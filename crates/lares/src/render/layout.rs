@@ -1,5 +1,5 @@
 //! Compile orthogonal room outlines into exact floor and wall boxes.
-use super::{CEILING_THICKNESS, FLOOR_THICKNESS, WALL_HEIGHT, WALL_THICKNESS};
+use super::{CEILING_THICKNESS, EXTERIOR_WALL_THICKNESS, FLOOR_THICKNESS, WALL_HEIGHT, WALL_THICKNESS};
 use crate::home::{Kind, Material, Object, Opening, Room, Walls};
 use isthmus::glam::{Vec2, Vec3, vec2, vec3};
 
@@ -25,13 +25,13 @@ fn subtract(wall: Object, cut: &Opening) -> Vec<Object> {
         if min[axis] < lo[axis] {
             let mut end = max;
             end[axis] = lo[axis];
-            pieces.push(slab(min, end));
+            pieces.push(Object { exterior: wall.exterior, ..slab(min, end) });
             min[axis] = lo[axis];
         }
         if max[axis] > hi[axis] {
             let mut start = min;
             start[axis] = hi[axis];
-            pieces.push(slab(start, max));
+            pieces.push(Object { exterior: wall.exterior, ..slab(start, max) });
             max[axis] = hi[axis];
         }
     }
@@ -58,7 +58,6 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
             if let Some(side) = side {
                 if room.walls.contains(Walls::from_bits_retain(1 << side)) {
                     let size = (size + Vec2::splat(WALL_THICKNESS)).extend(WALL_HEIGHT);
-                    walls.push(solid(center + Vec3::Z * WALL_HEIGHT * 0.5, size, Material::Paint));
                     // Interior trim follows each authored wall, sharing its opening cuts.
                     let normal = match side {
                         0 => Vec3::X,
@@ -66,6 +65,23 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
                         2 => -Vec3::X,
                         _ => -Vec3::Y,
                     };
+                    let authored_center = vec2(center.x + origin.x, origin.y - center.y);
+                    let authored_inward = vec2(normal.x, -normal.y);
+                    let outside = authored_center - authored_inward * (WALL_THICKNESS + 0.01);
+                    let exterior = !rooms.iter().any(|other| contains(other, outside));
+                    let thickness = if exterior { EXTERIOR_WALL_THICKNESS } else { WALL_THICKNESS };
+                    let extra = thickness - WALL_THICKNESS;
+                    let mut wall_size = size;
+                    if normal.x == 0.0 {
+                        wall_size.y += extra;
+                    } else {
+                        wall_size.x += extra;
+                    }
+                    // Grow outward only: preserve authored room clearances and trim.
+                    walls.push(Object {
+                        exterior: if exterior { -normal } else { Vec3::ZERO },
+                        ..solid(center - normal * extra * 0.5 + Vec3::Z * WALL_HEIGHT * 0.5, wall_size, Material::Paint)
+                    });
                     for (height, depth, base, material) in
                         [(0.10, 0.016, 0.022, Material::Paint), (0.022, 0.022, 0.0, Material::Wood)]
                     {
@@ -97,14 +113,31 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
             walls = walls.into_iter().flat_map(|wall| subtract(wall, cut)).collect();
         }
         objects.extend(walls);
-        objects.extend(
-            room.furniture
-                .iter()
-                .chain(room.lights.iter().map(|light| &light.fixture))
-                .map(|item| Object { pos: point(room, item.pos + Vec3::Z * item.size.z * 0.5, origin), ..*item }),
-        );
+        objects.extend(room.furniture.iter().chain(room.lights.iter().map(|light| &light.fixture)).map(|item| {
+            Object {
+                pos: point(room, item.pos + Vec3::Z * item.size.z * 0.5, origin),
+                exterior: if item.kind == Kind::Window {
+                    vec3(-item.rotation.x, item.rotation.y, 0.0)
+                } else {
+                    item.exterior
+                },
+                ..*item
+            }
+        }));
     }
     objects
+}
+
+/// Point-in-polygon classification in authored coordinates, including notches.
+fn contains(room: &Room, point: Vec2) -> bool {
+    let point = point - room.position;
+    let mut inside = false;
+    for (a, b) in room.outline.iter().zip(room.outline.iter().cycle().skip(1)) {
+        if (a.y > point.y) != (b.y > point.y) && point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 /// Floors are horizontal strips of the polygon; walls follow its edges.

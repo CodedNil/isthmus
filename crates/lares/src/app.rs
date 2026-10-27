@@ -3,21 +3,38 @@ use crate::{
     home,
     render::{self, Frame, Globals, Program, Scene},
 };
-use isthmus::{Render, SurfaceHandle, glam::Vec2};
+use core::cell::Cell;
+use isthmus::{
+    Render, SurfaceHandle,
+    glam::{Vec2, Vec3},
+};
 
 pub struct App {
     pub scene: Scene,
     pub camera: Camera,
     dragging: bool,
     pointer: Vec2,
+    meter: Cell<Option<([Vec3; 5], u64, f32)>>,
+    exposure: Cell<f32>,
 }
 
 impl App {
     pub fn template() -> Self {
-        let scene = Scene::new(&home::rooms());
+        Self::with_sun(render::SunSettings::default())
+    }
+
+    pub fn with_sun(settings: render::SunSettings) -> Self {
+        let scene = Scene::new_at(&home::rooms(), render::sun::utc_now(), settings);
         let camera =
             Camera { target: Vec2::ZERO, distance: (scene.radius * 2.0).clamp(6.0, 40.0), ..Camera::default() };
-        Self { scene, camera, dragging: false, pointer: Vec2::ZERO }
+        Self {
+            scene,
+            camera,
+            dragging: false,
+            pointer: Vec2::ZERO,
+            meter: Cell::new(None),
+            exposure: Cell::new(render::photometry::EXPOSURE),
+        }
     }
 
     pub fn pointer_moved(&mut self, position: Vec2, viewport: Vec2) {
@@ -40,12 +57,59 @@ impl App {
         self.camera.zoom(amount);
     }
 
-    pub fn draw(&self, render: &mut Render<'_, Program>, surface: SurfaceHandle, size: Vec2) {
+    pub fn globals(&self, size: Vec2) -> Globals {
         let (eye, forward, right, up) = self.camera.rays(size.x / size.y.max(1.0));
         let pixel_angle = self.camera.fov / size.y.max(1.0);
-        let globals = Globals { eye, forward, right, up, pixel_angle, sun: self.scene.sun };
+        let key = [eye, forward, right, up, self.scene.sun.direction];
+        let revision = self.scene.lighting_revision;
+        let target = if let Some((previous, old_revision, value)) = self.meter.get() {
+            if key == previous && revision == old_revision {
+                value
+            } else {
+                let value = self.scene.camera_exposure(eye, forward, right, up);
+                self.meter.set(Some((key, revision, value)));
+                value
+            }
+        } else {
+            let value = self.scene.camera_exposure(eye, forward, right, up);
+            self.meter.set(Some((key, revision, value)));
+            self.exposure.set(value);
+            value
+        };
+        // Adapt gradually in stop space; regular metering never invalidates AA.
+        let exposure = (self.exposure.get().log2() * 0.85 + target.log2() * 0.15).exp2();
+        self.exposure.set(exposure);
+        Globals {
+            eye,
+            exposure,
+            forward,
+            right,
+            up,
+            pixel_angle,
+            sun: self.scene.sun,
+            sample_index: 0,
+            interleaved: false,
+            parity: 0,
+        }
+    }
+
+    pub fn draw(
+        &self,
+        render: &mut Render<'_, Program>,
+        surface: SurfaceHandle,
+        size: Vec2,
+        shadows: &render::shadows::ShadowAtlas,
+        sample: u32,
+        interleaved: bool,
+    ) {
+        let globals = Globals {
+            sample_index: if interleaved { sample / 2 } else { sample },
+            interleaved,
+            parity: sample & 1,
+            ..self.globals(size)
+        };
         render.surface(surface, size, globals, |mut frame: Frame<'_>| {
-            render::draw(&mut frame, &self.scene);
+            render::draw(&mut frame, &self.scene, shadows);
         });
     }
 }

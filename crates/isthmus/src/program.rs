@@ -27,6 +27,9 @@ pub enum Blend {
     Add,
     /// Replaces the destination with the source output.
     Replace,
+    /// Stores raw fragment channels without blending, alpha premultiplication,
+    /// or coverage multiplication. Intended for offscreen data textures.
+    Raw,
 }
 
 #[cfg(not(target_arch = "spirv"))]

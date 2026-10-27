@@ -76,9 +76,9 @@ pub(super) fn cabinet<S: Sample>(kind: Kind, p: Vec3, size: Vec3) -> S {
     } else {
         hit = hit.union(fronts(p, size, false));
     }
-    let moulding =
-        rounded_box(vec3(p.x, p.y, p.z.abs() - size.z * 0.5), vec3(size.x + 0.045, size.y + 0.045, 0.044), 0.018);
-    hit.union(S::new(moulding, || (Material::Maple, MAPLE)))
+    // Cornices are authored as continuous runs, rather than oversized caps
+    // repeated on each carcass. The fridge has no projecting floor-level cap.
+    hit
 }
 #[inline(never)]
 pub(super) fn oven<S: Sample>(p: Vec3, size: Vec3) -> S {
@@ -158,10 +158,10 @@ pub(super) fn hood<S: Sample>(p: Vec3, size: Vec3) -> S {
     let z = p.z + size.z * 0.5;
     let t = (z / 0.24).max_num(0.0).min_num(1.0);
     let half = size.xy() * 0.5 - vec2(0.18, 0.12) * t;
-    let canopy = (p.xy().abs() - half).max_element().max_num(-z).max_num(z - 0.24) * 0.65;
-    let chimney = rounded_box(p - vec3(0.0, -0.09, 0.12), vec3(0.20, 0.18, size.z - 0.24), 0.004);
+    let canopy = ((p.xy() - vec2(0.0, -0.09 * t)).abs() - half).max_element().max_num(-z).max_num(z - 0.24) * 0.60;
+    let chimney = rounded_box(p - vec3(0.0, -0.09, 0.115), vec3(0.20, 0.18, size.z - 0.21), 0.004);
     let lip = rounded_box(p + Vec3::Z * (size.z * 0.5 - 0.010), vec3(size.x, size.y, 0.020), 0.003);
-    let rail = rounded_box(p - vec3(0.0, -0.105, size.z * 0.5 - 0.06), vec3(0.615, 0.345, 0.044), 0.010);
+    let rail = rounded_box(p - vec3(0.0, -0.105, 0.74 - size.z * 0.5), vec3(0.615, 0.345, 0.044), 0.010);
     S::new(canopy.min_num(chimney).min_num(lip), || (Material::Metal, STEEL))
         .union(S::new(rail, || (Material::MapleHorizontal, MAPLE)))
 }

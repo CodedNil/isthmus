@@ -20,12 +20,13 @@ fn radiator(p: Vec3, size: Vec3) -> f32 {
     panel.min_num(cap).min_num(endcap).min_num(valve)
 }
 fn window(p: Vec3, size: Vec3) -> f32 {
-    let sill = super::rounded_box(p - vec3(0.0, 0.045, -size.z * 0.5 + 0.012), vec3(size.x + 0.06, 0.23, 0.035), 0.008);
-    let frame = super::rounded_box(p - Vec3::Y * 0.13, vec3(size.x, 0.035, size.z), 0.008);
-    let opening = super::box_sdf(p - Vec3::Y * 0.13, vec3(size.x - 0.08, 0.10, size.z - 0.08));
+    let sill =
+        super::rounded_box(p - vec3(0.0, -0.015, -size.z * 0.5 + 0.012), vec3(size.x + 0.06, 0.35, 0.035), 0.008);
+    let frame = super::rounded_box(p - Vec3::Y * 0.08, vec3(size.x, 0.055, size.z), 0.008);
+    let opening = super::box_sdf(p - Vec3::Y * 0.08, vec3(size.x - 0.08, 0.14, size.z - 0.08));
     let frame = frame.max_num(-opening);
-    let mullion = super::rounded_box(p - Vec3::Y * 0.13, vec3(0.035, 0.035, size.z - 0.05), 0.004);
-    sill.min_num(frame).min_num(mullion)
+    let mullion = super::rounded_box(p - Vec3::Y * 0.08, vec3(0.035, 0.055, size.z - 0.05), 0.004);
+    sill.min_num(frame).min_num(if size.x > 0.90 { mullion } else { super::FAR })
 }
 fn curtain<S: Sample>(p: Vec3, size: Vec3) -> S {
     // Broad vertical folds draw outward into a narrow gathered waist. Keep the

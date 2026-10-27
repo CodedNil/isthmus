@@ -1,6 +1,6 @@
 //! Geographic sun direction from NOAA's approximate solar equations.
 //! <https://gml.noaa.gov/grad/solcalc/solareqns.PDF>
-use core::f64::consts::TAU;
+use core::{f32::consts::PI, f64::consts::TAU};
 use isthmus::{
     ShaderData,
     glam::{FloatExt, Vec3, vec3},
@@ -70,10 +70,20 @@ impl Sun {
                 .normalize();
         let elevation = direction.z;
         let daylight = (elevation + 0.10).smoothstep(0.0, 0.55);
-        let horizon = elevation.smoothstep(0.0, 0.10);
-        let temperature = (elevation / 0.40).clamp(0.0, 1.0);
-        let radiance = vec3(1.0, 0.43, 0.17).lerp(vec3(1.0, 0.98, 0.94), temperature) * (6.8 * horizon);
-        let sky = vec3(0.0015, 0.0025, 0.006).lerp(vec3(1.20, 1.44, 1.90), daylight);
+        let (beam_lux, diffuse_lux) = super::photometry::clear_sky(elevation, day as f32);
+        // Direct sun is near-white at midday and warms through a longer air path;
+        // the blue tint comes primarily from sky, not the solar disc.
+        let warmth = elevation.smoothstep(0.0, 0.60);
+        let direct_white = if warmth < 0.4 {
+            super::photometry::warm_white(2200.0 + warmth * 4500.0)
+        } else {
+            super::photometry::daylight(4000.0 + (warmth - 0.4) * 3000.0)
+        };
+        let radiance = direct_white * (beam_lux / super::photometry::UNITS);
+        // The cached sky distribution integrates to 0.85*pi on a horizontal
+        // receiver. Calibrate to diffuse horizontal lux, without adding sun twice.
+        let sky = vec3(0.0015, 0.0025, 0.006) * (1.0 - daylight)
+            + super::photometry::daylight(10000.0) * (diffuse_lux / (0.85 * PI * super::photometry::UNITS));
         Self { direction, radiance, sky }
     }
 }

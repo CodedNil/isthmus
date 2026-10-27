@@ -13,11 +13,16 @@ fn main() {
     let started = Instant::now();
     let mut scene = Scene::new_at(&home::rooms(), noon, SunSettings::default());
     println!(
-        "Initial transport + two bounces: {:?}; {} probes, {} fixtures",
+        "Initial transport + four bounces: {:?}; {} active / {} lattice probe sites, {} fixtures",
         started.elapsed(),
+        scene.probes.iter().filter(|probe| probe.positive.x >= 0.0).count(),
         scene.probes.len(),
         scene.lights.len()
     );
+    let slots = scene.lights.len().min(32);
+    let active = if slots == 32 { u32::MAX } else { (1u32 << slots) - 1 };
+    let rejected: u32 = scene.light_masks.iter().map(|mask| ((!mask) & active).count_ones()).sum();
+    println!("Conservative light culling: {rejected}/{} object/light pairs", scene.objects.len() * slots);
     let mut updates = Vec::new();
     for frame in 0..600 {
         let started = Instant::now();
@@ -34,5 +39,5 @@ fn main() {
         black_box(&scene);
         dimming += started.elapsed();
     }
-    println!("Entity change + two bounce blend: {:?} average", dimming / 20);
+    println!("Entity change + four bounce blend: {:?} average", dimming / 20);
 }

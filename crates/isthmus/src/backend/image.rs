@@ -76,7 +76,7 @@ impl ImageCache {
         for (&key, image) in key.iter().zip(images) {
             self.images.entry(key).or_insert_with(|| CachedImage {
                 source: Arc::downgrade(&image.pixels),
-                view: upload(device, queue, image.size, &image.pixels),
+                view: image.texture_view().unwrap_or_else(|| upload(device, queue, image.size, &image.pixels)),
             });
         }
         let entries: Vec<_> = key

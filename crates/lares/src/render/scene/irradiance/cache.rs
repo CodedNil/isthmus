@@ -1,26 +1,30 @@
 //! Geometry transport and per-fixture bounce bases never change with the clock.
-//! Sun visibility refreshes incrementally; two diffuse bounces use no feedback.
+//! Sun visibility refreshes incrementally; eight diffuse bounces use no temporal feedback.
 use super::{Grid, Irradiance, Probe, SPACING};
 use crate::{
-    home::{Material, Object},
+    home::{Kind, Material, Object},
     render::{
-        Sun,
+        Sun, WALL_HEIGHT,
         acceleration::{BRANCH, Node},
         scene::{self, FAR, fixtures},
     },
 };
 use core::{array::from_fn, f32::consts::PI};
-use isthmus::glam::{UVec3, Vec2, Vec3, uvec3, vec3};
+use isthmus::glam::{IVec3, UVec3, Vec2, Vec3, uvec3, vec3};
 
-const RAYS: usize = 32;
-const UPDATE_BUDGET: usize = 16;
+const RAYS: usize = 128;
+const UPDATE_BUDGET: usize = 64;
+const BOUNCES: usize = 8;
 
 impl Irradiance {
     fn project(&mut self, direction: Vec3, radiance: Vec3) {
+        // Window the first SH band to a nonnegative reconstruction kernel.
+        // This preserves mean energy and source linearity, while suppressing
+        // negative colour lobes and square-looking bright/dark probe patches.
         self.constant += radiance / RAYS as f32;
-        self.x += radiance * (direction.x * 2.0 / RAYS as f32);
-        self.y += radiance * (direction.y * 2.0 / RAYS as f32);
-        self.z += radiance * (direction.z * 2.0 / RAYS as f32);
+        self.x += radiance * (direction.x / RAYS as f32);
+        self.y += radiance * (direction.y / RAYS as f32);
+        self.z += radiance * (direction.z / RAYS as f32);
     }
 
     fn add(&mut self, other: Self, weight: Vec3) {
@@ -41,10 +45,14 @@ pub struct Cache {
     directions: [Vec3; RAYS],
     paths: Box<[Bounce]>,
     sky: Box<[Irradiance]>,
+    ground: Box<[Irradiance]>,
     sun: Box<[Irradiance]>,
     fixtures: Box<[Irradiance]>,
-    /// Direct sources and their first bounce; second bounce only reads this field.
+    /// Fixed direct sources and their first bounce, shared by every spatial iteration.
     direct: Box<[Probe]>,
+    raw: Box<[Probe]>,
+    bounces: [Box<[Probe]>; BOUNCES - 2],
+    active: Box<[usize]>,
     grid: Grid,
     lights: Box<[u32]>,
     cursor: usize,
@@ -70,35 +78,91 @@ impl Cache {
     fn compose_at(&mut self, index: usize, sun: Sun, objects: &[Object]) {
         let mut result = Irradiance::default();
         result.add(self.sky[index], sun.sky);
+        // Analytic sunlit exterior ground seen through real apertures. No
+        // outdoor probes: a neutral 20%-reflecting Lambertian ground assumption.
+        let ground = (sun.radiance * sun.direction.z.max(0.0) + sun.sky * (0.85 * PI)) * (0.20 / PI);
+        result.add(self.ground[index], ground);
         result.add(self.sun[index], sun.radiance);
         let count = self.lights.len();
         for (light, &object) in self.lights.iter().enumerate() {
-            result.add(self.fixtures[index * count + light], Vec3::splat(objects[object as usize].emission));
+            let fixture = objects[object as usize];
+            result.add(self.fixtures[index * count + light], fixture.emission_color * fixture.emission);
         }
-        self.direct[index].light = result;
+        self.raw[index].light = result;
     }
 
-    fn second_bounce(&self, index: usize) -> Probe {
+    /// Geometry-aware spatial denoising, before interpolation and further
+    /// bounces. Fixed weights preserve source linearity and constant fields.
+    fn filtered(&self, index: usize) -> Irradiance {
+        let size = self.grid.size;
+        let coordinate = uvec3(index as u32 % size.x, index as u32 / size.x % size.y, index as u32 / (size.x * size.y));
+        let source = self.raw[index];
+        let mut result = Irradiance::default();
+        result.add(source.light, Vec3::splat(2.0));
+        let mut total = 2.0;
+        for axis in 0..3 {
+            for sign in [-1, 1] {
+                let mut neighbour = coordinate.as_ivec3();
+                neighbour[axis] += sign;
+                if neighbour.cmplt(IVec3::ZERO).any() || neighbour.cmpge(size.as_ivec3()).any() {
+                    continue;
+                }
+                let neighbour = neighbour.as_uvec3();
+                let probe = self.raw[(neighbour.x + size.x * (neighbour.y + size.y * neighbour.z)) as usize];
+                let delta = probe.position - source.position;
+                if delta.cmpgt(source.positive).any()
+                    || (-delta).cmpgt(source.negative).any()
+                    || (-delta).cmpgt(probe.positive).any()
+                    || delta.cmpgt(probe.negative).any()
+                {
+                    continue;
+                }
+                let weight = 1.0 / (1.0 + delta.length_squared() / (SPACING * SPACING));
+                result.add(probe.light, Vec3::splat(weight));
+                total += weight;
+            }
+        }
+        let mut normalized = Irradiance::default();
+        normalized.add(result, Vec3::splat(1.0 / total));
+        normalized
+    }
+
+    fn bounce(&self, index: usize, previous: &[Probe]) -> Probe {
         let mut result = self.direct[index].light;
         for (sample, bounce) in self.paths[index * RAYS..(index + 1) * RAYS].iter().enumerate() {
             if bounce.albedo == Vec3::ZERO {
                 continue;
             }
-            let incident = self.grid.sample(&self.direct, bounce.point, bounce.normal);
-            // A conservative gain damps low-order SH ringing. There is no
-            // iterative accumulation: brightness cannot grow between frames.
-            result.project(self.directions[sample], incident * bounce.albedo * 0.65);
+            let incident = self.grid.sample(previous, bounce.point, bounce.normal);
+            // Finite spatial iterations, always adding the fixed source term.
+            // No ad-hoc energy loss and no feedback from previous frames.
+            result.project(self.directions[sample], incident * bounce.albedo);
         }
         Probe { light: result, ..self.direct[index] }
     }
 
     /// State changes blend precomputed light bases, without casting any rays.
     pub(crate) fn compose(&mut self, sun: Sun, objects: &[Object], probes: &mut [Probe]) {
-        for index in 0..self.direct.len() {
-            self.compose_at(index, sun, objects);
+        for slot in 0..self.active.len() {
+            self.compose_at(self.active[slot], sun, objects);
         }
-        for (index, probe) in probes.iter_mut().enumerate() {
-            *probe = self.second_bounce(index);
+        for &index in &self.active {
+            self.direct[index].light = self.filtered(index);
+        }
+        for pass in 0..BOUNCES - 1 {
+            for slot in 0..self.active.len() {
+                self.bounce_at(pass, self.active[slot], probes);
+            }
+        }
+    }
+
+    fn bounce_at(&mut self, pass: usize, index: usize, probes: &mut [Probe]) {
+        let previous = if pass == 0 { &self.direct } else { &self.bounces[pass - 1] };
+        let result = self.bounce(index, previous);
+        if pass < BOUNCES - 2 {
+            self.bounces[pass][index] = result;
+        } else {
+            probes[index] = result;
         }
     }
 
@@ -108,35 +172,35 @@ impl Cache {
 
     pub(crate) fn begin_update(&mut self) {
         self.cursor = 0;
-        self.remaining = self.direct.len() * 2;
+        self.remaining = self.active.len() * (BOUNCES + 1);
     }
 
-    /// At most 16 probes / 512 cached paths per frame, independent of resolution.
+    /// At most 64 probes / 8192 cached paths per frame, independent of resolution.
     pub(crate) fn step(&mut self, sun: Sun, objects: &[Object], nodes: &[Node], probes: &mut [Probe]) {
         if self.remaining == 0 {
             return;
         }
-        let count = self.direct.len();
-        let transport_pass = self.cursor < count;
-        let start = if transport_pass { self.cursor } else { self.cursor - count };
+        let count = self.active.len();
+        let pass = self.cursor / count;
+        let start = self.cursor % count;
         let end = (start + UPDATE_BUDGET).min(count);
-        if transport_pass {
-            for index in start..end {
+        for slot in start..end {
+            let index = self.active[slot];
+            if pass == 0 {
                 self.sun[index] = self.sun_at(index, sun, objects, nodes);
                 self.compose_at(index, sun, objects);
+            } else if pass == 1 {
+                self.direct[index].light = self.filtered(index);
+            } else {
+                self.bounce_at(pass - 2, index, probes);
             }
-        }
-        // The second sweep removes dependence on the order in which direct
-        // probes were refreshed. Both sweeps have the same bounded budget.
-        for (index, probe) in probes.iter_mut().enumerate().take(end).skip(start) {
-            *probe = self.second_bounce(index);
         }
         self.remaining -= end - start;
         self.cursor += end - start;
     }
 
     pub(crate) fn relight(&mut self, sun: Sun, objects: &[Object], nodes: &[Node], probes: &mut [Probe]) {
-        for index in 0..self.direct.len() {
+        for &index in &self.active {
             self.sun[index] = self.sun_at(index, sun, objects, nodes);
         }
         self.compose(sun, objects, probes);
@@ -167,9 +231,13 @@ pub fn bake(
         directions,
         paths: vec![Bounce::default(); count * RAYS].into_boxed_slice(),
         sky: vec![Irradiance::default(); count].into_boxed_slice(),
+        ground: vec![Irradiance::default(); count].into_boxed_slice(),
         sun: vec![Irradiance::default(); count].into_boxed_slice(),
         fixtures: vec![Irradiance::default(); count * lights.len()].into_boxed_slice(),
         direct: vec![Probe::default(); count].into_boxed_slice(),
+        raw: vec![Probe::default(); count].into_boxed_slice(),
+        bounces: from_fn(|_| vec![Probe::default(); count].into_boxed_slice()),
+        active: Box::default(),
         grid,
         lights: lights.into(),
         cursor: 0,
@@ -196,21 +264,50 @@ pub fn bake(
         false
     };
     let trace = |from: Vec3, direction: Vec3| scene::cast::<false, false>(from, direction, nodes, objects, 0.0, FAR);
+    let usable = |point: Vec3| {
+        if point.z <= 0.025 || point.z >= WALL_HEIGHT - 0.01 || inside(point) {
+            return false;
+        }
+        let (distance, object) = scene::architectural_cast(point, Vec3::Z, nodes, objects);
+        distance < FAR && objects[object as usize].kind == Kind::Ceiling
+    };
     for index in 0..count {
         let coordinate = uvec3(index as u32 % size.x, index as u32 / size.x % size.y, index as u32 / (size.x * size.y));
-        let point = origin + coordinate.as_vec3() * SPACING;
-        if inside(point) {
-            cache.direct[index].positive = Vec3::splat(-FAR);
-            cache.direct[index].negative = Vec3::splat(-FAR);
-            continue;
+        let lattice = origin + coordinate.as_vec3() * SPACING;
+        let mut point = lattice;
+        // Keep interpolation sites near wall/ceiling intersections populated.
+        // Bake at the nearest free indoor point instead of discarding sites
+        // inside furniture or sampling exterior sky above the roof.
+        if !usable(point) {
+            let mut nearest = f32::INFINITY;
+            for candidate in 0..27 {
+                let offset =
+                    vec3((candidate % 3) as f32 - 1.0, (candidate / 3 % 3) as f32 - 1.0, (candidate / 9) as f32 - 1.0)
+                        * (SPACING * 0.5);
+                let distance = offset.length_squared();
+                if distance < nearest && usable(lattice + offset) {
+                    nearest = distance;
+                    point = lattice + offset;
+                }
+            }
+            if !nearest.is_finite() {
+                cache.direct[index].positive = Vec3::splat(-FAR);
+                cache.direct[index].negative = Vec3::splat(-FAR);
+                continue;
+            }
         }
-        let clearance = |axis: Vec3| (trace(point, axis).0 - 0.002).max(0.0);
+        cache.direct[index].position = point;
+        let clearance = |axis: Vec3| (scene::architectural_cast(point, axis, nodes, objects).0 - 0.002).max(0.0);
         let axes = |sign: f32| vec3(clearance(Vec3::X * sign), clearance(Vec3::Y * sign), clearance(Vec3::Z * sign));
         (cache.direct[index].positive, cache.direct[index].negative) = (axes(1.0), axes(-1.0));
         for (sample, &direction) in directions.iter().enumerate() {
             let (distance, object) = trace(point, direction);
             if distance >= FAR {
-                cache.sky[index].project(direction, Vec3::splat(0.25 + direction.z.max(0.0).sqrt() * 0.75));
+                if direction.z >= 0.0 {
+                    cache.sky[index].project(direction, Vec3::splat(0.25 + direction.z.sqrt() * 0.75));
+                } else {
+                    cache.ground[index].project(direction, Vec3::ONE);
+                }
                 continue;
             }
             let object = objects[object as usize];
@@ -218,11 +315,11 @@ pub fn bake(
             let local = scene::unrotate_z(hit - object.pos, object.rotation);
             let normal = scene::rotate_z(scene::object_normal(object, local), object.rotation);
             let albedo = average_albedo(object, local).min(Vec3::splat(0.85));
-            let point = hit + normal * 0.015;
+            let point = hit + normal * 0.002;
             cache.paths[index * RAYS + sample] = Bounce { point, normal, albedo };
             for (light, &fixture) in lights.iter().enumerate() {
                 // Unit brightness: entity changes only scale the cached transport.
-                let fixture = Object { emission: 1.0, ..objects[fixture as usize] };
+                let fixture = Object { emission: 1.0, emission_color: Vec3::ONE, ..objects[fixture as usize] };
                 let (direction_to_light, radiance, distance_to_light) = fixtures::incident(fixture, point, Vec2::ZERO);
                 let contribution = albedo * radiance * (normal.dot(direction_to_light).max(0.0) / PI);
                 if contribution.max_element() < 0.0005 {
@@ -241,7 +338,15 @@ pub fn bake(
             }
         }
     }
-    let mut probes = vec![Probe::default(); count].into_boxed_slice();
+    cache.active = cache
+        .direct
+        .iter()
+        .enumerate()
+        .filter_map(|(index, probe)| (probe.positive.x >= 0.0).then_some(index))
+        .collect();
+    cache.raw = cache.direct.clone();
+    cache.bounces = from_fn(|_| cache.direct.clone());
+    let mut probes = cache.direct.clone();
     cache.relight(sun, objects, nodes, &mut probes);
     (grid, probes, cache)
 }
@@ -261,66 +366,5 @@ fn average_albedo(object: Object, local: Vec3) -> Vec3 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        home::Room,
-        render::{Scene, SunSettings},
-    };
-    use isthmus::glam::vec2;
-    const MIDNIGHT: f64 = 1_782_000_000.0;
-
-    fn room(position: Vec2) -> Room {
-        Room::new(position, Vec2::splat(3.0), Material::Carpet)
-    }
-
-    #[test]
-    fn fixtures_bounce_onto_ceiling_and_dimming_does_not_accumulate_energy() {
-        let room = room(Vec2::ZERO).downlights("light.test", &[(0.0, 0.0)]);
-        let mut scene = Scene::new_at(&[room], MIDNIGHT, SunSettings::default());
-        let sample = |scene: &Scene| scene.grid.sample(&scene.probes, vec3(0.0, 0.0, 2.25), -Vec3::Z);
-        let lit = sample(&scene);
-        scene.set_light_state("light.test", 0.0);
-        let dark = sample(&scene);
-        assert!(lit.x > dark.x + 0.001, "ceiling should receive bounced light: {lit:?}, {dark:?}");
-        assert!(lit.x > lit.z, "warm emitters should tint the bounce");
-        scene.set_light_state("light.test", 0.5);
-        let dim = sample(&scene);
-        assert!(dim.x > dark.x && dim.x < lit.x);
-        scene.set_light_state("light.test", 1.0);
-        assert!((sample(&scene) - lit).length() < 1.0e-6);
-    }
-
-    #[test]
-    fn bounced_fixture_light_does_not_cross_a_closed_room_wall() {
-        let left = room(vec2(-1.6, 0.0)).downlights("light.left", &[(0.0, 0.0)]);
-        let right = room(vec2(1.6, 0.0));
-        let mut scene = Scene::new_at(&[left, right], MIDNIGHT, SunSettings::default());
-        let sample = |scene: &Scene| scene.grid.sample(&scene.probes, vec3(1.6, 0.0, 1.0), -Vec3::X);
-        let lit = sample(&scene);
-        scene.set_light_state("light.left", 0.0);
-        assert!((lit - sample(&scene)).length() < 0.0001, "GI should respect the partition");
-    }
-
-    #[test]
-    fn budgeted_updates_converge_to_a_full_relight() {
-        let room = Room::new(Vec2::ZERO, Vec2::splat(3.0), Material::Carpet).downlights("light.test", &[(0.0, 0.0)]);
-        let scene = Scene::new_at(&[room], MIDNIGHT, SunSettings::default());
-        let (_, mut probes, mut cache) =
-            bake(&scene.objects, &scene.nodes, &scene.lights, scene.nodes[0].min, scene.nodes[0].max, scene.sun);
-        let noon = Sun::at_utc(MIDNIGHT + 12.0 * 3600.0, SunSettings::default());
-        cache.begin_update();
-        let old = cache.remaining;
-        cache.step(noon, &scene.objects, &scene.nodes, &mut probes);
-        assert!(old - cache.remaining <= UPDATE_BUDGET);
-        while cache.updating() {
-            cache.step(noon, &scene.objects, &scene.nodes, &mut probes);
-        }
-        let incremental = probes.clone();
-        cache.relight(noon, &scene.objects, &scene.nodes, &mut probes);
-        for (a, b) in incremental.iter().zip(&probes) {
-            assert!((a.light.constant - b.light.constant).length() < 1.0e-5);
-            assert!((a.light.x - b.light.x).length() < 1.0e-5);
-        }
-    }
-}
+#[path = "transport_tests.rs"]
+mod transport_tests;

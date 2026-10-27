@@ -1,18 +1,27 @@
 use crate::home::Object;
 use acceleration::Node;
 pub use acceleration::Scene;
-use isthmus::prelude::*;
+use isthmus::{prelude::*, spirv_std::arch::kill};
+#[cfg(not(target_arch = "spirv"))]
 pub use scene::pixel;
+pub use scene::pixel_cached;
 pub use sun::{Sun, SunSettings};
 
 pub mod acceleration;
 mod layout;
+#[cfg(not(target_arch = "spirv"))]
+mod light_culling;
+pub mod photometry;
 mod plants;
 pub(crate) mod scene;
+pub mod shadows;
 pub mod sun;
+#[cfg(not(target_arch = "spirv"))]
+pub mod temporal;
 
 pub const WALL_HEIGHT: f32 = 2.4;
 pub const WALL_THICKNESS: f32 = 0.1;
+pub const EXTERIOR_WALL_THICKNESS: f32 = 0.30;
 pub const FLOOR_THICKNESS: f32 = 0.12;
 pub const CEILING_THICKNESS: f32 = 0.04;
 pub const DOOR_HEIGHT: f32 = 2.05;
@@ -31,12 +40,18 @@ pub struct Globals {
     pub up: Vec3,
     /// Vertical camera angle per pixel, in radians.
     pub pixel_angle: f32,
+    /// Photometric camera exposure, metered separately from light power.
+    pub exposure: f32,
     pub sun: Sun,
+    pub sample_index: u32,
+    pub interleaved: bool,
+    pub parity: u32,
 }
 
 isthmus::program!(Globals, ());
 
-pub fn draw(frame: &mut Frame<'_>, scene: &Scene) {
+#[allow(clippy::needless_borrow, reason = "Shader captures become owned GPU image handles")]
+pub fn draw(frame: &mut Frame<'_>, scene: &Scene, shadows: &shadows::ShadowAtlas) {
     shader!(
         frame
             .blend(Blend::Replace)
@@ -44,14 +59,121 @@ pub fn draw(frame: &mut Frame<'_>, scene: &Scene) {
                 let nodes: &[Node] = &scene.nodes;
                 let objects: &[Object] = &scene.objects;
                 let lights: &[u32] = &scene.lights;
+                let light_masks: &[u32] = &scene.light_masks;
                 let probes: &[scene::irradiance::Probe] = &scene.probes;
                 let grid: scene::irradiance::Grid = scene.grid;
+                let atlas: &Image = &shadows.image;
+                let info: shadows::AtlasInfo = shadows.info;
+            })
+            .primitive(|frame| {
+                let half = (frame.screen_size.x * 0.5).ceil();
+                let start = if frame.globals.interleaved && frame.globals.parity != 0 { half } else { 0.0 };
+                let end =
+                    if frame.globals.interleaved && frame.globals.parity == 0 { half } else { frame.screen_size.x };
+                raster(Rect::new(vec2(start, 0.0), vec2(end, frame.screen_size.y)))
+            })
+            .fragment(|frame, surface| {
+                let (globals, size) = (frame.globals, frame.screen_size);
+                let mut pixel = surface.pixel;
+                if globals.interleaved {
+                    let half = (size.x * 0.5).ceil();
+                    let start = if globals.parity != 0 { half } else { 0.0 };
+                    let end = if globals.parity == 0 { half } else { size.x };
+                    if pixel.x < start || pixel.x >= end {
+                        kill();
+                    }
+                    pixel.x = (pixel.x - start) * 2.0 - 0.5 + globals.parity as f32;
+                }
+                scene::pixel_single(
+                    globals,
+                    nodes,
+                    objects,
+                    lights,
+                    light_masks,
+                    grid,
+                    probes,
+                    pixel,
+                    size,
+                    frame.pixel_size,
+                    frame.time,
+                    &atlas,
+                    info,
+                    globals.sample_index,
+                )
+                .extend(1.0)
+            })
+    );
+}
+
+/// Resolve independent full-resolution SDF samples in linear light. Camera
+/// changes invalidate every older sample, so there is no temporal ghosting.
+#[allow(clippy::needless_borrow, reason = "Shader captures become owned GPU image handles")]
+pub fn resolve(frame: &mut Frame<'_>, images: &[Image; 4], mask: u32, interleaved: bool) {
+    shader!(
+        frame
+            .blend(Blend::Replace)
+            .upload({
+                let first: &Image = &images[0];
+                let second: &Image = &images[1];
+                let third: &Image = &images[2];
+                let fourth: &Image = &images[3];
+                let mask: u32;
+                let interleaved: bool;
             })
             .primitive(|frame| Rect::new(Vec2::ZERO, frame.screen_size))
             .fragment(|frame, surface| {
-                let (globals, size) = (frame.globals, frame.screen_size);
-                pixel(globals, nodes, objects, lights, grid, probes, surface.pixel, size, frame.pixel_size, frame.time)
-                    .extend(1.0)
+                let p = surface.pixel;
+                let size = frame.screen_size;
+                let color = resolved_sample(&first, p, size, mask, 0, interleaved)
+                    + resolved_sample(&second, p, size, mask, 1, interleaved)
+                    + resolved_sample(&third, p, size, mask, 2, interleaved)
+                    + resolved_sample(&fourth, p, size, mask, 3, interleaved);
+                (color.truncate() / color.w.max_num(1.0)).powf(1.0 / 2.2).extend(1.0)
             })
     );
+}
+
+fn resolved_sample(image: &Image, pixel: Vec2, size: Vec2, mask: u32, sample: u32, interleaved: bool) -> Vec4 {
+    let mut position = pixel;
+    if interleaved {
+        let mut parity = pixel.x.floor() as u32 & 1;
+        if mask & (1 << (sample * 2 + parity)) == 0 {
+            parity ^= 1;
+        }
+        if mask & (1 << (sample * 2 + parity)) == 0 {
+            return Vec4::ZERO;
+        }
+        let half = (size.x * 0.5).ceil();
+        let start = if parity != 0 { half } else { 0.0 };
+        let end = if parity != 0 { size.x } else { half };
+        position.x = ((pixel.x + 0.5 - parity as f32) * 0.5 + start).clamp(start + 0.5, end - 0.5);
+    } else if mask & (1 << sample) == 0 {
+        return Vec4::ZERO;
+    }
+    image.sample(position / size).truncate().powf(2.2).extend(1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interleaved_resolve_restores_every_native_pixel_for_even_and_odd_widths() {
+        for width in 1u32..=33 {
+            let half = width.div_ceil(2);
+            let mut bytes = vec![0u8; width as usize * 4];
+            for x in 0..width {
+                let slot = x / 2 + if x & 1 != 0 { half } else { 0 };
+                bytes[slot as usize * 4..slot as usize * 4 + 4].copy_from_slice(&[(x * 7) as u8, 64, 128, 255]);
+            }
+            let image = Image::rgba8([width, 1], bytes);
+            for x in 0..width {
+                let value = resolved_sample(&image, vec2(x as f32 + 0.5, 0.5), vec2(width as f32, 1.0), 3, 0, true);
+                let expected = vec3((x * 7) as f32, 64.0, 128.0) / 255.0;
+                assert!((value.truncate().powf(1.0 / 2.2) - expected).length() < 0.00001);
+                assert_eq!(value.w, 1.0);
+            }
+            assert_eq!(resolved_sample(&image, vec2(0.5, 0.5), vec2(width as f32, 1.0), 0, 0, true), Vec4::ZERO);
+        }
+    }
 }
