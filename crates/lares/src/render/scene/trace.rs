@@ -32,8 +32,9 @@ impl Ray {
     }
 }
 
-/// Validated over-relaxation: overlapping empty spheres certify each longer
-/// step. A failed trial returns to the last safe sphere boundary.
+/// Validated, slope-adaptive over-relaxation. Consecutive samples estimate the
+/// largest step whose empty spheres overlap; every trial is checked before it
+/// is accepted. Failed trials return to the last certified sphere boundary.
 pub(super) fn march(
     origin: Vec3,
     direction: Vec3,
@@ -45,15 +46,16 @@ pub(super) fn march(
     let mut travelled = enter;
     let mut previous = 0.0;
     let mut step = 0.0;
-    let mut relax = 1.6;
     for _ in 0..192 {
-        let epsilon = (travelled * pixel_angle * 0.03).max_num(MIN_HIT_DISTANCE).min_num(0.0003);
+        // Resolve primary geometry to < 0.1 pixel instead of imposing a fixed
+        // sub-millimetre tolerance at every viewing distance. Shadow/depth
+        // queries use pixel_angle = 0 and retain the original exact tolerance.
+        let epsilon = (travelled * pixel_angle * 0.08).max_num(MIN_HIT_DISTANCE).min_num(0.002);
         let radius = distance(origin + direction * travelled).abs();
         if previous + radius < step {
             travelled -= step - previous;
             previous = 0.0;
             step = 0.0;
-            relax = 1.0;
             continue;
         }
         if radius <= epsilon {
@@ -63,6 +65,12 @@ pub(super) fn march(
         if travelled + radius > exit {
             return FAR;
         }
+        let relax = if step > 0.0 {
+            let slope = (radius - previous) / step;
+            (2.0 / (1.0 - slope).max_num(0.05)).clamp(1.0, 1.95)
+        } else {
+            1.0
+        };
         previous = radius;
         step = (radius * relax).min_num(exit - travelled);
         travelled += step;
@@ -180,4 +188,32 @@ pub(super) fn normal(point: Vec3, distance: impl Fn(Vec3) -> f32) -> Vec3 {
         + d * distance(point + d * super::NORMAL_OFFSET);
     let length = gradient.length();
     if length > 0.0 { gradient / length } else { Vec3::Z }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn adaptive_steps_agree_with_analytic_sphere_intersections_across_scales() {
+        for radius in [0.1, 1.0, 5.0] {
+            for sample in 0..100 {
+                let relative = sample as f32 / 100.0;
+                let origin = vec3(-3.0 * radius, relative * radius, 0.0);
+                let hit = march(origin, Vec3::X, 0.0, 6.0 * radius, 0.0, |p| p.length() - radius);
+                let cosine = (1.0 - relative * relative).sqrt();
+                let expected = radius * (3.0 - cosine);
+                let tolerance = MIN_HIT_DISTANCE / cosine * 1.5;
+                assert!(
+                    (hit - expected).abs() <= tolerance,
+                    "sphere entry mismatch at radius={radius}, offset={relative}"
+                );
+            }
+            for relative in [1.01, 1.1, 2.0] {
+                let miss = march(vec3(-3.0 * radius, relative * radius, 0.0), Vec3::X, 0.0, 6.0 * radius, 0.0, |p| {
+                    p.length() - radius
+                });
+                assert!(miss >= FAR);
+            }
+        }
+    }
 }

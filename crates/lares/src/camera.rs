@@ -3,7 +3,7 @@ use isthmus::glam::{Vec2, Vec3};
 const MIN_DISTANCE: f32 = 1.0;
 const MAX_DISTANCE: f32 = 60.0;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Camera {
     pub target: Vec2,
     pub distance: f32,

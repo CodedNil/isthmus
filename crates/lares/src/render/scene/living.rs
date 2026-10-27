@@ -31,17 +31,44 @@ pub(super) fn ottoman<S: Sample>(p: Vec3, size: Vec3) -> S {
 }
 #[inline(never)]
 pub(super) fn rug<S: Sample>(p: Vec3, size: Vec3) -> S {
-    // Dense, continuous pile avoids empty gaps between isolated fiber capsules.
-    // These are centimeter-scale height changes in the traced surface, not bump.
-    let rotated = vec2(p.x * 0.8 - p.y * 0.6, p.x * 0.6 + p.y * 0.8);
-    let clumps = super::materials::noise(rotated * 38.0);
-    let nap = super::materials::noise(p.xy() * 17.0 + 3.7);
-    let height = size.z * 0.5 + 0.006 + clumps * 0.002 + nap * 0.001;
-    let edge = super::rounded_box(vec3(p.x, p.y, 0.0), vec3(size.x, size.y, 0.04), 0.012);
+    // Millimetre-scale outline drift is shared by the backing and pile,
+    // so the rug bends subtly rather than carrying a straight fringe strip.
+    let bend = vec2(
+        (p.y * 2.3 + 0.7).sin() * 0.006 + (p.y * 5.1).sin() * 0.002,
+        (p.x * 1.9 - 0.8).sin() * 0.007 + (p.x * 4.3 + 1.7).sin() * 0.002,
+    );
+    let p = vec3(p.x - bend.x, p.y - bend.y, p.z);
+    let clumps = super::materials::noise(p.xy() * 27.0);
+    let height = size.z * 0.5 + 0.021 + clumps * 0.004;
+    let q = p.xy().abs() - size.xy() * 0.5;
+    let outside = q.max_element();
+    let edge = super::rounded_box(vec3(p.x, p.y, 0.0), vec3(size.x, size.y, 0.10), 0.030);
     let layer = (p.z - height).max_num(-p.z - size.z * 0.5);
-    // Quintic noise gradient <= 2.652 per octave. The combined height
-    // slope <= 0.740 gives a tight, conservative extrusion bound of 1.25.
-    let distance = edge.max_num(layer) / 1.25;
+    let mut distance = edge.max_num(layer) / 1.25;
+    if outside > -0.080 && p.z.abs() < 0.070 {
+        let across_x = q.x > q.y;
+        let along = if across_x { p.y } else { p.x };
+        let edge_half = if across_x { size.y } else { size.x } * 0.5;
+        let outward = if across_x { p.x.abs() - size.x * 0.5 } else { p.y.abs() - size.y * 0.5 };
+        let facing = if (if across_x { p.x } else { p.y }) > 0.0 { 1.0 } else { -1.0 };
+        let cell = (along / 0.030).round();
+        let point = vec3(outward, along, p.z);
+        for neighbour in 0..3 {
+            let index = cell + neighbour as f32 - 1.0;
+            let seed = super::materials::hash(vec2(index, facing * if across_x { 17.0 } else { 31.0 }));
+            let variation = super::materials::hash(vec2(index, facing * 47.0));
+            let root_along =
+                (index * 0.030 + (variation - 0.5) * 0.018).max_num(-edge_half + 0.027).min_num(edge_half - 0.027);
+            // Thick locks emerge from within the top pile and lean outwards.
+            let root = vec3(-0.034, root_along, 0.024 + seed * 0.006);
+            let tip = vec3(0.004 + seed * 0.024, root_along + (variation - 0.5) * 0.036, 0.009 + variation * 0.028);
+            let elbow = root.lerp(tip, 0.52) + vec3(0.0, (seed - 0.5) * 0.009, 0.017);
+            let radius = 0.0055 + variation * 0.0045;
+            let lock =
+                super::capsule(point, root, elbow, radius).min_num(super::capsule(point, elbow, tip, radius * 0.48));
+            distance = distance.min_num(lock / 1.04);
+        }
+    }
     S::new(distance, || (Material::Shag, Vec3::ONE))
 }
 /// Cushions bulge between their seams and compress toward their edges.
@@ -118,10 +145,6 @@ pub(super) fn side_table<S: Sample>(p: Vec3, size: Vec3) -> S {
         .union(S::new(book, || (Material::Fabric, vec3(0.17, 0.19, 0.15))))
         .union(S::new(coaster, || (Material::Ceramic, vec3(0.92, 0.90, 0.84))));
     // Skip tabletop dressing outside conservative bounds of each component.
-    let lamp = p - vec3(-0.10, 0.085, deck + 0.193);
-    if (lamp.length() - 0.18).max_num(0.0) * 0.4 <= hit.distance() {
-        hit = hit.union(super::decor::table_lamp(lamp + Vec3::Z * 0.18));
-    }
     let flowers = p - vec3(0.015, -0.085, deck + 0.112);
     if (flowers.length() - 0.10).max_num(0.0) * 0.4 <= hit.distance() {
         hit = hit.union(super::decor::table_flowers(flowers + Vec3::Z * 0.07));

@@ -60,7 +60,7 @@ impl Gpu {
                 });
                 let blend = match entry.blend {
                     Blend::Over => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    Blend::Replace => None,
+                    Blend::Replace | Blend::Raw => None,
                     Blend::Add => Some(wgpu::BlendState {
                         color: wgpu::BlendComponent {
                             src_factor: wgpu::BlendFactor::One,

@@ -25,9 +25,9 @@ fn flower(p: Vec3, radius: f32) -> f32 {
 #[inline(never)]
 pub(super) fn plant<S: Sample>(kind: Kind, p: Vec3, size: Vec3) -> S {
     let blossom = kind == Kind::Blossom;
-    let scale = size.x;
+    let scale = size.x * if kind == Kind::Palm { 0.65 } else { 1.0 };
     let bottom = -size.z * 0.5;
-    let top = bottom + size.z * if blossom { 0.24 } else { 0.16 };
+    let top = bottom + size.z * if blossom || (kind == Kind::SillPlant && size.z > 0.60) { 0.24 } else { 0.16 };
     let pot = if blossom {
         let shoulder = bottom + size.z * 0.17;
         super::taper(p, vec3(0.0, 0.0, bottom), vec3(0.0, 0.0, shoulder), scale * 0.065, scale * 0.105)
@@ -119,7 +119,7 @@ pub(super) fn blade<S: Sample>(kind: Kind, p: Vec3, size: Vec3) -> S {
     let profile = width * (1.0 - (q.x / length).powi(2)).max_num(0.02);
     let margin = (q.y.abs() / profile).max_num(0.0).min_num(1.0);
     let vein = (1.0 - q.y.abs() / 0.0015).max_num(0.0).min_num(1.0);
-    let tint = vec3(0.25, 0.36, 0.18).lerp(vec3(0.61, 0.65, 0.43), margin.powf(5.0) * 0.55 + vein * 0.08);
+    let tint = vec3(0.20, 0.34, 0.16).lerp(vec3(0.43, 0.53, 0.29), margin.powf(5.0) * 0.55 + vein * 0.08);
     S::new(leaf(q, length, width), || (Material::Foliage, tint))
 }
 
@@ -132,11 +132,19 @@ pub(super) fn table_lamp<S: Sample>(p: Vec3) -> S {
     let warp = (angle * 36.0 + q.z * 24.0).sin().abs();
     let weft = (q.z * 210.0 - angle * 2.0).sin().abs();
     let weave = oval.abs() - 0.0035;
-    let shade = weave.max_num((0.45 - warp.max_num(weft)) * 0.003).min_num(oval + 0.005);
+    let wicker = weave.max_num((0.45 - warp.max_num(weft)) * 0.003);
+    let diffuser = oval + 0.005;
+    let shade = wicker.min_num(diffuser);
     let foot = super::cylinder(p - Vec3::Z * 0.012, 0.045, 0.024);
     S::new(shade.min_num(foot), || {
         (
-            if shade < foot { Material::Fabric } else { Material::Metal },
+            if shade >= foot {
+                Material::Metal
+            } else if diffuser < wicker {
+                Material::Emissive
+            } else {
+                Material::Fabric
+            },
             if shade < foot {
                 vec3(0.82, 0.70, 0.47) * (0.58 + 0.42 * warp.max_num(weft))
             } else {
@@ -174,40 +182,40 @@ pub(super) fn table_flowers<S: Sample>(p: Vec3) -> S {
 }
 #[inline(never)]
 pub(super) fn sill_arrangement<S: Sample>(p: Vec3, size: Vec3) -> S {
-    // A single narrow amber vase with grasses and flowering stems, distinct
-    // from both the ficus and the floor-standing cherry blossom arrangement.
+    // Artificial grasses are bound directly with twine: no vase or pot.
     let bottom = -size.z * 0.5;
-    let top = bottom + size.z * 0.32;
-    let vase = super::taper(p, vec3(0.0, 0.0, bottom), vec3(0.0, 0.0, top), 0.032, 0.039)
-        .max_num(bottom - p.z)
-        .max_num(p.z - top)
-        .max_num(-super::cylinder(p - Vec3::Z * (top - 0.055), 0.031, 0.14));
+    let tie_height = bottom + 0.12;
+    let binding = vec2(p.xy().length() - 0.032, p.z - tie_height).length() - 0.003;
+    let second_wrap = vec2(p.xy().length() - 0.032, p.z - tie_height - 0.008).length() - 0.003;
+    let string = binding.min_num(second_wrap);
     let mut grasses = super::FAR;
     let mut blossoms = super::FAR;
-    let mut i = 0;
-    while i < 12 {
+    for i in 0..18 {
         let phase = i as f32 * 2.399_963;
         let (sin, cos) = phase.sin_cos();
-        let start = vec3(cos * 0.018, sin * 0.018, top - 0.03);
-        let middle = vec3(cos * 0.035, sin * 0.035, top + size.z * 0.24);
-        let end = vec3(cos * 0.085, sin * 0.055, size.z * (0.37 + 0.07 * phase.sin()));
+        let start = vec3(cos * 0.026, sin * 0.026, bottom + 0.005);
+        let neck = vec3(cos * 0.024, sin * 0.024, tie_height);
+        let middle = vec3(cos * 0.045, sin * 0.040, bottom + size.z * 0.55);
+        let end = vec3(cos * 0.10, sin * 0.07, size.z * (0.28 + 0.20 * phase.sin().abs()));
         grasses = grasses
-            .min_num(super::taper(p, start, middle, 0.0025, 0.002))
-            .min_num(super::taper(p, middle, end, 0.002, 0.0005));
-        if i < 6 {
+            .min_num(super::taper(p, start, neck, 0.003, 0.0025))
+            .min_num(super::taper(p, neck, middle, 0.0025, 0.002))
+            .min_num(super::taper(p, middle, end, 0.002, 0.0006));
+        let blade_end = middle + vec3(cos * 0.055, sin * 0.055, -0.035);
+        grasses = grasses.min_num(super::taper(p, neck, blade_end, 0.0025, 0.0003));
+        if i < 7 {
             let q = super::unrotate_z(p - end, vec2(sin, cos));
-            blossoms = blossoms.min_num(flower(q, 0.016));
-            grasses = grasses.min_num(leaf(q - vec3(0.0, 0.0, -0.05), 0.031, 0.006));
+            blossoms = blossoms.min_num(flower(q, 0.020));
+            blossoms = blossoms.min_num(flower(q - vec3(0.01, 0.0, -0.035), 0.016));
         }
-        i += 1;
     }
-    let distance = vase.min_num(grasses).min_num(blossoms);
-    let (material, tint) = if blossoms < vase.min_num(grasses) {
-        (Material::Fabric, vec3(0.71, 0.33, 0.52))
-    } else if grasses < vase {
-        (Material::Foliage, vec3(0.49, 0.54, 0.22))
+    let distance = string.min_num(grasses).min_num(blossoms);
+    let (material, tint) = if blossoms < string.min_num(grasses) {
+        (Material::Fabric, vec3(0.72, 0.31, 0.55))
+    } else if grasses < string {
+        (Material::Foliage, vec3(0.56, 0.57, 0.25))
     } else {
-        (Material::Ceramic, vec3(0.66, 0.57, 0.18))
+        (Material::Fabric, vec3(0.65, 0.53, 0.32))
     };
     S::new(distance, || (material, tint))
 }

@@ -15,6 +15,7 @@ pub struct Renderer<P: Program> {
     resources: P::Resources,
     started: Instant,
     last_frame: f64,
+    order: SmallVec<[SurfaceHandle; 4]>,
 }
 /// Records surfaces that will be submitted together in one frame.
 pub struct Render<'a, P: Program> {
@@ -44,9 +45,11 @@ impl<P: Program> Render<'_, P> {
         draw: impl FnOnce(Frame<'_, P>),
     ) {
         let renderer = &mut *self.renderer;
+        let handle = surface;
         let Some(surface) = renderer.surfaces.get_mut(surface) else { return };
         assert!(!surface.recorded, "record each surface once per render batch");
         surface.recorded = true;
+        renderer.order.push(handle);
         let pixel_scale = screen_size / Vec2::new(surface.config.width as f32, surface.config.height as f32);
         let frame_data = FrameData { screen_size, time: self.time, pixel_scale, globals };
         draw(Frame {
@@ -72,12 +75,16 @@ impl<P: Program> Renderer<P> {
         let (gpu, target) = setup::new::<P>(target, size).await?;
         let mut surfaces = SlotMap::with_key();
         let handle = surfaces.insert(target);
-        Ok((Self { surfaces, gpu, resources, started: Instant::now(), last_frame: 0.0 }, handle))
+        Ok((
+            Self { surfaces, gpu, resources, started: Instant::now(), last_frame: 0.0, order: SmallVec::new() },
+            handle,
+        ))
     }
 
     /// Records and presents one frame, returning surface loss or GPU validation errors.
     pub fn render(&mut self, draw: impl FnOnce(&mut Render<'_, P>)) -> Result<(), RenderError> {
         self.gpu.begin_frame();
+        self.order.clear();
         for surface in self.surfaces.values_mut() {
             surface.paints.clear();
             surface.recorded = false;
@@ -94,21 +101,34 @@ impl<P: Program> Renderer<P> {
         let mut outputs = SmallVec::<[wgpu::SurfaceTexture; 2]>::new();
         let mut encoder =
             self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("isthmus frame") });
-        for surface in self.surfaces.values_mut() {
-            if !surface.recorded {
-                continue;
-            }
-            let Some(output) = surface.acquire(&self.gpu)? else { continue };
-            let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut has_passes = false;
+        // Recording order defines dependencies between offscreen passes.
+        for handle in &self.order {
+            let surface = self.surfaces.get_mut(*handle).expect("recorded surface exists");
+            let output;
+            let view = if let Some(view) = surface.image.as_ref() {
+                output = None;
+                view.clone()
+            } else {
+                let Some(acquired) = surface.acquire(&self.gpu)? else { continue };
+                let view = acquired.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                output = Some(acquired);
+                view
+            };
             {
+                has_passes = true;
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("isthmus render pass"),
+                    label: Some(if surface.image.is_some() { "isthmus image pass" } else { "isthmus surface pass" }),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &view,
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            load: if surface.image.is_some() {
+                                wgpu::LoadOp::Load
+                            } else {
+                                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                            },
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -119,9 +139,11 @@ impl<P: Program> Renderer<P> {
                 });
                 self.gpu.draw_surface(&mut pass, surface);
             }
-            outputs.push(output);
+            if let Some(output) = output {
+                outputs.push(output);
+            }
         }
-        if !outputs.is_empty() {
+        if has_passes {
             self.gpu.queue.submit([encoder.finish()]);
             for output in outputs {
                 self.gpu.queue.present(output);
@@ -148,6 +170,38 @@ impl<P: Program> Renderer<P> {
     /// Returns the format shared by this renderer's presentation surfaces.
     pub const fn format(&self) -> wgpu::TextureFormat {
         self.gpu.format
+    }
+
+    /// Adds a persistent render target that can also be sampled by later draws.
+    /// Its contents are preserved between render batches. Release its surface
+    /// handle with `remove_surface` when no further updates are needed.
+    pub fn add_image(&mut self, size: [u32; 2]) -> (SurfaceHandle, crate::Image) {
+        let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("isthmus render image"),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.gpu.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let image = crate::Image::from_texture(&texture);
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: self.gpu.format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            width: size[0],
+            height: size[1],
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        let target = SurfaceTarget::from_image(&self.gpu.device, config, image.texture_view().unwrap());
+        (self.surfaces.insert(target), image)
     }
 
     /// Updates physical surface dimensions, ignoring zero dimensions and stale handles.

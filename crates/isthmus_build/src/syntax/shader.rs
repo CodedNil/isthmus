@@ -119,7 +119,7 @@ impl Shader {
         }
         let blend = argument(&mut frame, "blend")?.unwrap_or_else(|| parse_quote!(#isthmus::Blend::Over));
         let Expr::Path(blend) = blend else {
-            return Err(syn::Error::new_spanned(blend, "expected Blend::Over, Blend::Add or Blend::Replace"));
+            return Err(syn::Error::new_spanned(blend, "expected a Blend variant"));
         };
         if let Expr::MethodCall(call) = &frame
             && ["blend", "upload", "primitive", "fragment"].iter().any(|name| call.method == *name)
@@ -285,6 +285,14 @@ impl Shader {
             *__out_uv = __vertex.uv;
             *__out_draw_index = __draw_index;
         });
+        let output = if self.blend.segments.last().is_some_and(|segment| segment.ident == "Raw") {
+            quote! { *__out_color = __color; }
+        } else {
+            quote! {
+                let __alpha = __color.w * __coverage;
+                *__out_color = (__color.truncate() * __alpha).extend(__alpha);
+            }
+        };
         let fragment = shader_entry(isthmus, &self.entry, false, &images, &payload_name, &quote! {
             #setup
             let __fragment = #isthmus::Fragment {
@@ -300,8 +308,7 @@ impl Shader {
             let #frame_input = __frame;
             let __color: #isthmus::glam::Vec4 = (|| #body)();
             if __coverage <= 0.0 { #isthmus::spirv_std::arch::kill(); }
-            let __alpha = __color.w * __coverage;
-            *__out_color = (__color.truncate() * __alpha).extend(__alpha);
+            #output
         });
         quote!(#payload #vertex #fragment)
     }

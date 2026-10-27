@@ -116,16 +116,32 @@ pub(super) fn workstation<S: Sample>(p: Vec3, _size: Vec3) -> S {
 #[inline(never)]
 pub(super) fn pegboard<S: Sample>(p: Vec3, size: Vec3) -> S {
     let board = rounded_box(p - Vec3::Y * -0.07, vec3(size.x, 0.014, size.z), 0.012);
-    let grid = p.xz() - (p.xz() / 0.025).round() * 0.025;
-    let slot = rounded_box(vec3(grid.x, p.y + 0.07, grid.y), vec3(0.005, 0.04, 0.011), 0.002);
+    // SKÅDIS has staggered vertical slots, not a square perforation grid.
+    let row = (p.z / 0.04).round();
+    let x = p.x - (row % 2.0) * 0.02;
+    let grid = vec2(x - (x / 0.04).round() * 0.04, p.z - row * 0.04);
+    let slot = rounded_box(vec3(grid.x, p.y + 0.07, grid.y), vec3(0.005, 0.04, 0.014), 0.002);
     let board = board.max_num(-slot);
-    let tray = rounded_box(p - vec3(0.0, 0.0, -0.17), vec3(size.x * 0.88, 0.14, 0.025), 0.006);
-    let bin = rounded_box(p - vec3(0.05, 0.0, 0.11), vec3(0.27, 0.13, 0.14), 0.016).max_num(-rounded_box(
-        p - vec3(0.05, 0.0, 0.13),
+    // Two separate lower trays, a small upper cup and the wide upper bin.
+    let q = p - vec3(if p.x < 0.0 { -0.137 } else { 0.137 }, 0.0, -0.19);
+    let tray = rounded_box(q, vec3(0.25, 0.14, 0.035), 0.007).max_num(-rounded_box(
+        q - Vec3::Z * 0.015,
+        vec3(0.23, 0.12, 0.035),
+        0.005,
+    ));
+    let q = p - vec3(0.075, 0.0, 0.115);
+    let bin = rounded_box(q, vec3(0.27, 0.13, 0.14), 0.016).max_num(-rounded_box(
+        q - Vec3::Z * 0.015,
         vec3(0.25, 0.11, 0.14),
         0.01,
     ));
-    S::new(board.min_num(tray).min_num(bin), || (Material::Paint, vec3(0.86, 0.85, 0.80)))
+    let q = p - vec3(-0.18, -0.005, 0.145);
+    let cup = rounded_box(q, vec3(0.075, 0.105, 0.085), 0.01).max_num(-rounded_box(
+        q - Vec3::Z * 0.01,
+        vec3(0.061, 0.091, 0.085),
+        0.007,
+    ));
+    S::new(board.min_num(tray).min_num(bin).min_num(cup), || (Material::Paint, vec3(0.92, 0.92, 0.90)))
 }
 
 #[inline(never)]

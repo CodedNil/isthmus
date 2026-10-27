@@ -15,6 +15,8 @@ pub struct Scene {
     pub objects: Box<[Object]>,
     pub nodes: Box<[Node]>,
     pub lights: Box<[u32]>,
+    pub light_masks: Box<[u32]>,
+    pub lighting_revision: u64,
     light_entities: Box<[(&'static str, u32)]>,
     pub radius: f32,
     pub sun: super::Sun,
@@ -27,6 +29,10 @@ pub struct Scene {
 }
 
 impl Scene {
+    pub fn camera_exposure(&self, eye: Vec3, forward: Vec3, right: Vec3, up: Vec3) -> f32 {
+        super::scene::camera_exposure(self, eye, forward, right, up)
+    }
+
     pub fn new(rooms: &[Room]) -> Self {
         Self::new_at(rooms, super::sun::utc_now(), super::SunSettings::default())
     }
@@ -70,6 +76,7 @@ impl Scene {
         let min = nodes.first().map_or(Vec3::ZERO, |n| n.min);
         let max = nodes.first().map_or(Vec3::ONE, |n| n.max);
         let lights: Box<[u32]> = (0..objects.len() as u32).filter(|&i| objects[i as usize].is_light()).collect();
+        let light_masks = super::light_culling::masks(&objects, &nodes, &lights);
         let (grid, probes, indirect) = super::scene::irradiance::bake(&objects, &nodes, &lights, min, max, sun);
         Self {
             sun,
@@ -80,6 +87,8 @@ impl Scene {
             objects: objects.into_boxed_slice(),
             nodes: nodes.into_boxed_slice(),
             lights,
+            light_masks,
+            lighting_revision: 0,
             light_entities: light_entities.into_boxed_slice(),
             radius,
             grid,
@@ -101,6 +110,28 @@ impl Scene {
             }
         }
         if changed {
+            self.lighting_revision = self.lighting_revision.wrapping_add(1);
+            self.indirect.compose(self.sun, &self.objects, &mut self.probes);
+        }
+        found
+    }
+
+    /// Changes linear RGB source colour and all cached diffuse bounces.
+    /// Visibility is geometric and does not need to be traced or baked again.
+    pub fn set_light_color(&mut self, entity_id: &str, color: Vec3) -> bool {
+        let color = if color.is_finite() { color.max(Vec3::ZERO) } else { Vec3::ZERO };
+        let mut found = false;
+        let mut changed = false;
+        for &(entity, index) in &self.light_entities {
+            if entity == entity_id {
+                let light = &mut self.objects[index as usize];
+                changed |= light.emission_color != color;
+                light.emission_color = color;
+                found = true;
+            }
+        }
+        if changed {
+            self.lighting_revision = self.lighting_revision.wrapping_add(1);
             self.indirect.compose(self.sun, &self.objects, &mut self.probes);
         }
         found
@@ -118,6 +149,7 @@ impl Scene {
         let jumped = (unix_seconds - self.clock).abs() > 120.0;
         self.clock = unix_seconds;
         if jumped {
+            self.lighting_revision = self.lighting_revision.wrapping_add(1);
             // A restored tab can cross sunrise or sunset. Update source colors
             // immediately; visibility then converges within the normal budget.
             self.indirect.compose(self.sun, &self.objects, &mut self.probes);
@@ -135,6 +167,7 @@ impl Scene {
             return;
         }
         self.clock = unix_seconds;
+        self.lighting_revision = self.lighting_revision.wrapping_add(1);
         self.last_bake = unix_seconds;
         self.sun = super::Sun::at_utc(unix_seconds, self.sun_settings);
         self.indirect.relight(self.sun, &self.objects, &self.nodes, &mut self.probes);
