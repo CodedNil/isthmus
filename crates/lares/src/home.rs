@@ -1,4 +1,6 @@
-use crate::render::{DOOR_HEIGHT, EXTERIOR_WALL_THICKNESS, WALL_HEIGHT, WINDOW_HEAD, WINDOW_SILL};
+use crate::render::{
+    DOOR_HEIGHT, EXTERIOR_WALL_THICKNESS, WALL_HEIGHT, WINDOW_HEAD, WINDOW_SILL, photometry::warm_white,
+};
 use isthmus::{
     ShaderData,
     glam::{Vec2, Vec3, vec2},
@@ -12,6 +14,7 @@ pub enum Material {
     Carpet,
     Tile,
     Fabric,
+    Satin,
     Stone,
     Ceramic,
     Metal,
@@ -27,6 +30,7 @@ pub enum Material {
     Mirror,
     Maple,
     MapleHorizontal,
+    GlazedTile,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, ShaderData)]
@@ -36,6 +40,7 @@ pub enum Kind {
     Box,
     Bed,
     Sofa,
+    Pillow,
     Table,
     Counter,
     Ceiling,
@@ -102,6 +107,8 @@ pub struct Object {
     pub rotation: Vec2,
     pub kind: Kind,
     pub material: Material,
+    /// Base of automatically projected surface irradiance samples, or MAX.
+    pub surface_cache: u32,
     /// Preview light output; zero for objects that do not emit light.
     pub emission: f32,
     /// Linear RGB source colour, separate from the fixture's material.
@@ -118,6 +125,7 @@ impl Object {
             rotation: Vec2::Y,
             kind,
             material,
+            surface_cache: u32::MAX,
             emission: 0.0,
             emission_color: DEFAULT_LIGHT_COLOR,
             exterior: Vec3::ZERO,
@@ -228,10 +236,14 @@ impl Room {
     }
 
     pub fn window_width(self, pos: Vec2, rotation: f32, width: f32) -> Self {
-        self.opening(pos, rotation, width, WINDOW_SILL, WINDOW_HEAD).furniture(
+        self.window_frame(pos, rotation, width, WINDOW_SILL, WINDOW_HEAD)
+    }
+
+    pub fn window_frame(self, pos: Vec2, rotation: f32, width: f32, sill: f32, head: f32) -> Self {
+        self.opening(pos, rotation, width, sill, head).furniture(
             Kind::Window,
-            pos.extend(WINDOW_SILL),
-            (width, EXTERIOR_WALL_THICKNESS, WINDOW_HEAD - WINDOW_SILL),
+            pos.extend(sill),
+            (width, EXTERIOR_WALL_THICKNESS, head - sill),
             rotation,
         )
     }
@@ -251,13 +263,16 @@ impl Room {
     pub fn downlights(self, entity_id: &'static str, positions: &[(f32, f32)]) -> Self {
         positions.iter().fold(self, |room, &(x, y)| {
             let pos = Vec3::new(x, y, WALL_HEIGHT - 0.032);
-            room.light(entity_id, Object::new(Kind::Downlight, pos, Vec3::new(0.11, 0.11, 0.032), Material::Paint))
+            room.light(entity_id, Object {
+                emission_color: warm_white(4000.0),
+                ..Object::new(Kind::Downlight, pos, Vec3::new(0.11, 0.11, 0.032), Material::Paint)
+            })
         })
     }
 
     /// A table lamp resting on a surface at the supplied room-local height.
     pub fn lamp(self, entity_id: &'static str, position: impl Into<Vec3>) -> Self {
-        self.light(entity_id, Object::new(Kind::Lamp, position.into(), Vec3::new(0.15, 0.15, 0.35), Material::Metal))
+        self.light(entity_id, Object::new(Kind::Lamp, position.into(), Vec3::new(0.20, 0.20, 0.40), Material::Metal))
     }
 
     fn light(mut self, entity_id: &'static str, fixture: Object) -> Self {
@@ -265,10 +280,21 @@ impl Room {
         self
     }
 
-    pub fn furniture(mut self, kind: Kind, pos: impl Into<Vec3>, size: impl Into<Vec3>, rotation: f32) -> Self {
+    pub fn furniture(self, kind: Kind, pos: impl Into<Vec3>, size: impl Into<Vec3>, rotation: f32) -> Self {
+        self.furniture_material(kind, pos, size, rotation, Material::Wood)
+    }
+
+    pub fn furniture_material(
+        mut self,
+        kind: Kind,
+        pos: impl Into<Vec3>,
+        size: impl Into<Vec3>,
+        rotation: f32,
+        material: Material,
+    ) -> Self {
         let (sin, cos) = rotation.to_radians().sin_cos();
         self.furniture
-            .push(Object { rotation: vec2(sin, cos), ..Object::new(kind, pos.into(), size.into(), Material::Wood) });
+            .push(Object { rotation: vec2(sin, cos), ..Object::new(kind, pos.into(), size.into(), material) });
         self
     }
 }
@@ -297,10 +323,10 @@ fn hall() -> Room {
         .door(vec2(-1.7, 2.55), 0.0)
         .furniture(Kind::EntryDoor, (-1.7, 2.55, 0.0), (0.79, 0.045, 2.04), 0.0)
         .furniture(Kind::Radiator, (-0.425, 0.45, 0.0), (1.2, 0.1, 0.6), 0.0)
-        .furniture(Kind::ShoeStorage, (-1.30, 1.65, 0.0), (0.76, 0.22, 1.02), 90.0)
-        .furniture(Kind::SillPlant, (-1.30, 1.82, 1.025), (0.53, 0.53, 0.76), 0.0)
-        .furniture(Kind::PosterBlue, (-1.215, 1.56, 1.36), (0.33, 0.02, 0.54), 90.0)
-        .furniture(Kind::Mirror, (-1.215, 0.99, 0.61), (0.40, 0.035, 1.41), 90.0)
+        .furniture(Kind::ShoeStorage, (-1.30, 1.47, 0.0), (0.76, 0.22, 1.02), 90.0)
+        .furniture(Kind::SillPlant, (-1.30, 1.64, 1.025), (0.53, 0.53, 0.76), 0.0)
+        .furniture(Kind::PosterBlue, (-1.215, 1.38, 1.36), (0.33, 0.02, 0.54), 90.0)
+        .furniture(Kind::Mirror, (-1.215, 0.77, 0.61), (0.40, 0.035, 1.41), 90.0)
 }
 
 fn lounge() -> Room {
@@ -321,6 +347,8 @@ fn lounge() -> Room {
         .furniture(Kind::Curtain, (1.75, -1.25, 0.67), (1.10, 0.38, 1.63), 0.0)
         .furniture(Kind::SillArrangement, (-1.40, -1.33, 0.945), (0.24, 0.20, 0.64), 0.0)
         .furniture(Kind::Sofa, (-2.56, 0.20, 0.0), (2.28, 0.95, 0.83), -90.0)
+        .furniture_material(Kind::Pillow, (-2.65, -0.47, 0.45), (0.39, 0.17, 0.39), -98.0, Material::Satin)
+        .furniture_material(Kind::Pillow, (-2.65, 0.87, 0.45), (0.40, 0.18, 0.39), -78.0, Material::Knit)
         .furniture(Kind::Ottoman, (-1.66, 0.60, 0.02), (0.90, 0.70, 0.43), -90.0)
         .furniture(Kind::Rug, (-1.50, 0.17, 0.0), (1.65, 2.94, 0.012), 0.0)
         .furniture(Kind::Plant, (-2.6, -1.00, 0.0), (1.22, 1.10, 1.9), 0.0)
@@ -333,12 +361,12 @@ fn lounge() -> Room {
         .furniture(Kind::DiningChair, (0.86, -0.98, 0.0), (0.44, 0.49, 0.94), 90.0)
         .furniture(Kind::DiningChair, (0.86, -0.39, 0.0), (0.44, 0.49, 0.94), 90.0)
         .furniture(Kind::Workstation, (2.43, -0.48, 0.0), (1.417, 1.20, 1.50), 90.0)
-        .furniture(Kind::Pegboard, (2.48, -1.235, 1.08), (0.56, 0.20, 0.56), 180.0)
+        .furniture(Kind::Pegboard, (2.58, -1.235, 1.08), (0.76, 0.20, 0.56), 180.0)
         .furniture(Kind::Poster, (3.00, 0.58, 1.35), (0.32, 0.02, 0.46), 90.0)
         .furniture(Kind::PosterNight, (3.00, 1.00, 1.35), (0.32, 0.02, 0.46), 90.0)
-        .furniture(Kind::Palm, (2.61, 0.80, 0.0), (1.30, 1.30, 1.48), 0.0)
+        .furniture(Kind::Palm, (2.61, 0.50, 0.0), (1.30, 1.30, 1.15), 0.0)
         .furniture(Kind::SillPlant, (1.78, -1.33, 0.945), (0.24, 0.24, 0.42), 0.0)
-        .furniture(Kind::Chair, (1.83, -0.43, 0.0), (0.72, 0.72, 1.3), -90.0)
+        .furniture(Kind::Chair, (1.83, -0.43, 0.0), (0.72, 0.72, 1.3), 115.0)
 
         // Display wall on the storage side of the kitchen/hall junction.
         .furniture(Kind::DisplayShelf, (0.85, 2.04, 0.0), (0.64, 0.32, 1.90), 0.0)
@@ -354,7 +382,7 @@ fn kitchen() -> Room {
         .downlights("light.kitchen_downlights", &[(-0.5, 0.0), (0.7, 0.0)])
         .cut_wall(vec2(1.3, -1.10), vec2(0.3, 0.95))
         .outline(&[(-1.6, -1.55), (1.3, -1.55), (1.3, -0.65), (1.8, -0.65), (1.8, 1.55), (-1.6, 1.55)])
-        .window_width(vec2(0.3, 1.55), 180.0, 1.4)
+        .window_frame(vec2(0.3, 1.55), 180.0, 1.4, 1.02, WINDOW_HEAD)
         .furniture(Kind::Counter, (-1.275, 1.225, 0.0), (0.55, 0.55, 0.9), 0.0)
         .furniture(Kind::Counter, (1.475, 1.225, 0.0), (0.55, 0.55, 0.9), 0.0)
         .furniture(Kind::Counter, (-1.275, -0.975, 0.0), (0.55, 0.55, 0.9), -90.0)
@@ -382,12 +410,12 @@ fn kitchen() -> Room {
         .furniture(Kind::CookerHood, (-1.34, 0.155, 1.43), (0.56, 0.44, WALL_HEIGHT - 1.43), -90.0)
         .furniture(Kind::Cupboard, (-0.975, 1.395, 1.45), (1.15, 0.30, 0.72), 0.0)
         .furniture(Kind::Cupboard, (1.375, 1.395, 1.45), (0.75, 0.30, 0.72), 0.0)
-        .furniture(Kind::Splashback, (-1.535, 0.10, 0.90), (2.80, 0.018, 0.55), -90.0)
-        .furniture(Kind::Splashback, (0.10, 1.485, 0.90), (3.30, 0.018, 0.06), 0.0)
+        .furniture(Kind::Splashback, (-1.535, 0.15, 0.90), (2.70, 0.018, 0.55), -90.0)
+        .furniture(Kind::Splashback, (0.10, 1.485, 0.90), (3.30, 0.018, 0.15), 0.0)
         .furniture(Kind::Splashback, (-1.00, 1.485, 0.90), (1.20, 0.018, 0.55), 0.0)
         .furniture(Kind::Splashback, (1.40, 1.485, 0.90), (0.80, 0.018, 0.55), 0.0)
         .furniture(Kind::Splashback, (1.735, 0.67, 0.90), (1.66, 0.018, 0.55), 90.0)
-        .furniture(Kind::SillPlant, (0.35, 1.43, 0.96), (0.29, 0.29, 0.48), 0.0)
+        .furniture(Kind::SillPlant, (0.35, 1.43, 1.05), (0.29, 0.29, 0.48), 0.0)
         .furniture(Kind::TrailingPlant, (-1.23, -0.075, 1.80), (0.30, 0.30, 0.42), -90.0)
         .furniture(Kind::TrailingPlant, (-1.23, 0.385, 1.83), (0.24, 0.24, 0.39), -90.0)
         .furniture(Kind::TrailingPlant, (1.07, 1.23, 1.608), (0.34, 0.34, 0.54), 0.0)

@@ -15,15 +15,31 @@ fn fixtures_bounce_onto_ceiling_and_dimming_does_not_accumulate_energy() {
     let room = room(Vec2::ZERO).downlights("light.test", &[(0.0, 0.0)]);
     let mut scene = Scene::new_at(&[room], MIDNIGHT, SunSettings::default());
     let sample = |scene: &Scene| scene.grid.sample(&scene.probes, vec3(0.0, 0.0, 2.25), -Vec3::Z);
+    let surface = scene
+        .probes
+        .iter()
+        .enumerate()
+        .filter(|(_, probe)| probe.normal.length_squared() > 0.5)
+        .map(|(index, probe)| (index, probe.light.constant))
+        .collect::<Vec<_>>();
+    assert!(surface.iter().any(|(_, light)| light.max_element() > 0.0), "surface receivers must receive bounced light");
     let lit = sample(&scene);
     scene.set_light_state("light.test", 0.0);
     let dark = sample(&scene);
+    let surface_dark: Vec<_> = surface.iter().map(|(index, _)| scene.probes[*index].light.constant).collect();
     assert!(lit.x > dark.x + 0.001, "ceiling should receive bounced light: {lit:?}, {dark:?}");
     assert!(lit.x > lit.z, "warm emitters should tint the bounce");
     for brightness in [0.0, 0.1, 0.25, 0.5, 0.9, 1.0] {
         scene.set_light_state("light.test", brightness);
         let expected = dark + (lit - dark) * brightness;
         assert!((sample(&scene) - expected).length() < 0.00001, "light transport must be linear and have no feedback");
+        for ((index, lit), dark) in surface.iter().zip(&surface_dark) {
+            let expected = *dark + (*lit - *dark) * brightness;
+            assert!(
+                (scene.probes[*index].light.constant - expected).length() < 0.00001,
+                "surface radiosity must also remain linear"
+            );
+        }
     }
 }
 
@@ -58,21 +74,50 @@ fn bounced_fixture_light_does_not_cross_a_closed_room_wall() {
     let left = room(vec2(-1.6, 0.0)).downlights("light.left", &[(0.0, 0.0)]);
     let right = room(vec2(1.6, 0.0));
     let mut scene = Scene::new_at(&[left, right], MIDNIGHT, SunSettings::default());
-    let sample = |scene: &Scene| scene.grid.sample(&scene.probes, vec3(1.6, 0.0, 1.0), -Vec3::X);
+    // Include floor/wall and ceiling/wall junctions, where relocated volume
+    // probes and projected surface footprints used to cross partitions.
+    let receivers = [
+        (vec3(1.6, 0.0, 1.0), -Vec3::X),
+        (vec3(0.103, 0.0, 0.003), Vec3::Z),
+        (vec3(0.103, 1.49, 0.003), -Vec3::Y),
+        (vec3(0.103, 0.0, 2.397), -Vec3::Z),
+    ];
+    let sample = |scene: &Scene| receivers.map(|(point, normal)| scene.grid.sample(&scene.probes, point, normal));
     let lit = sample(&scene);
+    let surfaces: Vec<_> = scene
+        .probes
+        .iter()
+        .enumerate()
+        .filter(|(_, probe)| probe.normal != Vec3::ZERO && probe.position.x > 0.101)
+        .map(|(index, probe)| (index, probe.light.constant))
+        .collect();
     scene.set_light_state("light.left", 0.0);
-    assert!((lit - sample(&scene)).length() < 0.0001, "GI should respect the partition");
+    for (lit, dark) in lit.into_iter().zip(sample(&scene)) {
+        assert!((lit - dark).length() < 0.0001, "GI should respect the partition: {:?}", lit - dark);
+    }
+    for (index, lit) in surfaces {
+        assert!(
+            (lit - scene.probes[index].light.constant).length() < 0.0001,
+            "surface filtering must not transfer light through a partition"
+        );
+    }
 }
 
 #[test]
 fn budgeted_updates_converge_to_a_full_relight() {
     let room = Room::new(Vec2::ZERO, Vec2::splat(3.0), Material::Carpet).downlights("light.test", &[(0.0, 0.0)]);
     let scene = Scene::new_at(&[room], MIDNIGHT, SunSettings::default());
-    let (_, mut probes, mut cache) =
-        bake(&scene.objects, &scene.nodes, &scene.lights, scene.nodes[0].min, scene.nodes[0].max, scene.sun);
+    let (_, mut probes, mut cache) = bake(
+        &mut scene.objects.clone(),
+        &scene.nodes,
+        &scene.lights,
+        scene.nodes[0].min,
+        scene.nodes[0].max,
+        scene.sun,
+    );
     let noon = Sun::at_utc(MIDNIGHT + 12.0 * 3600.0, SunSettings::default());
     cache.begin_update();
-    assert_eq!(cache.remaining, cache.active.len() * (BOUNCES + 1));
+    assert!(cache.updating());
     assert!(cache.active.len() < cache.direct.len(), "exterior/solid sites must be excluded from transport work");
     let old = cache.remaining;
     cache.step(noon, &scene.objects, &scene.nodes, &mut probes);
@@ -126,7 +171,7 @@ fn exterior_sky_and_ground_enter_only_through_apertures() {
                 }
                 let scene = Scene::new_at(&[room], MIDNIGHT + 43200.0, SunSettings::default());
                 let (_, _, cache) = bake(
-                    &scene.objects,
+                    &mut scene.objects.clone(),
                     &scene.nodes,
                     &scene.lights,
                     scene.nodes[0].min,
@@ -142,5 +187,58 @@ fn exterior_sky_and_ground_enter_only_through_apertures() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn surface_gather_preserves_constant_environment_across_receiver_orientations() {
+    for normal in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z, vec3(1.0, 2.0, 3.0).normalize()] {
+        let mut result = Irradiance::default();
+        for sample in 0..RAYS {
+            let z = 1.0 - 2.0 * (sample as f32 + 0.5) / RAYS as f32;
+            let angle = sample as f32 * 2.399_963;
+            let radius = (1.0 - z * z).sqrt();
+            let direction = vec3(radius * angle.cos(), radius * angle.sin(), z);
+            result.project_receiver(direction, Vec3::ONE, normal);
+        }
+        assert!(
+            (result.constant - Vec3::ONE).abs().max_element() < 0.015,
+            "cosine gather must preserve unit radiance: {:?}",
+            result.constant
+        );
+        for (actual, expected) in [(result.x, normal.x), (result.y, normal.y), (result.z, normal.z)] {
+            assert!(
+                (actual - Vec3::splat(expected)).abs().max_element() < 0.02,
+                "surface directional derivative must match the cosine integral"
+            );
+        }
+    }
+}
+
+#[test]
+fn surface_normal_response_matches_directional_hemisphere_integration() {
+    let light = vec3(0.8, 0.0, 0.6);
+    let normals = [vec3(0.15, 0.0, 1.0).normalize(), vec3(-0.15, 0.0, 1.0).normalize()];
+    let mut field = Irradiance::default();
+    let mut reference = [Vec3::ZERO; 2];
+    for sample in 0..RAYS {
+        let z = 1.0 - 2.0 * (sample as f32 + 0.5) / RAYS as f32;
+        let angle = sample as f32 * 2.399_963;
+        let radius = (1.0 - z * z).sqrt();
+        let direction = vec3(radius * angle.cos(), radius * angle.sin(), z);
+        let radiance = Vec3::splat(direction.dot(light).max(0.0).powi(8));
+        field.project_receiver(direction, radiance, Vec3::Z);
+        for (value, normal) in reference.iter_mut().zip(normals) {
+            *value += radiance * (4.0 * normal.dot(direction).max(0.0) / RAYS as f32);
+        }
+    }
+    assert!(reference[0].x > reference[1].x * 1.2);
+    for (normal, expected) in normals.into_iter().zip(reference) {
+        let delta = normal - Vec3::Z;
+        let actual = field.constant + field.x * delta.x + field.y * delta.y + field.z * delta.z;
+        assert!(
+            (actual - expected).length() < expected.length() * 0.02,
+            "bumped cached irradiance must agree with directional integration: {actual:?} vs {expected:?}"
+        );
     }
 }

@@ -3,11 +3,13 @@ use crate::home::Material;
 use core::f32::consts::TAU;
 use isthmus::prelude::*;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub(super) struct Surface {
     pub albedo: Vec3,
     pub roughness: f32,
     pub metallic: f32,
+    /// Effective coverage of the dielectric specular finish.
+    pub specular: f32,
     pub anisotropy: f32,
     pub tangent: Vec3,
     pub sheen: f32,
@@ -15,6 +17,25 @@ pub(super) struct Surface {
     pub coat_roughness: f32,
     pub gradient: Vec3,
     pub occlusion: f32,
+    pub fiber_depth: f32,
+}
+impl Default for Surface {
+    fn default() -> Self {
+        Self {
+            albedo: Vec3::ZERO,
+            roughness: 0.0,
+            metallic: 0.0,
+            specular: 1.0,
+            anisotropy: 0.0,
+            tangent: Vec3::ZERO,
+            sheen: 0.0,
+            coat: 0.0,
+            coat_roughness: 0.0,
+            gradient: Vec3::ZERO,
+            occlusion: 0.0,
+            fiber_depth: 0.0,
+        }
+    }
 }
 pub(super) fn hash(cell: Vec2) -> f32 {
     let bits = (cell.x as i32 as u32).wrapping_mul(0x9e37_79b9) ^ (cell.y as i32 as u32).wrapping_mul(0x85eb_ca6b);
@@ -67,6 +88,34 @@ fn edge(distance: f32, width: f32, pixel: f32) -> f32 {
 fn linear(color: Vec3) -> Vec3 {
     // sRGB albedo inputs; all illumination is evaluated in linear light.
     color.clamp(Vec3::ZERO, Vec3::ONE).powf(2.2)
+}
+/// Jittered mineral cells retain sharp crystal boundaries at close range.
+fn mineral_grains(uv: Vec2, pixel: f32) -> Vec3 {
+    let scale = 165.0;
+    let point = uv * scale;
+    let cell = point.floor();
+    let mut nearest = 100.0;
+    let mut crystal = Vec3::ZERO;
+    for neighbour in 0..9 {
+        let index = cell + vec2((neighbour % 3) as f32 - 1.0, (neighbour / 3) as f32 - 1.0);
+        let seed = hash(index);
+        let variation = hash(index + vec2(67.0, 23.0));
+        let delta = point - index - vec2(0.1 + seed * 0.8, 0.1 + variation * 0.8);
+        let distance = delta.length_squared();
+        if distance < nearest {
+            nearest = distance;
+            let tone = if variation > 0.88 {
+                0.16 + seed * 0.10
+            } else if variation > 0.55 {
+                0.015 + seed * 0.035
+            } else {
+                seed * 0.006
+            };
+            crystal = vec3(tone, (seed - 0.5) * 0.025, (variation - 0.5) * 0.025);
+        }
+    }
+    let filter = 1.0 / (1.0 + (pixel * scale * 1.5).powi(4));
+    vec3(0.044, 0.0, 0.0).lerp(crystal, filter)
 }
 /// Board-local oak growth, pores, finish wear and a shallow machined bevel.
 /// Height derivatives perturb the true SDF normal only after the ray hits.
@@ -127,9 +176,13 @@ fn floorboards(tint: Vec3, uv: Vec2, footprint: Vec2) -> Surface {
     let distance = local.min(vec2(length, width) - local);
     let seam = edge(distance.x, 0.00055, footprint.x).max_num(edge(distance.y, 0.00055, footprint.y));
     let bevel_width = 0.0022;
-    let bevel = (Vec2::ONE - distance / bevel_width).max(Vec2::ZERO);
-    let bevel_sign = Vec2::select(local.cmpgt(vec2(length, width) * 0.5), Vec2::ONE, -Vec2::ONE);
-    let resolved = (Vec2::ONE - footprint / 0.007).clamp(Vec2::ZERO, Vec2::ONE);
+    // Convolve a shallow bevel with the pixel footprint instead of dropping
+    // it once the pixel grows beyond the bevel. Edge highlights stay local.
+    let filtered_width = Vec2::splat(bevel_width) + footprint * 0.5;
+    let bevel = (Vec2::ONE - distance / filtered_width).max(Vec2::ZERO) * bevel_width / filtered_width
+        * (Vec2::ONE - footprint / 0.05).clamp(Vec2::ZERO, Vec2::ONE);
+    let bevel_sign = Vec2::select(local.cmpgt(vec2(length, width) * 0.5), -Vec2::ONE, Vec2::ONE);
+    let relief = floor_detail(local + seed * 53.0, vec2(6.0, 32.0), footprint);
     let finish = 0.5 + fibres.x * 0.5 + broad.x * 0.35;
     let tone = vec3(0.36, 0.29, 0.225).lerp(vec3(0.53, 0.435, 0.34), seed * 0.70 + 0.10);
     let albedo = tint
@@ -140,20 +193,24 @@ fn floorboards(tint: Vec3, uv: Vec2, footprint: Vec2) -> Surface {
     let phase_gradient = (radial_gradient * (TAU * frequency) + drift.yz() * 3.0)
         * (1.0 + (ring_phase * 0.37 + seed * TAU).cos() * 0.2405);
     let ring_gradient = phase_gradient * phase.cos() * (1.0 - frequency * 1.25 * footprint.y * 2.0).clamp(0.0, 1.0);
-    let gradient = fibres.yz() * 0.00055
-        + pores.yz() * 0.00016
-        + ring_gradient * 0.00012
-        + broad.yz() * 0.00055
-        + bevel_sign * bevel * (0.16 * resolved);
+    let gradient = fibres.yz() * 0.00095
+        + pores.yz() * 0.00024
+        + ring_gradient * 0.00065
+        + broad.yz() * 0.0015
+        + relief.yz() * 0.0018
+        + bevel_sign * bevel * 0.50;
     // Unresolved pores become microsurface roughness rather than disappearing
     // and leaving an unnaturally perfect mirror at distant viewing angles.
     Surface {
         albedo,
-        roughness: (0.53 + (seed - 0.5) * 0.10 + broad.x * 0.10 + fibres.x * 0.10 + seam * 0.12).clamp(0.40, 0.76),
-        coat: 0.10 + finish * 0.06,
-        anisotropy: 0.38,
+        roughness: (0.59 + (seed - 0.5) * 0.10 + broad.x * 0.10 + fibres.x * 0.14 + pores.x * 0.08 + seam * 0.10
+            - bevel.max_element() * 0.18)
+            .clamp(0.37, 0.80),
+        specular: 0.32 + bevel.max_element() * 0.38,
+        coat: 0.012 + finish * 0.008,
+        anisotropy: 0.16,
         tangent: Vec3::X,
-        coat_roughness: 0.48 + broad.x * 0.08,
+        coat_roughness: 0.60 + broad.x * 0.10 + pores.x * 0.08,
         gradient: gradient.extend(0.0),
         occlusion: 1.0 - seam * 0.12,
         ..Surface::default()
@@ -186,22 +243,11 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
                 * if maple { 0.25 } else { 1.0 })
             .extend(0.0);
         }
-        Material::Carpet | Material::Shag | Material::Fabric | Material::Knit => {
-            let shag = kind == Material::Shag;
-            let carpet = kind == Material::Carpet || shag;
+        Material::Shag => return shag(tint, uv.extend(0.0), Vec3::Z, Vec3::Z, pixel),
+        Material::Carpet | Material::Fabric | Material::Satin | Material::Knit => {
+            let carpet = kind == Material::Carpet;
             let mottling = detail(uv, Vec2::splat(7.0), pixel);
-            let pile = if shag {
-                let a = vec2(uv.x * 0.8 - uv.y * 0.6, uv.x * 0.6 + uv.y * 0.8);
-                let b = vec2(uv.x * 0.38 + uv.y * 0.925, -uv.x * 0.925 + uv.y * 0.38);
-                {
-                    let first = detail(a, Vec2::splat(42.0), pixel);
-                    let second = detail(b, Vec2::splat(60.0), pixel);
-                    vec3(first.x, first.y * 0.8 + first.z * 0.6, -first.y * 0.6 + first.z * 0.8) * 0.6
-                        + vec3(second.x, second.y * 0.38 - second.z * 0.925, second.y * 0.925 + second.z * 0.38) * 0.4
-                }
-            } else {
-                detail(uv, Vec2::splat(65.0), pixel)
-            };
+            let pile = detail(uv, Vec2::splat(65.0), pixel);
             let fibre = detail(uv, Vec2::splat(230.0), pixel);
             let weave = wave(uv.x * TAU * 750.0, 750.0, pixel) * wave(uv.y * TAU * 680.0, 680.0, pixel);
             let knit = if kind == Material::Knit {
@@ -213,22 +259,18 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
             let base = if carpet { vec3(0.94, 0.91, 0.84) } else { Vec3::ONE };
             surface.albedo = tint
                 * base
-                * (1.0
-                    + mottling.x * 0.04
-                    + pile.x * if shag { 0.07 } else { 0.035 }
-                    + fibre.x * 0.025
-                    + weave * 0.02
-                    + knit * 0.055);
-            surface.roughness = (if carpet { 0.94 } else { 0.84 }) + pile.x * 0.06 + mottling.x * 0.035;
-            surface.sheen = if shag {
-                0.65
-            } else if carpet {
-                0.35
+                * (1.0 + mottling.x * 0.04 + pile.x * 0.035 + fibre.x * 0.025 + weave * 0.02 + knit * 0.055);
+            surface.roughness = (if carpet {
+                0.94
+            } else if kind == Material::Satin {
+                0.40
             } else {
-                0.5
-            };
-            surface.occlusion = if shag { 0.92 + pile.x * 0.12 } else { 1.0 };
-            let mut gradient = pile.yz() * if shag { 0.0008 } else { 0.0001 } + fibre.yz() * 0.000_035;
+                0.84
+            }) + pile.x * 0.06
+                + mottling.x * 0.035;
+            surface.sheen = if carpet { 0.35 } else { 0.5 };
+            surface.anisotropy = if kind == Material::Satin { 0.45 } else { 0.0 };
+            let mut gradient = pile.yz() * 0.0001 + fibre.yz() * 0.000_035;
             let phase = uv * vec2(750.0, 680.0) * TAU;
             let weight = (1.0 - 750.0 * pixel * 2.0).max_num(0.0).min_num(1.0)
                 * (1.0 - 680.0 * pixel * 2.0).max_num(0.0).min_num(1.0);
@@ -252,6 +294,7 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
         Material::Stone => {
             // Interlocking feldspar/quartz grains, dark mica inclusions and
             // a finer polished crystal population; never a blurred grey wash.
+            let facets = mineral_grains(uv, pixel);
             let cloud = detail(uv, Vec2::splat(3.5), pixel);
             let aggregate = detail(uv + cloud.x * 0.018, vec2(27.0, 39.0), pixel);
             let grains = detail(uv + cloud.x * 0.012, vec2(100.0, 135.0), pixel);
@@ -260,14 +303,14 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
             let quartz = ((aggregate.x * 0.80 + grains.x + crystals.x * 0.45 - 0.01) * 4.0).clamp(0.0, 1.0);
             let dark = ((-grains.x - 0.08) * 4.0).clamp(0.0, 1.0);
             surface.albedo = tint * (0.82 + cloud.x * 0.25 + aggregate.x * 0.65 - dark * 0.35)
-                + vec3(0.17, 0.165, 0.15) * quartz
-                + Vec3::splat(mica.x.max_num(0.0) * 0.10);
+                + vec3(0.21, 0.205, 0.19) * quartz
+                + Vec3::splat(mica.x.max_num(0.0) * 0.10 + facets.x);
             surface.roughness =
-                (0.29 + aggregate.x * 0.32 + grains.x * 0.13 - quartz * 0.08 + dark * 0.09).clamp(0.18, 0.48);
-            surface.coat = 0.24;
-            surface.coat_roughness = 0.24 + aggregate.x * 0.18;
+                (0.18 + aggregate.x * 0.15 + grains.x * 0.10 - quartz * 0.04 + dark * 0.05).clamp(0.10, 0.30);
+            surface.coat = 0.48;
+            surface.coat_roughness = 0.12 + aggregate.x * 0.08;
             surface.gradient =
-                (grains.yz() * 0.000_035 + crystals.yz() * 0.000_015 + mica.yz() * 0.000_004).extend(0.0);
+                (grains.yz() * 0.000_035 + crystals.yz() * 0.000_015 + mica.yz() * 0.000_004 + facets.yz()).extend(0.0);
         }
         Material::Tile => {
             let mineral = detail(uv, Vec2::splat(44.0), pixel);
@@ -281,6 +324,16 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
             surface.gradient = (mineral.yz() * 0.00032).extend(0.0);
         }
         Material::Emissive => {}
+        Material::GlazedTile => {
+            let uneven = detail(uv, vec2(13.0, 17.0), pixel);
+            let ripple = detail(uv + uneven.x * 0.004, vec2(41.0, 53.0), pixel);
+            let glaze = detail(uv, Vec2::splat(135.0), pixel);
+            surface.albedo = tint * (1.0 + uneven.x * 0.035 + ripple.x * 0.018);
+            surface.roughness = (0.17 + uneven.x * 0.08 + ripple.x * 0.05).clamp(0.10, 0.27);
+            surface.coat = 0.68;
+            surface.coat_roughness = 0.11 + glaze.x * 0.05;
+            surface.gradient = (uneven.yz() * 0.0011 + ripple.yz() * 0.00035 + glaze.yz() * 0.00004).extend(0.0);
+        }
         Material::Ceramic => {
             let glaze = detail(uv, vec2(38.0, 38.0), pixel);
             surface.roughness = 0.20 + glaze.x * 0.06;
@@ -320,10 +373,61 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
     surface.roughness = surface.roughness.max_num(0.12).min_num(1.0);
     surface
 }
+/// Dense cut pile: resolvable yarn ridges shade individually; smaller fibres
+/// fade into a rough, occluded microsurface instead of a painted colour noise.
+fn shag(tint: Vec3, point: Vec3, normal: Vec3, view: Vec3, cone: f32) -> Surface {
+    let pixel = cone / normal.dot(view).abs().max_num(0.30);
+    let uv = point.xy();
+    let nap = detail(uv, Vec2::splat(3.0), pixel);
+    let flow = vec2(uv.x * 0.8 - uv.y * 0.6, uv.x * 0.6 + uv.y * 0.8);
+    let spacing = vec2(0.014, 0.018);
+    let cell = (flow / spacing).floor();
+    let mut ridge = Vec3::ZERO;
+    // Overlapping yarn bundles, jittered in two dimensions across the whole
+    // rug. Each has its own lean; roots do not form a regular fringe/grid.
+    for neighbour in 0..9 {
+        let index = cell + vec2((neighbour % 3) as f32 - 1.0, (neighbour / 3) as f32 - 1.0);
+        let seed = hash(index);
+        let variation = hash(index + vec2(37.0, 81.0));
+        let center = (index + vec2(0.2 + seed * 0.6, 0.2 + variation * 0.6)) * spacing;
+        let lean = (variation - 0.5) * 1.2;
+        let direction = vec2(1.0, lean).normalize();
+        let delta = flow - center;
+        let local = vec2(delta.dot(direction), delta.dot(vec2(-direction.y, direction.x)));
+        let inverse = vec2(1.0 / (0.0048 + seed * 0.0021), 1.0 / (0.010 + variation * 0.005));
+        let radial = local * inverse;
+        let profile = (-radial.length_squared() * 1.6).exp();
+        if profile > ridge.x {
+            let slope = local * inverse * inverse * (-3.2 * profile * 0.0010);
+            let gradient = direction * slope.x + vec2(-direction.y, direction.x) * slope.y;
+            ridge = vec3(profile, gradient.x, gradient.y);
+        }
+    }
+    let filtered = 1.0 / (1.0 + (pixel / 0.007).powi(4));
+    let gradient = ridge.yz() * filtered;
+    let gradient = vec2(gradient.x * 0.8 + gradient.y * 0.6, -gradient.x * 0.6 + gradient.y * 0.8);
+    let texture_depth = 0.55 + (0.40 - ridge.x * 0.8) * filtered;
+    let pile_depth = ((0.040 - point.z) / 0.035).clamp(0.05, 0.95);
+    let valley = pile_depth * 0.7 + texture_depth * 0.3;
+    Surface {
+        albedo: linear(tint * vec3(0.93, 0.92, 0.88) * (1.0 + nap.x * 0.065)),
+        roughness: 0.94,
+        sheen: 0.85,
+        coat_roughness: 1.0,
+        gradient: (gradient * 0.5 + nap.yz() * 0.003).extend(0.0),
+        tangent: normal,
+        fiber_depth: valley,
+        occlusion: 1.0 - valley * 0.12,
+        ..Surface::default()
+    }
+}
 /// Blend projections on bevels instead of abruptly switching axes. Each plane
 /// also filters by its projected pixel footprint, including grazing side faces.
 #[inline(never)]
 pub(super) fn sample(kind: Material, tint: Vec3, p: Vec3, n: Vec3, view: Vec3, cone: f32) -> Surface {
+    if kind == Material::Shag {
+        return shag(tint, p, n, view, cone);
+    }
     let incidence = n.dot(view).abs().max_num(0.10);
     if kind == Material::Floorboards && n.z.abs() > 0.999 {
         // The long axis of the grazing ray footprint follows the viewing
@@ -345,7 +449,7 @@ pub(super) fn sample(kind: Material, tint: Vec3, p: Vec3, n: Vec3, view: Vec3, c
     let square = n * n;
     let weights = square * square;
     let weights = weights / weights.element_sum().max_num(0.0001);
-    let mut result = Surface::default();
+    let mut result = Surface { specular: 0.0, ..Surface::default() };
     for axis in 0..3 {
         let (uv, weight, facing) = match axis {
             0 => (p.yz(), weights.x, n.x),
@@ -359,6 +463,7 @@ pub(super) fn sample(kind: Material, tint: Vec3, p: Vec3, n: Vec3, view: Vec3, c
         result.albedo += surface.albedo * weight;
         result.roughness += surface.roughness * weight;
         result.metallic += surface.metallic * weight;
+        result.specular += surface.specular * weight;
         result.anisotropy += surface.anisotropy * weight;
         result.sheen += surface.sheen * weight;
         result.coat += surface.coat * weight;
@@ -382,9 +487,9 @@ pub(super) fn sample(kind: Material, tint: Vec3, p: Vec3, n: Vec3, view: Vec3, c
     result
 }
 #[inline(never)]
-pub(super) fn bump(n: Vec3, gradient: Vec3) -> Vec3 {
+pub(super) fn bump(n: Vec3, gradient: Vec3, limit: f32) -> Vec3 {
     let tangent = gradient - n * gradient.dot(n);
-    (n - tangent / (tangent.length() / 0.25).max_num(1.0)).normalize()
+    (n - tangent / (tangent.length() / limit).max_num(1.0)).normalize()
 }
 
 #[cfg(test)]
@@ -398,12 +503,14 @@ mod tests {
             Material::Maple,
             Material::MapleHorizontal,
             Material::Fabric,
+            Material::Satin,
             Material::Knit,
             Material::Shag,
             Material::Carpet,
             Material::Stone,
             Material::Tile,
             Material::Ceramic,
+            Material::GlazedTile,
             Material::Metal,
             Material::Paint,
             Material::Foliage,
@@ -420,6 +527,7 @@ mod tests {
                         let surface = sample(material, Vec3::ONE, point, normal, normal, pixel);
                         assert!(surface.albedo.is_finite() && surface.gradient.is_finite());
                         assert!((0.12..=1.0).contains(&surface.roughness));
+                        assert!((0.0..=1.0).contains(&surface.specular));
                         assert!(surface.albedo.cmpge(Vec3::ZERO).all() && surface.albedo.cmple(Vec3::ONE).all());
                     }
                 }

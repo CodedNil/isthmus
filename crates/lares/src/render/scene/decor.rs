@@ -125,33 +125,26 @@ pub(super) fn blade<S: Sample>(kind: Kind, p: Vec3, size: Vec3) -> S {
 
 #[inline(never)]
 pub(super) fn table_lamp<S: Sample>(p: Vec3) -> S {
-    // Woven oval shade, solid warm inner diffuser and a small dark foot.
-    let q = p - Vec3::Z * 0.18;
-    let oval = ((q / vec3(0.065, 0.065, 0.16)).length() - 1.0) * 0.065;
-    let angle = q.y.atan2(q.x);
-    let warp = (angle * 36.0 + q.z * 24.0).sin().abs();
-    let weft = (q.z * 210.0 - angle * 2.0).sin().abs();
-    let weave = oval.abs() - 0.0035;
-    let wicker = weave.max_num((0.45 - warp.max_num(weft)) * 0.003);
-    let diffuser = oval + 0.005;
-    let shade = wicker.min_num(diffuser);
-    let foot = super::cylinder(p - Vec3::Z * 0.012, 0.045, 0.024);
-    S::new(shade.min_num(foot), || {
-        (
-            if shade >= foot {
-                Material::Metal
-            } else if diffuser < wicker {
-                Material::Emissive
-            } else {
-                Material::Fabric
-            },
-            if shade < foot {
-                vec3(0.82, 0.70, 0.47) * (0.58 + 0.42 * warp.max_num(weft))
-            } else {
-                vec3(0.22, 0.19, 0.15)
-            },
-        )
-    })
+    // BÖJA: 40 cm tall, 20 cm maximum diameter, with an open bamboo
+    // basket tapering to its top opening and a brushed steel pedestal.
+    let height = ((p.z - 0.045) / 0.355).max_num(0.0).min_num(1.0);
+    let bulge = 4.0 * height * (1.0 - height);
+    let radius = 0.063 + 0.037 * bulge * (1.20 - 0.40 * height);
+    let radial = p.xy().length() - radius;
+    let angle = p.y.atan2(p.x);
+    let warp = (angle * 24.0 + p.z * 42.0).sin().abs();
+    let weft = (angle * 24.0 - p.z * 42.0).sin().abs();
+    let weave = super::extrude(vec2(radial.abs() - 0.002, (p.z - 0.2225).abs() - 0.1775));
+    let wicker = weave.max_num((0.72 - warp.max_num(weft)) * 0.003) * 0.70;
+    let rim = vec2(radial, p.z - 0.3975).length() - 0.0025;
+    let shade = wicker.min_num(rim);
+    let base = (((p - Vec3::Z * 0.008) / vec3(0.048, 0.048, 0.030)).length() - 1.0) * 0.030;
+    let base = base.max_num(-p.z);
+    let stem = super::cylinder(p - Vec3::Z * 0.13, 0.004, 0.20);
+    let bulb = ((p - Vec3::Z * 0.22) / vec3(0.025, 0.025, 0.045)).length() - 1.0;
+    S::new(shade, || (Material::Fabric, vec3(0.72, 0.58, 0.37)))
+        .union(S::new(base.min_num(stem), || (Material::Metal, vec3(0.65, 0.66, 0.65))))
+        .union(S::new(bulb * 0.025, || (Material::Emissive, Vec3::ONE)))
 }
 #[inline(never)]
 pub(super) fn table_flowers<S: Sample>(p: Vec3) -> S {

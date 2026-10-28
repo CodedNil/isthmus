@@ -16,6 +16,7 @@ pub struct Scene {
     pub nodes: Box<[Node]>,
     pub lights: Box<[u32]>,
     pub light_masks: Box<[u32]>,
+    pub contacts: Box<[u32]>,
     pub lighting_revision: u64,
     light_entities: Box<[(&'static str, u32)]>,
     pub radius: f32,
@@ -30,7 +31,12 @@ pub struct Scene {
 
 impl Scene {
     pub fn camera_exposure(&self, eye: Vec3, forward: Vec3, right: Vec3, up: Vec3) -> f32 {
-        super::scene::camera_exposure(self, eye, forward, right, up)
+        self.camera_settings(eye, forward, right, up).0
+    }
+
+    /// Exposure and bounded white balance for this view's illumination.
+    pub fn camera_settings(&self, eye: Vec3, forward: Vec3, right: Vec3, up: Vec3) -> (f32, Vec3) {
+        super::scene::camera_settings(self, eye, forward, right, up)
     }
 
     pub fn new(rooms: &[Room]) -> Self {
@@ -71,13 +77,14 @@ impl Scene {
                 node.object = (ordered.len() - 1) as u32;
             }
         }
-        let objects = ordered;
+        let mut objects = ordered;
         let radius = nodes.first().map_or(0.0, |node| node.min.abs().max(node.max.abs()).length());
         let min = nodes.first().map_or(Vec3::ZERO, |n| n.min);
         let max = nodes.first().map_or(Vec3::ONE, |n| n.max);
         let lights: Box<[u32]> = (0..objects.len() as u32).filter(|&i| objects[i as usize].is_light()).collect();
         let light_masks = super::light_culling::masks(&objects, &nodes, &lights);
-        let (grid, probes, indirect) = super::scene::irradiance::bake(&objects, &nodes, &lights, min, max, sun);
+        let contacts = super::scene::contacts::build(&objects, &nodes, min, max);
+        let (grid, probes, indirect) = super::scene::irradiance::bake(&mut objects, &nodes, &lights, min, max, sun);
         Self {
             sun,
             sun_settings,
@@ -88,6 +95,7 @@ impl Scene {
             nodes: nodes.into_boxed_slice(),
             lights,
             light_masks,
+            contacts,
             lighting_revision: 0,
             light_entities: light_entities.into_boxed_slice(),
             radius,
@@ -99,14 +107,21 @@ impl Scene {
     /// Set an entity's output in [0, 1], updating every fixture in its group.
     /// Cached transport also updates bounced light without rebuilding geometry.
     pub fn set_light_state(&mut self, entity_id: &str, brightness: f32) -> bool {
-        let brightness = if brightness.is_finite() { brightness.clamp(0.0, 1.0) } else { 0.0 };
+        self.set_light_states(&[(entity_id, brightness)])
+    }
+
+    /// Apply a lighting scene with one transport recomposition.
+    pub fn set_light_states(&mut self, states: &[(&str, f32)]) -> bool {
         let mut found = false;
         let mut changed = false;
-        for &(entity, index) in &self.light_entities {
-            if entity == entity_id {
-                changed |= self.objects[index as usize].emission.to_bits() != brightness.to_bits();
-                self.objects[index as usize].emission = brightness;
-                found = true;
+        for &(entity_id, brightness) in states {
+            let brightness = if brightness.is_finite() { brightness.clamp(0.0, 1.0) } else { 0.0 };
+            for &(entity, index) in &self.light_entities {
+                if entity == entity_id {
+                    changed |= self.objects[index as usize].emission.to_bits() != brightness.to_bits();
+                    self.objects[index as usize].emission = brightness;
+                    found = true;
+                }
             }
         }
         if changed {

@@ -82,19 +82,22 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
                         exterior: if exterior { -normal } else { Vec3::ZERO },
                         ..solid(center - normal * extra * 0.5 + Vec3::Z * WALL_HEIGHT * 0.5, wall_size, Material::Paint)
                     });
-                    for (height, depth, base, material) in
-                        [(0.10, 0.016, 0.022, Material::Paint), (0.022, 0.022, 0.0, Material::Wood)]
-                    {
-                        let mut trim_size = size;
-                        trim_size.z = height;
-                        if normal.x == 0.0 {
-                            trim_size.y = depth;
-                        } else {
-                            trim_size.x = depth;
+                    for inward in [normal, -normal].into_iter().take(if exterior { 1 } else { 2 }) {
+                        for (height, depth, base, material) in
+                            [(0.10, 0.016, 0.022, Material::Paint), (0.022, 0.022, 0.0, Material::Wood)]
+                        {
+                            let mut trim_size = size;
+                            trim_size.z = height;
+                            if normal.x == 0.0 {
+                                trim_size.y = depth;
+                            } else {
+                                trim_size.x = depth;
+                            }
+                            let pos = center
+                                + inward * (WALL_THICKNESS * 0.5 + depth * 0.5)
+                                + Vec3::Z * (base + height * 0.5);
+                            walls.push(solid(pos, trim_size, material));
                         }
-                        let pos =
-                            center + normal * (WALL_THICKNESS * 0.5 + depth * 0.5) + Vec3::Z * (base + height * 0.5);
-                        walls.push(solid(pos, trim_size, material));
                     }
                 }
             } else {

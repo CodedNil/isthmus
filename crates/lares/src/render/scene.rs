@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 
 mod bathroom;
 mod bedroom;
+pub(super) mod contacts;
 mod decor;
 mod entry;
 mod fixtures;
@@ -89,6 +90,7 @@ fn render_furniture<S: Sample>(kind: Kind, local: Vec3, size: Vec3) -> S {
         Kind::Lamp => fixtures::lamp(local, size),
         Kind::Bed => bedroom::bed(local, size),
         Kind::Sofa => living::sofa(local, size),
+        Kind::Pillow => living::pillow(local, size),
         Kind::Ottoman => living::ottoman(local, size),
         Kind::Rug => living::rug(local, size),
         Kind::Chair => office::chair(local, size),
@@ -195,9 +197,9 @@ fn scaled_box(local: Vec3, size: Vec3, center: Vec3, extent: Vec3, radius: f32) 
     rounded_box(local - center * size, size * extent, radius * size.min_element())
 }
 
-fn background(origin: Vec3, sun: super::Sun, exposure: f32) -> Vec3 {
+fn background(origin: Vec3, sun: super::Sun, exposure: f32, white_balance: Vec3) -> Vec3 {
     if origin.z < super::WALL_HEIGHT {
-        return lighting::display(sun.sky * 1.5, exposure);
+        return lighting::display(sun.sky * white_balance * 1.5, exposure);
     }
     // The floor-plan surroundings are unlit context, not a rendered world.
     vec3(0.72, 0.77, 0.82)
@@ -325,17 +327,21 @@ fn intersect(item: Object, origin: Vec3, direction: Vec3, enter: f32, exit: f32,
     }
 }
 
+fn bounds_normal(local: Vec3, size: Vec3) -> Vec3 {
+    let face = (local.abs() - size * 0.5).abs();
+    if face.z <= face.x && face.z <= face.y {
+        vec3(0.0, 0.0, if local.z >= 0.0 { 1.0 } else { -1.0 })
+    } else if face.x <= face.y {
+        vec3(if local.x >= 0.0 { 1.0 } else { -1.0 }, 0.0, 0.0)
+    } else {
+        vec3(0.0, if local.y >= 0.0 { 1.0 } else { -1.0 }, 0.0)
+    }
+}
+
 #[inline(never)]
 fn object_normal(item: Object, local: Vec3) -> Vec3 {
     if matches!(item.kind, Kind::Box | Kind::Ceiling) {
-        let face = (local.abs() - item.size * 0.5).abs();
-        if face.z <= face.x + MIN_HIT_DISTANCE && face.z <= face.y + MIN_HIT_DISTANCE {
-            vec3(0.0, 0.0, if local.z >= 0.0 { 1.0 } else { -1.0 })
-        } else if face.x <= face.y {
-            vec3(if local.x >= 0.0 { 1.0 } else { -1.0 }, 0.0, 0.0)
-        } else {
-            vec3(0.0, if local.y >= 0.0 { 1.0 } else { -1.0 }, 0.0)
-        }
+        bounds_normal(local, item.size)
     } else if item.kind == Kind::Leaf {
         decor::leaf_normal(local, item.size)
     } else if item.kind == Kind::Stem {
@@ -356,6 +362,7 @@ pub fn pixel(
     objects: &[Object],
     lights: &[u32],
     light_masks: &[u32],
+    contacts: &[u32],
     grid: irradiance::Grid,
     probes: &[irradiance::Probe],
     pixel: Vec2,
@@ -371,6 +378,7 @@ pub fn pixel(
         objects,
         lights,
         light_masks,
+        contacts,
         grid,
         probes,
         pixel,
@@ -388,6 +396,7 @@ pub fn pixel_cached(
     objects: &[Object],
     lights: &[u32],
     light_masks: &[u32],
+    contacts: &[u32],
     grid: irradiance::Grid,
     probes: &[irradiance::Probe],
     pixel: Vec2,
@@ -403,6 +412,7 @@ pub fn pixel_cached(
         objects,
         lights,
         light_masks,
+        contacts,
         grid,
         probes,
         pixel,
@@ -420,6 +430,7 @@ pub fn pixel_single(
     objects: &[Object],
     lights: &[u32],
     light_masks: &[u32],
+    contacts: &[u32],
     grid: irradiance::Grid,
     probes: &[irradiance::Probe],
     pixel: Vec2,
@@ -432,8 +443,91 @@ pub fn pixel_single(
 ) -> Vec3 {
     let ndc = (pixel + subpixel(sample) * 0.5 * pixel_size) / screen_size * 2.0 - 1.0;
     let direction = (globals.forward + globals.right * ndc.x - globals.up * ndc.y).normalize();
-    shade::<true>(globals, nodes, objects, lights, light_masks, grid, probes, direction, time, sample, atlas, info)
-        .truncate()
+    shade::<true>(
+        globals,
+        nodes,
+        objects,
+        lights,
+        light_masks,
+        contacts,
+        grid,
+        probes,
+        direction,
+        time,
+        sample,
+        atlas,
+        info,
+    )
+    .truncate()
+}
+
+/// One opaque reflection bounce for polished kitchen receivers. Roofs remain
+/// solid and daylight can enter only through the authored window apertures.
+#[inline(never)]
+fn glossy_reflection(
+    sun: super::Sun,
+    point: Vec3,
+    normal: Vec4,
+    incoming: Vec4,
+    nodes: &[Node],
+    objects: &[Object],
+    grid: irradiance::Grid,
+    probes: &[irradiance::Probe],
+) -> Vec3 {
+    let roughness = normal.w;
+    let normal = normal.truncate();
+    let sample = incoming.w as u32;
+    let incoming = incoming.truncate();
+    let reflected = incoming - normal * (2.0 * incoming.dot(normal));
+    let right = if reflected.z.abs() < 0.9 { Vec3::Z.cross(reflected).normalize() } else { Vec3::X };
+    let up = reflected.cross(right);
+    let spread = subpixel(sample) * (roughness * roughness * 2.0);
+    let reflected = (reflected + right * spread.x + up * spread.y).normalize();
+    let origin = point + normal * 0.002;
+    let (distance, index) = cast::<false, false>(origin, reflected, nodes, objects, 0.003, FAR);
+    if distance >= FAR {
+        return if reflected.z >= 0.0 {
+            sun.sky * (0.25 + reflected.z.sqrt() * 0.75)
+        } else {
+            (sun.radiance * sun.direction.z.max_num(0.0) + sun.sky * (0.85 * PI)) * (0.20 / PI)
+        };
+    }
+    let item = objects[index as usize];
+    let hit = origin + reflected * distance;
+    let local = unrotate_z(hit - item.pos, item.rotation);
+    if item.is_light() && item.emission > 0.0 {
+        let luminance = if item.kind == Kind::Downlight {
+            photometry::GU10_PEAK_CANDELA / (PI * (item.size.x * 0.225).powi(2) * photometry::UNITS)
+        } else {
+            470.0 / (4.0 * PI * PI * 0.065 * 0.065 * photometry::UNITS)
+        };
+        return item.emission_color * item.emission * luminance;
+    }
+    // Secondary rays retain the actual SDF silhouettes, but filter receiver
+    // finishes to their mean. Re-evaluating full procedural furniture and six
+    // normal samples here greatly increases shader register pressure, including
+    // pixels which never need a glossy ray.
+    let albedo = match item.kind {
+        Kind::Box | Kind::Ceiling => match item.material {
+            Material::Floorboards => vec3(0.15, 0.085, 0.045),
+            Material::Paint => WALL_COLOR.powf(2.2),
+            _ => Vec3::splat(0.50),
+        },
+        Kind::Leaf | Kind::Stem => vec3(0.065, 0.15, 0.035),
+        Kind::Petal => vec3(0.75, 0.35, 0.48),
+        Kind::Sofa | Kind::Ottoman | Kind::Rug => vec3(0.65, 0.61, 0.52),
+        Kind::Counter if local.z > item.size.z * 0.43 => Vec3::splat(0.025),
+        Kind::Counter | Kind::Cupboard | Kind::Fridge | Kind::KitchenPanel | Kind::Workstation => {
+            vec3(0.55, 0.43, 0.28)
+        }
+        Kind::EntryDoor | Kind::DisplayShelf | Kind::Table | Kind::DiningChair => vec3(0.22, 0.12, 0.055),
+        Kind::Microwave | Kind::AirFryer | Kind::Chair | Kind::ShoeStorage => Vec3::splat(0.025),
+        _ => Vec3::splat(0.50),
+    };
+    let local_normal =
+        if item.kind == Kind::Leaf { decor::leaf_normal(local, item.size) } else { bounds_normal(local, item.size) };
+    let normal = rotate_z(local_normal, item.rotation);
+    albedo * grid.sample(probes, hit + normal * 0.002, normal)
 }
 
 fn pixel_impl<const CACHED: bool>(
@@ -442,6 +536,7 @@ fn pixel_impl<const CACHED: bool>(
     objects: &[Object],
     lights: &[u32],
     light_masks: &[u32],
+    contacts: &[u32],
     grid: irradiance::Grid,
     probes: &[irradiance::Probe],
     pixel: Vec2,
@@ -462,6 +557,7 @@ fn pixel_impl<const CACHED: bool>(
             objects,
             lights,
             light_masks,
+            contacts,
             grid,
             probes,
             direction,
@@ -484,6 +580,10 @@ fn surface_at(item: Object, local: Vec3) -> Hit {
         Hit::new(0.0, || (item.material, tint))
     } else {
         let mut hit = render_furniture::<Hit>(item.kind, local, item.size);
+        if item.kind == Kind::Pillow {
+            hit.material = item.material;
+            hit.tint = if item.material == Material::Knit { vec3(0.34, 0.45, 0.48) } else { living::BLUE };
+        }
         if item.kind == Kind::Leaf && item.material == Material::VariegatedFoliage {
             let margin = (local.y.abs() / (item.size.y * 0.5)).clamp(0.0, 1.0);
             let patches = materials::noise(local.xy() * 65.0);
@@ -512,6 +612,7 @@ fn shade<const CACHED: bool>(
     objects: &[Object],
     lights: &[u32],
     light_masks: &[u32],
+    contacts: &[u32],
     grid: irradiance::Grid,
     probes: &[irradiance::Probe],
     direction: Vec3,
@@ -537,7 +638,7 @@ fn shade<const CACHED: bool>(
         }
     }
     if nearest >= FAR {
-        return background(origin, globals.sun, globals.exposure).extend(1.0);
+        return background(origin, globals.sun, globals.exposure, globals.white_balance).extend(1.0);
     }
     if PROFILE == 1 {
         return Vec3::splat(nearest / 40.0).extend(1.0);
@@ -567,8 +668,13 @@ fn shade<const CACHED: bool>(
         && matches!(item.kind, Kind::Box | Kind::Downlight);
     let lighting_point = point + Vec3::Z * if section_cap { super::CEILING_THICKNESS + 0.02 } else { 0.0 };
     // The cutaway shows the downlight's luminous face from above as a state cue.
-    if section_cap && item.kind == Kind::Downlight && item.emission > 0.0 {
-        return lighting::display(item.emission_color * item.emission * 2.0, 0.95).extend(1.0);
+    if section_cap && item.kind == Kind::Downlight {
+        let cue = if item.emission > 0.0 {
+            lighting::display(item.emission_color * item.emission * 2.0, 0.95)
+        } else {
+            Vec3::splat(0.12)
+        };
+        return cue.extend(1.0);
     }
     // Cutaway caps and outward wall faces are presentation context, not
     // lighting receivers. Do not sample probes, trace sun rays or visit lamps.
@@ -588,7 +694,7 @@ fn shade<const CACHED: bool>(
         } else {
             office::wallpaper(local, time) * 2.0
         };
-        return lighting::display(emission, globals.exposure).extend(1.0);
+        return lighting::display(emission * globals.white_balance, globals.exposure).extend(1.0);
     }
     if fixture && surface.material == Material::Emissive {
         (surface.material, surface.tint) = (Material::Ceramic, vec3(0.85, 0.83, 0.78));
@@ -604,8 +710,6 @@ fn shade<const CACHED: bool>(
     } else {
         0.0
     };
-    let indirect = grid.sample(probes, lighting_point + world_normal * 0.002, world_normal);
-
     // Surface footprint grows at grazing incidence; the screen-space ray
     // cone alone seriously underfilters upholstery on the cushion sides.
     let local_view = unrotate_z(-direction, item.rotation);
@@ -616,9 +720,53 @@ fn shade<const CACHED: bool>(
     if PROFILE == 3 {
         return material.albedo.extend(1.0);
     }
-    let bumped = materials::bump(normal, material.gradient);
+    let bumped =
+        materials::bump(normal, material.gradient, if surface.material == Material::Shag { 1.1 } else { 0.25 });
+    // Unresolved fibres scatter around a shared nap normal. Retain the SDF
+    // silhouette, while avoiding hard cylinder-like shading on every yarn.
+    let bumped = if surface.material == Material::Shag { (bumped * 0.40 + Vec3::Z * 0.60).normalize() } else { bumped };
     let bumped = rotate_z(bumped, item.rotation);
-    let mut color = lighting::shade(material, bumped, -direction, visibility, indirect, globals.sun);
+    let cached = if item.surface_cache != u32::MAX && !section_cap {
+        if surface.material == Material::Floorboards {
+            irradiance::Grid::surface_normal(probes, item, local, world_normal, bumped)
+        } else {
+            irradiance::Grid::surface(probes, item, local, world_normal)
+        }
+    } else {
+        Vec4::ZERO
+    };
+    let indirect = if cached.w >= 0.95 {
+        cached.truncate()
+    } else {
+        grid.sample(probes, lighting_point + world_normal * 0.002, world_normal)
+            .lerp(cached.truncate(), (cached.w / 0.95).min_num(1.0))
+    };
+
+    let contact_visibility =
+        if matches!(surface.material, Material::Foliage | Material::VariegatedFoliage | Material::MarbledFoliage) {
+            1.0
+        } else {
+            let receiver_normal = if surface.material == Material::Shag { Vec3::Z } else { world_normal };
+            contacts::visibility(contacts, objects, object, point, receiver_normal, light_sample)
+        };
+    let indirect = indirect * contact_visibility;
+
+    let reflection = if matches!(surface.material, Material::Stone | Material::GlazedTile) {
+        glossy_reflection(
+            globals.sun,
+            point,
+            bumped.extend(material.coat_roughness),
+            direction.extend(light_sample as f32),
+            nodes,
+            objects,
+            grid,
+            probes,
+        )
+        .extend(1.0)
+    } else {
+        Vec4::ZERO
+    };
+    let mut color = lighting::shade(material, bumped, -direction, visibility, indirect, globals.sun, reflection);
     let mask = light_masks[object as usize];
     let mut slot = 0;
     while slot < lights.len() && PROFILE != 5 {
@@ -661,7 +809,7 @@ fn shade<const CACHED: bool>(
         };
         color += contribution * visible;
     }
-    lighting::display(color, globals.exposure).extend(1.0)
+    lighting::display(color * globals.white_balance, globals.exposure).extend(1.0)
 }
 
 #[cfg(test)]
@@ -671,7 +819,8 @@ mod tests;
 /// Meter opaque scene surfaces in a small view grid. Windows/background are
 /// excluded, so they cannot force the whole interior into silhouette.
 #[cfg(not(target_arch = "spirv"))]
-pub(super) fn camera_exposure(scene: &super::Scene, eye: Vec3, forward: Vec3, right: Vec3, up: Vec3) -> f32 {
+pub(super) fn camera_settings(scene: &super::Scene, eye: Vec3, forward: Vec3, right: Vec3, up: Vec3) -> (f32, Vec3) {
+    let mut illuminant = Vec3::ZERO;
     let mut log_sum = 0.0f32;
     let mut log_peak = -20.0f32;
     let mut samples = 0;
@@ -686,16 +835,35 @@ pub(super) fn camera_exposure(scene: &super::Scene, eye: Vec3, forward: Vec3, ri
             let point = eye + direction * distance;
             let normal = rotate_z(object_normal(item, unrotate_z(point - item.pos, item.rotation)), item.rotation);
             let source = point + normal * 0.002;
-            let mut incident = scene.grid.sample(&scene.probes, source, normal);
+            let cached = if item.surface_cache == u32::MAX {
+                Vec4::ZERO
+            } else {
+                irradiance::Grid::surface(&scene.probes, item, unrotate_z(point - item.pos, item.rotation), normal)
+            };
+            let mut incident =
+                scene.grid.sample(&scene.probes, source, normal).lerp(cached.truncate(), (cached.w / 0.95).min(1.0));
             let cosine = normal.dot(scene.sun.direction).max(0.0);
             if cosine > 0.0
                 && cast::<true, false>(source, scene.sun.direction, &scene.nodes, &scene.objects, 0.0, FAR).0 > 0.0
             {
                 incident += scene.sun.radiance * (cosine / PI);
             }
+            for &index in &scene.lights {
+                let light = scene.objects[index as usize];
+                let (to_light, radiance, distance) = fixtures::incident(light, point, Vec2::ZERO);
+                let cosine = normal.dot(to_light).max(0.0);
+                if cosine > 0.0
+                    && radiance.max_element() > 0.0
+                    && cast::<true, false>(source, to_light, &scene.nodes, &scene.objects, 0.0, distance - 0.002).0
+                        > 0.0
+                {
+                    incident += radiance * (cosine / PI);
+                }
+            }
             // Exposure of a conventional 18% grey receiver; do not compensate
             // for dark wood or white cabinets by baking albedo into the meter.
             let luminance = (incident.dot(vec3(0.2126, 0.7152, 0.0722)) * photometry::UNITS * 0.18).max(0.05);
+            illuminant += incident / incident.dot(vec3(0.2126, 0.7152, 0.0722)).max(0.0001);
             let log = luminance.log2();
             log_sum += log;
             log_peak = log_peak.max(log);
@@ -703,9 +871,11 @@ pub(super) fn camera_exposure(scene: &super::Scene, eye: Vec3, forward: Vec3, ri
         }
     }
     if samples == 0 {
-        return photometry::EXPOSURE;
+        return (photometry::EXPOSURE, Vec3::ONE);
     }
     let average = log_sum / samples as f32;
-    let ev = (3.0 + average + ((log_peak - average) * 0.25).min(1.5)).clamp(6.0, 11.0);
-    photometry::UNITS / (1.2 * ev.exp2())
+    let ev = (3.0 + average + ((log_peak - average) * 0.25).min(1.5)).clamp(3.0, 11.0);
+    let white_balance =
+        (Vec3::splat(samples as f32) / illuminant.max(Vec3::splat(0.001))).clamp(Vec3::splat(0.65), Vec3::splat(2.2));
+    (photometry::UNITS / (1.2 * ev.exp2()), Vec3::ONE.lerp(white_balance, 0.85))
 }

@@ -62,21 +62,40 @@ pub(super) fn direct(s: Surface, n: Vec3, view: Vec3, light: Vec3, radiance: Vec
     let no_l = n.dot(light).max_num(0.0);
     let no_h = n.dot(half).max_num(0.0);
     let lo_h = light.dot(half).max_num(0.0);
-    let f = fresnel(f0, lo_h);
+    let f = fresnel(f0, lo_h) * s.specular;
     let diffuse = (Vec3::ONE - f) * (1.0 - s.metallic) * s.albedo / PI;
     let specular = f * microfacet(s, n, view, light, half);
     let sheen = s.albedo * s.sheen * ((1.0 - lo_h) * (1.0 - lo_h) * (1.0 - lo_h) * (1.0 - lo_h) * (1.0 - lo_h)) / PI;
     let coat_f = fresnel(Vec3::splat(0.04), lo_h) * s.coat;
     let coat = if s.coat > 0.0 { coat_f * ggx(s.coat_roughness, no_h, no_v, no_l) } else { Vec3::ZERO };
-    ((diffuse + specular + sheen) * (Vec3::ONE - coat_f) + coat) * radiance * no_l
+    // Local yarn-horizon masking, reciprocal in view/light directions. Large
+    // pile clumps still cast real SDF shadows; this covers sub-texel fibres.
+    let fiber_visibility = if s.fiber_depth > 0.0 {
+        let elevation = |direction: Vec3| {
+            let cosine = s.tangent.dot(direction).abs().max_num(0.001);
+            cosine / (cosine + s.fiber_depth * (1.0 - cosine) * 0.30)
+        };
+        elevation(light) * elevation(view)
+    } else {
+        1.0
+    };
+    ((diffuse + specular + sheen) * (Vec3::ONE - coat_f) + coat) * radiance * (no_l * fiber_visibility)
 }
 #[inline(never)]
-pub(super) fn shade(s: Surface, n: Vec3, view: Vec3, visibility: f32, indirect: Vec3, sun: Sun) -> Vec3 {
+pub(super) fn shade(
+    s: Surface,
+    n: Vec3,
+    view: Vec3,
+    visibility: f32,
+    indirect: Vec3,
+    sun: Sun,
+    reflection: Vec4,
+) -> Vec3 {
     let no_v = n.dot(view).max_num(0.001);
     let f0 = Vec3::splat(0.04).lerp(s.albedo, s.metallic);
     let mut color =
         if visibility > 0.0 { direct(s, n, view, sun.direction, sun.radiance) * visibility } else { Vec3::ZERO };
-    let f = fresnel(f0, no_v);
+    let f = fresnel(f0, no_v) * s.specular;
     let reflected = 2.0 * n.dot(view) * n - view;
     let diffuse_env = indirect * s.albedo * (1.0 - s.metallic) * (Vec3::ONE - f);
     // Analytic prefiltered environment and integrated specular approximation.
@@ -87,19 +106,20 @@ pub(super) fn shade(s: Surface, n: Vec3, view: Vec3, visibility: f32, indirect: 
     // Global sky here bypassed the roof/walls and bleached dark worktops and
     // foliage when daylight strength increased.
     let environment_scale = indirect * 1.5;
+    let filtered_environment = |roughness: f32| {
+        let approximate = environment(reflected, roughness) * environment_scale;
+        approximate.lerp(reflection.truncate(), reflection.w * (1.0 - roughness).powi(2))
+    };
     let specular_env =
-        environment(reflected, s.roughness) * environment_scale * (f0 * ab.x + Vec3::splat(ab.y)).max_num(Vec3::ZERO);
+        filtered_environment(s.roughness) * (f0 * ab.x + Vec3::splat(ab.y)).max_num(Vec3::ZERO) * s.specular;
     // Environment highlights follow local visibility instead of shining equally
     // inside cupboards and beside windows. The bounce field is already cached.
     let specular_occlusion = (indirect.element_sum() * 0.9).clamp(0.18, 1.0);
     let edge = 1.0 - no_v;
     let sheen_env = indirect * s.albedo * (s.sheen * (edge * edge * edge) * 0.35);
     let coat_env = fresnel(Vec3::splat(0.04), no_v) * s.coat;
-    let coat = if s.coat > 0.0 {
-        environment(reflected, s.coat_roughness) * environment_scale * coat_env * specular_occlusion
-    } else {
-        Vec3::ZERO
-    };
+    let coat =
+        if s.coat > 0.0 { filtered_environment(s.coat_roughness) * coat_env * specular_occlusion } else { Vec3::ZERO };
     color +=
         ((diffuse_env + sheen_env + specular_env * specular_occlusion) * (Vec3::ONE - coat_env) + coat) * s.occlusion;
     color
@@ -122,9 +142,9 @@ mod tests {
             Surface { albedo: Vec3::splat(0.05), metallic: 1.0, roughness: 0.45, occlusion: 1.0, ..Surface::default() };
         let sun = Sun { direction: Vec3::Z, radiance: Vec3::ZERO, sky: Vec3::ONE };
         let local = Vec3::splat(0.2);
-        let first = shade(material, Vec3::X, Vec3::X, 0.0, local, sun);
+        let first = shade(material, Vec3::X, Vec3::X, 0.0, local, sun, Vec4::ZERO);
         let bright_sky = Sun { sky: Vec3::splat(1000.0), ..sun };
-        let second = shade(material, Vec3::X, Vec3::X, 0.0, local, bright_sky);
+        let second = shade(material, Vec3::X, Vec3::X, 0.0, local, bright_sky, Vec4::ZERO);
         assert!(
             (first - second).abs().max_element() < 0.00001,
             "the roof's cached occlusion must also apply to reflections"
@@ -137,22 +157,25 @@ mod tests {
             for tangent in [normal, axis, normal.cross(axis)] {
                 for roughness in [0.15, 0.4, 0.7, 1.0] {
                     for anisotropy in [0.0, 0.38, 0.7] {
-                        let material = Surface {
-                            albedo: Vec3::splat(0.4),
-                            roughness,
-                            anisotropy,
-                            tangent,
-                            coat: 0.2,
-                            coat_roughness: 0.45,
-                            occlusion: 1.0,
-                            ..Surface::default()
-                        };
-                        let view = (normal + axis * 0.4).normalize();
-                        let light = (normal - axis * 0.25).normalize();
-                        let first = direct(material, normal, view, light, Vec3::ONE) / normal.dot(light);
-                        let reversed = direct(material, normal, light, view, Vec3::ONE) / normal.dot(view);
-                        assert!(first.is_finite() && first.min_element() >= 0.0);
-                        assert!((first - reversed).abs().max_element() < 0.0001);
+                        for fiber_depth in [0.0, 0.3, 0.8] {
+                            let material = Surface {
+                                albedo: Vec3::splat(0.4),
+                                roughness,
+                                anisotropy,
+                                tangent,
+                                fiber_depth,
+                                coat: 0.2,
+                                coat_roughness: 0.45,
+                                occlusion: 1.0,
+                                ..Surface::default()
+                            };
+                            let view = (normal + axis * 0.4).normalize();
+                            let light = (normal - axis * 0.25).normalize();
+                            let first = direct(material, normal, view, light, Vec3::ONE) / normal.dot(light);
+                            let reversed = direct(material, normal, light, view, Vec3::ONE) / normal.dot(view);
+                            assert!(first.is_finite() && first.min_element() >= 0.0);
+                            assert!((first - reversed).abs().max_element() < 0.0001);
+                        }
                     }
                 }
             }
