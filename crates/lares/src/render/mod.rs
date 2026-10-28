@@ -42,6 +42,8 @@ pub struct Globals {
     pub pixel_angle: f32,
     /// Photometric camera exposure, metered separately from light power.
     pub exposure: f32,
+    /// Bounded photographic illuminant adaptation, applied before tone mapping.
+    pub white_balance: Vec3,
     pub sun: Sun,
     pub sample_index: u32,
     pub interleaved: bool,
@@ -60,6 +62,7 @@ pub fn draw(frame: &mut Frame<'_>, scene: &Scene, shadows: &shadows::ShadowAtlas
                 let objects: &[Object] = &scene.objects;
                 let lights: &[u32] = &scene.lights;
                 let light_masks: &[u32] = &scene.light_masks;
+                let contacts: &[u32] = &scene.contacts;
                 let probes: &[scene::irradiance::Probe] = &scene.probes;
                 let grid: scene::irradiance::Grid = scene.grid;
                 let atlas: &Image = &shadows.image;
@@ -90,6 +93,7 @@ pub fn draw(frame: &mut Frame<'_>, scene: &Scene, shadows: &shadows::ShadowAtlas
                     objects,
                     lights,
                     light_masks,
+                    contacts,
                     grid,
                     probes,
                     pixel,

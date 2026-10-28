@@ -159,7 +159,7 @@ fn straight(color: Vec4) -> Vec4 {
     (color.truncate() / color.w.max(f32::MIN_POSITIVE)).extend(color.w)
 }
 
-#[cfg(all(test, not(target_arch = "spirv")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]

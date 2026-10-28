@@ -108,3 +108,18 @@ fn enclosures_block_light_except_through_openings_and_have_only_indoor_probes() 
         }
     }
 }
+
+#[test]
+fn box_normals_follow_the_hit_face_near_edges() {
+    for size in [vec3(0.02, 0.3, 0.5), vec3(0.12, 3.0, 2.4), vec3(10.0, 20.0, 0.16)] {
+        for relative_gap in [0.00001, 0.0001, 0.001, 0.01] {
+            let gap = size.min_element() * relative_gap;
+            for sign in [-1.0, 1.0] {
+                let point = vec3(sign * size.x * 0.5, 0.0, size.z * 0.5 - gap);
+                assert_eq!(bounds_normal(point, size), Vec3::X * sign);
+                let point = vec3(0.0, sign * size.y * 0.5, size.z * 0.5 - gap);
+                assert_eq!(bounds_normal(point, size), Vec3::Y * sign);
+            }
+        }
+    }
+}

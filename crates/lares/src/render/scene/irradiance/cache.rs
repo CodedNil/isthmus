@@ -12,7 +12,7 @@ use crate::{
 use core::{array::from_fn, f32::consts::PI};
 use isthmus::glam::{IVec3, UVec3, Vec2, Vec3, uvec3, vec3};
 
-const RAYS: usize = 128;
+const RAYS: usize = 256;
 const UPDATE_BUDGET: usize = 64;
 const BOUNCES: usize = 8;
 
@@ -27,6 +27,24 @@ impl Irradiance {
         self.z += radiance * (direction.z / RAYS as f32);
     }
 
+    fn project_receiver(&mut self, direction: Vec3, radiance: Vec3, normal: Vec3) {
+        if normal.length_squared() > 0.5 {
+            let cosine = normal.dot(direction).max(0.0);
+            self.constant += radiance * (4.0 * cosine / RAYS as f32);
+            if cosine > 0.0 {
+                // First derivative of the cosine integral, in world space.
+                // The existing directional fields let material normals respond
+                // to bounced light without adding receiver sites or ray casts.
+                let incoming = radiance * (4.0 / RAYS as f32);
+                self.x += incoming * direction.x;
+                self.y += incoming * direction.y;
+                self.z += incoming * direction.z;
+            }
+        } else {
+            self.project(direction, radiance);
+        }
+    }
+
     fn add(&mut self, other: Self, weight: Vec3) {
         self.constant += other.constant * weight;
         self.x += other.x * weight;
@@ -36,14 +54,18 @@ impl Irradiance {
 }
 #[derive(Clone, Copy, Default)]
 struct Bounce {
+    object: u32,
+    direction: Vec3,
+    lookup: super::surface::Lookup,
     point: Vec3,
     normal: Vec3,
     albedo: Vec3,
 }
 
 pub struct Cache {
-    directions: [Vec3; RAYS],
-    paths: Box<[Bounce]>,
+    paths: Vec<Bounce>,
+    path_offsets: Box<[usize]>,
+    path_lengths: Box<[usize]>,
     sky: Box<[Irradiance]>,
     ground: Box<[Irradiance]>,
     sun: Box<[Irradiance]>,
@@ -54,6 +76,7 @@ pub struct Cache {
     bounces: [Box<[Probe]>; BOUNCES - 2],
     active: Box<[usize]>,
     grid: Grid,
+    surface_neighbours: Box<[[u32; 9]]>,
     lights: Box<[u32]>,
     cursor: usize,
     remaining: usize,
@@ -64,13 +87,17 @@ impl Cache {
         if sun.radiance.max_element() <= 0.0 {
             return result;
         }
-        for (sample, bounce) in self.paths[index * RAYS..(index + 1) * RAYS].iter().enumerate() {
+        for bounce in &self.paths[self.path_offsets[index]..self.path_offsets[index] + self.path_lengths[index]] {
             let cosine = bounce.normal.dot(sun.direction).max(0.0);
             if cosine <= 0.0 || bounce.albedo == Vec3::ZERO {
                 continue;
             }
             let visibility = scene::cast::<true, false>(bounce.point, sun.direction, nodes, objects, 0.0, FAR).0;
-            result.project(self.directions[sample], bounce.albedo * (cosine * visibility / PI));
+            result.project_receiver(
+                bounce.direction,
+                bounce.albedo * (cosine * visibility / PI),
+                self.direct[index].normal,
+            );
         }
         result
     }
@@ -94,6 +121,35 @@ impl Cache {
     /// Geometry-aware spatial denoising, before interpolation and further
     /// bounces. Fixed weights preserve source linearity and constant fields.
     fn filtered(&self, index: usize) -> Irradiance {
+        if self.raw[index].normal.length_squared() > 0.5 {
+            let lattice = (self.grid.size.x * self.grid.size.y * self.grid.size.z) as usize;
+            let source = self.raw[index];
+            let mut result = Irradiance::default();
+            let mut total = 0.0;
+            for (tap, &neighbour) in self.surface_neighbours[index - lattice].iter().enumerate() {
+                if neighbour == u32::MAX {
+                    continue;
+                }
+                let probe = self.raw[neighbour as usize];
+                let agreement = probe.normal.dot(source.normal);
+                let separation = (probe.position - source.position).dot(source.normal).abs();
+                if agreement < 0.85 || separation > 0.05 {
+                    continue;
+                }
+                let weight = if tap == 4 {
+                    4.0
+                } else if tap % 2 == 1 {
+                    2.0
+                } else {
+                    1.0
+                };
+                result.add(probe.light, Vec3::splat(weight));
+                total += weight;
+            }
+            let mut normalized = Irradiance::default();
+            normalized.add(result, Vec3::splat(1.0 / total.max(1.0)));
+            return normalized;
+        }
         let size = self.grid.size;
         let coordinate = uvec3(index as u32 % size.x, index as u32 / size.x % size.y, index as u32 / (size.x * size.y));
         let source = self.raw[index];
@@ -129,14 +185,21 @@ impl Cache {
 
     fn bounce(&self, index: usize, previous: &[Probe]) -> Probe {
         let mut result = self.direct[index].light;
-        for (sample, bounce) in self.paths[index * RAYS..(index + 1) * RAYS].iter().enumerate() {
+        for bounce in &self.paths[self.path_offsets[index]..self.path_offsets[index] + self.path_lengths[index]] {
             if bounce.albedo == Vec3::ZERO {
                 continue;
             }
-            let incident = self.grid.sample(previous, bounce.point, bounce.normal);
+            let cached = bounce.lookup.sample(previous);
+            let incident = if cached.w > 0.01 {
+                cached.truncate()
+            } else {
+                self.grid
+                    .sample(previous, bounce.point, bounce.normal)
+                    .lerp(cached.truncate(), (cached.w * 100.0).min(1.0))
+            };
             // Finite spatial iterations, always adding the fixed source term.
             // No ad-hoc energy loss and no feedback from previous frames.
-            result.project(self.directions[sample], incident * bounce.albedo);
+            result.project_receiver(bounce.direction, incident * bounce.albedo, self.direct[index].normal);
         }
         Probe { light: result, ..self.direct[index] }
     }
@@ -151,18 +214,27 @@ impl Cache {
         }
         for pass in 0..BOUNCES - 1 {
             for slot in 0..self.active.len() {
-                self.bounce_at(pass, self.active[slot], probes);
+                self.bounce_at(pass, self.active[slot]);
             }
+        }
+        for &index in &self.active {
+            probes[index] = Probe { light: self.filtered(index), ..self.raw[index] };
+        }
+        for &index in &self.active {
+            self.raw[index].light = probes[index].light;
+        }
+        for &index in &self.active {
+            probes[index] = Probe { light: self.filtered(index), ..self.raw[index] };
         }
     }
 
-    fn bounce_at(&mut self, pass: usize, index: usize, probes: &mut [Probe]) {
+    fn bounce_at(&mut self, pass: usize, index: usize) {
         let previous = if pass == 0 { &self.direct } else { &self.bounces[pass - 1] };
         let result = self.bounce(index, previous);
         if pass < BOUNCES - 2 {
             self.bounces[pass][index] = result;
         } else {
-            probes[index] = result;
+            self.raw[index] = result;
         }
     }
 
@@ -172,10 +244,10 @@ impl Cache {
 
     pub(crate) fn begin_update(&mut self) {
         self.cursor = 0;
-        self.remaining = self.active.len() * (BOUNCES + 1);
+        self.remaining = self.active.len() * (BOUNCES + 4);
     }
 
-    /// At most 64 probes / 8192 cached paths per frame, independent of resolution.
+    /// At most 64 probes / 16384 cached paths per frame, independent of resolution.
     pub(crate) fn step(&mut self, sun: Sun, objects: &[Object], nodes: &[Node], probes: &mut [Probe]) {
         if self.remaining == 0 {
             return;
@@ -191,8 +263,12 @@ impl Cache {
                 self.compose_at(index, sun, objects);
             } else if pass == 1 {
                 self.direct[index].light = self.filtered(index);
+            } else if pass == BOUNCES + 2 {
+                self.raw[index].light = probes[index].light;
+            } else if pass == BOUNCES + 1 || pass == BOUNCES + 3 {
+                probes[index] = Probe { light: self.filtered(index), ..self.raw[index] };
             } else {
-                self.bounce_at(pass - 2, index, probes);
+                self.bounce_at(pass - 2, index);
             }
         }
         self.remaining -= end - start;
@@ -210,7 +286,7 @@ impl Cache {
 }
 
 pub fn bake(
-    objects: &[Object],
+    objects: &mut [Object],
     nodes: &[Node],
     lights: &[u32],
     min: Vec3,
@@ -220,16 +296,19 @@ pub fn bake(
     let origin = vec3(min.x, min.y, 0.10);
     let size = ((vec3(max.x, max.y, 2.6) - origin) / SPACING).ceil().as_uvec3() + UVec3::ONE;
     let grid = Grid { origin, size };
-    let count = (size.x * size.y * size.z) as usize;
-    let directions = from_fn(|sample| {
+    let lattice_count = (size.x * size.y * size.z) as usize;
+    let surfaces = super::surface::sites(objects, nodes, lattice_count as u32);
+    let count = lattice_count + surfaces.probes.len();
+    let directions: [Vec3; RAYS] = from_fn(|sample| {
         let h = 1.0 - 2.0 * (sample as f32 + 0.5) / RAYS as f32;
         let (sin, cos) = (sample as f32 * 2.399_963).sin_cos();
         let r = (1.0 - h * h).sqrt();
         vec3(r * cos, r * sin, h)
     });
     let mut cache = Cache {
-        directions,
-        paths: vec![Bounce::default(); count * RAYS].into_boxed_slice(),
+        paths: Vec::new(),
+        path_offsets: vec![0; count].into_boxed_slice(),
+        path_lengths: vec![0; count].into_boxed_slice(),
         sky: vec![Irradiance::default(); count].into_boxed_slice(),
         ground: vec![Irradiance::default(); count].into_boxed_slice(),
         sun: vec![Irradiance::default(); count].into_boxed_slice(),
@@ -239,6 +318,7 @@ pub fn bake(
         bounces: from_fn(|_| vec![Probe::default(); count].into_boxed_slice()),
         active: Box::default(),
         grid,
+        surface_neighbours: surfaces.neighbours.into_boxed_slice(),
         lights: lights.into(),
         cursor: 0,
         remaining: 0,
@@ -257,7 +337,7 @@ pub fn bake(
             }
             let object = objects[node.object as usize];
             let local = scene::unrotate_z(p - object.pos, object.rotation);
-            if scene::render_furniture::<scene::Distance>(object.kind, local, object.size).0 < -0.002 {
+            if scene::render_furniture::<scene::Distance>(object.kind, local, object.size).0 < -0.0001 {
                 return true;
             }
         }
@@ -271,14 +351,35 @@ pub fn bake(
         let (distance, object) = scene::architectural_cast(point, Vec3::Z, nodes, objects);
         distance < FAR && objects[object as usize].kind == Kind::Ceiling
     };
+    cache.direct[lattice_count..].copy_from_slice(&surfaces.probes);
+    // Populate every projected receiver's architectural bounds before baking
+    // any transport stencil, including stencils that reference later sites.
+    for probe in &mut cache.direct[lattice_count..] {
+        if probe.normal == Vec3::ZERO {
+            continue;
+        }
+        let clearance =
+            |axis: Vec3| (scene::architectural_cast(probe.position, axis, nodes, objects).0 - 0.002).max(0.0);
+        probe.positive = vec3(clearance(Vec3::X), clearance(Vec3::Y), clearance(Vec3::Z));
+        probe.negative = vec3(clearance(-Vec3::X), clearance(-Vec3::Y), clearance(-Vec3::Z));
+    }
     for index in 0..count {
+        let surface = index >= lattice_count;
+        if surface && cache.direct[index].normal == Vec3::ZERO {
+            continue;
+        }
         let coordinate = uvec3(index as u32 % size.x, index as u32 / size.x % size.y, index as u32 / (size.x * size.y));
-        let lattice = origin + coordinate.as_vec3() * SPACING;
+        let lattice = if surface { cache.direct[index].position } else { origin + coordinate.as_vec3() * SPACING };
         let mut point = lattice;
+        if surface && inside(point) {
+            cache.direct[index] =
+                Probe { positive: Vec3::splat(-FAR), negative: Vec3::splat(-FAR), ..Probe::default() };
+            continue;
+        }
         // Keep interpolation sites near wall/ceiling intersections populated.
         // Bake at the nearest free indoor point instead of discarding sites
         // inside furniture or sampling exterior sky above the roof.
-        if !usable(point) {
+        if !surface && !usable(point) {
             let mut nearest = f32::INFINITY;
             for candidate in 0..27 {
                 let offset =
@@ -296,27 +397,87 @@ pub fn bake(
                 continue;
             }
         }
+        cache.path_offsets[index] = cache.paths.len();
         cache.direct[index].position = point;
         let clearance = |axis: Vec3| (scene::architectural_cast(point, axis, nodes, objects).0 - 0.002).max(0.0);
         let axes = |sign: f32| vec3(clearance(Vec3::X * sign), clearance(Vec3::Y * sign), clearance(Vec3::Z * sign));
-        (cache.direct[index].positive, cache.direct[index].negative) = (axes(1.0), axes(-1.0));
+        if !surface {
+            (cache.direct[index].positive, cache.direct[index].negative) = (axes(1.0), axes(-1.0));
+        }
+        let receiver_normal = cache.direct[index].normal;
+        // Independent rotations prevent a shared finite ray pattern from
+        // turning narrow window visibility into coherent square bands. The
+        // rotation is static: relighting stays deterministic and noise-free.
+        let spin_axis = if surface { receiver_normal } else { Vec3::Z };
+        let key = (point * 10000.0).round();
+        let angle = scene::materials::hash(
+            Vec2::new(key.x + key.z * 17.0, key.y) + Vec2::new(receiver_normal.x, receiver_normal.y) * 37.0,
+        ) * (2.0 * PI);
+        let (sin, cos) = angle.sin_cos();
+        let mut cone_weights = [Vec3::ZERO; 2];
         for (sample, &direction) in directions.iter().enumerate() {
+            let direction = direction * cos
+                + spin_axis.cross(direction) * sin
+                + spin_axis * (spin_axis.dot(direction) * (1.0 - cos));
+            if surface && receiver_normal.dot(direction) <= 0.0 {
+                continue;
+            }
+            let point = if surface {
+                let footprint = surfaces.footprints[index - lattice_count];
+                let jitter = (Vec2::new(sample as f32 * 0.754_877_7, sample as f32 * 0.569_840_3).fract() - 0.5) * 2.0;
+                let candidate = point + footprint[0] * jitter.x + footprint[1] * jitter.y;
+                // A free endpoint can still lie across a thin partition. Never
+                // teleport transport origins through geometry at texel edges.
+                let offset = candidate - point;
+                let length = offset.length();
+                if inside(candidate) || (length > 0.0001 && trace(point, offset / length).0 < length) {
+                    point
+                } else {
+                    candidate
+                }
+            } else {
+                point
+            };
             let (distance, object) = trace(point, direction);
+            // Reuse the transport rays for visibility; no extra geometry work.
+            // Narrow, overlapping cones retain furniture silhouettes while
+            // their second moments soften uncertain, partially blocked regions.
+            let depth = distance.min(4.0);
+            for (side, sign) in [1.0, -1.0].into_iter().enumerate() {
+                let cosine = (direction * sign).max(Vec3::ZERO);
+                let weights = cosine * cosine;
+                let weights = weights * weights;
+                let weights = weights * weights;
+                let weights = weights * weights;
+                cone_weights[side] += weights;
+                if side == 0 {
+                    cache.direct[index].mean_positive += weights * depth;
+                    cache.direct[index].square_positive += weights * (depth * depth);
+                } else {
+                    cache.direct[index].mean_negative += weights * depth;
+                    cache.direct[index].square_negative += weights * (depth * depth);
+                }
+            }
             if distance >= FAR {
                 if direction.z >= 0.0 {
-                    cache.sky[index].project(direction, Vec3::splat(0.25 + direction.z.sqrt() * 0.75));
+                    cache.sky[index].project_receiver(
+                        direction,
+                        Vec3::splat(0.25 + direction.z.sqrt() * 0.75),
+                        receiver_normal,
+                    );
                 } else {
-                    cache.ground[index].project(direction, Vec3::ONE);
+                    cache.ground[index].project_receiver(direction, Vec3::ONE, receiver_normal);
                 }
                 continue;
             }
+            let object_index = object;
             let object = objects[object as usize];
             let hit = point + direction * distance;
             let local = scene::unrotate_z(hit - object.pos, object.rotation);
             let normal = scene::rotate_z(scene::object_normal(object, local), object.rotation);
             let albedo = average_albedo(object, local).min(Vec3::splat(0.85));
             let point = hit + normal * 0.002;
-            cache.paths[index * RAYS + sample] = Bounce { point, normal, albedo };
+            cache.paths.push(Bounce { object: object_index, direction, point, normal, albedo, ..Bounce::default() });
             for (light, &fixture) in lights.iter().enumerate() {
                 // Unit brightness: entity changes only scale the cached transport.
                 let fixture = Object { emission: 1.0, emission_color: Vec3::ONE, ..objects[fixture as usize] };
@@ -334,8 +495,27 @@ pub fn bake(
                     distance_to_light - 0.002,
                 )
                 .0;
-                cache.fixtures[index * lights.len() + light].project(direction, contribution * visibility);
+                cache.fixtures[index * lights.len() + light].project_receiver(
+                    direction,
+                    contribution * visibility,
+                    receiver_normal,
+                );
             }
+        }
+        cache.path_lengths[index] = cache.paths.len() - cache.path_offsets[index];
+        let probe = &mut cache.direct[index];
+        probe.mean_positive /= cone_weights[0].max(Vec3::splat(1.0e-8));
+        probe.square_positive /= cone_weights[0].max(Vec3::splat(1.0e-8));
+        probe.mean_negative /= cone_weights[1].max(Vec3::splat(1.0e-8));
+        probe.square_negative /= cone_weights[1].max(Vec3::splat(1.0e-8));
+    }
+    // Geometry interpolation links are fixed. Cache them once rather than
+    // reconstructing four surface neighbours for every ray of every bounce.
+    for path in &mut cache.paths {
+        let item = objects[path.object as usize];
+        if item.surface_cache != u32::MAX {
+            let local = scene::unrotate_z(path.point - path.normal * 0.002 - item.pos, item.rotation);
+            path.lookup = super::surface::lookup(&cache.direct, item, local, path.normal);
         }
     }
     cache.active = cache
@@ -344,6 +524,21 @@ pub fn bake(
         .enumerate()
         .filter_map(|(index, probe)| (probe.positive.x >= 0.0).then_some(index))
         .collect();
+    // Coplanar receivers may be on opposite sides of a perpendicular wall.
+    // Plane/normal agreement alone cannot certify a connected filter footprint.
+    for (index, neighbours) in cache.surface_neighbours.iter_mut().enumerate() {
+        let from = cache.direct[lattice_count + index].position;
+        for neighbour in neighbours.iter_mut() {
+            if *neighbour == u32::MAX {
+                continue;
+            }
+            let offset = cache.direct[*neighbour as usize].position - from;
+            let length = offset.length();
+            if length > 0.0001 && trace(from, offset / length).0 < length {
+                *neighbour = u32::MAX;
+            }
+        }
+    }
     cache.raw = cache.direct.clone();
     cache.bounces = from_fn(|_| cache.direct.clone());
     let mut probes = cache.direct.clone();

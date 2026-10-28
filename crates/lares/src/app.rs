@@ -9,12 +9,19 @@ use isthmus::{
     glam::{Vec2, Vec3},
 };
 
+#[derive(Clone, Copy)]
+struct Meter {
+    rays: [Vec3; 5],
+    revision: u64,
+    settings: (f32, Vec3),
+}
+
 pub struct App {
     pub scene: Scene,
     pub camera: Camera,
     dragging: bool,
     pointer: Vec2,
-    meter: Cell<Option<([Vec3; 5], u64, f32)>>,
+    meter: Cell<Option<Meter>>,
     exposure: Cell<f32>,
 }
 
@@ -62,26 +69,27 @@ impl App {
         let pixel_angle = self.camera.fov / size.y.max(1.0);
         let key = [eye, forward, right, up, self.scene.sun.direction];
         let revision = self.scene.lighting_revision;
-        let target = if let Some((previous, old_revision, value)) = self.meter.get() {
+        let target = if let Some(Meter { rays: previous, revision: old_revision, settings: value }) = self.meter.get() {
             if key == previous && revision == old_revision {
                 value
             } else {
-                let value = self.scene.camera_exposure(eye, forward, right, up);
-                self.meter.set(Some((key, revision, value)));
+                let value = self.scene.camera_settings(eye, forward, right, up);
+                self.meter.set(Some(Meter { rays: key, revision, settings: value }));
                 value
             }
         } else {
-            let value = self.scene.camera_exposure(eye, forward, right, up);
-            self.meter.set(Some((key, revision, value)));
-            self.exposure.set(value);
+            let value = self.scene.camera_settings(eye, forward, right, up);
+            self.meter.set(Some(Meter { rays: key, revision, settings: value }));
+            self.exposure.set(value.0);
             value
         };
         // Adapt gradually in stop space; regular metering never invalidates AA.
-        let exposure = (self.exposure.get().log2() * 0.85 + target.log2() * 0.15).exp2();
+        let exposure = (self.exposure.get().log2() * 0.85 + target.0.log2() * 0.15).exp2();
         self.exposure.set(exposure);
         Globals {
             eye,
             exposure,
+            white_balance: target.1,
             forward,
             right,
             up,

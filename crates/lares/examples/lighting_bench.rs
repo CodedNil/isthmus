@@ -13,11 +13,19 @@ fn main() {
     let started = Instant::now();
     let mut scene = Scene::new_at(&home::rooms(), noon, SunSettings::default());
     println!(
-        "Initial transport + four bounces: {:?}; {} active / {} lattice probe sites, {} fixtures",
+        "Initial transport + eight bounces: {:?}; {} active / {} allocated cache sites, {} fixtures",
         started.elapsed(),
         scene.probes.iter().filter(|probe| probe.positive.x >= 0.0).count(),
         scene.probes.len(),
         scene.lights.len()
+    );
+    let lattice = (scene.grid.size.x * scene.grid.size.y * scene.grid.size.z) as usize;
+    let volume = scene.probes[..lattice].iter().filter(|probe| probe.positive.x >= 0.0).count();
+    let surfaces = scene.probes[lattice..].iter().filter(|probe| probe.normal.length_squared() > 0.5).count();
+    println!(
+        "GI: {volume}/{lattice} indoor volume sites (50 cm), {surfaces}/{} surface sites (20 cm); {:.2} MiB GPU cache",
+        scene.probes.len() - lattice,
+        size_of_val(&*scene.probes) as f64 / 1_048_576.0
     );
     let slots = scene.lights.len().min(32);
     let active = if slots == 32 { u32::MAX } else { (1u32 << slots) - 1 };
@@ -39,5 +47,5 @@ fn main() {
         black_box(&scene);
         dimming += started.elapsed();
     }
-    println!("Entity change + four bounce blend: {:?} average", dimming / 20);
+    println!("Entity change + eight bounce blend: {:?} average", dimming / 20);
 }

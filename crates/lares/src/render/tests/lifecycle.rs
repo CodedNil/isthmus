@@ -114,7 +114,9 @@ fn camera_meter_tracks_source_energy_without_being_driven_by_empty_background() 
             probe.light.y = base.light.y * factor;
             probe.light.z = base.light.z * factor;
         }
-        let exposure = scene.camera_exposure(eye, forward, right, up);
+        let (exposure, white_balance) = scene.camera_settings(eye, forward, right, up);
+        assert!(white_balance.is_finite());
+        assert!(white_balance.cmpge(Vec3::splat(0.65)).all() && white_balance.cmple(Vec3::splat(2.2)).all());
         assert!(exposure.is_finite() && exposure > 0.0 && exposure <= previous);
         previous = exposure;
     }

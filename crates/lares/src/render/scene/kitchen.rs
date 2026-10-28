@@ -172,10 +172,12 @@ pub(super) fn splashback<S: Sample>(p: Vec3, size: Vec3) -> S {
     let cell = vec2(0.15, 0.15);
     let from_edge = p.xz() + size.xz() * 0.5;
     let uv = from_edge - ((from_edge / cell).floor() + Vec2::splat(0.5)) * cell;
-    let tile = rounded_box(vec3(uv.x, p.y - size.y * 0.5, uv.y), vec3(0.147, 0.010, 0.147), 0.003)
+    let face = uv / 0.074;
+    let crown = (1.0 - face.x * face.x).max_num(0.0) * (1.0 - face.y * face.y).max_num(0.0) * 0.0008;
+    let tile = rounded_box(vec3(uv.x, p.y - size.y * 0.5 - crown, uv.y), vec3(0.147, 0.010, 0.147), 0.003)
         .max_num(super::box_sdf(p, size + Vec3::Y * 0.02));
     S::new(backing, || (Material::Paint, vec3(0.66, 0.65, 0.61)))
-        .union(S::new(tile, || (Material::Ceramic, vec3(0.78, 0.81, 0.80))))
+        .union(S::new(tile, || (Material::GlazedTile, vec3(0.78, 0.81, 0.80))))
 }
 #[inline(never)]
 pub(super) fn blind<S: Sample>(p: Vec3, size: Vec3) -> S {

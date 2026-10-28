@@ -147,6 +147,27 @@ try {
     if (i === 119) throw Error('Scene readiness timed out: ' + await evaluate('document.body.innerText'));
   }
   await new Promise(resolve => setTimeout(resolve, 1000));
+  if (process.env.LARES_BENCH_TARGET || process.env.LARES_BENCH_ZOOM) {
+    const target = (process.env.LARES_BENCH_TARGET || '0,0').split(',').map(Number);
+    const zoom = Number(process.env.LARES_BENCH_ZOOM || 0);
+    if (target.length !== 2 || !target.every(Number.isFinite) || !Number.isInteger(zoom) || Math.abs(zoom) > 20) throw Error('Invalid benchmark target/zoom');
+    await evaluate(`(() => {
+      const canvas = document.querySelector('canvas');
+      const target = ${JSON.stringify(target)};
+      const units = 36 * Math.tan(.325) / canvas.clientHeight;
+      const x = canvas.clientWidth / 2, y = canvas.clientHeight / 2;
+      const event = (type, px, py) => canvas.dispatchEvent(new PointerEvent(type, { clientX: px, clientY: py, pointerId: 1, button: 0, buttons: type === 'pointerup' ? 0 : 1, bubbles: true }));
+      event('pointerdown', x, y);
+      event('pointermove', x - target[0] / units, y - target[1] / units);
+      event('pointerup', x - target[0] / units, y - target[1] / units);
+      for (let step = 0; step < ${Math.abs(zoom)}; step++) canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: ${zoom >= 0 ? -1 : 1}, bubbles: true, cancelable: true }));
+    })()`);
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if (await evaluate("+(document.querySelector('canvas').getAttribute('data-samples') || 0) >= 8")) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
   if (process.env.LARES_BENCH_MOTION === '1') await evaluate(`
     (() => {
       const canvas = document.querySelector('canvas');
