@@ -1,4 +1,4 @@
-//! Geometry transport and per-fixture bounce bases never change with the clock.
+//! Static geometry transport, solved fixture responses and budgeted daylight.
 //! Sun visibility refreshes incrementally; eight diffuse bounces use no temporal feedback.
 use super::{Grid, Irradiance, Probe, SPACING};
 use crate::{
@@ -11,6 +11,7 @@ use crate::{
 };
 use core::{array::from_fn, f32::consts::PI};
 use isthmus::glam::{IVec3, UVec3, Vec2, Vec3, uvec3, vec3};
+use std::collections::BTreeMap;
 
 const RAYS: usize = 256;
 const UPDATE_BUDGET: usize = 64;
@@ -60,10 +61,17 @@ struct Bounce {
     point: Vec3,
     normal: Vec3,
     albedo: Vec3,
+    volume_offset: u32,
+    volume_length: u32,
 }
 
 pub struct Cache {
     paths: Vec<Bounce>,
+    volume_weights: Vec<(u32, f32)>,
+    /// Solved unit response, keyed by the fixtures controlled together.
+    pub(super) responses: BTreeMap<Vec<u32>, Box<[Irradiance]>>,
+    applied: Vec<Vec3>,
+    groups: Vec<Vec<u32>>,
     path_offsets: Box<[usize]>,
     path_lengths: Box<[usize]>,
     sky: Box<[Irradiance]>,
@@ -74,7 +82,7 @@ pub struct Cache {
     direct: Box<[Probe]>,
     raw: Box<[Probe]>,
     bounces: [Box<[Probe]>; BOUNCES - 2],
-    active: Box<[usize]>,
+    pub(super) active: Box<[usize]>,
     grid: Grid,
     surface_neighbours: Box<[[u32; 9]]>,
     lights: Box<[u32]>,
@@ -82,6 +90,14 @@ pub struct Cache {
     remaining: usize,
 }
 impl Cache {
+    pub(crate) const fn statistics(&self) -> (usize, usize, usize) {
+        (
+            self.paths.len(),
+            self.volume_weights.len(),
+            self.paths.len() * size_of::<Bounce>() + self.volume_weights.len() * size_of::<(u32, f32)>(),
+        )
+    }
+
     fn sun_at(&self, index: usize, sun: Sun, objects: &[Object], nodes: &[Node]) -> Irradiance {
         let mut result = Irradiance::default();
         if sun.radiance.max_element() <= 0.0 {
@@ -102,7 +118,7 @@ impl Cache {
         result
     }
 
-    fn compose_at(&mut self, index: usize, sun: Sun, objects: &[Object]) {
+    fn daylight_at(&mut self, index: usize, sun: Sun) {
         let mut result = Irradiance::default();
         result.add(self.sky[index], sun.sky);
         // Analytic sunlit exterior ground seen through real apertures. No
@@ -110,11 +126,6 @@ impl Cache {
         let ground = (sun.radiance * sun.direction.z.max(0.0) + sun.sky * (0.85 * PI)) * (0.20 / PI);
         result.add(self.ground[index], ground);
         result.add(self.sun[index], sun.radiance);
-        let count = self.lights.len();
-        for (light, &object) in self.lights.iter().enumerate() {
-            let fixture = objects[object as usize];
-            result.add(self.fixtures[index * count + light], fixture.emission_color * fixture.emission);
-        }
         self.raw[index].light = result;
     }
 
@@ -193,8 +204,18 @@ impl Cache {
             let incident = if cached.w > 0.01 {
                 cached.truncate()
             } else {
-                self.grid
-                    .sample(previous, bounce.point, bounce.normal)
+                self.volume_weights
+                    [bounce.volume_offset as usize..(bounce.volume_offset + bounce.volume_length) as usize]
+                    .iter()
+                    .fold(Vec3::ZERO, |sum, &(index, weight)| {
+                        let field = previous[index as usize].light;
+                        sum + (field.constant
+                            + field.x * bounce.normal.x
+                            + field.y * bounce.normal.y
+                            + field.z * bounce.normal.z)
+                            * weight
+                    })
+                    .max(Vec3::ZERO)
                     .lerp(cached.truncate(), (cached.w * 100.0).min(1.0))
             };
             // Finite spatial iterations, always adding the fixed source term.
@@ -204,11 +225,24 @@ impl Cache {
         Probe { light: result, ..self.direct[index] }
     }
 
-    /// State changes blend precomputed light bases, without casting any rays.
+    /// Solve cached daylight transport, then add the solved fixture field.
     pub(crate) fn compose(&mut self, sun: Sun, objects: &[Object], probes: &mut [Probe]) {
         for slot in 0..self.active.len() {
-            self.compose_at(self.active[slot], sun, objects);
+            self.daylight_at(self.active[slot], sun);
         }
+        self.solve(probes);
+        self.add_fixtures(objects, probes);
+        self.applied = self
+            .lights
+            .iter()
+            .map(|&index| {
+                let light = objects[index as usize];
+                light.emission_color * light.emission
+            })
+            .collect();
+    }
+
+    fn solve(&mut self, probes: &mut [Probe]) {
         for &index in &self.active {
             self.direct[index].light = self.filtered(index);
         }
@@ -226,6 +260,72 @@ impl Cache {
         for &index in &self.active {
             probes[index] = Probe { light: self.filtered(index), ..self.raw[index] };
         }
+    }
+
+    pub(crate) fn bind_groups(&mut self, entities: &[(&str, u32)]) {
+        let mut groups = BTreeMap::<&str, Vec<u32>>::new();
+        for &(name, object) in entities {
+            if let Some(slot) = self.lights.iter().position(|&light| light == object) {
+                groups.entry(name).or_default().push(slot as u32);
+            }
+        }
+        self.groups = groups.into_values().collect();
+    }
+
+    pub(crate) fn prepare_controls(&mut self, sun: Sun, objects: &[Object], probes: &mut [Probe]) {
+        if self.fixtures.is_empty() {
+            return;
+        }
+        for group in self.groups.clone() {
+            for &index in &self.active {
+                let mut value = Irradiance::default();
+                for &slot in &group {
+                    value.add(self.fixtures[index * self.lights.len() + slot as usize], Vec3::ONE);
+                }
+                self.raw[index].light = value;
+            }
+            let mut response = self.direct.clone();
+            self.solve(&mut response);
+            self.responses.insert(group, self.active.iter().map(|&index| response[index].light).collect());
+        }
+        // Runtime fixture transport is now a solved field. It never enters
+        // the daylight solver again, and the large first-bounce bank is freed.
+        self.fixtures = Box::default();
+        self.compose(sun, objects, probes);
+    }
+
+    fn add_fixtures(&self, objects: &[Object], probes: &mut [Probe]) {
+        for group in &self.groups {
+            let fixture = objects[self.lights[group[0] as usize] as usize];
+            let weight = fixture.emission_color * fixture.emission;
+            let response = &self.responses[group];
+            for (slot, &index) in self.active.iter().enumerate() {
+                probes[index].light.add(response[slot], weight);
+            }
+        }
+    }
+
+    /// Blend solved group responses without entering the daylight solver.
+    pub(crate) fn fixture_changes(&mut self, objects: &[Object], probes: &mut [Probe]) {
+        let current: Vec<_> = self
+            .lights
+            .iter()
+            .map(|&index| {
+                let light = objects[index as usize];
+                light.emission_color * light.emission
+            })
+            .collect();
+        for group in &self.groups {
+            let delta = current[group[0] as usize] - self.applied[group[0] as usize];
+            if delta == Vec3::ZERO {
+                continue;
+            }
+            let response = &self.responses[group];
+            for (slot, &index) in self.active.iter().enumerate() {
+                probes[index].light.add(response[slot], delta);
+            }
+        }
+        self.applied = current;
     }
 
     fn bounce_at(&mut self, pass: usize, index: usize) {
@@ -260,19 +360,27 @@ impl Cache {
             let index = self.active[slot];
             if pass == 0 {
                 self.sun[index] = self.sun_at(index, sun, objects, nodes);
-                self.compose_at(index, sun, objects);
+                self.daylight_at(index, sun);
             } else if pass == 1 {
                 self.direct[index].light = self.filtered(index);
             } else if pass == BOUNCES + 2 {
-                self.raw[index].light = probes[index].light;
+                self.raw[index].light = self.bounces[0][index].light;
             } else if pass == BOUNCES + 1 || pass == BOUNCES + 3 {
-                probes[index] = Probe { light: self.filtered(index), ..self.raw[index] };
+                self.bounces[0][index] = Probe { light: self.filtered(index), ..self.raw[index] };
             } else {
                 self.bounce_at(pass - 2, index);
             }
         }
         self.remaining -= end - start;
         self.cursor += end - start;
+        if self.remaining == 0 {
+            // Publish a complete lighting solution, never a moving stripe of
+            // partially updated wall texels or a half-filtered source state.
+            for &index in &self.active {
+                probes[index] = self.bounces[0][index];
+            }
+            self.add_fixtures(objects, probes);
+        }
     }
 
     pub(crate) fn relight(&mut self, sun: Sun, objects: &[Object], nodes: &[Node], probes: &mut [Probe]) {
@@ -285,6 +393,7 @@ impl Cache {
     }
 }
 
+#[cfg(test)]
 pub fn bake(
     objects: &mut [Object],
     nodes: &[Node],
@@ -293,6 +402,22 @@ pub fn bake(
     max: Vec3,
     sun: Sun,
 ) -> (Grid, Box<[Probe]>, Cache) {
+    let (grid, mut probes, mut cache) = bake_cached(objects, nodes, lights, min, max, sun, None);
+    cache.groups = (0..lights.len() as u32).map(|slot| vec![slot]).collect();
+    cache.prepare_controls(sun, objects, &mut probes);
+    (grid, probes, cache)
+}
+
+pub fn bake_cached(
+    objects: &mut [Object],
+    nodes: &[Node],
+    lights: &[u32],
+    min: Vec3,
+    max: Vec3,
+    sun: Sun,
+    controls: Option<super::Controls>,
+) -> (Grid, Box<[Probe]>, Cache) {
+    let cached = controls.is_some();
     let origin = vec3(min.x, min.y, 0.10);
     let size = ((vec3(max.x, max.y, 2.6) - origin) / SPACING).ceil().as_uvec3() + UVec3::ONE;
     let grid = Grid { origin, size };
@@ -307,12 +432,16 @@ pub fn bake(
     });
     let mut cache = Cache {
         paths: Vec::new(),
+        volume_weights: Vec::new(),
+        responses: BTreeMap::new(),
+        applied: Vec::new(),
+        groups: Vec::new(),
         path_offsets: vec![0; count].into_boxed_slice(),
         path_lengths: vec![0; count].into_boxed_slice(),
         sky: vec![Irradiance::default(); count].into_boxed_slice(),
         ground: vec![Irradiance::default(); count].into_boxed_slice(),
         sun: vec![Irradiance::default(); count].into_boxed_slice(),
-        fixtures: vec![Irradiance::default(); count * lights.len()].into_boxed_slice(),
+        fixtures: vec![Irradiance::default(); if cached { 0 } else { count * lights.len() }].into_boxed_slice(),
         direct: vec![Probe::default(); count].into_boxed_slice(),
         raw: vec![Probe::default(); count].into_boxed_slice(),
         bounces: from_fn(|_| vec![Probe::default(); count].into_boxed_slice()),
@@ -372,9 +501,26 @@ pub fn bake(
         let lattice = if surface { cache.direct[index].position } else { origin + coordinate.as_vec3() * SPACING };
         let mut point = lattice;
         if surface && inside(point) {
-            cache.direct[index] =
-                Probe { positive: Vec3::splat(-FAR), negative: Vec3::splat(-FAR), ..Probe::default() };
-            continue;
+            // A wall chart can land inside a thin mirror/frame mounted a few
+            // millimetres in front of it. Discarding that texel makes a dark
+            // 20 cm hole which the interpolation spreads beyond the ornament.
+            // Move its transport origin to free air on the same side of the
+            // wall; thick furniture remains disabled, as before.
+            let normal = cache.direct[index].normal;
+            let clearance = scene::architectural_cast(point, normal, nodes, objects).0;
+            for step in 1..=6 {
+                let offset = step as f32 * 0.01;
+                let candidate = lattice + normal * offset;
+                if offset < clearance && !inside(candidate) {
+                    point = candidate;
+                    break;
+                }
+            }
+            if inside(point) {
+                cache.direct[index] =
+                    Probe { positive: Vec3::splat(-FAR), negative: Vec3::splat(-FAR), ..Probe::default() };
+                continue;
+            }
         }
         // Keep interpolation sites near wall/ceiling intersections populated.
         // Bake at the nearest free indoor point instead of discarding sites
@@ -401,7 +547,7 @@ pub fn bake(
         cache.direct[index].position = point;
         let clearance = |axis: Vec3| (scene::architectural_cast(point, axis, nodes, objects).0 - 0.002).max(0.0);
         let axes = |sign: f32| vec3(clearance(Vec3::X * sign), clearance(Vec3::Y * sign), clearance(Vec3::Z * sign));
-        if !surface {
+        if !surface || point != lattice {
             (cache.direct[index].positive, cache.direct[index].negative) = (axes(1.0), axes(-1.0));
         }
         let receiver_normal = cache.direct[index].normal;
@@ -430,7 +576,10 @@ pub fn bake(
                 // teleport transport origins through geometry at texel edges.
                 let offset = candidate - point;
                 let length = offset.length();
-                if inside(candidate) || (length > 0.0001 && trace(point, offset / length).0 < length) {
+                if inside(candidate)
+                    || (length > 0.0001
+                        && scene::cast::<false, false>(point, offset / length, nodes, objects, 0.0, length).0 < length)
+                {
                     point
                 } else {
                     candidate
@@ -478,29 +627,6 @@ pub fn bake(
             let albedo = average_albedo(object, local).min(Vec3::splat(0.85));
             let point = hit + normal * 0.002;
             cache.paths.push(Bounce { object: object_index, direction, point, normal, albedo, ..Bounce::default() });
-            for (light, &fixture) in lights.iter().enumerate() {
-                // Unit brightness: entity changes only scale the cached transport.
-                let fixture = Object { emission: 1.0, emission_color: Vec3::ONE, ..objects[fixture as usize] };
-                let (direction_to_light, radiance, distance_to_light) = fixtures::incident(fixture, point, Vec2::ZERO);
-                let contribution = albedo * radiance * (normal.dot(direction_to_light).max(0.0) / PI);
-                if contribution.max_element() < 0.0005 {
-                    continue;
-                }
-                let visibility = scene::cast::<true, false>(
-                    point,
-                    direction_to_light,
-                    nodes,
-                    objects,
-                    0.0,
-                    distance_to_light - 0.002,
-                )
-                .0;
-                cache.fixtures[index * lights.len() + light].project_receiver(
-                    direction,
-                    contribution * visibility,
-                    receiver_normal,
-                );
-            }
         }
         cache.path_lengths[index] = cache.paths.len() - cache.path_offsets[index];
         let probe = &mut cache.direct[index];
@@ -534,10 +660,80 @@ pub fn bake(
             }
             let offset = cache.direct[*neighbour as usize].position - from;
             let length = offset.length();
-            if length > 0.0001 && trace(from, offset / length).0 < length {
+            if length > 0.0001
+                && scene::cast::<false, false>(from, offset / length, nodes, objects, 0.0, length).0 < length
+            {
                 *neighbour = u32::MAX;
             }
         }
+    }
+    // Evaluate unit direct lighting once per reliable architectural receiver,
+    // rather than ray-tracing all fixtures again at every transport-ray hit.
+    // The primary shadow atlas remains full resolution; only the already
+    // 20 cm projected diffuse transport uses this shared spatial field.
+    if !cached {
+        let mut needed = vec![false; count];
+        for path in &cache.paths {
+            if path.lookup.confidence() >= 0.95 {
+                for (index, weight) in path.lookup.taps() {
+                    if weight > 0.0 {
+                        needed[index as usize] = true;
+                    }
+                }
+            }
+        }
+        let unit_incident = |point: Vec3, normal: Vec3, slot: usize| {
+            let fixture = Object { emission: 1.0, emission_color: Vec3::ONE, ..objects[lights[slot] as usize] };
+            let (direction, radiance, distance) = fixtures::incident(fixture, point, Vec2::ZERO);
+            let contribution = radiance * (normal.dot(direction).max(0.0) / PI);
+            if contribution.max_element() < 0.0005 {
+                return Vec3::ZERO;
+            }
+            contribution * scene::cast::<true, false>(point, direction, nodes, objects, 0.0, distance - 0.002).0
+        };
+        let mut direct_sources = vec![Vec3::ZERO; count * lights.len()];
+        for (index, &needed) in needed.iter().enumerate() {
+            if !needed {
+                continue;
+            }
+            let probe = cache.direct[index];
+            for slot in 0..lights.len() {
+                direct_sources[index * lights.len() + slot] = unit_incident(probe.position, probe.normal, slot);
+            }
+        }
+        for index in 0..count {
+            for path in
+                &mut cache.paths[cache.path_offsets[index]..cache.path_offsets[index] + cache.path_lengths[index]]
+            {
+                for slot in 0..lights.len() {
+                    let incoming = if path.lookup.confidence() >= 0.95 {
+                        path.lookup.taps().into_iter().fold(Vec3::ZERO, |sum, (index, weight)| {
+                            sum + direct_sources[index as usize * lights.len() + slot] * weight
+                        }) / path.lookup.confidence()
+                    } else {
+                        unit_incident(path.point, path.normal, slot)
+                    };
+                    cache.fixtures[index * lights.len() + slot].project_receiver(
+                        path.direction,
+                        path.albedo * incoming,
+                        cache.direct[index].normal,
+                    );
+                }
+            }
+        }
+        drop(direct_sources);
+    }
+    for path in &mut cache.paths {
+        path.volume_offset = cache.volume_weights.len() as u32;
+        if path.lookup.confidence() <= 0.01 {
+            cache.volume_weights.extend(grid.stencil(&cache.direct, path.point, path.normal));
+        }
+        path.volume_length = cache.volume_weights.len() as u32 - path.volume_offset;
+    }
+    if let Some(controls) = controls {
+        assert!(controls.active == cache.active, "baked receiver layout differs; rebuild lighting assets");
+        cache.groups = controls.responses.keys().cloned().collect();
+        cache.responses = controls.responses;
     }
     cache.raw = cache.direct.clone();
     cache.bounces = from_fn(|_| cache.direct.clone());

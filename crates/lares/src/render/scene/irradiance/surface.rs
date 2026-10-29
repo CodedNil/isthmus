@@ -3,6 +3,8 @@ use super::Probe;
 use crate::home::{Kind, Object};
 #[cfg(not(target_arch = "spirv"))]
 use crate::render::{WALL_HEIGHT, acceleration::Node};
+#[cfg(not(target_arch = "spirv"))]
+use core::array::from_fn;
 use isthmus::prelude::*;
 
 const SPACING: f32 = 0.20;
@@ -60,6 +62,16 @@ impl Lookup {
             + light(self.indices.z) * self.weights.z
             + light(self.indices.w) * self.weights.w;
         (color / weight.max_num(1.0e-10)).extend(weight.min_num(1.0))
+    }
+
+    #[cfg(not(target_arch = "spirv"))]
+    pub(super) fn confidence(self) -> f32 {
+        self.weights.element_sum()
+    }
+
+    #[cfg(not(target_arch = "spirv"))]
+    pub(super) fn taps(self) -> [(u32, f32); 4] {
+        from_fn(|i| (self.indices[i], self.weights[i]))
     }
 
     pub(super) fn sample(self, probes: &[Probe]) -> Vec4 {

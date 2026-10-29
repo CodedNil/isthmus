@@ -21,11 +21,13 @@ impl Growth<'_> {
             emission: 0.0,
             emission_color: DEFAULT_LIGHT_COLOR,
             exterior: Vec3::ZERO,
-            material: if self.plant.kind == Kind::SillPlant && self.plant.size.z > 0.60 {
-                Material::MarbledFoliage
+            material: if kind == Kind::Petal && self.plant.material == Material::Ceramic {
+                Material::Ceramic
+            } else if self.plant.kind == Kind::Alocasia && kind == Kind::Stem {
+                Material::Paint
             } else if kind == Kind::Leaf && self.plant.kind == Kind::Plant {
                 Material::VariegatedFoliage
-            } else if kind == Kind::Stem && self.plant.kind != Kind::Palm && self.plant.kind != Kind::SillPlant {
+            } else if kind == Kind::Stem && !matches!(self.plant.kind, Kind::Palm | Kind::SillPlant | Kind::Alocasia) {
                 Material::Wood
             } else {
                 Material::Foliage
@@ -68,6 +70,7 @@ impl Growth<'_> {
     }
 
     fn leaf(&mut self, root: Vec3, angle: f32, length: f32, width: f32, droop: f32) {
+        let shield = self.plant.kind == Kind::Alocasia;
         let lean = droop.clamp(-0.95, 0.95);
         let horizontal = (1.0 - lean * lean).sqrt();
         let direction = vec3(angle.cos() * horizontal, angle.sin() * horizontal, -lean);
@@ -88,8 +91,8 @@ impl Growth<'_> {
                 let fraction = u as f32 / 10.0;
                 let x = length * 0.5 * fraction;
                 for v in [-1.0, 0.0, 1.0] {
-                    let y = width * 0.5 * (1.0 - fraction * fraction) * v;
-                    let z = -0.18 * x * x / (length * 0.5) + 0.32 * y.abs();
+                    let y = super::scene::leaf_profile(x, length * 0.5, width * 0.5, shield) * v;
+                    let z = super::scene::leaf_height(x, y, length * 0.5, width * 0.5, shield);
                     let q = vec3(x * upright - z * lean, y, z * upright + x * lean);
                     let point = center + vec3(q.x * cos - q.y * sin, q.x * sin + q.y * cos, q.z);
                     center += self.repel(point, 0.003) - point;
@@ -97,10 +100,12 @@ impl Growth<'_> {
             }
         }
         let displaced_start = center - delta * 0.48;
-        if attachment.distance_squared(displaced_start) > 0.0001 {
+        if shield {
+            self.stem(attachment, displaced_start + delta * 0.18);
+        } else if attachment.distance_squared(displaced_start) > 0.0001 {
             self.stem(attachment, displaced_start);
         }
-        self.add(Kind::Leaf, center, vec3(length, width, -delta.z), yaw);
+        self.add(if shield { Kind::ShieldLeaf } else { Kind::Leaf }, center, vec3(length, width, -delta.z), yaw);
     }
 
     fn tree(&mut self) {
@@ -264,22 +269,42 @@ impl Growth<'_> {
         }
     }
 
+    fn alocasia(&mut self) {
+        let s = self.plant.size;
+        let soil = -s.z * 0.5 + 0.166;
+        // Separate burgundy petioles rise from the crown, with young upright
+        // spears above a loose skirt of older, outward-drooping shield leaves.
+        for i in 0..10 {
+            let f = i as f32;
+            let angle = f * 2.399_963 + 0.40;
+            let radial = vec3(angle.cos(), angle.sin(), 0.0);
+            let root = radial * (0.008 + f * 0.001) + Vec3::Z * soil;
+            let young = i < 3;
+            let rise = s.z * if young { 0.52 + f * 0.035 } else { 0.36 + 0.16 * (f * 1.7).sin().abs() };
+            let tip = root + radial * s.x * (0.10 + 0.11 * (f * 2.1).sin().abs()) + Vec3::Z * rise;
+            let mut previous = root;
+            for segment in 1..=6 {
+                let t = segment as f32 / 6.0;
+                let point = root.lerp(tip, t) + radial * ((t * PI).sin() * s.x * 0.045);
+                self.stem(previous, point);
+                previous = point;
+            }
+            let length = s.x * (0.31 + 0.13 * (f * 1.9 + 0.5).sin().abs());
+            let width = length * (0.47 + 0.13 * (f * 2.7).cos().abs());
+            let droop = if young { -0.76 + f * 0.24 } else { 0.16 + 0.55 * (f * 1.3).sin().abs() };
+            self.leaf(tip, angle + 0.16 * f.sin(), length, width, droop);
+        }
+    }
+
     fn sill(&mut self) {
         let s = self.plant.size;
-        let hallway = s.z > 0.60;
-        for i in 0..if hallway { 7 } else { 9 } {
+        for i in 0..9 {
             let f = i as f32;
             let angle = f * 2.399_963;
             let root = Vec3::Z * -s.z * 0.30;
             let tip = vec3(angle.cos() * s.x * 0.06, angle.sin() * s.x * 0.06, s.z * (0.10 + 0.13 * f.sin()));
             self.stem(root, tip);
-            self.leaf(
-                tip,
-                angle,
-                s.x * if hallway { 0.75 } else { 0.60 },
-                s.x * if hallway { 0.45 } else { 0.30 },
-                if hallway { 0.10 + 0.65 * (f * 1.7).sin() } else { -0.80 },
-            );
+            self.leaf(tip, angle, s.x * 0.60, s.x * 0.30, -0.80);
         }
     }
 }
@@ -310,6 +335,7 @@ pub(super) fn compile(objects: Vec<Object>) -> Vec<Object> {
             Kind::Blossom => growth.blossom(),
             Kind::Palm => growth.palm(),
             Kind::SillPlant => growth.sill(),
+            Kind::Alocasia => growth.alocasia(),
             _ => {}
         }
     }
@@ -325,7 +351,7 @@ mod tests {
         // Exercise scene-derived deformation with different species, rotations,
         // distances and a corner. Sample the actual curved leaf sheet, not just
         // its centre; this catches leaves whose tips clear but sides intersect.
-        for kind in [Kind::Plant, Kind::Palm, Kind::SillPlant] {
+        for kind in [Kind::Plant, Kind::Palm, Kind::SillPlant, Kind::Alocasia] {
             for degree in (0..360).step_by(45) {
                 for clearance in [0.15, 0.35, 0.60] {
                     let (sin, cos) = (degree as f32).to_radians().sin_cos();
@@ -349,14 +375,25 @@ mod tests {
                                 let p = world(part.size * endpoint);
                                 assert!(p.x >= 0.004 && p.y >= 0.004, "stem crosses architectural wall");
                             }
-                        } else if part.kind == Kind::Leaf {
+                        } else if matches!(part.kind, Kind::Leaf | Kind::ShieldLeaf) {
                             let lean = (-part.size.z / part.size.x).clamp(-0.95, 0.95);
                             let upright = (1.0 - lean * lean).sqrt();
                             for u in -5..=5 {
                                 let x = part.size.x * 0.5 * u as f32 / 5.0;
                                 for v in [-1.0, 0.0, 1.0] {
-                                    let y = part.size.y * 0.5 * (1.0 - (u as f32 / 5.0).powi(2)) * v;
-                                    let z = -0.18 * x * x / (part.size.x * 0.5) + 0.32 * y.abs();
+                                    let y = super::super::scene::leaf_profile(
+                                        x,
+                                        part.size.x * 0.5,
+                                        part.size.y * 0.5,
+                                        part.kind == Kind::ShieldLeaf,
+                                    ) * v;
+                                    let z = super::super::scene::leaf_height(
+                                        x,
+                                        y,
+                                        part.size.x * 0.5,
+                                        part.size.y * 0.5,
+                                        part.kind == Kind::ShieldLeaf,
+                                    );
                                     let p = world(vec3(x * upright - z * lean, y, z * upright + x * lean));
                                     assert!(p.x >= 0.0 && p.y >= 0.0, "curved leaf crosses architectural wall: {p:?}");
                                 }

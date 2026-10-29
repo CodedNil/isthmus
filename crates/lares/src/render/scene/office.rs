@@ -102,7 +102,7 @@ pub(super) fn workstation<S: Sample>(p: Vec3, _size: Vec3) -> S {
     let mat = rounded_box(p - vec3(0.10, -0.14, 0.035), vec3(0.83, 0.32, 0.005), 0.012);
     let keyboard = rounded_box(p - vec3(0.08, -0.10, 0.054), vec3(0.37, 0.13, 0.029), 0.006);
     let key = vec2(p.x - 0.08, p.y + 0.10);
-    let cell = key - (key / 0.019).round().clamp(vec2(-9.0, -3.0), vec2(9.0, 3.0)) * 0.019;
+    let cell = key - (key / 0.019).round().clamp_num(vec2(-9.0, -3.0), vec2(9.0, 3.0)) * 0.019;
     let keys = rounded_box(vec3(cell.x, cell.y, p.z - 0.073), vec3(0.016, 0.016, 0.012), 0.002);
     let mouse = rounded_box(p - vec3(-0.19, -0.10, 0.059), vec3(0.06, 0.10, 0.04), 0.018);
     S::new(wood, || (Material::Wood, OAK))

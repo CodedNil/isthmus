@@ -88,9 +88,14 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
                         {
                             let mut trim_size = size;
                             trim_size.z = height;
+                            // Wrap around exposed corners as well as internal
+                            // ones. The extra depth closes the square gap where
+                            // two outward-facing runs otherwise only touch tips.
                             if normal.x == 0.0 {
+                                trim_size.x += depth * 2.0;
                                 trim_size.y = depth;
                             } else {
+                                trim_size.y += depth * 2.0;
                                 trim_size.x = depth;
                             }
                             let pos = center
@@ -172,6 +177,42 @@ fn footprint(room: &Room, mut emit: impl FnMut(Vec2, Vec2, Option<u32>)) {
         xs.sort_by(f32::total_cmp);
         for span in xs.as_chunks::<2>().0 {
             emit(vec2(span[0], band[0]), vec2(span[1], band[1]), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_covers_return_corners_in_every_orientation() {
+        for turn in 0..4 {
+            let rotate = |mut point: Vec2| {
+                for _ in 0..turn {
+                    point = vec2(-point.y, point.x);
+                }
+                point
+            };
+            let outline: Vec<_> = [(-2.0, -2.0), (2.0, -2.0), (2.0, 0.0), (0.0, 0.0), (0.0, 2.0), (-2.0, 2.0)]
+                .map(|point| rotate(Vec2::from(point)))
+                .into_iter()
+                .collect();
+            let mut room = Room::new(Vec2::ZERO, Vec2::splat(4.0), Material::Floorboards);
+            room.outline = outline;
+            let objects = compile(&[room]);
+            for (material, depth, height, z) in
+                [(Material::Paint, 0.016, 0.10, 0.072), (Material::Wood, 0.022, 0.022, 0.011)]
+            {
+                let corner = rotate(Vec2::splat(-WALL_THICKNESS * 0.5 - depth * 0.5));
+                let point = vec3(corner.x, -corner.y, z);
+                assert!(
+                    objects.iter().any(|object| object.material == material
+                        && (object.size.z - height).abs() < 1e-6
+                        && (point - object.pos).abs().cmple(object.size * 0.5).all()),
+                    "trim leaves a gap at return corner, rotation {turn}"
+                );
+            }
         }
     }
 }

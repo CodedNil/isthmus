@@ -3,26 +3,19 @@ use crate::{
     home,
     render::{self, Frame, Globals, Program, Scene},
 };
-use core::cell::Cell;
 use isthmus::{
     Render, SurfaceHandle,
     glam::{Vec2, Vec3},
 };
-
-#[derive(Clone, Copy)]
-struct Meter {
-    rays: [Vec3; 5],
-    revision: u64,
-    settings: (f32, Vec3),
-}
 
 pub struct App {
     pub scene: Scene,
     pub camera: Camera,
     dragging: bool,
     pointer: Vec2,
-    meter: Cell<Option<Meter>>,
-    exposure: Cell<f32>,
+    /// Lock the display transform for the session. Panning and light controls
+    /// must not fight an automatic camera meter or mix differently exposed AA samples.
+    display: (f32, Vec3),
 }
 
 impl App {
@@ -31,17 +24,19 @@ impl App {
     }
 
     pub fn with_sun(settings: render::SunSettings) -> Self {
-        let scene = Scene::new_at(&home::rooms(), render::sun::utc_now(), settings);
+        Self::from_scene(Scene::new_at(&home::rooms(), render::sun::utc_now(), settings))
+    }
+
+    pub fn with_baked_lighting(settings: render::SunSettings, controls: &[u8]) -> Result<Self, &'static str> {
+        Ok(Self::from_scene(Scene::from_baked_at(&home::rooms(), render::sun::utc_now(), settings, controls)?))
+    }
+
+    fn from_scene(scene: Scene) -> Self {
         let camera =
             Camera { target: Vec2::ZERO, distance: (scene.radius * 2.0).clamp(6.0, 40.0), ..Camera::default() };
-        Self {
-            scene,
-            camera,
-            dragging: false,
-            pointer: Vec2::ZERO,
-            meter: Cell::new(None),
-            exposure: Cell::new(render::photometry::EXPOSURE),
-        }
+        let (eye, forward, right, up) = camera.rays(1.0);
+        let display = scene.camera_settings(eye, forward, right, up);
+        Self { scene, camera, dragging: false, pointer: Vec2::ZERO, display }
     }
 
     pub fn pointer_moved(&mut self, position: Vec2, viewport: Vec2) {
@@ -67,29 +62,10 @@ impl App {
     pub fn globals(&self, size: Vec2) -> Globals {
         let (eye, forward, right, up) = self.camera.rays(size.x / size.y.max(1.0));
         let pixel_angle = self.camera.fov / size.y.max(1.0);
-        let key = [eye, forward, right, up, self.scene.sun.direction];
-        let revision = self.scene.lighting_revision;
-        let target = if let Some(Meter { rays: previous, revision: old_revision, settings: value }) = self.meter.get() {
-            if key == previous && revision == old_revision {
-                value
-            } else {
-                let value = self.scene.camera_settings(eye, forward, right, up);
-                self.meter.set(Some(Meter { rays: key, revision, settings: value }));
-                value
-            }
-        } else {
-            let value = self.scene.camera_settings(eye, forward, right, up);
-            self.meter.set(Some(Meter { rays: key, revision, settings: value }));
-            self.exposure.set(value.0);
-            value
-        };
-        // Adapt gradually in stop space; regular metering never invalidates AA.
-        let exposure = (self.exposure.get().log2() * 0.85 + target.0.log2() * 0.15).exp2();
-        self.exposure.set(exposure);
         Globals {
             eye,
-            exposure,
-            white_balance: target.1,
+            exposure: self.display.0,
+            white_balance: self.display.1,
             forward,
             right,
             up,
@@ -119,5 +95,30 @@ impl App {
         render.surface(surface, size, globals, |mut frame: Frame<'_>| {
             render::draw(&mut frame, &self.scene, shadows);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_motion_and_source_controls_cannot_change_the_display_transform() {
+        let scene = Scene::new_at(
+            &[home::Room::new(Vec2::ZERO, Vec2::splat(3.0), home::Material::Paint).downlights("test", &[(0.0, 0.0)])],
+            1_782_043_200.0,
+            render::SunSettings::default(),
+        );
+        let mut app =
+            App { scene, camera: Camera::default(), dragging: false, pointer: Vec2::ZERO, display: (1.3, Vec3::ONE) };
+        for step in 0..20 {
+            app.camera.pan(Vec2::splat(step as f32), Vec2::splat(800.0));
+            app.camera.zoom(0.1);
+            app.scene.set_light_state("test", step as f32 / 20.0);
+            for size in [Vec2::splat(600.0), Vec2::new(1600.0, 900.0)] {
+                let globals = app.globals(size);
+                assert_eq!((globals.exposure, globals.white_balance), app.display);
+            }
+        }
     }
 }

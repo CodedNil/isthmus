@@ -1,7 +1,11 @@
 //! SDF-traced variance shadows, independent of camera, dimming and light colour.
-use super::{Program, acceleration::Node, scene};
+use super::{acceleration::Node, scene};
 use crate::home::{Kind, Object};
+#[cfg(not(target_arch = "spirv"))]
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use isthmus::prelude::*;
+#[cfg(not(target_arch = "spirv"))]
+use std::io;
 
 pub const RESOLUTION: u32 = 512;
 const PADDING: u32 = 2;
@@ -54,7 +58,7 @@ fn emitter(light: Object) -> Vec3 {
 }
 
 fn pack(value: f32) -> Vec2 {
-    let bits = (value * 65535.0).clamp(0.0, 65535.0).round();
+    let bits = (value * 65535.0).clamp_num(0.0, 65535.0).round();
     let high = (bits / 256.0).floor();
     vec2(high, bits - high * 256.0) / 255.0
 }
@@ -71,7 +75,7 @@ fn packed(value: Vec2) -> Vec4 {
 }
 
 pub fn depth_pixel(nodes: &[Node], objects: &[Object], light: Object, uv: Vec2) -> Vec4 {
-    let direction = decode(uv.clamp(Vec2::ZERO, Vec2::ONE));
+    let direction = decode(uv.clamp_num(Vec2::ZERO, Vec2::ONE));
     let distance = if light.kind == Kind::Downlight && direction.z >= 0.0 {
         RANGE
     } else {
@@ -112,7 +116,7 @@ pub fn visible(
     let difference = receiver - value.x;
     let probability = variance / (variance + difference * difference);
     // Suppress the low-probability tail that otherwise leaks behind blockers.
-    ((probability - 0.22) / 0.78).clamp(0.0, 1.0)
+    ((probability - 0.22) / 0.78).clamp_num(0.0, 1.0)
 }
 
 pub fn filter_pixel(source: &Image, info: AtlasInfo, origin: Vec2, pixel: Vec2, axis: Vec2) -> Vec4 {
@@ -125,7 +129,7 @@ pub fn filter_pixel(source: &Image, info: AtlasInfo, origin: Vec2, pixel: Vec2, 
         } else {
             6.0
         };
-        let p = (pixel + axis * (tap as f32 - 2.0)).clamp(origin + 0.5, origin + info.pitch() as f32 - 0.5);
+        let p = (pixel + axis * (tap as f32 - 2.0)).clamp_num(origin + 0.5, origin + info.pitch() as f32 - 0.5);
         sum += moments(source.sample_raw(p / info.size)) * (weight / 16.0);
     }
     packed(sum)
@@ -138,47 +142,54 @@ pub struct ShadowAtlas {
 }
 
 #[cfg(not(target_arch = "spirv"))]
-pub fn draw_tile(frame: &mut isthmus::Frame<'_, Program>, scene: &super::Scene, info: AtlasInfo, tile: u32) {
-    shader!(
-        frame
-            .blend(Blend::Raw)
-            .upload({
-                let nodes: &[Node] = &scene.nodes;
-                let objects: &[Object] = &scene.objects;
-                let light: Object = scene.objects[scene.lights[tile as usize] as usize];
-                let origin: Vec2 = info.origin(tile);
-                let resolution: f32 = info.resolution as f32;
-            })
-            .primitive(|_| Rect::new(origin, origin + Vec2::splat(resolution + 4.0)))
-            .fragment(|_, surface| depth_pixel(
-                nodes,
-                objects,
-                light,
-                (surface.pixel - origin - Vec2::splat(2.0)) / resolution
-            ))
-    );
-}
-
-#[cfg(not(target_arch = "spirv"))]
-#[allow(clippy::needless_borrow, reason = "Shader captures become owned GPU image handles")]
-pub fn filter_tile(frame: &mut isthmus::Frame<'_, Program>, source: &Image, info: AtlasInfo, tile: u32, axis: Vec2) {
-    shader!(
-        frame
-            .blend(Blend::Raw)
-            .upload({
-                let source: &Image;
-                let info: AtlasInfo;
-                let origin: Vec2 = info.origin(tile);
-                let axis: Vec2;
-                let pitch: f32 = info.pitch() as f32;
-            })
-            .primitive(|_| Rect::new(origin, origin + Vec2::splat(pitch)))
-            .fragment(|_, surface| filter_pixel(&source, info, origin, surface.pixel, axis))
-    );
-}
-
-#[cfg(not(target_arch = "spirv"))]
 impl ShadowAtlas {
+    pub fn encode(&self, scene: &super::Scene) -> Result<Vec<u8>, io::Error> {
+        use std::io::Write;
+        let mut output = GzEncoder::new(Vec::new(), Compression::best());
+        output.write_all(b"LARESV02")?;
+        output.write_all(&scene.signature().to_le_bytes())?;
+        output.write_all(&self.info.resolution.to_le_bytes())?;
+        let size = self.image.size();
+        let mut pixels = self.image.pixels().expect("CPU visibility pixels").to_vec();
+        // Lossless row prediction, as in PNG's Sub filter. Packed depth moments
+        // are smooth spatially but their raw low bytes compress poorly.
+        for row in pixels.chunks_exact_mut(size[0] as usize * 4) {
+            for index in (4..row.len()).rev() {
+                row[index] = row[index].wrapping_sub(row[index - 4]);
+            }
+        }
+        output.write_all(&pixels)?;
+        output.finish()
+    }
+
+    pub fn decode(scene: &super::Scene, bytes: &[u8]) -> Result<Self, &'static str> {
+        use std::io::Read;
+        let mut decoder = GzDecoder::new(bytes);
+        let mut header = [0; 20];
+        decoder.read_exact(&mut header).map_err(|_error| "invalid visibility asset")?;
+        if &header[..8] != b"LARESV02" || header[8..16] != scene.signature().to_le_bytes() {
+            return Err("visibility asset is stale; rebuild with just lares");
+        }
+        let resolution = u32::from_le_bytes(header[16..20].try_into().map_err(|_error| "invalid resolution")?);
+        if resolution != RESOLUTION {
+            return Err("visibility resolution differs; rebuild with just lares");
+        }
+        let info = AtlasInfo::new(scene.lights.len() as u32, resolution);
+        let size = info.size.to_array().map(|value| value as u32);
+        let mut pixels = vec![0; size[0] as usize * size[1] as usize * 4];
+        decoder.read_exact(&mut pixels).map_err(|_error| "truncated visibility asset")?;
+        let mut tail = [0];
+        if decoder.read(&mut tail).map_err(|_error| "corrupt visibility asset")? != 0 {
+            return Err("oversized visibility asset");
+        }
+        for row in pixels.chunks_exact_mut(size[0] as usize * 4) {
+            for index in 4..row.len() {
+                row[index] = row[index].wrapping_add(row[index - 4]);
+            }
+        }
+        Ok(Self { info, image: Image::raw_rgba8(size, pixels) })
+    }
+
     /// CPU equivalent of the GPU bake, used for reproducible image comparisons.
     pub fn bake_cpu(scene: &super::Scene, resolution: u32) -> Self {
         use std::thread;

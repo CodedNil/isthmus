@@ -351,17 +351,19 @@ impl SpotifyWorker {
         let tracks = player.prev_tracks.iter().chain(player.track.as_ref()).chain(&player.next_tracks);
         // Keep recent metadata across temporary queue gaps.
         if self.track_metadata.len() > METADATA_CACHE_LIMIT {
-            self.track_metadata.retain(|uri, value| value.is_none() || tracks.clone().any(|track| track.uri == *uri));
+            self.track_metadata
+                .retain(|uri, value| value.is_none() || tracks.clone().any(|track| requested_track_uri(track) == uri));
         }
         let requested = tracks
             .filter_map(|track| {
-                if !matches!(SpotifyUri::from_uri(&track.uri), Ok(SpotifyUri::Track { .. }))
-                    || self.track_metadata.contains_key(&track.uri)
+                let uri = requested_track_uri(track);
+                if !matches!(SpotifyUri::from_uri(uri), Ok(SpotifyUri::Track { .. }))
+                    || self.track_metadata.contains_key(uri)
                 {
                     return None;
                 }
-                self.track_metadata.insert(track.uri.clone(), None);
-                Some(track.uri.clone())
+                self.track_metadata.insert(uri.to_owned(), None);
+                Some(uri.to_owned())
             })
             .collect::<Vec<_>>();
         if !requested.is_empty() {
@@ -380,7 +382,11 @@ impl SpotifyWorker {
         let Some(player) = &self.player else { return };
         let index = player.prev_tracks.iter().filter(|track| !track.uri.ends_with(":delimiter")).count();
         let convert = |track: &ProvidedTrack, duration| {
-            track_from_provided(track, self.track_metadata.get(&track.uri).and_then(Option::as_ref), duration)
+            track_from_provided(
+                track,
+                self.track_metadata.get(requested_track_uri(track)).and_then(Option::as_ref),
+                duration,
+            )
         };
         let mut tracks: Vec<Track> = player
             .prev_tracks
@@ -632,6 +638,19 @@ async fn fetch_track_metadata(session: &Session, tracks: &[String]) -> Metadata 
         .collect()
 }
 
+/// Spotify can replace a requested recording with a playable alternative. Keep the
+/// library/queue identity stable; the player's `ProvidedTrack` retains the playback URI.
+fn requested_track_uri(track: &ProvidedTrack) -> &str {
+    track
+        .metadata
+        .get("requested_uri")
+        .filter(|uri| {
+            matches!(SpotifyUri::from_uri(&track.uri), Ok(SpotifyUri::Track { .. }))
+                && matches!(SpotifyUri::from_uri(uri), Ok(SpotifyUri::Track { .. }))
+        })
+        .map_or(track.uri.as_str(), String::as_str)
+}
+
 fn track_from_provided(
     track: &ProvidedTrack,
     catalog: Option<&CatalogTrack>,
@@ -649,15 +668,16 @@ fn track_from_provided(
     if artists.is_empty() {
         artists.extend(track.metadata.get("artist_name").filter(|s| !s.is_empty()).cloned());
     }
+    let uri = requested_track_uri(track);
     Track {
-        id: match SpotifyUri::from_uri(&track.uri) {
+        id: match SpotifyUri::from_uri(uri) {
             Ok(SpotifyUri::Track { id }) => id.to_base62().ok().and_then(|id| id.parse().ok()),
             _ => None,
         },
         isrc: catalog
             .and_then(|track| track.external_ids.iter().find(|id| id.external_type.eq_ignore_ascii_case("isrc")))
             .map(|id| id.id.clone()),
-        uri: track.uri.clone(),
+        uri: uri.to_owned(),
         queue_uid: track.uid.clone(),
         original_title: catalog.map(|track| track.original_title.clone()),
         name: catalog
@@ -694,4 +714,57 @@ fn track_from_provided(
 
 fn image_url(url: &str) -> String {
     url.strip_prefix("spotify:image:").map_or_else(|| url.into(), |id| format!("https://i.scdn.co/image/{id}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::music::queue::{Queue, Timeline};
+    use std::collections::HashSet;
+
+    const REQUESTED: &str = "spotify:track:6vWfZZyIlODYPMEbsrOK3G";
+    const PLAYBACK: &str = "spotify:track:3OIgsG6duyvwodGPoFYVzJ";
+
+    #[test]
+    fn relinked_playback_keeps_rating_artwork_and_queue_occurrence() {
+        let mut provided = ProvidedTrack {
+            uri: REQUESTED.into(),
+            uid: "921086112294dced".into(),
+            metadata: HashMap::from([("requested_uri".into(), REQUESTED.into())]),
+            ..Default::default()
+        };
+        let mut queued = track_from_provided(&provided, None, Some(160_342));
+        queued.image = Some("https://i.scdn.co/image/already-loaded".into());
+        queued.runtime.track_expansion = 0.75;
+        let interaction_id = queued.interaction_id;
+        let rating_playlist = HashSet::from([queued.id.expect("requested track id")]);
+        let image = queued.image.clone();
+        let metadata_cache = HashMap::from([(REQUESTED.to_owned(), "prefetched metadata")]);
+        let mut queue = Queue { tracks: vec![queued], timeline: Timeline { observed_at: Instant::now(), .. }, .. };
+
+        provided.uri = PLAYBACK.into();
+        let playing = track_from_provided(&provided, None, Some(160_342));
+        assert!(rating_playlist.contains(&playing.id.expect("playing track id")));
+        assert_eq!(metadata_cache.get(requested_track_uri(&provided)), Some(&"prefetched metadata"));
+        queue.replace(vec![playing], 0, 0.0);
+        let playing = &queue.tracks[0];
+        assert_eq!(playing.uri, REQUESTED);
+        assert_eq!(playing.image, image);
+        assert_eq!(playing.interaction_id, interaction_id);
+        assert_eq!(playing.runtime.track_expansion, 0.75);
+        assert_eq!(provided.uri, PLAYBACK);
+    }
+
+    #[test]
+    fn missing_or_invalid_requested_uri_uses_reported_identity() {
+        let mut provided = ProvidedTrack { uri: PLAYBACK.into(), ..Default::default() };
+        for requested in [None, Some(""), Some("invalid"), Some("spotify:episode:6vWfZZyIlODYPMEbsrOK3G")] {
+            provided.metadata =
+                requested.map(|uri| HashMap::from([("requested_uri".into(), uri.into())])).unwrap_or_default();
+            assert_eq!(requested_track_uri(&provided), PLAYBACK);
+        }
+        provided.uri = "spotify:episode:6vWfZZyIlODYPMEbsrOK3G".into();
+        provided.metadata.insert("requested_uri".into(), REQUESTED.into());
+        assert_eq!(requested_track_uri(&provided), provided.uri);
+    }
 }

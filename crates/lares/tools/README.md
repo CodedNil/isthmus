@@ -8,16 +8,18 @@ LARES_TIMESTAMP=1782043200 LARES_SHADOW_RESOLUTION=512 cargo run -p lares --rele
 cargo run -p lares --release --example gallery
 cargo run -p lares --release --example compare -- reference.webp candidate.png /tmp/error.png
 cargo run -p lares --release --example lighting_bench
+cargo run -p lares --example bake_lighting
 cargo test -p lares -p isthmus --lib
 ```
 
 [Comparison sheet](../assets/references/comparison.webp) contains photographs
 on the left and paired current renders on the right. Each base render is one
-1200×1800 image: **evening lights on above daytime lights off**. Rows:
-entrance, bookshelf, kitchen-fridge, kitchen-window, kitchen-cooker, lounge,
-desk, hall, bedroom, bathroom, ensuite, boiler-room, spare-room, storage-top,
-storage-bottom. Missing photographs leave a blank left column. Plan and
-overhead use the same stacked format but are excluded from the comparison.
+1200×1800 image: **evening lights on above daytime lights off**. The gallery
+uses the camera list in `examples/support/views.rs`, excluding plan and overhead.
+There are 18 photographic references, including three bedroom views and two
+views each of the bathroom and ensuite. Dining and kitchen-cabinet have their
+own cameras. Hall and the two storage views have no photographs and leave the
+left column blank. Plan and overhead retain stacked renders outside the gallery.
 
 Capture always renders both setups. Evening uses 21:00 UTC on the chosen date,
 with fixtures at 100%; daylight uses noon with fixtures off. Each setup meters
@@ -25,7 +27,6 @@ exposure and bounded camera white balance independently. `LARES_TIMESTAMP`
 overrides the daytime timestamp (and sets the date for the evening render);
 the optional UTC-hour argument changes the daytime hour. The command above
 fixes the date to June 21: evening is 22:00 BST and daytime is 13:00 BST.
-Successful paired captures replace obsolete `-lights-off.webp` files.
 Original photographs are preserved. Captures use four AA samples.
 Camera metering includes diffuse GI and visible direct sources, with exposure
 allowed down to EV100 3 for dim interiors. Bounded diagonal white balance is
@@ -44,6 +45,23 @@ Use `capture -- crates/lares/assets/references 1200 900 matched` to update all
 photographed cameras in place, or replace `matched` with a single view name or comma-separated names.
 Use `all` for full room coverage, then regenerate the comparison sheet.
 
+### Measured alignment
+
+`cargo run -p lares --example align -- all /tmp/lares-alignment` fits cameras
+against architectural points and line segments measured in the reference photos.
+Measurements live in `examples/support/measurements.rs`, in original photo pixels
+and rendered world metres; they use inner wall faces, including wall thickness.
+Furniture, reflections and open door leaves do not constrain the fit. Tile caps
+with uncertain heights constrain direction only. Close crops without enough
+metric landmarks retain their existing camera position.
+
+The tool writes measured/projected edge overlays and a report with pixel errors,
+line angles and a separate reference-roll diagnostic. Capture fits keep roll zero.
+`cargo run -p lares --example align -- entrance /tmp/lares-alignment --write`
+writes the fitted pose directly into `views.rs`; there are no runtime adjustments.
+Inspect the overlays and standard captures before accepting a fit: opening sizes,
+missing alcoves and reference tilt can leave residual architectural differences.
+
 ## Browser GPU checks
 
 The Rust examples run shared renderer code on the CPU. Their elapsed times
@@ -59,8 +77,10 @@ LARES_BENCH_MOTION=1 node crates/lares/tools/run-benchmark.mjs /tmp/lares-motion
 
 Requires Node 22+ and Chromium. The runner owns a separate browser profile
 and temporary server and stops both on completion, failure, interrupt or a
-60-second deadline. It writes JSON metrics and a converged GPU screenshot.
-Startup compilation and baking are excluded. `LARES_BENCH_MS` controls the
+60-second deadline (`LARES_BENCH_DEADLINE_MS` can extend a cold-start run).
+It writes JSON metrics and a converged GPU screenshot.
+The JSON includes startup stage timestamps, GPU frame cost and synchronous
+browser light-control latency. `LARES_BENCH_MS` controls the
 measurement duration (default 10000). Run after CPU captures/builds finish.
 The running-clock check fails if settled accumulation resets as time advances.
 Optional `LARES_BENCH_TARGET=x,y` pans to a world coordinate and
@@ -77,6 +97,31 @@ Ineichen/Perez with assumed turbidity 3. Solar motion uses date, coordinates
 and north bearing. Weather and measured LED spectra are not modelled.
 Exterior ground visible through windows uses an analytic 20% diffuse reflectance assumption, including sunlight;
 no exterior probes or geometry are baked.
+
+`Scene::set_light_state`, `set_light_states` and `set_light_color` update grouped
+fixture output and bounced light, then invalidate accumulated lighting samples.
+The shadow atlas depends on geometry and can be reused for brightness/RGB edits.
+Fixture changes blend solved, eight-bounce unit responses for the 11 control
+groups. The browser exports `set_light_state(entity, brightness)` and
+`set_light_color(entity, linear_r, linear_g, linear_b)` from `web/lares.js`;
+Home Assistant and UI events can call them without rebaking geometry.
+`lighting_bench` reports first and repeated update costs separately from GPU time.
+
+The native server checks `assets/baked/lighting.bin` and `visibility.bin` before
+serving. Unchanged geometry is a fast header check; camera, UI and server edits
+do not invalidate these assets. Geometry/SDF/transport edits rebuild them once.
+`bake_lighting` runs the same check explicitly. The assets contain losslessly
+compressed final fixture responses and the full 512-pixel SDF visibility atlas.
+The browser fetches both in parallel with WASM loading. It no longer compiles a
+shadow-bake shader or traces the atlas during startup. GPU lamp visibility and
+CPU captures use the same packed depth moments and filter.
+
+Runtime GI has one final irradiance field: solved fixture responses plus the
+current eight-bounce daylight solution. Static interpolation weights are cached;
+the daylight solver runs in bounded batches and publishes only complete results.
+The temporary first-bounce fixture bank exists only while authoring a new bake.
+Receiver-side filtering rejects samples behind opaque surfaces, including when
+surface charts fall back to the volume at tile edges and wall junctions.
 
 Static SDF visibility maps filter fixture shadows. Hybrid diffuse GI uses 20 cm
 samples projected onto the SDF surfaces of architecture and the lounge footstool,
@@ -121,6 +166,13 @@ coverage management and dynamic acceleration structures; replacing a grid alone
 does not provide those capabilities. The projected cache suits this static SDF
 house while retaining bounded CPU daylight updates and cheap GPU gathers.
 
+Shader compilation uses assertion-free numeric clamps for validated bounds,
+and the shader extractor lowers integer range loops to counters. This preserves
+CPU Rust behaviour while preventing iterator/clamp panic paths from forcing
+Rust-GPU to duplicate large SDF dispatch functions. The compiler lowering is
+checked against native Rust across nested loops, labels, continues, side effects
+and inclusive integer limits.
+
 Materials include procedural normal gradients, roughness, metallic Fresnel,
 sheen and clear coat. The rug uses one procedural SDF yarn field across its
 entire pile, with varied lean/height, a gently curved backing and broad nap
@@ -131,7 +183,12 @@ local GI. The BÖJA lamp is 40 cm high and 20 cm wide; the STARKVIND table is
 55 cm high and 54 cm wide, matching IKEA's product dimensions.
 
 Progressive rendering converges all native pixels to four AA samples. Large
-views interleave columns over eight updates. Interaction targets 30 updates/s;
-settled views use an 8 Hz ceiling and 20% GPU duty budget. Hidden views stop
-submitting and queue depth is limited to one. See [rendering contracts](../src/render/tests/README.md)
+views interleave columns over eight updates. Motion targets 30 updates/s with
+an adaptive ray-traced resolution; native resolution and all four samples return
+when motion stops. Resizing targets discards incompatible history. A small
+edge filter softens initial samples and disappears at convergence. Interactive
+exposure/white balance are metered once at startup and locked for the session:
+panning and light controls never change the display transform. Offline photo
+captures retain independent view metering. Settled views use an 8 Hz ceiling and
+20% GPU duty budget. Hidden views stop submitting and queue depth is limited to one. See [rendering contracts](../src/render/tests/README.md)
 for the automated checks.

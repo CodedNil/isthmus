@@ -215,12 +215,25 @@ pub(super) fn entry_door<S: Sample>(p: Vec3, size: Vec3) -> S {
     let q = p - Vec3::Y * (size.y * 0.5);
     let letter = rounded_box(q - vec3(0.0, 0.006, -0.22), vec3(0.29, 0.012, 0.065), 0.003);
     let flap = rounded_box(q - vec3(0.0, 0.014, -0.22), vec3(0.267, 0.008, 0.045), 0.002);
-    let escutcheon = cylinder(vec3(q.x - size.x * 0.38, q.z - 0.02, q.y - 0.008), 0.025, 0.014);
-    let handle = pull(vec3(q.z - 0.07, q.y - 0.018, q.x - size.x * 0.38), 0.16);
+    // A connected curved pull on two short posts, rather than upper_mount kitchen
+    // handle with permuted axes and detached feet.
+    let h = q - vec3(size.x * 0.38, 0.0, 0.04);
+    let backplate = rounded_box(h - vec3(0.0, 0.004, -0.022), vec3(0.032, 0.008, 0.20), 0.012);
+    let upper_mount = vec3(0.0, 0.008, 0.055);
+    let upper_bend = vec3(-0.012, 0.042, 0.040);
+    let grip = vec3(-0.018, 0.053, -0.025);
+    let lower_bend = vec3(-0.008, 0.040, -0.075);
+    let lower_mount = vec3(0.0, 0.008, -0.088);
+    let handle = capsule(h, upper_mount, upper_bend, 0.008)
+        .min_num(capsule(h, upper_bend, grip, 0.008))
+        .min_num(capsule(h, grip, lower_bend, 0.008))
+        .min_num(capsule(h, lower_bend, lower_mount, 0.008));
+    let escutcheon = cylinder(vec3(h.x, h.z + 0.15, h.y - 0.009), 0.019, 0.014);
+    let key = rounded_box(h - vec3(0.0, 0.018, -0.15), vec3(0.003, 0.004, 0.014), 0.001);
     let peephole = cylinder(vec3(q.x, q.z - size.z * 0.27, q.y - 0.004), 0.006, 0.010);
     S::new(body, || (Material::Maple, vec3(0.75, 0.69, 0.60)))
-        .union(S::new(letter.min_num(peephole), || (Material::Metal, BLACK)))
-        .union(S::new(flap.min_num(escutcheon).min_num(handle), || (Material::Metal, STEEL)))
+        .union(S::new(letter.min_num(peephole).min_num(key), || (Material::Metal, BLACK)))
+        .union(S::new(flap.min_num(escutcheon).min_num(backplate).min_num(handle), || (Material::Metal, STEEL)))
 }
 
 #[inline(never)]
@@ -247,17 +260,45 @@ pub(super) fn drawers<S: Sample>(p: Vec3, size: Vec3) -> S {
 
 #[inline(never)]
 pub(super) fn air_fryer<S: Sample>(p: Vec3, size: Vec3) -> S {
-    let body = rounded_box(p, size, 0.045);
+    // AF400UKCP: 415 x 270 x 325 mm; two independent 4.75 litre baskets.
+    let body = rounded_box(p, size, 0.027);
     let front = p - Vec3::Y * (size.y * 0.5);
-    let panel = rounded_box(front - vec3(0.0, 0.010, 0.10), vec3(size.x * 0.75, 0.014, 0.12), 0.012);
-    let seam = rounded_box(front + Vec3::Z * 0.075, vec3(size.x * 0.88, 0.014, 0.006), 0.003);
-    let handle = rounded_box(front - vec3(0.0, 0.032, -0.105), vec3(0.025, 0.045, 0.14), 0.011);
-    let band = rounded_box(p - Vec3::Z * size.z * 0.44, vec3(size.x + 0.008, size.y + 0.008, 0.012), 0.006);
-    let dial = cylinder(vec3(front.x, front.z - 0.10, front.y - 0.022), 0.022, 0.010);
-    S::new(body.max_num(-seam), || (Material::Ceramic, BLACK))
-        .union(S::new(panel, || (Material::Paint, vec3(0.09, 0.09, 0.10))))
-        .union(S::new(handle.min_num(band), || (Material::Metal, vec3(0.65, 0.39, 0.19))))
-        .union(S::new(dial, || (Material::Metal, STEEL)))
+    let split = rounded_box(front + Vec3::Z * 0.055, vec3(0.003, 0.018, 0.213), 0.001);
+    let opening = rounded_box(front + Vec3::Z * 0.049, vec3(size.x - 0.012, 0.025, 0.218), 0.019);
+    let basket = rounded_box(
+        vec3(front.x.abs() - size.x * 0.245, front.y - 0.002, front.z + 0.049),
+        vec3(size.x * 0.477, 0.026, 0.207),
+        0.015,
+    );
+    let control = front - vec3(0.0, 0.014, 0.097);
+    let surround = rounded_box(control, vec3(size.x * 0.67, 0.012, 0.112), 0.014);
+    let panel = rounded_box(control - Vec3::Y * 0.004, vec3(size.x * 0.65, 0.014, 0.108), 0.013);
+    let display = rounded_box(
+        vec3(control.x.abs() - 0.079, control.y - 0.014, control.z - 0.018),
+        vec3(0.039, 0.004, 0.020),
+        0.003,
+    );
+    let knob = cylinder(vec3(control.x, control.z + 0.017, control.y - 0.026), 0.018, 0.018);
+    let handle = rounded_box(
+        vec3(front.x.abs() - size.x * 0.245, front.y - 0.037, front.z + 0.049),
+        vec3(0.026, 0.036, 0.173),
+        0.008,
+    );
+    let handle_mount = rounded_box(
+        vec3(front.x.abs() - size.x * 0.245, front.y - 0.020, (front.z + 0.049).abs() - 0.073),
+        vec3(0.029, 0.039, 0.023),
+        0.005,
+    );
+    let rim = rounded_box(p - Vec3::Z * (size.z * 0.5 - 0.005), vec3(size.x + 0.004, size.y + 0.004, 0.010), 0.006);
+    let vents =
+        rounded_box(vec3(p.x, p.y, p.z - size.z * 0.5 + 0.017), vec3(size.x - 0.020, size.y - 0.020, 0.018), 0.006);
+    S::new(body.max_num(-opening), || (Material::Ceramic, vec3(0.13, 0.13, 0.135)))
+        .union(S::new(basket.max_num(-split).min_num(panel).min_num(handle_mount), || {
+            (Material::Paint, vec3(0.075, 0.075, 0.078))
+        }))
+        .union(S::new(surround.min_num(knob), || (Material::Metal, STEEL)))
+        .union(S::new(display.min_num(vents), || (Material::Ceramic, BLACK)))
+        .union(S::new(handle.min_num(rim), || (Material::Metal, vec3(0.70, 0.46, 0.29))))
 }
 
 #[inline(never)]

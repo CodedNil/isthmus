@@ -87,7 +87,7 @@ fn edge(distance: f32, width: f32, pixel: f32) -> f32 {
 }
 fn linear(color: Vec3) -> Vec3 {
     // sRGB albedo inputs; all illumination is evaluated in linear light.
-    color.clamp(Vec3::ZERO, Vec3::ONE).powf(2.2)
+    color.clamp_num(Vec3::ZERO, Vec3::ONE).powf(2.2)
 }
 /// Jittered mineral cells retain sharp crystal boundaries at close range.
 fn mineral_grains(uv: Vec2, pixel: f32) -> Vec3 {
@@ -180,7 +180,7 @@ fn floorboards(tint: Vec3, uv: Vec2, footprint: Vec2) -> Surface {
     // it once the pixel grows beyond the bevel. Edge highlights stay local.
     let filtered_width = Vec2::splat(bevel_width) + footprint * 0.5;
     let bevel = (Vec2::ONE - distance / filtered_width).max(Vec2::ZERO) * bevel_width / filtered_width
-        * (Vec2::ONE - footprint / 0.05).clamp(Vec2::ZERO, Vec2::ONE);
+        * (Vec2::ONE - footprint / 0.05).clamp_num(Vec2::ZERO, Vec2::ONE);
     let bevel_sign = Vec2::select(local.cmpgt(vec2(length, width) * 0.5), -Vec2::ONE, Vec2::ONE);
     let relief = floor_detail(local + seed * 53.0, vec2(6.0, 32.0), footprint);
     let finish = 0.5 + fibres.x * 0.5 + broad.x * 0.35;
@@ -192,7 +192,7 @@ fn floorboards(tint: Vec3, uv: Vec2, footprint: Vec2) -> Surface {
     let radial_gradient = radial_point * vec2(0.0081, 1.0) / radial;
     let phase_gradient = (radial_gradient * (TAU * frequency) + drift.yz() * 3.0)
         * (1.0 + (ring_phase * 0.37 + seed * TAU).cos() * 0.2405);
-    let ring_gradient = phase_gradient * phase.cos() * (1.0 - frequency * 1.25 * footprint.y * 2.0).clamp(0.0, 1.0);
+    let ring_gradient = phase_gradient * phase.cos() * (1.0 - frequency * 1.25 * footprint.y * 2.0).clamp_num(0.0, 1.0);
     let gradient = fibres.yz() * 0.00095
         + pores.yz() * 0.00024
         + ring_gradient * 0.00065
@@ -205,7 +205,7 @@ fn floorboards(tint: Vec3, uv: Vec2, footprint: Vec2) -> Surface {
         albedo,
         roughness: (0.59 + (seed - 0.5) * 0.10 + broad.x * 0.10 + fibres.x * 0.14 + pores.x * 0.08 + seam * 0.10
             - bevel.max_element() * 0.18)
-            .clamp(0.37, 0.80),
+            .clamp_num(0.37, 0.80),
         specular: 0.32 + bevel.max_element() * 0.38,
         coat: 0.012 + finish * 0.008,
         anisotropy: 0.16,
@@ -300,13 +300,13 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
             let grains = detail(uv + cloud.x * 0.012, vec2(100.0, 135.0), pixel);
             let crystals = detail(uv + vec2(17.3, 9.1), vec2(410.0, 360.0), pixel);
             let mica = detail(uv + 31.7, Vec2::splat(680.0), pixel);
-            let quartz = ((aggregate.x * 0.80 + grains.x + crystals.x * 0.45 - 0.01) * 4.0).clamp(0.0, 1.0);
-            let dark = ((-grains.x - 0.08) * 4.0).clamp(0.0, 1.0);
+            let quartz = ((aggregate.x * 0.80 + grains.x + crystals.x * 0.45 - 0.01) * 4.0).clamp_num(0.0, 1.0);
+            let dark = ((-grains.x - 0.08) * 4.0).clamp_num(0.0, 1.0);
             surface.albedo = tint * (0.82 + cloud.x * 0.25 + aggregate.x * 0.65 - dark * 0.35)
                 + vec3(0.21, 0.205, 0.19) * quartz
                 + Vec3::splat(mica.x.max_num(0.0) * 0.10 + facets.x);
             surface.roughness =
-                (0.18 + aggregate.x * 0.15 + grains.x * 0.10 - quartz * 0.04 + dark * 0.05).clamp(0.10, 0.30);
+                (0.18 + aggregate.x * 0.15 + grains.x * 0.10 - quartz * 0.04 + dark * 0.05).clamp_num(0.10, 0.30);
             surface.coat = 0.48;
             surface.coat_roughness = 0.12 + aggregate.x * 0.08;
             surface.gradient =
@@ -324,15 +324,27 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
             surface.gradient = (mineral.yz() * 0.00032).extend(0.0);
         }
         Material::Emissive => {}
-        Material::GlazedTile => {
+        Material::GlazedTile | Material::BathroomTile => {
             let uneven = detail(uv, vec2(13.0, 17.0), pixel);
             let ripple = detail(uv + uneven.x * 0.004, vec2(41.0, 53.0), pixel);
             let glaze = detail(uv, Vec2::splat(135.0), pixel);
             surface.albedo = tint * (1.0 + uneven.x * 0.035 + ripple.x * 0.018);
-            surface.roughness = (0.17 + uneven.x * 0.08 + ripple.x * 0.05).clamp(0.10, 0.27);
+            surface.roughness = (0.17 + uneven.x * 0.08 + ripple.x * 0.05).clamp_num(0.10, 0.27);
             surface.coat = 0.68;
             surface.coat_roughness = 0.11 + glaze.x * 0.05;
             surface.gradient = (uneven.yz() * 0.0011 + ripple.yz() * 0.00035 + glaze.yz() * 0.00004).extend(0.0);
+            if kind == Material::BathroomTile {
+                let pitch = vec2(0.25, 0.33);
+                let phase = uv / pitch - (uv / pitch).floor();
+                let distance = phase.min_num(Vec2::ONE - phase) * pitch;
+                let grout = edge(distance.min_element(), 0.0014, pixel);
+                surface.albedo = surface.albedo.lerp(vec3(0.64, 0.64, 0.62), grout);
+                surface.roughness = surface.roughness * (1.0 - grout) + 0.85 * grout;
+                surface.coat *= 1.0 - grout;
+                let bevel = (Vec2::ONE - distance / (0.004 + pixel)).max_num(Vec2::ZERO);
+                let sign = Vec2::select(phase.cmplt(Vec2::splat(0.5)), Vec2::ONE, -Vec2::ONE);
+                surface.gradient += (bevel * sign * 0.13 * (1.0 - grout)).extend(0.0);
+            }
         }
         Material::Ceramic => {
             let glaze = detail(uv, vec2(38.0, 38.0), pixel);
@@ -407,7 +419,7 @@ fn shag(tint: Vec3, point: Vec3, normal: Vec3, view: Vec3, cone: f32) -> Surface
     let gradient = ridge.yz() * filtered;
     let gradient = vec2(gradient.x * 0.8 + gradient.y * 0.6, -gradient.x * 0.6 + gradient.y * 0.8);
     let texture_depth = 0.55 + (0.40 - ridge.x * 0.8) * filtered;
-    let pile_depth = ((0.040 - point.z) / 0.035).clamp(0.05, 0.95);
+    let pile_depth = ((0.040 - point.z) / 0.035).clamp_num(0.05, 0.95);
     let valley = pile_depth * 0.7 + texture_depth * 0.3;
     Surface {
         albedo: linear(tint * vec3(0.93, 0.92, 0.88) * (1.0 + nap.x * 0.065)),
@@ -511,6 +523,7 @@ mod tests {
             Material::Tile,
             Material::Ceramic,
             Material::GlazedTile,
+            Material::BathroomTile,
             Material::Metal,
             Material::Paint,
             Material::Foliage,

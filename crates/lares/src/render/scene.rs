@@ -85,10 +85,13 @@ fn extrude(d: Vec2) -> f32 {
 #[inline(never)]
 fn render_furniture<S: Sample>(kind: Kind, local: Vec3, size: Vec3) -> S {
     match kind {
+        Kind::GlassPane => S::new(box_sdf(local, size), || (Material::Ceramic, Vec3::ONE)),
         Kind::Box => S::new(box_sdf(local, size), || (Material::Paint, WALL_COLOR)),
         Kind::Downlight => fixtures::downlight(local, size),
         Kind::Lamp => fixtures::lamp(local, size),
         Kind::Bed => bedroom::bed(local, size),
+        Kind::TowerFan | Kind::RoundSpeaker => bedroom::accessory(kind, local, size),
+        Kind::Dresser | Kind::Nightstand | Kind::Wardrobe | Kind::Vanity => bedroom::cabinet(kind, local, size),
         Kind::Sofa => living::sofa(local, size),
         Kind::Pillow => living::pillow(local, size),
         Kind::Ottoman => living::ottoman(local, size),
@@ -104,7 +107,14 @@ fn render_furniture<S: Sample>(kind: Kind, local: Vec3, size: Vec3) -> S {
         Kind::Poster | Kind::PosterNight => office::poster(local, size, kind == Kind::PosterNight),
         Kind::Table => office::table(local, size),
         Kind::Workstation => office::workstation(local, size),
-        Kind::Bath | Kind::Shower | Kind::Sink | Kind::Toilet => bathroom::model(kind, local, size),
+        Kind::Bath
+        | Kind::Shower
+        | Kind::Sink
+        | Kind::Toilet
+        | Kind::TowelRail
+        | Kind::BathMat
+        | Kind::ExtractorVent
+        | Kind::WasteBin => bathroom::model(kind, local, size),
         Kind::Kettle => kitchen::kettle(local, size),
         Kind::EntryDoor => kitchen::entry_door(local, size),
         Kind::KitchenSink => kitchen::sink(local, size),
@@ -123,12 +133,14 @@ fn render_furniture<S: Sample>(kind: Kind, local: Vec3, size: Vec3) -> S {
         Kind::AirFryer => kitchen::air_fryer(local, size),
         Kind::Cupboard | Kind::Fridge => kitchen::cabinet(kind, local, size),
         Kind::Oven => kitchen::oven(local, size),
-        Kind::Plant | Kind::Blossom | Kind::Palm | Kind::SillPlant => decor::plant(kind, local, size),
-        Kind::Leaf | Kind::Petal | Kind::Stem => decor::blade(kind, local, size),
+        Kind::Plant | Kind::Blossom | Kind::Palm | Kind::SillPlant | Kind::Alocasia => decor::plant(kind, local, size),
+        Kind::Leaf | Kind::ShieldLeaf | Kind::Petal | Kind::Stem => decor::blade(kind, local, size),
         Kind::SillArrangement => decor::sill_arrangement(local, size),
         Kind::SideTable => living::side_table(local, size),
         Kind::WallArt => decor::wall_art(local, size),
-        Kind::Appliance | Kind::Radiator | Kind::Window | Kind::Curtain => utility::model(kind, local, size),
+        Kind::Appliance | Kind::Radiator | Kind::Window | Kind::Curtain | Kind::LinenStack => {
+            utility::model(kind, local, size)
+        }
     }
 }
 
@@ -136,8 +148,6 @@ const WALL_COLOR: Vec3 = vec3(0.86, 0.84, 0.8);
 const MIN_HIT_DISTANCE: f32 = 0.0002;
 const NORMAL_OFFSET: f32 = 0.0002;
 const FAR: f32 = 1000.0;
-// Compile-time diagnostic stages; zero is the complete renderer.
-const PROFILE: u32 = 0;
 
 fn unrotate_z(point: Vec3, rotation: Vec2) -> Vec3 {
     let (sin, cos) = (rotation.x, rotation.y);
@@ -151,6 +161,18 @@ fn rotate_z(point: Vec3, rotation: Vec2) -> Vec3 {
 /// One of four fixed offsets in [-0.5, 0.5], shared by pixel, sun and emitter samples.
 fn subpixel(sample: u32) -> Vec2 {
     vec2((sample & 1) as f32 - 0.5, (sample >> 1) as f32 - 0.5)
+}
+
+/// Half-width of ordinary lens leaves or asymmetric, notched shield leaves.
+/// Shared by growth, the SDF, analytic intersections and contact projection.
+pub(super) fn leaf_profile(x: f32, length: f32, width: f32, shield: bool) -> f32 {
+    let t = (x / length).clamp_num(-1.0, 1.0);
+    width
+        * if shield { ((0.935 - 0.31 * t - 0.625 * t * t) / 0.973_44).max_num(0.0) } else { (1.0 - t * t).max_num(0.0) }
+}
+
+pub(super) fn leaf_height(x: f32, y: f32, length: f32, width: f32, shield: bool) -> f32 {
+    -0.18 * x * x / length + if shield { 0.32 * y * y / width } else { 0.32 * y.abs() }
 }
 
 fn box_sdf(point: Vec3, size: Vec3) -> f32 {
@@ -233,6 +255,7 @@ fn cast<const SHADOW: bool, const CUTAWAY: bool>(
         let item = objects[node.object as usize];
         if (item.kind == Kind::Ceiling && CUTAWAY && !SHADOW && origin.z > super::WALL_HEIGHT)
             || (SHADOW && item.is_light())
+            || (item.kind == Kind::GlassPane && (SHADOW || !CUTAWAY))
         {
             continue;
         }
@@ -272,7 +295,7 @@ pub(super) fn light_depth(origin: Vec3, direction: Vec3, nodes: &[Node], objects
             continue;
         }
         let item = objects[node.object as usize];
-        if item.is_light() {
+        if item.is_light() || item.kind == Kind::GlassPane {
             continue;
         }
         let hit = if matches!(item.kind, Kind::Box | Kind::Ceiling) && item.rotation == Vec2::Y {
@@ -313,13 +336,17 @@ pub(super) fn architectural_cast(origin: Vec3, direction: Vec3, nodes: &[Node], 
     (nearest, object)
 }
 
-// Keep per-object intersection separate from buffer traversal so each ray shares one body.
+// Share per-object intersection across all BVH ray queries.
 #[inline(never)]
 fn intersect(item: Object, origin: Vec3, direction: Vec3, enter: f32, exit: f32, pixel_angle: f32) -> f32 {
     let local = unrotate_z(origin - item.pos, item.rotation);
     let ray = unrotate_z(direction, item.rotation);
     match item.kind {
-        Kind::Leaf => trace::leaf(local, ray, item.size, enter, exit),
+        Kind::GlassPane => {
+            let (near, far) = trace::Ray::new(local, ray).bounds(-item.size * 0.5, item.size * 0.5);
+            if near <= far { near } else { FAR }
+        }
+        Kind::Leaf | Kind::ShieldLeaf => trace::leaf(local, ray, item.size, enter, exit, item.kind == Kind::ShieldLeaf),
         Kind::Stem => trace::stem(local, ray, item.size),
         _ => trace::march(local, ray, enter, exit, pixel_angle, |p| {
             render_furniture::<Distance>(item.kind, p, item.size).0
@@ -340,10 +367,10 @@ fn bounds_normal(local: Vec3, size: Vec3) -> Vec3 {
 
 #[inline(never)]
 fn object_normal(item: Object, local: Vec3) -> Vec3 {
-    if matches!(item.kind, Kind::Box | Kind::Ceiling) {
+    if matches!(item.kind, Kind::Box | Kind::Ceiling | Kind::GlassPane) {
         bounds_normal(local, item.size)
-    } else if item.kind == Kind::Leaf {
-        decor::leaf_normal(local, item.size)
+    } else if matches!(item.kind, Kind::Leaf | Kind::ShieldLeaf) {
+        decor::leaf_normal(local, item.size, item.kind == Kind::ShieldLeaf)
     } else if item.kind == Kind::Stem {
         let along = ((local + item.size * 0.5).dot(item.size) / item.size.length_squared().max_num(1.0e-12))
             .max_num(0.0)
@@ -513,7 +540,7 @@ fn glossy_reflection(
             Material::Paint => WALL_COLOR.powf(2.2),
             _ => Vec3::splat(0.50),
         },
-        Kind::Leaf | Kind::Stem => vec3(0.065, 0.15, 0.035),
+        Kind::Leaf | Kind::ShieldLeaf | Kind::Stem => vec3(0.065, 0.15, 0.035),
         Kind::Petal => vec3(0.75, 0.35, 0.48),
         Kind::Sofa | Kind::Ottoman | Kind::Rug => vec3(0.65, 0.61, 0.52),
         Kind::Counter if local.z > item.size.z * 0.43 => Vec3::splat(0.025),
@@ -524,8 +551,11 @@ fn glossy_reflection(
         Kind::Microwave | Kind::AirFryer | Kind::Chair | Kind::ShoeStorage => Vec3::splat(0.025),
         _ => Vec3::splat(0.50),
     };
-    let local_normal =
-        if item.kind == Kind::Leaf { decor::leaf_normal(local, item.size) } else { bounds_normal(local, item.size) };
+    let local_normal = if matches!(item.kind, Kind::Leaf | Kind::ShieldLeaf) {
+        decor::leaf_normal(local, item.size, item.kind == Kind::ShieldLeaf)
+    } else {
+        bounds_normal(local, item.size)
+    };
     let normal = rotate_z(local_normal, item.rotation);
     albedo * grid.sample(probes, hit + normal * 0.002, normal)
 }
@@ -548,7 +578,7 @@ fn pixel_impl<const CACHED: bool>(
 ) -> Vec3 {
     let mut color = Vec3::ZERO;
     let mut sample = 0;
-    while sample < if PROFILE == 6 { 1 } else { 4 } {
+    while sample < 4 {
         let ndc = (pixel + subpixel(sample) * 0.5 * pixel_size) / screen_size * 2.0 - 1.0;
         let direction = (globals.forward + globals.right * ndc.x - globals.up * ndc.y).normalize();
         color += shade::<CACHED>(
@@ -570,10 +600,11 @@ fn pixel_impl<const CACHED: bool>(
         .powf(2.2);
         sample += 1;
     }
-    (color * if PROFILE == 6 { 1.0 } else { 0.25 }).powf(1.0 / 2.2)
+    (color * 0.25).powf(1.0 / 2.2)
 }
 
 /// Architectural boxes have a uniform finish; furniture evaluates its model.
+#[inline(never)]
 fn surface_at(item: Object, local: Vec3) -> Hit {
     if item.kind == Kind::Box {
         let tint = if item.material == Material::Paint { WALL_COLOR } else { Vec3::ONE };
@@ -584,17 +615,27 @@ fn surface_at(item: Object, local: Vec3) -> Hit {
             hit.material = item.material;
             hit.tint = if item.material == Material::Knit { vec3(0.34, 0.45, 0.48) } else { living::BLUE };
         }
+        if item.kind == Kind::Blossom && item.material == Material::Ceramic && hit.material == Material::Ceramic {
+            hit.tint = vec3(0.94, 0.93, 0.89);
+        }
+        if item.kind == Kind::Petal && item.material == Material::Ceramic {
+            hit.tint = vec3(0.96, 0.95, 0.89);
+        }
         if item.kind == Kind::Leaf && item.material == Material::VariegatedFoliage {
-            let margin = (local.y.abs() / (item.size.y * 0.5)).clamp(0.0, 1.0);
+            let margin = (local.y.abs() / (item.size.y * 0.5)).clamp_num(0.0, 1.0);
             let patches = materials::noise(local.xy() * 65.0);
-            let cream = ((margin - 0.47) * 3.5 + (patches - 0.5) * 1.1).clamp(0.0, 1.0);
+            let cream = ((margin - 0.47) * 3.5 + (patches - 0.5) * 1.1).clamp_num(0.0, 1.0);
             hit.tint = vec3(0.25, 0.37, 0.21).lerp(vec3(0.90, 0.89, 0.76), cream);
+        }
+        if item.kind == Kind::Stem && item.material == Material::Paint {
+            hit.material = Material::Paint;
+            hit.tint = vec3(0.34, 0.16, 0.14);
         }
         if item.material == Material::MarbledFoliage {
             if item.kind == Kind::Leaf {
                 let q = decor::leaf_frame(local, item.size);
                 let patches = materials::noise(q.xy() * 34.0 + vec2(q.x * 7.0, 0.0));
-                let marble = ((patches - 0.48) * 3.0).clamp(0.0, 0.65);
+                let marble = ((patches - 0.48) * 3.0).clamp_num(0.0, 0.65);
                 hit.tint = vec3(0.16, 0.32, 0.17).lerp(vec3(0.66, 0.76, 0.47), marble);
                 hit.material = Material::MarbledFoliage;
             } else if item.kind == Kind::Stem {
@@ -625,32 +666,68 @@ fn shade<const CACHED: bool>(
     let mut direction = direction;
     let (mut nearest, mut object) = cast::<false, true>(origin, direction, nodes, objects, globals.pixel_angle, FAR);
     let mut reflected_distance = 0.0;
-    if nearest < FAR && objects[object as usize].kind == Kind::Mirror {
-        let item = objects[object as usize];
-        let point = origin + direction * nearest;
-        let local = unrotate_z(point - item.pos, item.rotation);
-        if entry::mirror::<Hit>(local, item.size).material == Material::Mirror {
-            let normal = rotate_z(object_normal(item, local), item.rotation);
-            direction -= normal * (2.0 * direction.dot(normal));
-            origin = point + normal * 0.002;
-            reflected_distance = nearest;
-            (nearest, object) = cast::<false, true>(origin, direction, nodes, objects, globals.pixel_angle, FAR);
+    // Parallel thin glazing transmits straight through; finite pane reflections
+    // use the same one-bounce scene query as polished stone. No refractive tree.
+    let mut glass_light = Vec3::ZERO;
+    let mut transmission = Vec3::ONE;
+    let mut reflected = false;
+    for _ in 0..5 {
+        if nearest >= FAR {
+            break;
         }
+        if !reflected && objects[object as usize].kind == Kind::Mirror {
+            let item = objects[object as usize];
+            let point = origin + direction * nearest;
+            let local = unrotate_z(point - item.pos, item.rotation);
+            if entry::mirror::<Hit>(local, item.size).material == Material::Mirror {
+                let normal = rotate_z(object_normal(item, local), item.rotation);
+                direction -= normal * (2.0 * direction.dot(normal));
+                origin = point + normal * 0.002;
+                reflected_distance += nearest;
+                reflected = true;
+                (nearest, object) = cast::<false, true>(origin, direction, nodes, objects, globals.pixel_angle, FAR);
+                continue;
+            }
+        }
+
+        if objects[object as usize].kind != Kind::GlassPane {
+            break;
+        }
+        let pane = objects[object as usize];
+        let point = origin + direction * nearest;
+        let local = unrotate_z(point - pane.pos, pane.rotation);
+        let mut normal = rotate_z(bounds_normal(local, pane.size), pane.rotation);
+        if normal.dot(direction) > 0.0 {
+            normal = -normal;
+        }
+        let fresnel = 0.078 + 0.922 * (1.0 - normal.dot(-direction)).powf(5.0);
+        glass_light += transmission
+            * fresnel
+            * glossy_reflection(
+                globals.sun,
+                point + normal * 0.001,
+                normal.extend(0.06),
+                direction.extend(light_sample as f32),
+                nodes,
+                objects,
+                grid,
+                probes,
+            );
+        transmission *= vec3(0.985, 0.995, 0.990) * (1.0 - fresnel);
+        let ray = trace::Ray::new(unrotate_z(origin - pane.pos, pane.rotation), unrotate_z(direction, pane.rotation));
+        let (_, exit) = ray.bounds(-pane.size * 0.5, pane.size * 0.5);
+        reflected_distance += exit + 0.0005;
+        origin += direction * (exit + 0.0005);
+        (nearest, object) = cast::<false, true>(origin, direction, nodes, objects, globals.pixel_angle, FAR);
     }
     if nearest >= FAR {
         return background(origin, globals.sun, globals.exposure, globals.white_balance).extend(1.0);
-    }
-    if PROFILE == 1 {
-        return Vec3::splat(nearest / 40.0).extend(1.0);
     }
     let point = origin + direction * nearest;
     let item = objects[object as usize];
     let local = unrotate_z(point - item.pos, item.rotation);
     let normal = object_normal(item, local);
     let world_normal = rotate_z(normal, item.rotation);
-    if PROFILE == 2 {
-        return (world_normal * 0.5 + 0.5).extend(1.0);
-    }
     let texture_point = if item.kind == Kind::Box { point } else { local };
     let mut surface = surface_at(item, local);
     if item.kind == Kind::PosterBlue {
@@ -694,15 +771,14 @@ fn shade<const CACHED: bool>(
         } else {
             office::wallpaper(local, time) * 2.0
         };
-        return lighting::display(emission * globals.white_balance, globals.exposure).extend(1.0);
+        return lighting::display((emission * transmission + glass_light) * globals.white_balance, globals.exposure)
+            .extend(1.0);
     }
     if fixture && surface.material == Material::Emissive {
         (surface.material, surface.tint) = (Material::Ceramic, vec3(0.85, 0.83, 0.78));
     }
     // The four pixel samples also cover the emitter, keeping four shadow rays per pixel.
-    let visibility = if PROFILE == 3 || PROFILE == 4 {
-        1.0
-    } else if globals.sun.radiance.max_element() > 0.0 && world_normal.dot(globals.sun.direction) > 0.0 {
+    let visibility = if globals.sun.radiance.max_element() > 0.0 && world_normal.dot(globals.sun.direction) > 0.0 {
         let start = lighting_point + world_normal * 0.001;
         let offset = subpixel(light_sample) * 0.05;
         let light = (globals.sun.direction + offset.extend(0.0)).normalize();
@@ -716,10 +792,13 @@ fn shade<const CACHED: bool>(
     let pixel = (nearest + reflected_distance) * globals.pixel_angle;
     // Keep procedural material state out of the traversal loops' live registers.
     let mut material = materials::sample(surface.material, surface.tint, texture_point, normal, local_view, pixel);
-    material.tangent = rotate_z(material.tangent, item.rotation);
-    if PROFILE == 3 {
-        return material.albedo.extend(1.0);
+    if item.kind == Kind::ShieldLeaf {
+        material.gradient += decor::leaf_veins(local, item.size, pixel);
+        material.roughness = 0.33;
+        material.coat = 0.12;
+        material.coat_roughness = 0.28;
     }
+    material.tangent = rotate_z(material.tangent, item.rotation);
     let bumped =
         materials::bump(normal, material.gradient, if surface.material == Material::Shag { 1.1 } else { 0.25 });
     // Unresolved fibres scatter around a shared nap normal. Retain the SDF
@@ -751,7 +830,7 @@ fn shade<const CACHED: bool>(
         };
     let indirect = indirect * contact_visibility;
 
-    let reflection = if matches!(surface.material, Material::Stone | Material::GlazedTile) {
+    let reflection = if matches!(surface.material, Material::Stone | Material::GlazedTile | Material::BathroomTile) {
         glossy_reflection(
             globals.sun,
             point,
@@ -769,7 +848,7 @@ fn shade<const CACHED: bool>(
     let mut color = lighting::shade(material, bumped, -direction, visibility, indirect, globals.sun, reflection);
     let mask = light_masks[object as usize];
     let mut slot = 0;
-    while slot < lights.len() && PROFILE != 5 {
+    while slot < lights.len() {
         let current = slot;
         slot += 1;
         // Slots beyond the mask remain conservatively visible.
@@ -792,9 +871,7 @@ fn shade<const CACHED: bool>(
         if contribution.max_element() < 0.001 {
             continue;
         }
-        let visible = if PROFILE == 4 {
-            1.0
-        } else if CACHED {
+        let visible = if CACHED {
             super::shadows::visible(
                 atlas,
                 info,
@@ -809,7 +886,7 @@ fn shade<const CACHED: bool>(
         };
         color += contribution * visible;
     }
-    lighting::display(color * globals.white_balance, globals.exposure).extend(1.0)
+    lighting::display((color * transmission + glass_light) * globals.white_balance, globals.exposure).extend(1.0)
 }
 
 #[cfg(test)]
@@ -874,8 +951,8 @@ pub(super) fn camera_settings(scene: &super::Scene, eye: Vec3, forward: Vec3, ri
         return (photometry::EXPOSURE, Vec3::ONE);
     }
     let average = log_sum / samples as f32;
-    let ev = (3.0 + average + ((log_peak - average) * 0.25).min(1.5)).clamp(3.0, 11.0);
-    let white_balance =
-        (Vec3::splat(samples as f32) / illuminant.max(Vec3::splat(0.001))).clamp(Vec3::splat(0.65), Vec3::splat(2.2));
+    let ev = (3.0 + average + ((log_peak - average) * 0.25).min(1.5)).clamp_num(3.0, 11.0);
+    let white_balance = (Vec3::splat(samples as f32) / illuminant.max(Vec3::splat(0.001)))
+        .clamp_num(Vec3::splat(0.65), Vec3::splat(2.2));
     (photometry::UNITS / (1.2 * ev.exp2()), Vec3::ONE.lerp(white_balance, 0.85))
 }

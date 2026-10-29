@@ -38,7 +38,7 @@ const cleanup = () => cleaning ||= (async () => {
   await rm(profile, { recursive: true, force: true });
 })();
 for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => { await cleanup(); process.exit(130); });
-const deadline = setTimeout(async () => { console.error('Benchmark deadline reached'); await cleanup(); process.exit(1); }, 60_000);
+const deadline = setTimeout(async () => { console.error('Benchmark deadline reached'); await cleanup(); process.exit(1); }, Number(process.env.LARES_BENCH_DEADLINE_MS || 60_000));
 try {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');

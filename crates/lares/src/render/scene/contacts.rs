@@ -95,7 +95,19 @@ pub fn build(objects: &[Object], nodes: &[Node], min: Vec3, max: Vec3) -> Box<[u
         // Tiny foliage retains its material/fibre visibility. Contact gathering
         // concentrates on solid furnishings and the architectural envelope.
         if item.is_light()
-            || matches!(item.kind, Kind::Leaf | Kind::Petal | Kind::Stem | Kind::Ceiling)
+            || matches!(
+                item.kind,
+                Kind::Leaf
+                    | Kind::ShieldLeaf
+                    | Kind::Petal
+                    | Kind::Stem
+                    | Kind::Ceiling
+                    | Kind::GlassPane
+                    | Kind::Mirror
+                    | Kind::Poster
+                    | Kind::PosterBlue
+                    | Kind::PosterNight
+            )
             || (item.kind == Kind::Box && item.material == Material::Paint)
         {
             continue;
