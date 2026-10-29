@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 bitflags.workspace = true
 isthmus.workspace = true
+flate2 = "1.1.10"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum = { version = "0.8.9", default-features = false, features = [

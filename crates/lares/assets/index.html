@@ -8,6 +8,8 @@
     <title>Lares</title>
     <link rel="preload" href="./web/lares_bg.wasm" as="fetch" type="application/wasm" crossorigin>
     <link rel="preload" href="./references/lounge.webp" as="image">
+    <link rel="preload" href="./baked/visibility.bin" as="fetch" crossorigin>
+    <link rel="preload" href="./baked/lighting.bin" as="fetch" crossorigin>
     <style>
         html,
         body,
@@ -97,9 +99,14 @@
             if (!isSecureContext) throw new Error("Open Lares over HTTPS or on localhost to use WebGPU.");
             if (!navigator.gpu) throw new Error("GPU adapter unavailable: this browser does not expose WebGPU.");
             const {default: init, start} = await import("./web/lares.js");
+            const assets = Promise.all(["visibility", "lighting"].map(async name => {
+                const response = await fetch(`./baked/${name}.bin`);
+                if (!response.ok) throw new Error("Lighting asset missing; rebuild with just lares.");
+                return new Uint8Array(await response.arrayBuffer());
+            }));
             await init();
             performance.mark("lares:wasm-ready");
-            await start();
+            await start(...await assets);
         } catch (error) {
             console.error("Lares could not start:", error);
             const message = document.getElementById("error");

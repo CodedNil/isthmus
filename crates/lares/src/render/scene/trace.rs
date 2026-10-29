@@ -67,7 +67,7 @@ pub(super) fn march(
         }
         let relax = if step > 0.0 {
             let slope = (radius - previous) / step;
-            (2.0 / (1.0 - slope).max_num(0.05)).clamp(1.0, 1.95)
+            (2.0 / (1.0 - slope).max_num(0.05)).clamp_num(1.0, 1.95)
         } else {
             1.0
         };
@@ -104,7 +104,7 @@ fn overlap(a: Vec2, b: Vec2) -> Vec2 {
 /// Exact intersection with the cupped parabolic leaf, including its thin rim.
 /// Two half-leaves remove abs(y), leaving only quadratic inequalities.
 #[inline(never)]
-pub(super) fn leaf(origin: Vec3, direction: Vec3, size: Vec3, enter: f32, exit: f32) -> f32 {
+pub(super) fn leaf(origin: Vec3, direction: Vec3, size: Vec3, enter: f32, exit: f32, shield: bool) -> f32 {
     let o = super::decor::leaf_frame(origin, size);
     let d = super::decor::leaf_frame(direction, size);
     let length = size.x * 0.5;
@@ -117,15 +117,33 @@ pub(super) fn leaf(origin: Vec3, direction: Vec3, size: Vec3, enter: f32, exit: 
         span = overlap(span, quadratic(0.0, -sign * d.y, -sign * o.y));
         span = overlap(span, quadratic(0.0, d.x, o.x - length));
         span = overlap(span, quadratic(0.0, -d.x, -o.x - length));
-        let curve = width / (length * length);
+        let curve = width / (length * length) * if shield { 0.625 / 0.973_44 } else { 1.0 };
+        let slope = if shield { width * 0.31 / (0.973_44 * length) } else { 0.0 };
+        let maximum = width * if shield { 0.935 / 0.973_44 } else { 1.0 };
+        if shield {
+            span = overlap(span, quadratic(0.0, -d.x - 1.1 * sign * d.y, -o.x - length * 0.65 - 1.1 * sign * o.y));
+        }
         span = overlap(
             span,
-            quadratic(curve * d.x * d.x, 2.0 * curve * o.x * d.x + sign * d.y, curve * o.x * o.x + sign * o.y - width),
+            quadratic(
+                curve * d.x * d.x,
+                2.0 * curve * o.x * d.x + slope * d.x + sign * d.y,
+                curve * o.x * o.x + slope * o.x + sign * o.y - maximum,
+            ),
         );
         let bend = 0.18 / length;
-        let square = bend * d.x * d.x;
-        let linear = d.z + 2.0 * bend * o.x * d.x - 0.32 * sign * d.y;
-        let constant = o.z + bend * o.x * o.x - 0.32 * sign * o.y;
+        let transverse = if shield { 0.32 / width } else { 0.0 };
+        let mut square = bend * d.x * d.x - transverse * d.y * d.y;
+        let mut linear =
+            d.z + 2.0 * bend * o.x * d.x - if shield { 2.0 * transverse * o.y * d.y } else { 0.32 * sign * d.y };
+        let mut constant = o.z + bend * o.x * o.x - if shield { transverse * o.y * o.y } else { 0.32 * sign * o.y };
+        // A saddle sheet can curve either way along a ray. Its absolute
+        // thickness band is unchanged by flipping the quadratic's sign.
+        if square < 0.0 {
+            square = -square;
+            linear = -linear;
+            constant = -constant;
+        }
         span = overlap(span, quadratic(square, linear, constant - 0.0025));
         let hollow = quadratic(square, linear, constant + 0.0025);
         let entry = span.x;
@@ -193,6 +211,41 @@ pub(super) fn normal(point: Vec3, distance: impl Fn(Vec3) -> f32) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn analytic_leaf_hits_match_sdf_sheets_across_shapes_scales_and_tilts() {
+        use super::super::{Distance, Kind, Sample, render_furniture};
+        for kind in [Kind::Leaf, Kind::ShieldLeaf] {
+            for length in [0.12, 0.32, 0.65] {
+                for lean in [-0.8, 0.0, 0.65] {
+                    let size = vec3(length, length * 0.56, length * lean);
+                    for sample in 0..121 {
+                        let origin = vec3(
+                            ((sample % 11) as f32 / 10.0 - 0.5) * length * 1.3,
+                            ((sample / 11) as f32 / 10.0 - 0.5) * size.y * 1.3,
+                            length * 1.5,
+                        );
+                        let direction = vec3(0.13, -0.08, -1.0).normalize();
+                        let actual = leaf(origin, direction, size, 0.0, length * 4.0, kind == Kind::ShieldLeaf);
+                        let expected = march(origin, direction, 0.0, length * 4.0, 0.0, |p| {
+                            render_furniture::<Distance>(kind, p, size).distance()
+                        });
+                        if actual < FAR {
+                            assert!(
+                                expected < FAR && (actual - expected).abs() < 0.002,
+                                "analytic leaf mismatch: {size:?} {actual} vs {expected}"
+                            );
+                        } else if expected < FAR {
+                            // The marcher accepts a small SDF tolerance outside a
+                            // silhouette. A genuine analytic miss must lie there.
+                            let p = origin + direction * expected;
+                            assert!(render_furniture::<Distance>(kind, p, size).distance().abs() < 0.0003);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn adaptive_steps_agree_with_analytic_sphere_intersections_across_scales() {
         for radius in [0.1, 1.0, 5.0] {

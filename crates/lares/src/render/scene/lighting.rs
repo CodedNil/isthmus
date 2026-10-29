@@ -114,7 +114,7 @@ pub(super) fn shade(
         filtered_environment(s.roughness) * (f0 * ab.x + Vec3::splat(ab.y)).max_num(Vec3::ZERO) * s.specular;
     // Environment highlights follow local visibility instead of shining equally
     // inside cupboards and beside windows. The bounce field is already cached.
-    let specular_occlusion = (indirect.element_sum() * 0.9).clamp(0.18, 1.0);
+    let specular_occlusion = (indirect.element_sum() * 0.9).clamp_num(0.18, 1.0);
     let edge = 1.0 - no_v;
     let sheen_env = indirect * s.albedo * (s.sheen * (edge * edge * edge) * 0.35);
     let coat_env = fresnel(Vec3::splat(0.04), no_v) * s.coat;
@@ -127,7 +127,7 @@ pub(super) fn shade(
 #[inline(never)]
 pub(super) fn display(color: Vec3, exposure: f32) -> Vec3 {
     let x = color * exposure;
-    let mapped = ((x * (x * 2.51 + 0.03)) / (x * (x * 2.43 + 0.59) + 0.14)).clamp(Vec3::ZERO, Vec3::ONE);
+    let mapped = ((x * (x * 2.51 + 0.03)) / (x * (x * 2.43 + 0.59) + 0.14)).clamp_num(Vec3::ZERO, Vec3::ONE);
     // Output is display-referred; the canvas uses an unorm target.
     mapped.powf(1.0 / 2.2)
 }

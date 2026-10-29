@@ -242,3 +242,44 @@ fn surface_normal_response_matches_directional_hemisphere_integration() {
         );
     }
 }
+
+#[test]
+fn baked_controls_match_fresh_transport_through_source_changes_and_atomic_daylight_updates() {
+    let rooms = [room(Vec2::ZERO).downlights("light.test", &[(-0.6, 0.0), (0.6, 0.0)])];
+    let mut fresh = Scene::new_at(&rooms, MIDNIGHT, SunSettings::default());
+    let bytes = fresh.encode_light_controls().unwrap();
+    let mut baked = Scene::from_baked_at(&rooms, MIDNIGHT, SunSettings::default(), &bytes).unwrap();
+    for color in [Vec3::ONE, vec3(0.2, 0.7, 0.4)] {
+        for brightness in [0.0, 0.25, 1.0] {
+            fresh.set_light_color("light.test", color);
+            baked.set_light_color("light.test", color);
+            fresh.set_light_state("light.test", brightness);
+            baked.set_light_state("light.test", brightness);
+            for (a, b) in fresh.probes.iter().zip(&baked.probes) {
+                assert!((a.light.constant - b.light.constant).length() < 1.0e-5);
+                assert!((a.light.x - b.light.x).length() < 1.0e-5);
+            }
+        }
+    }
+    let initial: Vec<_> = baked.probes.iter().map(|probe| probe.light.constant).collect();
+    let noon = MIDNIGHT + 60.0;
+    baked.update_time(noon);
+    assert!(
+        baked.probes.iter().zip(&initial).all(|(probe, old)| (probe.light.constant - *old).length() < 1.0e-5),
+        "a partial daylight batch must not become visible"
+    );
+    // Source edits during an in-flight daylight solve must survive publication.
+    fresh.set_light_state("light.test", 0.35);
+    baked.set_light_state("light.test", 0.35);
+    for _ in 0..2000 {
+        baked.update_time(noon);
+    }
+    fresh.set_time(noon);
+    for (a, b) in fresh.probes.iter().zip(&baked.probes) {
+        assert!((a.light.constant - b.light.constant).length() < 1.0e-5);
+    }
+    assert!(
+        Scene::from_baked_at(&rooms, MIDNIGHT, SunSettings::default(), &bytes[..bytes.len() / 2]).is_err(),
+        "truncated bakes must be rejected"
+    );
+}

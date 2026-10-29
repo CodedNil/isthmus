@@ -54,10 +54,53 @@ fn curtain<S: Sample>(p: Vec3, size: Vec3) -> S {
         .union(S::new(rod.min_num(hoop).min_num(mount).min_num(finial), || (Material::Metal, vec3(0.65, 0.63, 0.58))))
 }
 
+// The cupboard contains a hot-water cylinder, not a rectangular wall boiler.
+fn cylinder_unit<S: Sample>(local: Vec3, size: Vec3) -> S {
+    let p = local + Vec3::Z * size.z * 0.5;
+    let tank = super::cylinder(p - Vec3::Z * (size.z * 0.48), size.x * 0.45, size.z * 0.88);
+    let shoulder = ((p - Vec3::Z * (size.z * 0.88)) / vec3(size.x * 0.45, size.y * 0.45, 0.13)).length() - 1.0;
+    let base = super::cylinder(p - Vec3::Z * 0.065, size.x * 0.46, 0.10);
+    let mut pipes = super::FAR;
+    let mut valves = super::FAR;
+    for i in 0..3 {
+        let x = (i as f32 - 1.0) * 0.14;
+        let height = 1.12 + i as f32 * 0.12;
+        pipes = pipes.min_num(super::capsule(p, vec3(x, 0.255, 0.20), vec3(x, 0.255, height), 0.012));
+        pipes = pipes.min_num(super::capsule(p, vec3(x, 0.255, height), vec3(x, 0.10, height), 0.012));
+        valves = valves.min_num(super::rounded_box(p - vec3(x, 0.28, height - 0.12), vec3(0.065, 0.015, 0.014), 0.006));
+    }
+    for i in 0..2 {
+        let height = 1.61 + i as f32 * 0.12;
+        let left = vec3(-0.23, 0.12, height);
+        let right = vec3(0.23, 0.12, height);
+        pipes = pipes.min_num(super::capsule(p, left, right, 0.012));
+        pipes = pipes.min_num(super::capsule(p, right, right - Vec3::Z * 0.18, 0.012));
+        pipes = pipes.min_num(super::capsule(p, left, left + Vec3::Z * 0.06, 0.012));
+    }
+    let insulation = super::capsule(p, vec3(-0.18, 0.12, 1.61), vec3(0.06, 0.12, 1.61), 0.027);
+    S::new(tank.min_num(shoulder * 0.13), || (Material::Paint, vec3(0.52, 0.53, 0.54)))
+        .union(S::new(base, || (Material::Paint, Vec3::splat(0.12))))
+        .union(S::new(pipes, || (Material::Metal, vec3(0.68, 0.39, 0.20))))
+        .union(S::new(valves, || (Material::Paint, vec3(0.65, 0.08, 0.06))))
+        .union(S::new(insulation, || (Material::Metal, Vec3::splat(0.68))))
+}
+
+fn linen<S: Sample>(p: Vec3, size: Vec3) -> S {
+    let pitch = size.z / 4.0;
+    let row = (p.z / pitch + 1.5).round().clamp_num(0.0, 3.0);
+    let folded = super::rounded_box(
+        p - vec3(0.008 * row.sin(), 0.006 * row.cos(), (row - 1.5) * pitch),
+        vec3(size.x, size.y, pitch * 0.92),
+        pitch * 0.35,
+    );
+    S::new(folded, || (Material::Knit, Vec3::splat(if row < 1.0 { 0.20 } else { 0.88 - row * 0.025 })))
+}
+
 #[inline(never)]
 pub(super) fn model<S: Sample>(kind: Kind, local: Vec3, size: Vec3) -> S {
     let distance = match kind {
-        Kind::Appliance => super::scaled_box(local, size, Vec3::ZERO, Vec3::ONE, 0.02),
+        Kind::Appliance => return cylinder_unit(local, size),
+        Kind::LinenStack => return linen(local, size),
         Kind::Radiator => radiator(local, size),
         Kind::Window => window(local, size),
         Kind::Curtain => return curtain(local, size),

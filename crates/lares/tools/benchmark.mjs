@@ -168,6 +168,23 @@ try {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
+  await evaluate(`(async () => {
+    const controls = await import('./web/lares.js');
+    if (!controls.set_light_state) return;
+    bench.lightUpdates = [];
+    for (let step = 0; step < 20; step++) {
+      const started = performance.now();
+      if (!controls.set_light_state('light.lounge_left_downlights', step % 2)) throw Error('Light control entity missing');
+      bench.lightUpdates.push(performance.now() - started);
+    }
+  })()`);
+  // Control checks intentionally reset history; let that settle before
+  // measuring spontaneous resets with a running clock.
+  await new Promise(resolve => setTimeout(resolve, 200));
+  for (let attempt = 0; attempt < 80; attempt++) {
+    if (await evaluate(`+(document.querySelector('canvas').getAttribute('data-samples') || 0) >= ${+width * +height > 2500000 ? 8 : 4}`)) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
   if (process.env.LARES_BENCH_MOTION === '1') await evaluate(`
     (() => {
       const canvas = document.querySelector('canvas');
@@ -197,12 +214,13 @@ try {
   const started = performance.now();
   await new Promise(resolve => setTimeout(resolve, +(process.env.LARES_BENCH_MS || 10000)));
   const result = await evaluate('JSON.parse(JSON.stringify(bench))');
+  result.startup = await evaluate(`performance.getEntriesByType('mark').filter(entry => entry.name.startsWith('lares:')).map(entry => ({ stage: entry.name, milliseconds: entry.startTime }))`);
   result.seconds = (performance.now() - started) / 1000;
   result.size = [+width, +height];
   result.motion = process.env.LARES_BENCH_MOTION === '1';
   result.clockRunning = process.env.LARES_BENCH_CLOCK === 'running';
   result.presentedFps = result.submits / result.seconds;
-  for (const field of ['gpu', 'latency']) {
+  for (const field of ['gpu', 'latency', ...(result.lightUpdates ? ['lightUpdates'] : [])]) {
     const sorted = result[field].sort((a, b) => a - b);
     result[field + 'Ms'] = { samples: sorted.length, total: sorted.reduce((a, b) => a + b, 0), median: sorted[Math.floor(sorted.length / 2)], p95: sorted[Math.floor(sorted.length * .95)] };
     delete result[field];

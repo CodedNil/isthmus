@@ -4,6 +4,14 @@ use crate::glam::{Vec2, Vec3, Vec4};
 pub trait MinMax: Sized {
     fn min_num(self, other: Self) -> Self;
     fn max_num(self, other: Self) -> Self;
+
+    /// Clamp with ordered finite bounds, without a host panic path in shaders.
+    /// Rust-GPU must inline any function that can abort; `f32::clamp` therefore
+    /// duplicates otherwise shared SDF dispatch even for constant valid bounds.
+    #[inline]
+    fn clamp_num(self, min: Self, max: Self) -> Self {
+        self.max_num(min).min_num(max)
+    }
 }
 
 #[cfg(target_arch = "spirv")]
@@ -48,3 +56,26 @@ macro_rules! impl_min_max {
     )+};
 }
 impl_min_max!(f32, Vec2, Vec3, Vec4);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_clamp_matches_ordered_scalar_and_vector_ranges() {
+        for lower in [-100.0f32, -1.0, 0.0, 0.5] {
+            for width in [0.0, 0.001, 1.0, 200.0] {
+                let upper = lower + width;
+                for step in -500..=500 {
+                    let value = step as f32 * 0.31;
+                    assert_eq!(value.clamp_num(lower, upper), value.clamp(lower, upper));
+                    let vector = Vec3::new(value, -value, value * 0.5);
+                    assert_eq!(
+                        vector.clamp_num(Vec3::splat(lower), Vec3::splat(upper)),
+                        vector.clamp(Vec3::splat(lower), Vec3::splat(upper))
+                    );
+                }
+            }
+        }
+    }
+}

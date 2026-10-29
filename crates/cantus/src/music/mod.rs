@@ -112,6 +112,7 @@ pub struct Track {
     /// The recording identifier used to disambiguate lyric-provider matches.
     #[serde(default)]
     pub isrc: Option<String>,
+    /// Requested recording identity, preserved when Spotify substitutes a playback alternative.
     #[serde(default)]
     pub uri: String,
     pub name: String,

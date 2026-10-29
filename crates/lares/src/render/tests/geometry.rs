@@ -52,6 +52,9 @@ fn acceleration_agrees_with_exhaustive_intersection_and_normals_stay_finite() {
             let bounds = trace::Ray::new(origin, direction);
             let mut exhaustive = FAR;
             for item in &scene.objects {
+                if item.kind == Kind::GlassPane {
+                    continue;
+                }
                 let extent = item.extent();
                 let (sin, cos) = (item.rotation.x.abs(), item.rotation.y.abs());
                 let extent = vec3(cos * extent.x + sin * extent.y, sin * extent.x + cos * extent.y, extent.z);
@@ -121,5 +124,42 @@ fn box_normals_follow_the_hit_face_near_edges() {
                 assert_eq!(bounds_normal(point, size), Vec3::Y * sign);
             }
         }
+    }
+}
+
+#[test]
+fn thin_glazing_is_visible_to_cameras_but_transmits_transport_and_shadow_rays() {
+    for angle in [0.0, 0.7, 1.57, 2.4] {
+        let (sin, cos) = angle.sin_cos();
+        let rotation = vec2(sin, cos);
+        let direction = rotate_z(Vec3::Y, rotation);
+        let pane =
+            Object { rotation, ..Object::new(Kind::GlassPane, Vec3::ZERO, vec3(0.8, 0.006, 1.8), Material::Ceramic) };
+        let solid = Object { rotation, ..Object::new(Kind::Box, direction, vec3(0.8, 0.1, 1.8), Material::Paint) };
+        let objects = [pane, solid];
+        let nodes: Vec<_> = objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| {
+                let half = object.extent();
+                let extent =
+                    vec3(cos.abs() * half.x + sin.abs() * half.y, sin.abs() * half.x + cos.abs() * half.y, half.z);
+                Node {
+                    min: object.pos - extent,
+                    max: object.pos + extent,
+                    skip: index as u32 + 1,
+                    object: index as u32,
+                }
+            })
+            .collect();
+        let origin = -direction * 2.0;
+        let camera = cast::<false, true>(origin, direction, &nodes, &objects, 0.0, FAR);
+        assert_eq!(camera.1, 0);
+        assert!((camera.0 - 1.997).abs() < 0.001);
+        let transport = cast::<false, false>(origin, direction, &nodes, &objects, 0.0, FAR);
+        assert_eq!(transport.1, 1);
+        assert!((transport.0 - 2.95).abs() < 0.002);
+        assert_eq!(cast::<true, false>(origin, direction, &nodes[..1], &objects, 0.0, FAR).0, 1.0);
+        assert!((light_depth(origin, direction, &nodes, &objects, FAR) - 2.95).abs() < 0.002);
     }
 }

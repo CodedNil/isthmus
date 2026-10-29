@@ -4,7 +4,7 @@ use core::f32::consts::PI;
 use image::{RgbImage, imageops::overlay};
 use isthmus::glam::{Vec3, vec2, vec3};
 use lares::{
-    home,
+    home::{self, Kind, Material},
     render::{Globals, Scene, SunSettings, pixel, pixel_cached, shadows::ShadowAtlas, sun::utc_now},
 };
 use std::{
@@ -81,6 +81,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             }) {
                 continue;
             }
+            // Reject invalid captures before tracing millions of rays at the
+            // inside of a wall. This applies to every camera, including new ones.
+            if scene.objects.iter().any(|object| {
+                if !matches!(object.kind, Kind::Box | Kind::Ceiling) || object.material != Material::Paint {
+                    return false;
+                }
+                let offset = view.eye - object.pos;
+                let local = vec3(
+                    offset.x * object.rotation.y + offset.y * object.rotation.x,
+                    offset.y * object.rotation.y - offset.x * object.rotation.x,
+                    offset.z,
+                );
+                local.abs().cmplt(object.size * 0.5).all()
+            }) {
+                return Err(format!("camera {name} is inside architectural geometry").into());
+            }
             let started = Instant::now();
             let pixels = pixels(&scene, view, width, height, shadows.as_ref());
             let image = RgbImage::from_raw(width as u32, height as u32, pixels).unwrap();
@@ -89,10 +105,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 overlay(&mut stacked, &evening_images.remove(name).unwrap(), 0, 0);
                 overlay(&mut stacked, &image, 0, height as i64);
                 stacked.save(format!("{destination}/{name}.webp"))?;
-                let old = Path::new(&destination).join(format!("{name}-lights-off.webp"));
-                if old.exists() {
-                    fs::remove_file(old)?;
-                }
             } else {
                 evening_images.insert(name, image);
             }

@@ -82,6 +82,11 @@ impl Image {
         }
     }
 
+    /// Host-side texels, or `None` for images backed only by a GPU texture.
+    pub fn pixels(&self) -> Option<&[u8]> {
+        self.view.is_none().then_some(&self.pixels)
+    }
+
     pub const fn size(&self) -> [u32; 2] {
         self.size
     }

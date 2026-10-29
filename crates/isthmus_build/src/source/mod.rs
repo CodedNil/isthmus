@@ -17,6 +17,7 @@ use syn::{
     visit_mut::VisitMut,
 };
 
+mod loops;
 mod references;
 
 pub struct Generated {
@@ -136,7 +137,8 @@ pub fn generate(path: &Path, root: Vec<String>, isthmus: &TokenStream) -> Result
         }
         #module
     };
-    let source = syn::parse2(source).map_err(|error| error.to_string())?;
+    let mut source = syn::parse2(source).map_err(|error| error.to_string())?;
+    loops::lower(&mut source);
     let mut dependencies = Dependencies::default();
     dependencies.visit_file(&source);
     Ok(Generated { source: prettyplease::unparse(&source), shaders: entries, identifiers: dependencies.0 })

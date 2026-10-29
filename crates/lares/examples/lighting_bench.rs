@@ -19,6 +19,7 @@ fn main() {
         scene.probes.len(),
         scene.lights.len()
     );
+    println!("Transport paths, volume taps, bytes: {:?}", scene.transport_statistics());
     let lattice = (scene.grid.size.x * scene.grid.size.y * scene.grid.size.z) as usize;
     let volume = scene.probes[..lattice].iter().filter(|probe| probe.positive.x >= 0.0).count();
     let surfaces = scene.probes[lattice..].iter().filter(|probe| probe.normal.length_squared() > 0.5).count();
@@ -40,6 +41,9 @@ fn main() {
     }
     updates.sort_unstable();
     println!("Daylight update CPU: median {:?}, p95 {:?}, max {:?}", updates[300], updates[570], updates[599]);
+    let cold = Instant::now();
+    scene.set_light_state("light.lounge_left_downlights", 0.0);
+    println!("First entity response: {:?}", cold.elapsed());
     let mut dimming = Duration::ZERO;
     for state in 0..20 {
         let started = Instant::now();
@@ -47,5 +51,5 @@ fn main() {
         black_box(&scene);
         dimming += started.elapsed();
     }
-    println!("Entity change + eight bounce blend: {:?} average", dimming / 20);
+    println!("Cached entity field update: {:?} average", dimming / 20);
 }

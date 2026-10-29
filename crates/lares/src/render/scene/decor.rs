@@ -5,10 +5,15 @@ use isthmus::prelude::*;
 /// Pointed leaf blade: a tapered lens extruded along a cupped, drooping sheet.
 /// Normalize the deformation's gradient bound to keep sphere steps conservative.
 fn leaf(p: Vec3, length: f32, width: f32) -> f32 {
-    let t = (p.x / length).max_num(-1.0).min_num(1.0);
-    let profile = width * (1.0 - t * t).max_num(0.0);
-    let edge = (p.y.abs() - profile).max_num(p.x.abs() - length);
-    let sheet = p.z + 0.18 * p.x * t - 0.32 * p.y.abs();
+    leaf_shape(p, length, width, false)
+}
+fn leaf_shape(p: Vec3, length: f32, width: f32, shield: bool) -> f32 {
+    let profile = super::leaf_profile(p.x, length, width, shield);
+    let mut edge = (p.y.abs() - profile).max_num(p.x.abs() - length);
+    if shield {
+        edge = edge.max_num(-p.x - length * 0.65 - p.y.abs() * 1.1);
+    }
+    let sheet = p.z - super::leaf_height(p.x, p.y, length, width, shield);
     super::extrude(vec2(edge, sheet.abs() - 0.0025)) * 0.55
 }
 fn flower(p: Vec3, radius: f32) -> f32 {
@@ -24,6 +29,25 @@ fn flower(p: Vec3, radius: f32) -> f32 {
 }
 #[inline(never)]
 pub(super) fn plant<S: Sample>(kind: Kind, p: Vec3, size: Vec3) -> S {
+    if kind == Kind::Alocasia {
+        let bottom = -size.z * 0.5;
+        let top = bottom + 0.18;
+        let radius = size.x * 0.15;
+        let shell = super::taper(p, vec3(0.0, 0.0, bottom), vec3(0.0, 0.0, top), radius * 0.82, radius)
+            .max_num(bottom - p.z)
+            .max_num(p.z - top)
+            .max_num(-super::taper(
+                p,
+                vec3(0.0, 0.0, bottom + 0.009),
+                vec3(0.0, 0.0, top + 0.01),
+                radius * 0.75,
+                radius - 0.004,
+            ));
+        let rim = vec2(p.xy().length() - radius, p.z - top + 0.004).length() - 0.003;
+        let soil = super::cylinder(p - Vec3::Z * (top - 0.014), radius - 0.005, 0.008);
+        return S::new(shell.min_num(rim), || (Material::Ceramic, vec3(0.07, 0.077, 0.08)))
+            .union(S::new(soil, || (Material::Soil, vec3(0.14, 0.095, 0.06))));
+    }
     let blossom = kind == Kind::Blossom;
     let scale = size.x * if kind == Kind::Palm { 0.65 } else { 1.0 };
     let bottom = -size.z * 0.5;
@@ -82,21 +106,41 @@ pub(super) fn leaf_frame(p: Vec3, size: Vec3) -> Vec3 {
     tilt(p, leaf_lean(size))
 }
 #[inline(never)]
-pub(super) fn leaf_normal(p: Vec3, size: Vec3) -> Vec3 {
+pub(super) fn leaf_normal(p: Vec3, size: Vec3, shield: bool) -> Vec3 {
     let q = leaf_frame(p, size);
     let length = size.x * 0.5;
     let width = size.y * 0.5;
     let sign = if q.y >= 0.0 { 1.0 } else { -1.0 };
-    let sheet = q.z + 0.18 * q.x * q.x / length - 0.32 * q.y.abs();
-    let edge = q.y.abs() - width * (1.0 - (q.x / length).powi(2));
-    let gradient = if edge > sheet.abs() - 0.0025 {
-        vec3(2.0 * width * q.x / (length * length), sign, 0.0)
+    let sheet = q.z - super::leaf_height(q.x, q.y, length, width, shield);
+    let edge = q.y.abs() - super::leaf_profile(q.x, length, width, shield);
+    let notch = -q.x - length * 0.65 - q.y.abs() * 1.1;
+    let gradient = if shield && notch > edge.max_num(sheet.abs() - 0.0025) {
+        vec3(-1.0, -sign * 1.1, 0.0)
+    } else if edge > sheet.abs() - 0.0025 {
+        let slope = if shield {
+            width * (0.31 + 1.25 * q.x / length) / (0.973_44 * length)
+        } else {
+            2.0 * width * q.x / (length * length)
+        };
+        vec3(slope, sign, 0.0)
     } else {
-        vec3(0.36 * q.x / length, -0.32 * sign, 1.0) * if sheet >= 0.0 { 1.0 } else { -1.0 }
+        vec3(0.36 * q.x / length, if shield { -0.64 * q.y / width } else { -0.32 * sign }, 1.0)
+            * if sheet >= 0.0 { 1.0 } else { -1.0 }
     };
     // The inverse is the transpose of the leaf frame.
     tilt(gradient, -leaf_lean(size)).normalize()
 }
+/// Raised midrib and shallow herringbone venation, filtered at pixel scale.
+pub(super) fn leaf_veins(p: Vec3, size: Vec3, pixel: f32) -> Vec3 {
+    let q = leaf_frame(p, size);
+    let sign = if q.y >= 0.0 { 1.0 } else { -1.0 };
+    let phase = (q.x - q.y.abs() * 0.75) * 145.0;
+    let resolved = (1.0 - pixel * 290.0).clamp_num(0.0, 1.0);
+    let ridge = phase.cos() * 0.045 * resolved;
+    let midrib = -q.y * 2.0 / 0.000_009 * (-(q.y * q.y) / 0.000_009).exp() * 0.0007;
+    tilt(vec3(ridge, ridge * -0.75 * sign + midrib, 0.0), -leaf_lean(size))
+}
+
 #[inline(never)]
 pub(super) fn blade<S: Sample>(kind: Kind, p: Vec3, size: Vec3) -> S {
     if kind == Kind::Stem {
@@ -120,7 +164,15 @@ pub(super) fn blade<S: Sample>(kind: Kind, p: Vec3, size: Vec3) -> S {
     let margin = (q.y.abs() / profile).max_num(0.0).min_num(1.0);
     let vein = (1.0 - q.y.abs() / 0.0015).max_num(0.0).min_num(1.0);
     let tint = vec3(0.20, 0.34, 0.16).lerp(vec3(0.43, 0.53, 0.29), margin.powf(5.0) * 0.55 + vein * 0.08);
-    S::new(leaf(q, length, width), || (Material::Foliage, tint))
+    let shield = kind == Kind::ShieldLeaf;
+    let tint = if shield {
+        let vein = ((q.x - q.y.abs() * 0.75) * 145.0).cos().max_num(0.0).powi(12);
+        let center = (-q.y.abs() * 400.0).exp();
+        vec3(0.12, 0.30, 0.15).lerp(vec3(0.30, 0.43, 0.20), vein * 0.18 + center * 0.35)
+    } else {
+        tint
+    };
+    S::new(leaf_shape(q, length, width, shield), || (Material::Foliage, tint))
 }
 
 #[inline(never)]

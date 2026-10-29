@@ -3,15 +3,17 @@
 Tests check renderer behaviour across ranges of inputs. Authored furniture and
 camera placement are reviewed using captures and photographic references.
 
+- `../layout.rs`: trim coverage at return corners across all four orientations.
 - `geometry.rs`: accelerated versus exhaustive traversal, valid normals,
   correct hit-face normals near edges, conservative light culling, opaque structure, window apertures, camera-only
-  cutaways and indoor probe allocation.
+  cutaways, thin-glass transport and indoor probe allocation.
 - `lifecycle.rs`: accumulation over advancing time, light controls, discontinuities,
   emitter distributions and camera exposure.
 - `../scene/irradiance/transport_tests.rs`: linearity and RGB superposition,
   surface cosine-gather normalization, bounded incremental updates, partition isolation, full versus incremental
   relighting and nonnegative directional reconstruction. Brightness linearity covers both surface
-  and volume transport.
+  and volume transport. Baked/fresh response equivalence, atomic daylight publication
+  and truncated-asset rejection cover the runtime/authoring boundary.
 - `../plants.rs`: curved foliage and stem containment across species, rotations
   and wall clearances.
 - Numerical tests beside implementations cover photometry, solar motion,
@@ -31,3 +33,8 @@ accumulation while the real clock advances.
 spatial candidate index with exhaustive SDF queries across rotations and cell
 boundaries. Indirect denoising is geometry constrained and must preserve
 partition isolation and full/incremental relighting agreement.
+
+The volume tests also check that samples behind opaque receivers contribute no
+light, and that precomputed CPU stencils match shader-side reconstruction.
+App tests hold the display transform constant through movement and light edits;
+temporal tests cover bounded motion resolution and clean history restarts.

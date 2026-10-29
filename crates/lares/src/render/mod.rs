@@ -122,12 +122,13 @@ pub fn resolve(frame: &mut Frame<'_>, images: &[Image; 4], mask: u32, interleave
                 let third: &Image = &images[2];
                 let fourth: &Image = &images[3];
                 let mask: u32;
+                let sample_size: Vec2 = Vec2::from_array(images[0].size().map(|value| value as f32));
                 let interleaved: bool;
             })
             .primitive(|frame| Rect::new(Vec2::ZERO, frame.screen_size))
             .fragment(|frame, surface| {
-                let p = surface.pixel;
-                let size = frame.screen_size;
+                let size = sample_size;
+                let p = surface.pixel * size / frame.screen_size;
                 let color = resolved_sample(&first, p, size, mask, 0, interleaved)
                     + resolved_sample(&second, p, size, mask, 1, interleaved)
                     + resolved_sample(&third, p, size, mask, 2, interleaved)
@@ -154,7 +155,22 @@ fn resolved_sample(image: &Image, pixel: Vec2, size: Vec2, mask: u32, sample: u3
     } else if mask & (1 << sample) == 0 {
         return Vec4::ZERO;
     }
-    image.sample(position / size).truncate().powf(2.2).extend(1.0)
+    let mut color = image.sample(position / size).truncate().powf(2.2);
+    if !interleaved && mask.count_ones() < 4 {
+        // Soften high-contrast single-sample edges during movement/restarts.
+        // This disappears completely at four samples; native settled detail
+        // and procedural material frequencies remain unchanged.
+        let a = image.sample((position + vec2(0.5, 0.0)) / size).truncate().powf(2.2);
+        let b = image.sample((position - vec2(0.5, 0.0)) / size).truncate().powf(2.2);
+        let c = image.sample((position + vec2(0.0, 0.5)) / size).truncate().powf(2.2);
+        let d = image.sample((position - vec2(0.0, 0.5)) / size).truncate().powf(2.2);
+        let high = a.max(b).max(c).max(d).max_element();
+        let low = a.min(b).min(c).min(d).min_element();
+        if high - low > (high + 0.01) * 0.15 {
+            color = color.lerp((a + b + c + d) * 0.25, (4 - mask.count_ones()) as f32 / 6.0);
+        }
+    }
+    color.extend(1.0)
 }
 
 #[cfg(test)]

@@ -2,15 +2,15 @@ use crate::{
     app::App,
     render::{
         self, Renderer, SunSettings,
-        shadows::{self, AtlasInfo, ShadowAtlas},
+        shadows::ShadowAtlas,
         sun::utc_now,
-        temporal::Accumulation,
+        temporal::{Accumulation, MotionResolution},
     },
 };
 use gloo_events::EventListener;
 use gloo_render::request_animation_frame;
 use isthmus::{
-    glam::{Vec2, vec2},
+    glam::{Vec2, vec2, vec3},
     wgpu::{Queue, SurfaceTarget},
 };
 use std::{array::from_fn, cell::RefCell, error::Error, panic, rc::Rc};
@@ -19,20 +19,49 @@ use wasm_bindgen::JsCast;
 use web_sys::console;
 use web_time::Instant;
 
+thread_local! {
+    static APPLICATION: RefCell<Option<Rc<RefCell<App>>>> = const { RefCell::new(None) };
+}
+
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_light_state(entity: &str, brightness: f32) -> bool {
+    APPLICATION.with(|application| {
+        application.borrow().as_ref().is_some_and(|app| app.borrow_mut().scene.set_light_state(entity, brightness))
+    })
+}
+
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_light_color(entity: &str, red: f32, green: f32, blue: f32) -> bool {
+    APPLICATION.with(|application| {
+        application
+            .borrow()
+            .as_ref()
+            .is_some_and(|app| app.borrow_mut().scene.set_light_color(entity, vec3(red, green, blue)))
+    })
+}
+
 #[wasm_bindgen::prelude::wasm_bindgen]
 extern "C" {
     fn laresProgress(stage: &str);
+
+    // web-sys' stable MouseEvent bindings return i32 and truncate slow drags.
+    #[wasm_bindgen::prelude::wasm_bindgen(extends = web_sys::PointerEvent, js_name = PointerEvent)]
+    type PrecisePointer;
+    #[wasm_bindgen::prelude::wasm_bindgen(method, getter, js_name = offsetX)]
+    fn precise_x(this: &PrecisePointer) -> f64;
+    #[wasm_bindgen::prelude::wasm_bindgen(method, getter, js_name = offsetY)]
+    fn precise_y(this: &PrecisePointer) -> f64;
 }
 
 #[wasm_bindgen::prelude::wasm_bindgen]
-pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
+pub async fn start(visibility: Vec<u8>, lighting: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
     panic::set_hook(Box::new(|panic| {
         console::error_1(&format!("Lares panic: {panic}").into());
     }));
-    run().await.map_err(|error| error.to_string().into())
+    run(visibility, lighting).await.map_err(|error| error.to_string().into())
 }
 
-async fn run() -> Result<(), Box<dyn Error>> {
+async fn run(visibility: Vec<u8>, lighting: Vec<u8>) -> Result<(), Box<dyn Error>> {
     let window = web_sys::window().ok_or("browser window is unavailable")?;
     let canvas = window
         .document()
@@ -60,51 +89,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
         longitude: setting("data-longitude", defaults.longitude),
         north_degrees: setting("data-north-degrees", defaults.north_degrees),
     };
-    let app = Rc::new(RefCell::new(App::with_sun(settings)));
+    let app = Rc::new(RefCell::new(App::with_baked_lighting(settings, &lighting)?));
+    drop(lighting);
+    APPLICATION.with(|application| *application.borrow_mut() = Some(Rc::clone(&app)));
     laresProgress("Preparing graphics…");
     next_frame().await;
     let physical = physical_size();
     let (mut gpu, surface) = Renderer::new(SurfaceTarget::Canvas(canvas.clone()), physical, ()).await?;
-    laresProgress("Caching SDF light visibility…");
-    let mut resolution = shadows::RESOLUTION;
-    let light_count = app.borrow().scene.lights.len() as u32;
-    let info = loop {
-        let info = AtlasInfo::new(light_count, resolution);
-        if info.size.max_element() <= gpu.device().limits().max_texture_dimension_2d as f32 {
-            break info;
-        }
-        resolution /= 2;
-    };
-    let (target, image) = gpu.add_image(info.size.to_array().map(|v| v as u32));
-    for tile in 0..light_count {
-        {
-            let app = app.borrow();
-            gpu.render(|render| {
-                render.surface(target, info.size, app.globals(info.size), |mut frame| {
-                    shadows::draw_tile(&mut frame, &app.scene, info, tile);
-                });
-            })?;
-        }
-        gpu_finished(gpu.queue()).await?;
-        next_frame().await;
-    }
-    let (scratch_target, scratch) = gpu.add_image(info.size.to_array().map(|v| v as u32));
-    for (destination, source, axis) in [(scratch_target, &image, Vec2::X), (target, &scratch, Vec2::Y)] {
-        for tile in 0..light_count {
-            let globals = app.borrow().globals(info.size);
-            gpu.render(|render| {
-                render.surface(destination, info.size, globals, |mut frame| {
-                    shadows::filter_tile(&mut frame, source, info, tile, axis);
-                });
-            })?;
-            gpu_finished(gpu.queue()).await?;
-            next_frame().await;
-        }
-    }
-    gpu.remove_surface(scratch_target);
-    drop(scratch);
-    gpu.remove_surface(target);
-    let shadows = ShadowAtlas { info, image };
+    laresProgress("Loading SDF light visibility…");
+    let shadows = ShadowAtlas::decode(&app.borrow().scene, &visibility)?;
+    drop(visibility);
     let (mut samples, mut images) = sample_images(&mut gpu, physical);
     laresProgress("Drawing the first view…");
     draw_sample(&mut gpu, &app.borrow(), surface, to_vec2(physical), &shadows, &samples, &images, 0, 1)?;
@@ -117,7 +111,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         let capture = canvas.clone();
         EventListener::new(&canvas, name, move |event| {
             let event = event.unchecked_ref::<web_sys::PointerEvent>();
-            let position = vec2(event.offset_x() as f32, event.offset_y() as f32);
+            let precise: &PrecisePointer = event.unchecked_ref();
+            let position = vec2(precise.precise_x() as f32, precise.precise_y() as f32);
             let viewport = vec2(capture.client_width() as f32, capture.client_height() as f32);
             let mut app = app.borrow_mut();
             match name {
@@ -142,6 +137,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     });
 
     let mut last_size = physical;
+    let mut last_render_size = physical;
+    let mut motion_resolution = MotionResolution::default();
+    let mut last_motion: Option<Instant> = None;
     let mut last_camera = app.borrow().camera;
     let mut last_lighting = app.borrow().scene.lighting_revision;
     let mut accumulation = Accumulation::new(interleaved(to_vec2(physical)));
@@ -157,7 +155,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
         let physical = physical_size();
         app.borrow_mut().scene.update_time(utc_now());
-        let changed = app.borrow().camera != last_camera
+        let camera_changed = app.borrow().camera != last_camera;
+        if camera_changed {
+            last_motion = Some(Instant::now());
+        }
+        let moving = last_motion.is_some_and(|time| time.elapsed().as_secs_f32() < 0.20);
+        let render_size = if moving { motion_resolution.extent(physical) } else { physical };
+        let changed = camera_changed
+            || render_size != last_render_size
             || physical != last_size
             || app.borrow().scene.lighting_revision != last_lighting;
         // Full-resolution samples converge to 4× spatial AA over four frames.
@@ -173,12 +178,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
             continue;
         }
         gpu.resize(surface, physical);
-        if physical != last_size {
+        if render_size != last_render_size {
             for sample in samples {
                 gpu.remove_surface(sample);
             }
-            (samples, images) = sample_images(&mut gpu, physical);
-            accumulation = Accumulation::new(interleaved(to_vec2(physical)));
+            (samples, images) = sample_images(&mut gpu, render_size);
+            accumulation = Accumulation::new(interleaved(to_vec2(render_size)));
         }
         let (phase, mask) = accumulation.advance(changed);
         let count = mask.count_ones();
@@ -197,10 +202,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
             last_lighting = app.scene.lighting_revision;
         }
         last_size = physical;
+        last_render_size = render_size;
         // Never queue another ray-traced frame before the previous one has
         // finished. Input events can still update the next camera meanwhile.
         gpu_finished(gpu.queue()).await?;
         frame_seconds = started.elapsed().as_secs_f64();
+        if moving {
+            motion_resolution.observe(frame_seconds as f32);
+        }
         completed = Instant::now();
         next_presented = (next_presented + interval).max(timestamp + interval * 0.5);
     }
@@ -223,9 +232,10 @@ fn draw_sample(
     mask: u32,
 ) -> Result<(), isthmus::RenderError> {
     gpu.render(|render| {
-        let checker = interleaved(size);
+        let render_size = Vec2::from_array(images[0].size().map(|value| value as f32));
+        let checker = interleaved(render_size);
         let sample = if checker { phase / 2 } else { phase };
-        app.draw(render, samples[sample as usize], size, shadows, phase, checker);
+        app.draw(render, samples[sample as usize], render_size, shadows, phase, checker);
         render.surface(surface, size, app.globals(size), |mut frame| {
             render::resolve(&mut frame, images, mask, checker);
         });

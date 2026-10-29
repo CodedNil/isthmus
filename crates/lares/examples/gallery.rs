@@ -3,27 +3,19 @@ use image::{
     Rgb, RgbImage,
     imageops::{FilterType, overlay, resize},
 };
-use std::{error::Error, fs, path::Path};
+use std::{error::Error, path::Path};
+
+#[path = "support/views.rs"]
+#[allow(dead_code, reason = "The gallery reads camera names without rendering")]
+mod views;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-    let views = [
-        "entrance",
-        "bookshelf",
-        "kitchen-fridge",
-        "kitchen-window",
-        "kitchen-cooker",
-        "lounge",
-        "desk",
-        "hall",
-        "bedroom",
-        "bathroom",
-        "ensuite",
-        "boiler-room",
-        "spare-room",
-        "storage-top",
-        "storage-bottom",
-    ];
+    let views: Vec<_> = views::all(0.0)
+        .into_iter()
+        .filter(|view| !matches!(view.name, "plan" | "overhead"))
+        .map(|view| view.name)
+        .collect();
     let mut sheet = RgbImage::from_pixel(800, 600 * views.len() as u32, Rgb([30, 31, 33]));
     for (row, view) in views.iter().enumerate() {
         let reference = assets.join(format!("references/{view}-reference.webp"));
@@ -36,12 +28,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let output = assets.join("references/comparison.webp");
     sheet.save(&output)?;
-    for old in ["comparison-lights-on.webp", "comparison-lights-off.webp"] {
-        let path = assets.join("references").join(old);
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-    }
     println!("{}: photograph left; evening lights on above daytime lights off at right", output.display());
     Ok(())
 }

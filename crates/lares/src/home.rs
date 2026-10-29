@@ -31,6 +31,7 @@ pub enum Material {
     Maple,
     MapleHorizontal,
     GlazedTile,
+    BathroomTile,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, ShaderData)]
@@ -39,6 +40,17 @@ pub enum Kind {
     #[default]
     Box,
     Bed,
+    Dresser,
+    Nightstand,
+    Vanity,
+    Wardrobe,
+    LinenStack,
+    TowelRail,
+    BathMat,
+    TowerFan,
+    RoundSpeaker,
+    ExtractorVent,
+    WasteBin,
     Sofa,
     Pillow,
     Table,
@@ -63,6 +75,7 @@ pub enum Kind {
     Toilet,
     Bath,
     Shower,
+    GlassPane,
     Radiator,
     Appliance,
     Chair,
@@ -81,6 +94,8 @@ pub enum Kind {
     WallSwords,
     Palm,
     SillPlant,
+    Alocasia,
+    ShieldLeaf,
     WallArt,
     SideTable,
     Blossom,
@@ -139,18 +154,20 @@ impl Object {
 
     pub fn extent(self) -> Vec3 {
         match self.kind {
-            Kind::Box | Kind::Ceiling | Kind::Downlight | Kind::Lamp => self.size * 0.5,
+            Kind::Box | Kind::Ceiling | Kind::Downlight | Kind::Lamp | Kind::GlassPane => self.size * 0.5,
             Kind::KitchenSink => self.size * 0.5 + Vec3::new(0.06, 0.06, 0.32),
+            Kind::Sink => self.size * 0.5 + Vec3::new(0.06, 0.06, 0.16),
+            Kind::Appliance => self.size * 0.5 + Vec3::new(0.10, 0.10, 0.23),
             Kind::Rug => self.size * 0.5 + Vec3::new(0.075, 0.075, 0.050),
             Kind::Ottoman => self.size * 0.5 + Vec3::splat(0.04),
             Kind::Chair => Vec3::new(0.39, 0.43, 0.68),
             Kind::Workstation => Vec3::new(0.73, 0.62, 0.75),
-            Kind::Plant | Kind::Blossom | Kind::Palm | Kind::SillPlant => {
+            Kind::Plant | Kind::Blossom | Kind::Palm | Kind::SillPlant | Kind::Alocasia => {
                 Vec3::new(self.size.x * 0.20, self.size.y * 0.20, self.size.z * 0.5)
             }
             Kind::SillArrangement | Kind::WallArt => self.size * 0.5 + Vec3::splat(0.05),
             Kind::Stem => self.size.abs() * 0.5 + Vec3::splat(0.004),
-            Kind::Leaf => Vec3::new(
+            Kind::Leaf | Kind::ShieldLeaf => Vec3::new(
                 self.size.x * 0.5 + 0.005,
                 self.size.y * 0.5 + 0.005,
                 self.size.z.abs() * 0.5 + self.size.x * 0.09 + self.size.y * 0.16 + 0.003,
@@ -280,6 +297,49 @@ impl Room {
         self
     }
 
+    fn bathroom_tiles(mut self) -> Self {
+        let half = self.outline.iter().copied().fold(Vec2::ZERO, |extent, point| extent.max(point.abs()));
+        // Half-height ceramic lining, split around each doorway.
+        let outline = self.outline.clone();
+        for (start, end) in outline.iter().zip(outline.iter().cycle().skip(1)).take(outline.len()) {
+            let axis = usize::from((end.x - start.x).abs() > (end.y - start.y).abs());
+            let across = 1 - axis;
+            let fixed = start[axis];
+            let inward = if axis == 0 { -(end.y - start.y).signum() } else { (end.x - start.x).signum() };
+            let mut intervals = vec![(start[across].min(end[across]), start[across].max(end[across]))];
+            for opening in &self.openings {
+                if opening.pos.z - opening.size.z * 0.5 > 0.02 || (opening.pos[axis] - fixed).abs() > 0.05 {
+                    continue;
+                }
+                let left = opening.pos[across] - opening.size[across] * 0.5;
+                let right = opening.pos[across] + opening.size[across] * 0.5;
+                intervals = intervals
+                    .into_iter()
+                    .flat_map(|(start, end)| [(start, end.min(left)), (start.max(right), end)])
+                    .filter(|(start, end)| end - start > 0.01)
+                    .collect();
+            }
+            for (start, end) in intervals {
+                let mut position = Vec3::ZERO;
+                let mut size = Vec3::new(0.018, 0.018, 1.0);
+                position[axis] = fixed + inward * 0.065;
+                position[across] = f32::midpoint(start, end);
+                size[across] = end - start;
+                self = self.furniture_material(Kind::Box, position, size, 0.0, Material::BathroomTile);
+            }
+        }
+        let shower = *self.furniture.iter().find(|object| object.kind == Kind::Shower).expect("bathroom shower");
+        for axis in 0..2 {
+            let mut position = shower.pos;
+            position[axis] += (shower.size[axis] * 0.5 - 0.014) * if axis == 0 && half.x < 1.0 { -1.0 } else { 1.0 };
+            position.z = 0.0;
+            let mut size = shower.size;
+            size[axis] = 0.018;
+            self = self.furniture_material(Kind::Box, position, size, 0.0, Material::BathroomTile);
+        }
+        self
+    }
+
     pub fn furniture(self, kind: Kind, pos: impl Into<Vec3>, size: impl Into<Vec3>, rotation: f32) -> Self {
         self.furniture_material(kind, pos, size, rotation, Material::Wood)
     }
@@ -323,8 +383,8 @@ fn hall() -> Room {
         .door(vec2(-1.7, 2.55), 0.0)
         .furniture(Kind::EntryDoor, (-1.7, 2.55, 0.0), (0.79, 0.045, 2.04), 0.0)
         .furniture(Kind::Radiator, (-0.425, 0.45, 0.0), (1.2, 0.1, 0.6), 0.0)
-        .furniture(Kind::ShoeStorage, (-1.30, 1.47, 0.0), (0.76, 0.22, 1.02), 90.0)
-        .furniture(Kind::SillPlant, (-1.30, 1.64, 1.025), (0.53, 0.53, 0.76), 0.0)
+        .furniture(Kind::ShoeStorage, (-1.30, 1.47, 0.0), (0.96, 0.17, 0.90), 90.0)
+        .furniture(Kind::Alocasia, (-1.35, 1.70, 0.902), (0.58, 0.58, 0.82), 0.0)
         .furniture(Kind::PosterBlue, (-1.215, 1.38, 1.36), (0.33, 0.02, 0.54), 90.0)
         .furniture(Kind::Mirror, (-1.215, 0.77, 0.61), (0.40, 0.035, 1.41), 90.0)
 }
@@ -419,7 +479,7 @@ fn kitchen() -> Room {
         .furniture(Kind::TrailingPlant, (-1.23, -0.075, 1.80), (0.30, 0.30, 0.42), -90.0)
         .furniture(Kind::TrailingPlant, (-1.23, 0.385, 1.83), (0.24, 0.24, 0.39), -90.0)
         .furniture(Kind::TrailingPlant, (1.07, 1.23, 1.608), (0.34, 0.34, 0.54), 0.0)
-        .furniture(Kind::AirFryer, (-1.27, -0.75, 0.905), (0.36, 0.38, 0.42), -90.0)
+        .furniture(Kind::AirFryer, (-1.27, -0.75, 0.905), (0.415, 0.27, 0.325), -90.0)
 }
 
 fn storage(pos: Vec2) -> Room {
@@ -432,32 +492,47 @@ fn bedroom() -> Room {
         .outline(&[(-1.95, -1.8), (1.95, -1.8), (1.95, 1.8), (-0.25, 1.8), (-0.25, 0.9), (-1.95, 0.9)])
         .door(vec2(-0.25, 1.35), -90.0)
         .window(vec2(0.0, -1.8), 0.0)
-        .furniture(Kind::Bed, (0.8, -0.45, 0.0), (1.4, 2.1, 0.55), 90.0)
-        .furniture(Kind::Cupboard, (1.625, -1.45, 0.0), (0.4, 0.55, 0.5), 90.0)
-        .furniture(Kind::Cupboard, (1.225, 1.45, 0.0), (1.35, 0.6, 2.0), 0.0)
-        .furniture(Kind::Cupboard, (-1.5, 0.08, 0.0), (1.54, 0.8, 0.8), -90.0)
+        .furniture(Kind::Bed, (0.8, -0.45, 0.0), (1.4, 2.1, 1.28), 90.0)
+        .furniture(Kind::Nightstand, (1.625, -1.45, 0.0), (0.4, 0.55, 0.5), 90.0)
+        .furniture(Kind::Wardrobe, (1.225, 1.45, 0.0), (1.35, 0.6, 2.0), 0.0)
+        .furniture(Kind::Dresser, (-1.5, 0.08, 0.0), (1.54, 0.48, 0.8), -90.0)
         .furniture(Kind::Radiator, (0.0, -1.7, 0.0), (1.4, 0.1, 0.6), 0.0)
+        .furniture(Kind::Curtain, (0.0, -1.56, 0.04), (1.65, 0.13, 2.20), 0.0)
+        .furniture(Kind::SillPlant, (-1.45, 0.42, 0.80), (0.30, 0.30, 0.36), 0.0)
+        .furniture(Kind::SillPlant, (-1.45, -0.35, 0.80), (0.23, 0.23, 0.29), 0.0)
+        .furniture(Kind::PosterBlue, (-1.87, 0.08, 1.13), (0.58, 0.025, 0.77), 90.0)
+        .furniture_material(Kind::Blossom, (1.625, -1.45, 0.50), (0.34, 0.34, 0.40), 0.0, Material::Ceramic)
+        .furniture(Kind::TowerFan, (1.60, 0.52, 0.0), (0.18, 0.18, 0.98), 90.0)
+        .furniture(Kind::RoundSpeaker, (-1.47, 0.03, 0.80), (0.27, 0.12, 0.31), -90.0)
 }
 
 fn ensuite() -> Room {
     Room::new(vec2(1.1, -1.4), vec2(1.6, 2.7), Material::Tile)
+        .outline(&[(-0.8, -1.35), (0.8, -1.35), (0.8, 0.35), (0.0, 0.35), (0.0, 1.35), (-0.8, 1.35)])
         .downlights("light.ensuite_downlight", &[(0.0, -0.4)])
         .downlights("light.ensuite_shower_downlight", &[(-0.4, 0.7)])
         .door(vec2(0.8, -0.85), 90.0)
-        .window(vec2(0.0, -1.35), 0.0)
+        .window_width(vec2(0.0, -1.35), 0.0, 0.8)
         .furniture(Kind::Shower, (-0.4, 0.65, 0.0), (0.7, 1.3, 2.0), 0.0)
         .furniture(Kind::Toilet, (-0.425, -0.9, 0.0), (0.40, 0.65, 0.80), -90.0)
         .furniture(Kind::Sink, (0.35, 0.075, 0.0), (0.45, 0.45, 0.85), 0.0)
-        .furniture(Kind::Radiator, (0.375, -1.25, 0.0), (0.7, 0.1, 0.6), 0.0)
+        .furniture(Kind::TowelRail, (0.40, -1.22, 0.16), (0.60, 0.08, 0.65), 0.0)
+        .furniture(Kind::GlassPane, (-0.4, 0.025, 0.14), (0.65, 0.006, 1.79), 0.0)
+        .furniture(Kind::GlassPane, (-0.075, 0.65, 0.14), (0.006, 1.24, 1.79), 0.0)
+        .furniture(Kind::BathMat, (0.18, -0.60, 0.005), (0.48, 0.75, 0.020), 0.0)
+        .furniture(Kind::Mirror, (0.35, 0.30, 1.02), (0.45, 0.035, 0.65), 0.0)
+        .furniture(Kind::SillPlant, (-0.22, -1.35, 1.0), (0.22, 0.22, 0.29), 0.0)
+        // Right jamb hinge; the leaf opens into the bedroom and clears the opening.
+        .bathroom_tiles()
 }
 
 fn boiler_room() -> Room {
-    Room::new(vec2(1.5, -0.55), vec2(0.8, 1.0), Material::Tile).door_width(vec2(0.0, 0.5), 180.0, 0.6).furniture(
-        Kind::Appliance,
-        (0.0, -0.1, 0.0),
-        (0.6, 0.6, 1.6),
-        0.0,
-    )
+    Room::new(vec2(1.5, -0.55), vec2(0.8, 1.0), Material::Floorboards)
+        .door_width(vec2(0.0, 0.5), 180.0, 0.6)
+        .furniture(Kind::Appliance, (0.0, -0.1, 0.0), (0.6, 0.6, 1.6), 180.0)
+        .furniture_material(Kind::Box, (0.0, -0.03, 1.79), (0.76, 0.87, 0.025), 0.0, Material::MapleHorizontal)
+        .furniture(Kind::LinenStack, (-0.16, -0.08, 1.82), (0.36, 0.51, 0.32), 0.0)
+        .furniture(Kind::LinenStack, (0.20, -0.08, 1.82), (0.29, 0.48, 0.25), 0.0)
 }
 
 fn spare_room() -> Room {
@@ -479,5 +554,15 @@ fn bathroom() -> Room {
         .furniture(Kind::Bath, (-0.75, 0.0, 0.0), (0.8, 1.9, 0.55), 0.0)
         .furniture(Kind::Toilet, (0.075, 0.625, 0.0), (0.40, 0.65, 0.80), 0.0)
         .furniture(Kind::Sink, (0.0, -0.725, 0.0), (0.45, 0.45, 0.85), -180.0)
+        .furniture(Kind::Vanity, (0.0, -0.725, 0.0), (0.49, 0.46, 0.65), -180.0)
         .furniture(Kind::Radiator, (1.1, -0.375, 0.0), (0.7, 0.1, 0.6), 90.0)
+        .furniture(Kind::GlassPane, (0.85, 0.12, 0.14), (0.55, 0.006, 1.79), 0.0)
+        .furniture(Kind::GlassPane, (0.575, 0.525, 0.14), (0.006, 0.80, 1.79), 0.0)
+        .furniture(Kind::WasteBin, (0.49, 0.78, 0.0), (0.17, 0.17, 0.29), 0.0)
+        .furniture(Kind::ExtractorVent, (0.20, 0.97, 1.99), (0.16, 0.035, 0.17), 180.0)
+        .furniture(Kind::BathMat, (-0.13, -0.30, 0.005), (0.48, 0.70, 0.020), 0.0)
+        .furniture(Kind::BathMat, (0.20, 0.42, 0.005), (0.45, 0.55, 0.020), 0.0)
+        .furniture(Kind::Mirror, (0.0, -0.94, 1.02), (0.50, 0.035, 0.65), 180.0)
+        .furniture_material(Kind::Box, (-1.01, 0.86, 0.0), (0.28, 0.20, 2.4), 0.0, Material::Paint)
+        .bathroom_tiles()
 }

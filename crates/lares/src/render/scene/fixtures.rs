@@ -44,7 +44,7 @@ pub(super) fn incident(light: super::Object, point: Vec3, emitter: Vec2) -> (Vec
         // The woven lamp's bulb is unknown: explicit 470 lm isotropic assumption.
         470.0 / (4.0 * PI * UNITS)
     };
-    let fade = (LIGHT_RANGE - distance).clamp(0.0, 1.0);
+    let fade = (LIGHT_RANGE - distance).clamp_num(0.0, 1.0);
     let radiance = light.emission_color * (light.emission * intensity * fade / (distance * distance).max_num(0.0025));
     (direction, radiance, distance)
 }

@@ -6,28 +6,40 @@ const WALNUT: Vec3 = vec3(0.33, 0.25, 0.19);
 
 #[inline(never)]
 pub(super) fn shoe_storage<S: Sample>(p: Vec3, size: Vec3) -> S {
-    let body = rounded_box(p - Vec3::Z * 0.035, size - vec3(0.0, 0.0, 0.07), 0.004);
-    let folded = vec3(p.x.abs(), p.y, p.z);
-    let row = if p.z < 0.02 { -0.215 } else { 0.225 };
-    let door = rounded_box(
-        folded - vec3(size.x * 0.25, size.y * 0.5 + 0.003, row),
-        vec3(size.x * 0.5 - 0.012, 0.018, 0.425),
-        0.003,
+    // STÄLL: four flush tilt-out fronts, a shallow carcass and two front
+    // feet. Dimensions include the feet; its back clears the skirting.
+    let bottom = -size.z * 0.5 + 0.085;
+    let height = size.z - 0.085;
+    let center = bottom + height * 0.5;
+    let upright =
+        rounded_box(vec3(p.x.abs() - size.x * 0.5 + 0.009, p.y, p.z - center), vec3(0.018, size.y, height), 0.0015);
+    let horizontal = rounded_box(
+        p - vec3(0.0, 0.0, if p.z > center { size.z * 0.5 - 0.009 } else { bottom + 0.009 }),
+        vec3(size.x, size.y, 0.018),
+        0.0015,
     );
-    let notch =
-        rounded_box(folded - vec3(size.x * 0.25, size.y * 0.5 + 0.005, row + 0.20), vec3(0.085, 0.045, 0.031), 0.009);
     let legs = rounded_box(
-        vec3(p.x.abs() - size.x * 0.45, p.y.abs() - size.y * 0.36, p.z + size.z * 0.46),
-        vec3(0.028, 0.028, 0.08),
-        0.003,
+        vec3(p.x.abs() - size.x * 0.5 + 0.019, p.y - size.y * 0.5 + 0.019, p.z + size.z * 0.5 - 0.044),
+        vec3(0.038, 0.038, 0.088),
+        0.002,
     );
-    let inset = rounded_box(p - vec3(0.0, size.y * 0.5, 0.02), vec3(size.x - 0.025, 0.022, 0.89), 0.002);
-    let top = rounded_box(p - Vec3::Z * (size.z * 0.5 - 0.012), vec3(size.x + 0.008, size.y + 0.008, 0.024), 0.004);
-    let shell = body.max_num(-inset).min_num(door.max_num(-notch)).min_num(legs).min_num(top);
-    S::new(shell, || (Material::Paint, vec3(0.25, 0.27, 0.29))).union(S::new(
-        rounded_box(p - vec3(0.0, size.y * 0.5 - 0.02, 0.02), vec3(size.x - 0.03, 0.012, 0.88), 0.002),
-        || (Material::Paint, IRON),
-    ))
+    let row_height = (height - 0.036 - 0.006) * 0.5;
+    let row = if p.z > center { bottom + 0.018 + row_height * 1.5 + 0.006 } else { bottom + 0.018 + row_height * 0.5 };
+    let q = vec3(p.x.abs() - (size.x - 0.036) * 0.25, p.y - size.y * 0.5 + 0.009, p.z - row);
+    let panel = rounded_box(q, vec3((size.x - 0.044) * 0.5, 0.018, row_height), 0.0015);
+    let handle = q - vec3(0.0, 0.0, row_height * 0.5 - 0.005);
+    let cutout = rounded_box(handle, vec3(0.094, 0.05, 0.045), 0.009);
+    let rim = rounded_box(vec3(handle.x, handle.z, 0.0), vec3(0.094, 0.045, 0.10), 0.009)
+        .max_num((handle.y - 0.010).abs() - 0.0015)
+        .max_num(-rounded_box(handle, vec3(0.089, 0.06, 0.040), 0.007))
+        .max_num(q.z - row_height * 0.5);
+    let inside =
+        rounded_box(p - vec3(0.0, -0.016, center), vec3(size.x - 0.036, size.y - 0.036, height - 0.036), 0.001);
+    S::new(upright.min_num(horizontal).min_num(legs).min_num(panel.max_num(-cutout)), || {
+        (Material::Paint, vec3(0.23, 0.25, 0.27))
+    })
+    .union(S::new(inside, || (Material::Paint, vec3(0.075, 0.082, 0.09))))
+    .union(S::new(rim, || (Material::Metal, vec3(0.40, 0.42, 0.43))))
 }
 
 #[inline(never)]
@@ -58,7 +70,7 @@ fn succulent<S: Sample>(p: Vec3, scale: f32) -> S {
 /// A few readable book spines, stacked volumes and planters. Keep the
 /// five-tier silhouette without tiny figurines or individually carved titles.
 fn display<S: Sample>(p: Vec3, tier: i32) -> S {
-    let cell = ((p.x + 0.22) / 0.044).round().clamp(0.0, 6.0);
+    let cell = ((p.x + 0.22) / 0.044).round().clamp_num(0.0, 6.0);
     let height = 0.20 + (cell * 1.7 + tier as f32).sin().abs() * 0.06;
     let book = p - vec3(-0.22 + cell * 0.044, -0.02, 0.018 + height * 0.5);
     let spine = rounded_box(book, vec3(0.037, 0.18, height), 0.002);
