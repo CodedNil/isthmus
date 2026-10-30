@@ -55,6 +55,7 @@ pub struct Shader {
     captures: Vec<Binding>,
     pub entry: syn::LitStr,
     blend: syn::Path,
+    format: Option<syn::Path>,
 }
 
 fn argument(expr: &mut Expr, name: &str) -> syn::Result<Option<Expr>> {
@@ -121,12 +122,18 @@ impl Shader {
         let Expr::Path(blend) = blend else {
             return Err(syn::Error::new_spanned(blend, "expected a Blend variant"));
         };
+        let format = argument(&mut frame, "format")?
+            .map(|format| match format {
+                Expr::Path(path) => Ok(path.path),
+                other => Err(syn::Error::new_spanned(other, "expected a TextureFormat variant")),
+            })
+            .transpose()?;
         if let Expr::MethodCall(call) = &frame
-            && ["blend", "upload", "primitive", "fragment"].iter().any(|name| call.method == *name)
+            && ["format", "blend", "upload", "primitive", "fragment"].iter().any(|name| call.method == *name)
         {
             return Err(syn::Error::new_spanned(
                 call,
-                "shader operations must occur once, in blend/upload/primitive/fragment order",
+                "shader operations must occur once, in format/blend/upload/primitive/fragment order",
             ));
         }
         let inputs = captures.iter().map(|Binding { name, ty, .. }| quote!(#name: #ty));
@@ -143,7 +150,7 @@ impl Shader {
             .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3));
         let entry =
             syn::LitStr::new(&format!("isthmus_{hash:x}_{line}_{column}_fragment"), proc_macro2::Span::call_site());
-        Ok(Self { declaration, frame, stage, fragment, captures, entry, blend: blend.path })
+        Ok(Self { declaration, frame, stage, fragment, captures, entry, blend: blend.path, format })
     }
 
     pub fn vertex_entry(&self) -> String {
@@ -154,12 +161,19 @@ impl Shader {
         self.captures.iter().filter(|capture| capture.kind == CaptureKind::Image).map(|capture| &capture.name)
     }
 
-    pub fn metadata(&self) -> TokenStream {
+    pub fn metadata(&self, isthmus: &TokenStream) -> TokenStream {
         let (name, vertex) = (&self.entry, self.vertex_entry());
         let blend = &self.blend.segments.last().unwrap().ident;
         let images = self.images().count();
+        let format = self.format.as_ref().map_or_else(
+            || quote!(None),
+            |format| {
+                let variant = &format.segments.last().unwrap().ident;
+                quote!({ use #isthmus::wgpu::TextureFormat; Some(TextureFormat::#variant) })
+            },
+        );
         quote!(ShaderEntry {
-            name: #name, blend: Blend::#blend, images: #images,
+            name: #name, blend: Blend::#blend, images: #images, format: #format,
             code: [
                 include_str!(concat!(env!("OUT_DIR"), "/", #vertex, ".wgsl")),
                 include_str!(concat!(env!("OUT_DIR"), "/", #name, ".wgsl")),

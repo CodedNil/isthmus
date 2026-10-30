@@ -82,7 +82,11 @@ impl Gpu {
                     fragment: Some(wgpu::FragmentState {
                         module: &fragment,
                         entry_point: None,
-                        targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: entry.format.unwrap_or(format),
+                            blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
                     }),
                     primitive: wgpu::PrimitiveState {

@@ -45,7 +45,7 @@ fn face(item: Object, axis: u32, negative: bool) -> (u32, UVec2) {
     (item.surface_cache + offset + u32::from(negative) * shape.x * shape.y, shape)
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, ShaderData)]
 pub(super) struct Lookup {
     indices: UVec4,
     weights: Vec4,

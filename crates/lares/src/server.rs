@@ -1,5 +1,4 @@
-use crate::bake::ensure_assets;
-use axum::Router;
+use crate::{bake::ensure_assets, presence};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::{net::TcpListener, task::spawn_blocking};
 use tower_http::services::{ServeDir, ServeFile};
@@ -16,7 +15,7 @@ pub async fn serve(port: u16) {
             return;
         }
     }
-    let app = Router::new().fallback_service(
+    let app = presence::router().fallback_service(
         ServeDir::new(FRONTEND)
             .precompressed_gzip()
             .not_found_service(ServeFile::new(format!("{FRONTEND}/index.html"))),

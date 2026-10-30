@@ -20,6 +20,7 @@ impl Ray {
         Self { origin, inverse }
     }
 
+    #[inline(never)]
     pub(super) fn bounds(&self, min: Vec3, max: Vec3) -> (f32, f32) {
         let a = (min - self.origin) * self.inverse;
         let b = (max - self.origin) * self.inverse;
@@ -35,6 +36,7 @@ impl Ray {
 /// Validated, slope-adaptive over-relaxation. Consecutive samples estimate the
 /// largest step whose empty spheres overlap; every trial is checked before it
 /// is accepted. Failed trials return to the last certified sphere boundary.
+#[inline(never)]
 pub(super) fn march(
     origin: Vec3,
     direction: Vec3,
@@ -195,6 +197,7 @@ pub(super) fn stem(o: Vec3, d: Vec3, size: Vec3) -> f32 {
     nearest
 }
 
+#[inline(never)]
 pub(super) fn normal(point: Vec3, distance: impl Fn(Vec3) -> f32) -> Vec3 {
     let a = vec3(1.0, -1.0, -1.0);
     let b = vec3(-1.0, -1.0, 1.0);

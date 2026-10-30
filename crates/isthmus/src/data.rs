@@ -298,12 +298,17 @@ impl<T: ShaderData, const N: usize> ShaderData for [T; N] {
         self
     }
 
-    #[expect(clippy::needless_range_loop, reason = "Rust-GPU cannot lower the array slice iterators")]
     unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
         let mut values = Self::ZERO;
-        for index in 0..N {
-            // SAFETY: Each element lies within the complete array guaranteed by the caller.
-            values[index] = unsafe { T::read_unchecked(words, offset + index * T::WORDS) };
+        let mut index = 0;
+        while index < N {
+            // SAFETY: The caller guarantees the complete encoded source.
+            let value = unsafe { T::read_unchecked(words, offset + index * T::WORDS) };
+            // SAFETY: The loop bounds the destination, without a shader panic path.
+            unsafe {
+                *values.index_unchecked_mut(index) = value;
+            }
+            index += 1;
         }
         values
     }

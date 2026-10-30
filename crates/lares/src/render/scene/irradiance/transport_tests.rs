@@ -249,6 +249,23 @@ fn baked_controls_match_fresh_transport_through_source_changes_and_atomic_daylig
     let mut fresh = Scene::new_at(&rooms, MIDNIGHT, SunSettings::default());
     let bytes = fresh.encode_light_controls().unwrap();
     let mut baked = Scene::from_baked_at(&rooms, MIDNIGHT, SunSettings::default(), &bytes).unwrap();
+    assert_eq!(baked.transport_statistics().0, 0, "runtime must not retain transport rays");
+    assert!(baked.transport_statistics().2 < fresh.transport_statistics().2);
+    for hour in [6.0, 12.0, 18.0, 0.0] {
+        let time = MIDNIGHT + hour * 3600.0;
+        fresh.set_time(time);
+        baked.set_time(time);
+        for (a, b) in fresh.probes.iter().zip(&baked.probes) {
+            for (a, b) in [a.light.constant, a.light.x, a.light.y, a.light.z].into_iter().zip([
+                b.light.constant,
+                b.light.x,
+                b.light.y,
+                b.light.z,
+            ]) {
+                assert!((a - b).length() < 0.002 + a.length() * 0.002, "packed daylight must preserve energy");
+            }
+        }
+    }
     for color in [Vec3::ONE, vec3(0.2, 0.7, 0.4)] {
         for brightness in [0.0, 0.25, 1.0] {
             fresh.set_light_color("light.test", color);

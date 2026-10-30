@@ -1,15 +1,20 @@
-//! Lossless solved fixture responses. No ray paths or temporal state in this asset.
-use super::{Irradiance, cache::Cache};
+//! Quantized solved lighting responses and lossless receiver geometry.
+use super::cache::{Cache, Packed};
+use crate::{
+    home::Object,
+    render::{Sun, acceleration::Node},
+};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use isthmus::glam::Vec3;
+use isthmus::ShaderData;
 use std::{
     collections::BTreeMap,
     io::{self, Read, Write},
 };
 
 pub struct Controls {
+    pub transport: Cache,
     pub active: Box<[usize]>,
-    pub responses: BTreeMap<Vec<u32>, Box<[Irradiance]>>,
+    pub responses: BTreeMap<Vec<u32>, Box<[Packed]>>,
 }
 
 fn number(input: &mut impl Read) -> Result<u32, io::Error> {
@@ -23,7 +28,7 @@ impl Controls {
         let mut input = GzDecoder::new(bytes);
         let mut header = [0; 16];
         input.read_exact(&mut header).map_err(|_error| "invalid lighting asset")?;
-        if &header[..8] != b"LARESL01" || header[8..] != signature.to_le_bytes() {
+        if &header[..8] != b"LARESL04" || header[8..] != signature.to_le_bytes() {
             return Err("lighting asset is stale; rebuild with just lares");
         }
         let mut parse = || -> Result<Self, io::Error> {
@@ -43,31 +48,47 @@ impl Controls {
                 let slots: Vec<_> = (0..fixtures).map(|_| number(&mut input)).collect::<Result<_, _>>()?;
                 let mut values = Vec::with_capacity(count);
                 for _ in 0..count {
-                    let mut vector = || -> Result<Vec3, io::Error> {
-                        Ok(Vec3::new(
-                            f32::from_bits(number(&mut input)?),
-                            f32::from_bits(number(&mut input)?),
-                            f32::from_bits(number(&mut input)?),
-                        ))
-                    };
-                    values.push(Irradiance { constant: vector()?, x: vector()?, y: vector()?, z: vector()? });
+                    let mut words = [0; 4];
+                    for word in &mut words {
+                        *word = number(&mut input)?;
+                    }
+                    let value = Packed::read(&words, 0);
+                    if !value.valid() {
+                        return Err(io::Error::other("invalid lighting coefficients"));
+                    }
+                    values.push(value);
                 }
                 responses.insert(slots, values.into_boxed_slice());
+            }
+            let transport = Cache::decode_transport(&mut input, count)
+                .ok_or_else(|| io::Error::other("invalid transport layout"))?;
+            if active.iter().any(|&index| index >= transport.probe_count())
+                || responses
+                    .keys()
+                    .any(|slots| slots.is_empty() || slots.iter().any(|&slot| slot as usize >= transport.light_count()))
+            {
+                return Err(io::Error::other("invalid active receiver"));
             }
             let mut tail = [0];
             if input.read(&mut tail)? != 0 {
                 return Err(io::Error::other("oversized lighting payload"));
             }
-            Ok(Self { active, responses })
+            Ok(Self { transport, active, responses })
         };
         parse().map_err(|_error| "corrupt lighting asset")
     }
 }
 
 impl Cache {
-    pub(crate) fn encode_controls(&self, signature: u64) -> Result<Vec<u8>, io::Error> {
+    pub(crate) fn encode_controls(
+        &mut self,
+        signature: u64,
+        sun: Sun,
+        objects: &[Object],
+        nodes: &[Node],
+    ) -> Result<Vec<u8>, io::Error> {
         let mut output = GzEncoder::new(Vec::new(), Compression::best());
-        output.write_all(b"LARESL01")?;
+        output.write_all(b"LARESL04")?;
         output.write_all(&signature.to_le_bytes())?;
         output.write_all(&(self.active.len() as u32).to_le_bytes())?;
         output.write_all(&(self.responses.len() as u32).to_le_bytes())?;
@@ -80,13 +101,15 @@ impl Cache {
                 output.write_all(&slot.to_le_bytes())?;
             }
             for value in values {
-                for vector in [value.constant, value.x, value.y, value.z] {
-                    for channel in vector.to_array() {
-                        output.write_all(&channel.to_le_bytes())?;
-                    }
+                let mut words = [0; 4];
+                value.write(&mut words, 0);
+                for word in words {
+                    output.write_all(&word.to_le_bytes())?;
                 }
             }
         }
+        let baked = self.daylight.is_none().then(|| self.bake_daylight(sun, objects, nodes));
+        self.encode_transport(&mut output, baked.as_ref().or(self.daylight.as_ref()).unwrap())?;
         output.finish()
     }
 }

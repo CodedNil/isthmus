@@ -1,0 +1,44 @@
+{
+  "sensor": "192.168.0.133",
+  "status": "Active three-point affine calibration after sensor tilt",
+  "desk": {
+    "captured_at": "2026-10-29T21:50:42.931Z",
+    "samples": 11,
+    "sensor_metres": [
+      1.86,
+      4.88
+    ],
+    "authored_plan_metres": [
+      -0.52,
+      -1.83
+    ]
+  },
+  "kitchen": {
+    "captured_from": "2026-10-29T21:52:31.628Z",
+    "captured_to": "2026-10-29T21:52:49.654Z",
+    "samples": 16,
+    "sensor_metres": [
+      -2.95,
+      2.45
+    ],
+    "authored_plan_metres": [
+      -4.2,
+      1.5
+    ],
+    "definition": "Centre of kitchen at authored room origin"
+  },
+  "hall": {
+    "captured_from": "2026-10-29T21:52:55.635Z",
+    "captured_to": "2026-10-29T21:53:07.335Z",
+    "samples": 11,
+    "sensor_metres": [
+      -0.69,
+      6.07
+    ],
+    "authored_plan_metres": [
+      -0.35,
+      0.5
+    ],
+    "definition": "Centre of entrance-corridor intersection with open lounge, from supplied image"
+  }
+}

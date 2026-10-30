@@ -10,6 +10,7 @@ use quote::{format_ident, quote};
 use spirv_builder::{ModuleResult, SpirvBuilder, SpirvMetadata};
 use std::{collections::BTreeMap, env, fs, path::Path};
 
+mod optimize;
 mod source;
 mod syntax;
 
@@ -157,8 +158,22 @@ pub fn build(source: &str) -> Result<()> {
         if module.entry_points.is_empty() {
             bail!("shader entry {name} was not exported");
         }
+        // Each stage owns a separate module. Keep its GPU entry name stable
+        // when unrelated Rust edits move shader! declarations to new lines.
+        module.entry_points[0].name = "main".into();
         compact(&mut module, KeepUnused::No);
-        let info = validator.validate(&module)?;
+        let mut info = validator.validate(&module)?;
+        if package
+            .metadata
+            .get("isthmus")
+            .and_then(|value| value.get("optimize-shaders"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+            && module.entry_points[0].stage == naga::ShaderStage::Fragment
+        {
+            module = optimize::shader(&module, &info)?;
+            info = validator.validate(&module)?;
+        }
         // Tint rejects Naga's rounded decimal spelling of the largest finite float.
         let code =
             write_string(&module, &info, WriterFlags::empty())?.replace(&format!("{}f", f32::MAX), "0x1.fffffep+127f");
@@ -167,7 +182,7 @@ pub fn build(source: &str) -> Result<()> {
         validator.validate(&wgsl::parse_str(&code)?)?;
         write_if_changed(&output.join(format!("{name}.wgsl")), &code)?;
     }
-    let entries = generated.shaders.iter().map(syntax::shader::Shader::metadata);
+    let entries = generated.shaders.iter().map(|shader| shader.metadata(&quote!(::#isthmus)));
     write_if_changed(
         &output.join("isthmus.manifest.rs"),
         &quote!({

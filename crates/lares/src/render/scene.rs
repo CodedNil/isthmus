@@ -5,7 +5,7 @@ use super::{
 };
 use crate::home::{Kind, Material, Object};
 use core::f32::consts::PI;
-use isthmus::prelude::*;
+use isthmus::{prelude::*, spirv_std::arch::kill};
 #[cfg(not(target_arch = "spirv"))]
 use std::sync::OnceLock;
 
@@ -354,6 +354,7 @@ fn intersect(item: Object, origin: Vec3, direction: Vec3, enter: f32, exit: f32,
     }
 }
 
+#[inline(never)]
 fn bounds_normal(local: Vec3, size: Vec3) -> Vec3 {
     let face = (local.abs() - size * 0.5).abs();
     if face.z <= face.x && face.z <= face.y {
@@ -378,6 +379,368 @@ fn object_normal(item: Object, local: Vec3) -> Vec3 {
         (local + item.size * 0.5 - item.size * along).normalize()
     } else {
         trace::normal(local, |p| render_furniture::<Distance>(item.kind, p, item.size).0)
+    }
+}
+
+// Four half-float channels carry 59 payload bits without denormals or infinities.
+// Each channel encodes 15 bits in sign, four exponent bits and ten mantissa bits.
+pub(super) const VISIBILITY_OBJECTS: u32 = 8191;
+const SUN_VISIBLE: u32 = 1 << 13;
+const REFLECTED: u32 = 1 << 14;
+const GLAZED: u32 = 1 << 15;
+const fn half_payload(value: u32) -> f32 {
+    f32::from_bits(((value & 16384) << 17) | ((((value >> 10) & 15) + 113) << 23) | ((value & 1023) << 13))
+}
+const fn read_half_payload(value: f32) -> u32 {
+    let bits = value.to_bits();
+    ((bits >> 17) & 16384) | ((((bits >> 23) & 255) - 113) << 10) | ((bits >> 13) & 1023)
+}
+fn octahedral(normal: Vec3) -> Vec2 {
+    let normal = normal / normal.abs().element_sum().max_num(0.00001);
+    let signs = vec2(if normal.x >= 0.0 { 1.0 } else { -1.0 }, if normal.y >= 0.0 { 1.0 } else { -1.0 });
+    if normal.z < 0.0 { (Vec2::ONE - normal.yx().abs()) * signs } else { normal.xy() }
+}
+fn decode_normal(value: u32) -> Vec3 {
+    let plane = uvec2(value & 511, value >> 9).as_vec2() * (2.0 / 511.0) - Vec2::ONE;
+    let normal = plane.extend(1.0 - plane.abs().element_sum());
+    let correction = (-normal.z).clamp_num(0.0, 1.0);
+    vec3(
+        normal.x + if normal.x >= 0.0 { -correction } else { correction },
+        normal.y + if normal.y >= 0.0 { -correction } else { correction },
+        normal.z,
+    )
+    .normalize()
+}
+fn encode_visibility(object: u32, flags: u32, height: f32, normal: Vec3, contact: f32) -> Vec4 {
+    let height = ((height + 0.2) * (131_071.0 / 3.2)).round().clamp_num(0.0, 131_071.0) as u32;
+    let normal = ((octahedral(normal) * 0.5 + Vec2::splat(0.5)) * 511.0).round().as_uvec2();
+    let normal = normal.x | (normal.y << 9);
+    let contact = (contact.clamp_num(0.0, 1.0) * 255.0).round() as u32;
+    vec4(
+        half_payload(object | (flags & (SUN_VISIBLE | REFLECTED))),
+        half_payload(height & 32767),
+        half_payload((height >> 15) | ((flags & GLAZED) >> 13) | (contact << 3) | ((normal >> 14) << 11)),
+        half_payload((normal & 16383) | ((flags & (GLAZED << 1)) >> 2)),
+    )
+}
+fn primary_direction(globals: Globals, pixel: Vec2, size: Vec2, pixel_size: f32) -> Vec3 {
+    let ndc = (pixel + subpixel(globals.sample_index) * 0.5 * pixel_size) / size * 2.0 - 1.0;
+    (globals.forward + globals.right * ndc.x - globals.up * ndc.y).normalize()
+}
+
+pub(super) fn visibility_pixel(
+    globals: Globals,
+    nodes: &[Node],
+    objects: &[Object],
+    contacts: &[u32],
+    pixel: Vec2,
+    size: Vec2,
+    pixel_size: f32,
+) -> Vec4 {
+    let mut origin = globals.eye;
+    let mut direction = primary_direction(globals, pixel, size, pixel_size);
+    let mut flags = 0;
+    let mut crossing = 0;
+    while crossing < 6 {
+        crossing += 1;
+        let (distance, object) = cast::<false, true>(origin, direction, nodes, objects, globals.pixel_angle, FAR);
+        if distance >= FAR {
+            break;
+        }
+        let item = objects[object as usize];
+        let point = origin + direction * distance;
+        let local = unrotate_z(point - item.pos, item.rotation);
+        if item.kind == Kind::GlassPane {
+            let normal = rotate_z(bounds_normal(local, item.size), item.rotation).abs();
+            let axis = if normal.x > 0.5 {
+                1
+            } else if normal.y > 0.5 {
+                2
+            } else {
+                3
+            };
+            flags = (flags & !(GLAZED * 3)) | (axis << 15);
+            let ray =
+                trace::Ray::new(unrotate_z(origin - item.pos, item.rotation), unrotate_z(direction, item.rotation));
+            let (_, exit) = ray.bounds(-item.size * 0.5, item.size * 0.5);
+            origin += direction * (exit + 0.0005);
+            continue;
+        }
+        if flags & REFLECTED == 0
+            && item.kind == Kind::Mirror
+            && entry::mirror::<Hit>(local, item.size).material == Material::Mirror
+        {
+            let normal = rotate_z(object_normal(item, local), item.rotation);
+            direction -= normal * (2.0 * direction.dot(normal));
+            origin = point + normal * 0.002;
+            flags |= REFLECTED;
+            continue;
+        }
+        let normal = rotate_z(object_normal(item, local), item.rotation);
+        let cap = globals.eye.z > super::WALL_HEIGHT
+            && point.z >= super::WALL_HEIGHT - 0.001
+            && normal.z > 0.5
+            && matches!(item.kind, Kind::Box | Kind::Downlight);
+        if globals.sun.radiance.max_element() > 0.0 && normal.dot(globals.sun.direction) > 0.0 {
+            let start = point + normal * 0.001 + Vec3::Z * if cap { super::CEILING_THICKNESS + 0.02 } else { 0.0 };
+            let light = (globals.sun.direction + (subpixel(globals.sample_index) * 0.05).extend(0.0)).normalize();
+            if cast::<true, false>(start, light, nodes, objects, 0.0, FAR).0 > 0.0 {
+                flags |= SUN_VISIBLE;
+            }
+        }
+        let contact = if cap || item.exterior.dot(normal) > 0.5 {
+            1.0
+        } else {
+            contacts::visibility(
+                contacts,
+                objects,
+                object,
+                point,
+                if item.kind == Kind::Rug { Vec3::Z } else { normal },
+                globals.sample_index,
+            )
+        };
+        return encode_visibility(object, flags, point.z, normal, contact);
+    }
+    encode_visibility(VISIBILITY_OBJECTS, 0, 0.0, Vec3::Z, 1.0)
+}
+
+#[derive(Clone, Copy)]
+struct VisibleSurface {
+    object: u32,
+    flags: u32,
+    normal: Vec3,
+    contact: f32,
+    origin: Vec3,
+    direction: Vec3,
+    nearest: f32,
+    surface_height: f32,
+    reflected_distance: f32,
+}
+fn visible_surface(
+    globals: Globals,
+    objects: &[Object],
+    pixel: Vec2,
+    size: Vec2,
+    pixel_size: f32,
+    record: Vec4,
+    mirror: u32,
+) -> VisibleSurface {
+    let word = read_half_payload(record.x);
+    let extra = read_half_payload(record.z);
+    let object = word & VISIBILITY_OBJECTS;
+    let height = (read_half_payload(record.y) | ((extra & 3) << 15)) as f32 * (3.2 / 131_071.0) - 0.2;
+    let normal = decode_normal((read_half_payload(record.w) & 16383) | ((extra >> 11) << 14));
+    let contact = ((extra >> 3) & 255) as f32 / 255.0;
+    let mut origin = globals.eye;
+    let mut direction = primary_direction(globals, pixel, size, pixel_size);
+    let mut surface_height = (height / 3.0).clamp_num(0.0, 1.0);
+    let reflected_distance = if word & REFLECTED != 0 {
+        let item = objects[mirror as usize];
+        let local = unrotate_z(origin - item.pos, item.rotation);
+        let ray = unrotate_z(direction, item.rotation);
+        let plane = if ray.y < 0.0 { 0.015 } else { 0.009 };
+        let distance = (plane - local.y) / ray.y;
+        let normal = rotate_z(vec3(0.0, if ray.y < 0.0 { 1.0 } else { -1.0 }, 0.0), item.rotation);
+        let point = origin + direction * distance;
+        surface_height = (point.z / 3.0).clamp_num(0.0, 1.0);
+        origin = point + normal * 0.002;
+        direction -= normal * (2.0 * direction.dot(normal));
+        distance
+    } else {
+        0.0
+    };
+    let nearest = ((height - origin.z) / direction.z).max_num(0.0);
+    VisibleSurface {
+        object,
+        flags: word | ((extra & 4) << 13) | ((read_half_payload(record.w) & 16384) << 2),
+        normal,
+        contact,
+        origin,
+        direction,
+        nearest,
+        surface_height,
+        reflected_distance,
+    }
+}
+
+pub(super) fn shade_visibility<const GROUP: u32>(
+    globals: Globals,
+    nodes: &[Node],
+    objects: &[Object],
+    lights: &[u32],
+    light_masks: &[u32],
+    contacts: &[u32],
+    grid: irradiance::Grid,
+    probes: &[irradiance::Probe],
+    pixel: Vec2,
+    size: Vec2,
+    pixel_size: f32,
+    time: f32,
+    atlas: &Image,
+    info: super::shadows::AtlasInfo,
+    record: Vec4,
+    mirror: u32,
+    material: Vec4,
+) -> Vec4 {
+    let hit = visible_surface(globals, objects, pixel, size, pixel_size, record, mirror);
+    let VisibleSurface {
+        object,
+        flags: word,
+        normal,
+        contact,
+        origin,
+        direction,
+        nearest,
+        surface_height,
+        reflected_distance,
+    } = hit;
+    if object == VISIBILITY_OBJECTS {
+        if GROUP > 1 {
+            kill();
+        }
+        return background(globals.eye, globals.sun, globals.exposure, globals.white_balance).extend(0.0);
+    }
+    let (material, indirect) = decode_material(material);
+    let family = materials::family(material.material);
+    if GROUP != 0 && GROUP != family {
+        kill();
+    }
+    let glass_axis = (word >> 15) & 3;
+    let facing = match glass_axis {
+        1 => direction.x.abs(),
+        2 => direction.y.abs(),
+        _ => direction.z.abs(),
+    };
+    let fresnel = if glass_axis != 0 { 0.078 + 0.922 * (1.0 - facing).powf(5.0) } else { 0.0 };
+    let transmission =
+        vec3(0.985, 0.995, 0.990).lerp(Vec3::ONE, if glass_axis == 0 { 1.0 } else { 0.0 }) * (1.0 - fresnel);
+    let glass_light = indirect * (fresnel * 0.5 / PI);
+    shade_surface::<true, true, GROUP>(
+        globals,
+        nodes,
+        objects,
+        lights,
+        light_masks,
+        contacts,
+        grid,
+        probes,
+        origin,
+        direction,
+        nearest,
+        object,
+        surface_height,
+        reflected_distance,
+        glass_light,
+        transmission,
+        time,
+        globals.sample_index,
+        atlas,
+        info,
+        if word & SUN_VISIBLE != 0 { 1.0 } else { 0.0 },
+        normal,
+        contact,
+        material,
+        indirect,
+    )
+}
+
+fn encode_material(surface: Hit, light: Vec3) -> Vec4 {
+    let tint = (surface.tint.clamp_num(Vec3::ZERO, Vec3::ONE) * 255.0).round().as_uvec3();
+    let material = tint.x | (tint.y << 8) | (tint.z << 16) | ((surface.material as u32) << 24);
+    let exponent = light.max_element().max_num(1.0e-19).log2().ceil().clamp_num(-63.0, 63.0);
+    let rgb = (light * (255.0 * (-exponent).exp2())).round().clamp_num(Vec3::ZERO, Vec3::splat(255.0)).as_uvec3();
+    let illumination = rgb.x | (rgb.y << 8) | (rgb.z << 16) | (((exponent as i32 + 63) as u32) << 24);
+    vec4(
+        half_payload(material & 32767),
+        half_payload((material >> 15) | ((illumination & 1) << 14)),
+        half_payload((illumination >> 1) & 32767),
+        half_payload(illumination >> 16),
+    )
+}
+fn decode_material(record: Vec4) -> (Hit, Vec3) {
+    let middle = read_half_payload(record.y);
+    let material = read_half_payload(record.x) | ((middle & 16383) << 15);
+    let light = (middle >> 14) | (read_half_payload(record.z) << 1) | (read_half_payload(record.w) << 16);
+    let tint = uvec3(material & 255, (material >> 8) & 255, (material >> 16) & 255).as_vec3() / 255.0;
+    let exponent = ((light >> 24) as i32 - 63) as f32;
+    let rgb = uvec3(light & 255, (light >> 8) & 255, (light >> 16) & 255).as_vec3() * (exponent.exp2() / 255.0);
+    (Hit::new(0.0, || (material_from_word(material >> 24), tint)), rgb)
+}
+
+fn visible_material(item: Object, local: Vec3) -> Hit {
+    let mut surface = surface_at(item, local);
+    if item.kind == Kind::PosterBlue {
+        let tint = surface.tint;
+        surface.tint = vec3(tint.z * 0.72, tint.x * 0.72 + tint.y * 0.28, tint.x * 0.55 + tint.z * 0.60);
+    }
+    if item.kind == Kind::Stem && item.material == Material::Foliage {
+        (surface.material, surface.tint) = (Material::Foliage, vec3(0.25, 0.38, 0.12));
+    }
+    surface
+}
+
+pub(super) fn material_visibility(
+    globals: Globals,
+    objects: &[Object],
+    grid: irradiance::Grid,
+    probes: &[irradiance::Probe],
+    pixel: Vec2,
+    size: Vec2,
+    pixel_size: f32,
+    record: Vec4,
+    mirror: u32,
+) -> Vec4 {
+    let hit = visible_surface(globals, objects, pixel, size, pixel_size, record, mirror);
+    if hit.object == VISIBILITY_OBJECTS {
+        return encode_material(Hit::new(0.0, || (Material::Wood, Vec3::ZERO)), Vec3::ZERO);
+    }
+    let item = objects[hit.object as usize];
+    let point = hit.origin + hit.direction * hit.nearest;
+    let material = visible_material(item, unrotate_z(point - item.pos, item.rotation));
+    let cap = globals.eye.z > super::WALL_HEIGHT
+        && point.z >= super::WALL_HEIGHT - 0.001
+        && hit.normal.z > 0.5
+        && matches!(item.kind, Kind::Box | Kind::Downlight);
+    let lighting_point = point + Vec3::Z * if cap { super::CEILING_THICKNESS + 0.02 } else { 0.0 };
+    let cached = if item.surface_cache != u32::MAX && !cap {
+        irradiance::Grid::surface(probes, item, unrotate_z(point - item.pos, item.rotation), hit.normal)
+    } else {
+        Vec4::ZERO
+    };
+    let light = if cached.w >= 0.95 {
+        cached.truncate()
+    } else {
+        grid.sample(probes, lighting_point + hit.normal * 0.002, hit.normal)
+            .lerp(cached.truncate(), (cached.w / 0.95).min_num(1.0))
+    };
+    encode_material(material, light)
+}
+
+const fn material_from_word(word: u32) -> Material {
+    match word {
+        1 => Material::Carpet,
+        2 => Material::Tile,
+        3 => Material::Fabric,
+        4 => Material::Satin,
+        5 => Material::Stone,
+        6 => Material::Ceramic,
+        7 => Material::Metal,
+        8 => Material::Paint,
+        9 => Material::Foliage,
+        10 => Material::VariegatedFoliage,
+        11 => Material::MarbledFoliage,
+        12 => Material::Soil,
+        13 => Material::Floorboards,
+        14 => Material::Shag,
+        15 => Material::Knit,
+        16 => Material::Emissive,
+        17 => Material::Mirror,
+        18 => Material::Maple,
+        19 => Material::MapleHorizontal,
+        20 => Material::GlazedTile,
+        21 => Material::BathroomTile,
+        _ => Material::Wood,
     }
 }
 
@@ -451,6 +814,7 @@ pub fn pixel_cached(
     )
 }
 
+#[cfg(test)]
 pub fn pixel_single(
     globals: Globals,
     nodes: &[Node],
@@ -467,7 +831,7 @@ pub fn pixel_single(
     atlas: &Image,
     info: super::shadows::AtlasInfo,
     sample: u32,
-) -> Vec3 {
+) -> Vec4 {
     let ndc = (pixel + subpixel(sample) * 0.5 * pixel_size) / screen_size * 2.0 - 1.0;
     let direction = (globals.forward + globals.right * ndc.x - globals.up * ndc.y).normalize();
     shade::<true>(
@@ -485,13 +849,12 @@ pub fn pixel_single(
         atlas,
         info,
     )
-    .truncate()
 }
 
 /// One opaque reflection bounce for polished kitchen receivers. Roofs remain
 /// solid and daylight can enter only through the authored window apertures.
 #[inline(never)]
-fn glossy_reflection(
+fn glossy_reflection<const CACHED: bool>(
     sun: super::Sun,
     point: Vec3,
     normal: Vec4,
@@ -506,6 +869,11 @@ fn glossy_reflection(
     let sample = incoming.w as u32;
     let incoming = incoming.truncate();
     let reflected = incoming - normal * (2.0 * incoming.dot(normal));
+    if CACHED {
+        // The web viewer uses locally occluded, prefiltered transport instead
+        // of embedding a second complete house tracer for glossy receivers.
+        return grid.sample(probes, point + normal * 0.002, reflected) * (0.5 / PI);
+    }
     let right = if reflected.z.abs() < 0.9 { Vec3::Z.cross(reflected).normalize() } else { Vec3::X };
     let up = reflected.cross(right);
     let spread = subpixel(sample) * (roughness * roughness * 2.0);
@@ -664,15 +1032,21 @@ fn shade<const CACHED: bool>(
 ) -> Vec4 {
     let mut origin = globals.eye;
     let mut direction = direction;
-    let (mut nearest, mut object) = cast::<false, true>(origin, direction, nodes, objects, globals.pixel_angle, FAR);
+    let mut surface_height = 0.0;
+    let mut nearest = FAR;
+    let mut object = 0;
     let mut reflected_distance = 0.0;
     // Parallel thin glazing transmits straight through; finite pane reflections
     // use the same one-bounce scene query as polished stone. No refractive tree.
     let mut glass_light = Vec3::ZERO;
     let mut transmission = Vec3::ONE;
     let mut reflected = false;
-    for _ in 0..5 {
-        if nearest >= FAR {
+    for crossing in 0..6 {
+        (nearest, object) = cast::<false, true>(origin, direction, nodes, objects, globals.pixel_angle, FAR);
+        if crossing == 0 && nearest < FAR {
+            surface_height = ((origin.z + direction.z * nearest) / 3.0).clamp_num(0.0, 1.0);
+        }
+        if crossing == 5 || nearest >= FAR {
             break;
         }
         if !reflected && objects[object as usize].kind == Kind::Mirror {
@@ -685,7 +1059,6 @@ fn shade<const CACHED: bool>(
                 origin = point + normal * 0.002;
                 reflected_distance += nearest;
                 reflected = true;
-                (nearest, object) = cast::<false, true>(origin, direction, nodes, objects, globals.pixel_angle, FAR);
                 continue;
             }
         }
@@ -703,7 +1076,7 @@ fn shade<const CACHED: bool>(
         let fresnel = 0.078 + 0.922 * (1.0 - normal.dot(-direction)).powf(5.0);
         glass_light += transmission
             * fresnel
-            * glossy_reflection(
+            * glossy_reflection::<CACHED>(
                 globals.sun,
                 point + normal * 0.001,
                 normal.extend(0.06),
@@ -718,25 +1091,73 @@ fn shade<const CACHED: bool>(
         let (_, exit) = ray.bounds(-pane.size * 0.5, pane.size * 0.5);
         reflected_distance += exit + 0.0005;
         origin += direction * (exit + 0.0005);
-        (nearest, object) = cast::<false, true>(origin, direction, nodes, objects, globals.pixel_angle, FAR);
     }
+    shade_surface::<CACHED, false, 0>(
+        globals,
+        nodes,
+        objects,
+        lights,
+        light_masks,
+        contacts,
+        grid,
+        probes,
+        origin,
+        direction,
+        nearest,
+        object,
+        surface_height,
+        reflected_distance,
+        glass_light,
+        transmission,
+        time,
+        light_sample,
+        atlas,
+        info,
+        0.0,
+        Vec3::ZERO,
+        1.0,
+        Hit::new(0.0, || (Material::Wood, Vec3::ONE)),
+        Vec3::ZERO,
+    )
+}
+
+fn shade_surface<const CACHED: bool, const PRECOMPUTED: bool, const GROUP: u32>(
+    globals: Globals,
+    nodes: &[Node],
+    objects: &[Object],
+    lights: &[u32],
+    light_masks: &[u32],
+    contacts: &[u32],
+    grid: irradiance::Grid,
+    probes: &[irradiance::Probe],
+    origin: Vec3,
+    direction: Vec3,
+    nearest: f32,
+    object: u32,
+    surface_height: f32,
+    reflected_distance: f32,
+    glass_light: Vec3,
+    transmission: Vec3,
+    time: f32,
+    light_sample: u32,
+    atlas: &Image,
+    info: super::shadows::AtlasInfo,
+    sun_visibility: f32,
+    encoded_normal: Vec3,
+    encoded_contact: f32,
+    encoded_material: Hit,
+    encoded_indirect: Vec3,
+) -> Vec4 {
     if nearest >= FAR {
-        return background(origin, globals.sun, globals.exposure, globals.white_balance).extend(1.0);
+        return background(origin, globals.sun, globals.exposure, globals.white_balance).extend(surface_height);
     }
     let point = origin + direction * nearest;
     let item = objects[object as usize];
     let local = unrotate_z(point - item.pos, item.rotation);
-    let normal = object_normal(item, local);
+    let normal = if PRECOMPUTED { unrotate_z(encoded_normal, item.rotation) } else { object_normal(item, local) };
     let world_normal = rotate_z(normal, item.rotation);
     let texture_point = if item.kind == Kind::Box { point } else { local };
-    let mut surface = surface_at(item, local);
-    if item.kind == Kind::PosterBlue {
-        let tint = surface.tint;
-        surface.tint = vec3(tint.z * 0.72, tint.x * 0.72 + tint.y * 0.28, tint.x * 0.55 + tint.z * 0.60);
-    }
-    if item.kind == Kind::Stem && item.material == Material::Foliage {
-        (surface.material, surface.tint) = (Material::Foliage, vec3(0.25, 0.38, 0.12));
-    }
+    let mut surface = if PRECOMPUTED { encoded_material } else { visible_material(item, local) };
     // Section caps sit at the roof cut. Sample just above the hidden roof,
     // rather than treating the exposed wall cross-section as buried inside it.
     let section_cap = globals.eye.z > super::WALL_HEIGHT
@@ -751,12 +1172,12 @@ fn shade<const CACHED: bool>(
         } else {
             Vec3::splat(0.12)
         };
-        return cue.extend(1.0);
+        return cue.extend(surface_height);
     }
     // Cutaway caps and outward wall faces are presentation context, not
     // lighting receivers. Do not sample probes, trace sun rays or visit lamps.
     if section_cap || item.exterior.dot(world_normal) > 0.5 {
-        return lighting::display(surface.tint.powf(2.2) * 0.85, 0.95).extend(1.0);
+        return lighting::display(surface.tint.powf(2.2) * 0.85, 0.95).extend(surface_height);
     }
     let fixture = item.is_light();
     if surface.material == Material::Emissive && (!fixture || item.emission > 0.0) {
@@ -772,13 +1193,15 @@ fn shade<const CACHED: bool>(
             office::wallpaper(local, time) * 2.0
         };
         return lighting::display((emission * transmission + glass_light) * globals.white_balance, globals.exposure)
-            .extend(1.0);
+            .extend(surface_height);
     }
     if fixture && surface.material == Material::Emissive {
         (surface.material, surface.tint) = (Material::Ceramic, vec3(0.85, 0.83, 0.78));
     }
     // The four pixel samples also cover the emitter, keeping four shadow rays per pixel.
-    let visibility = if globals.sun.radiance.max_element() > 0.0 && world_normal.dot(globals.sun.direction) > 0.0 {
+    let visibility = if PRECOMPUTED {
+        sun_visibility
+    } else if globals.sun.radiance.max_element() > 0.0 && world_normal.dot(globals.sun.direction) > 0.0 {
         let start = lighting_point + world_normal * 0.001;
         let offset = subpixel(light_sample) * 0.05;
         let light = (globals.sun.direction + offset.extend(0.0)).normalize();
@@ -791,7 +1214,8 @@ fn shade<const CACHED: bool>(
     let local_view = unrotate_z(-direction, item.rotation);
     let pixel = (nearest + reflected_distance) * globals.pixel_angle;
     // Keep procedural material state out of the traversal loops' live registers.
-    let mut material = materials::sample(surface.material, surface.tint, texture_point, normal, local_view, pixel);
+    let mut material =
+        materials::sample_group::<GROUP>(surface.material, surface.tint, texture_point, normal, local_view, pixel);
     if item.kind == Kind::ShieldLeaf {
         material.gradient += decor::leaf_veins(local, item.size, pixel);
         material.roughness = 0.33;
@@ -805,20 +1229,24 @@ fn shade<const CACHED: bool>(
     // silhouette, while avoiding hard cylinder-like shading on every yarn.
     let bumped = if surface.material == Material::Shag { (bumped * 0.40 + Vec3::Z * 0.60).normalize() } else { bumped };
     let bumped = rotate_z(bumped, item.rotation);
-    let cached = if item.surface_cache != u32::MAX && !section_cap {
-        if surface.material == Material::Floorboards {
-            irradiance::Grid::surface_normal(probes, item, local, world_normal, bumped)
+    let indirect = if PRECOMPUTED {
+        encoded_indirect
+    } else {
+        let cached = if item.surface_cache != u32::MAX && !section_cap {
+            if surface.material == Material::Floorboards {
+                irradiance::Grid::surface_normal(probes, item, local, world_normal, bumped)
+            } else {
+                irradiance::Grid::surface(probes, item, local, world_normal)
+            }
         } else {
-            irradiance::Grid::surface(probes, item, local, world_normal)
+            Vec4::ZERO
+        };
+        if cached.w >= 0.95 {
+            cached.truncate()
+        } else {
+            grid.sample(probes, lighting_point + world_normal * 0.002, world_normal)
+                .lerp(cached.truncate(), (cached.w / 0.95).min_num(1.0))
         }
-    } else {
-        Vec4::ZERO
-    };
-    let indirect = if cached.w >= 0.95 {
-        cached.truncate()
-    } else {
-        grid.sample(probes, lighting_point + world_normal * 0.002, world_normal)
-            .lerp(cached.truncate(), (cached.w / 0.95).min_num(1.0))
     };
 
     let contact_visibility =
@@ -826,25 +1254,30 @@ fn shade<const CACHED: bool>(
             1.0
         } else {
             let receiver_normal = if surface.material == Material::Shag { Vec3::Z } else { world_normal };
-            contacts::visibility(contacts, objects, object, point, receiver_normal, light_sample)
+            if PRECOMPUTED {
+                encoded_contact
+            } else {
+                contacts::visibility(contacts, objects, object, point, receiver_normal, light_sample)
+            }
         };
     let indirect = indirect * contact_visibility;
 
-    let reflection = if matches!(surface.material, Material::Stone | Material::GlazedTile | Material::BathroomTile) {
-        glossy_reflection(
-            globals.sun,
-            point,
-            bumped.extend(material.coat_roughness),
-            direction.extend(light_sample as f32),
-            nodes,
-            objects,
-            grid,
-            probes,
-        )
-        .extend(1.0)
-    } else {
-        Vec4::ZERO
-    };
+    let reflection =
+        if !CACHED && matches!(surface.material, Material::Stone | Material::GlazedTile | Material::BathroomTile) {
+            glossy_reflection::<CACHED>(
+                globals.sun,
+                point,
+                bumped.extend(material.coat_roughness),
+                direction.extend(light_sample as f32),
+                nodes,
+                objects,
+                grid,
+                probes,
+            )
+            .extend(1.0)
+        } else {
+            Vec4::ZERO
+        };
     let mut color = lighting::shade(material, bumped, -direction, visibility, indirect, globals.sun, reflection);
     let mask = light_masks[object as usize];
     let mut slot = 0;
@@ -886,7 +1319,8 @@ fn shade<const CACHED: bool>(
         };
         color += contribution * visible;
     }
-    lighting::display((color * transmission + glass_light) * globals.white_balance, globals.exposure).extend(1.0)
+    lighting::display((color * transmission + glass_light) * globals.white_balance, globals.exposure)
+        .extend(surface_height)
 }
 
 #[cfg(test)]

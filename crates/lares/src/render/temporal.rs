@@ -10,6 +10,10 @@ impl Accumulation {
         Self { phase: 0, mask: 1, phases: if interleaved { 8 } else { 4 } }
     }
 
+    pub const fn valid_mask(self) -> u32 {
+        self.mask
+    }
+
     pub const fn converged(self) -> bool {
         self.mask == (1 << self.phases) - 1
     }
@@ -26,57 +30,12 @@ impl Accumulation {
     }
 }
 
-/// Budget ray-traced pixels while the camera moves. History is recreated when
-/// this extent changes; stationary views always return to native resolution.
-#[derive(Clone, Copy)]
-pub struct MotionResolution {
-    scale: f32,
-    fast_frames: u32,
-}
-impl Default for MotionResolution {
-    fn default() -> Self {
-        Self { scale: 0.5, fast_frames: 0 }
-    }
-}
-impl MotionResolution {
-    pub fn observe(&mut self, seconds: f32) {
-        // Fall quickly, recover slowly. Increasing after every cheap frame
-        // oscillated between two extents and repeatedly discarded AA history.
-        if seconds > 0.030 {
-            self.scale = (self.scale * 0.75).max(0.25);
-            self.fast_frames = 0;
-        } else if seconds < 0.014 {
-            self.fast_frames += 1;
-            if self.fast_frames >= 30 {
-                self.scale = (self.scale / 0.75).min(1.0);
-                self.fast_frames = 0;
-            }
-        } else {
-            self.fast_frames = 0;
-        }
-    }
-
-    pub fn extent(self, native: [u32; 2]) -> [u32; 2] {
-        native.map(|value| ((value as f32 * self.scale).round() as u32).max(1))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn motion_budget_is_bounded_and_resized_histories_restart_cleanly() {
-        let mut quality = MotionResolution::default();
-        for _ in 0..40 {
-            quality.observe(0.20);
-        }
-        assert_eq!(quality.extent([2400, 1600]), [600, 400]);
-        for _ in 0..240 {
-            quality.observe(0.01);
-        }
-        assert_eq!(quality.extent([2400, 1600]), [2400, 1600]);
-        assert_eq!(quality.extent([1, 1]), [1, 1]);
+    fn camera_changes_discard_all_previous_samples() {
         for interleaved in [false, true] {
             let mut history = Accumulation::new(interleaved);
             for _ in 0..20 {

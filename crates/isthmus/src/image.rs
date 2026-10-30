@@ -108,6 +108,13 @@ impl Image {
         straight(self.sample_raw(uv))
     }
 
+    /// Loads one clamped texel without interpolating packed data channels.
+    pub fn texel(&self, pixel: glam::IVec2) -> Vec4 {
+        self.sample_raw(
+            (pixel.as_vec2() + glam::Vec2::splat(0.5)) / glam::Vec2::from_array(self.size.map(|v| v as f32)),
+        )
+    }
+
     /// Filters the stored channels directly, for depth/moment data textures.
     pub fn sample_raw(&self, uv: glam::Vec2) -> Vec4 {
         assert!(self.view.is_none(), "GPU images cannot be sampled on the CPU");
@@ -157,6 +164,10 @@ impl<'a> Image<'a> {
 
     pub fn sample_raw(&self, uv: glam::Vec2) -> Vec4 {
         self.image.sample_by_lod(self.sampler, uv, 0.0)
+    }
+
+    pub fn texel(&self, pixel: glam::IVec2) -> Vec4 {
+        self.image.fetch(pixel)
     }
 }
 
