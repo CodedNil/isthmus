@@ -110,15 +110,25 @@ Home Assistant and UI events can call them without rebaking geometry.
 The native server checks `assets/baked/lighting.bin` and `visibility.bin` before
 serving. Unchanged geometry is a fast header check; camera, UI and server edits
 do not invalidate these assets. Geometry/SDF/transport edits rebuild them once.
-`bake_lighting` runs the same check explicitly. The assets contain losslessly
-compressed final fixture responses and the full 512-pixel SDF visibility atlas.
+`bake_lighting` runs the same check explicitly. The lighting asset contains lossless receiver geometry and compact solved
+fixture/daylight responses. Twelve signed diffuse-light coefficients share one
+scale in 16 bytes (at most 0.4% peak-coefficient quantization error). Sky and
+exterior ground are solved once; bounced sunlight interpolates a world-space
+65-direction hemisphere table. The sun's actual direction, direct illumination,
+SDF geometry, materials and primary shadows are unchanged. Eight diffuse bounces
+are solved offline for every basis field. Angular interpolation can soften or
+shift bounced-sun patches; it does not interpolate direct sun shadows.
+The runtime holds no ray-hit bank, volume transport stencils or iterative bounce
+buffers. Startup and daylight changes only blend solved fields, as fixture
+controls already do. Geometry is decoded in bounded byte-plane chunks.
+The separate visibility asset retains the full 512-pixel SDF atlas.
 The browser fetches both in parallel with WASM loading. It no longer compiles a
 shadow-bake shader or traces the atlas during startup. GPU lamp visibility and
 CPU captures use the same packed depth moments and filter.
 
 Runtime GI has one final irradiance field: solved fixture responses plus the
-current eight-bounce daylight solution. Static interpolation weights are cached;
-the daylight solver runs in bounded batches and publishes only complete results.
+interpolated eight-bounce daylight solution. Daylight changes publish a complete
+field atomically without tracing or spatial iterations.
 The temporary first-bounce fixture bank exists only while authoring a new bake.
 Receiver-side filtering rejects samples behind opaque surfaces, including when
 surface charts fall back to the volume at tile edges and wall junctions.
@@ -183,8 +193,7 @@ local GI. The BÖJA lamp is 40 cm high and 20 cm wide; the STARKVIND table is
 55 cm high and 54 cm wide, matching IKEA's product dimensions.
 
 Progressive rendering converges all native pixels to four AA samples. Large
-views interleave columns over eight updates. Motion targets 30 updates/s with
-an adaptive ray-traced resolution; native resolution and all four samples return
+views interleave columns over eight updates. Motion follows the display refresh at native resolution; all four samples converge
 when motion stops. Resizing targets discards incompatible history. A small
 edge filter softens initial samples and disappears at convergence. Interactive
 exposure/white balance are metered once at startup and locked for the session:
@@ -192,3 +201,58 @@ panning and light controls never change the display transform. Offline photo
 captures retain independent view metering. Settled views use an 8 Hz ceiling and
 20% GPU duty budget. Hidden views stop submitting and queue depth is limited to one. See [rendering contracts](../src/render/tests/README.md)
 for the automated checks.
+
+The browser reports its selected adapter and rejects CPU software fallbacks
+before scene preparation. SwiftShader is not a hardware GPU measurement; a
+GPU driver/library mismatch must be resolved before benchmarking hardware.
+`LARES_BENCH_STARTUP_MS` extends the readiness deadline independently of
+`LARES_BENCH_DEADLINE_MS`, which bounds the entire browser run. Device loss
+fails the benchmark instead of counting a failed submission as a rendered frame.
+
+`cargo run -p lares --example startup_bench` separates CPU startup costs from
+GPU compilation and reports retained transport storage. The native authoring
+solver still traces full-quality transport when producing new lighting assets.
+
+## Live Shelly presence
+
+The native server continuously receives `ws://192.168.0.133/rpc` and relays
+snapshots to client WebUIs at `/api/presence`. It keeps one upstream connection
+open independently of browser viewers and renews `Presence.LiveTrack` every
+40 seconds. This same server-side feed is available for future presence-driven
+lighting. Current integration does not control lights or change sensor settings.
+Five seconds without fresh tracking clears stale estimates, with reconnection.
+
+Coordinates and the alignment live in Rust. After tilting the sensor, desk
+`(1.86, 4.88)`, kitchen-centre `(-2.95, 2.45)`, and entrance-corridor intersection
+`(-0.69, 6.07)` measurements define a three-point affine transform. The desk
+anchor is 40 cm toward the keyboard from the modelled chair. The kitchen anchor
+is its authored room centre; the hall anchor is the centre of the corridor where
+it meets the open lounge, as identified in the reference crop. Coefficients are
+solved at compile time. Measurement medians and target definitions are saved in
+`presence-calibration.json`; there are no alignment controls or browser-local
+calibration, and the live service does not write position history to disk.
+
+Ghosts are translucent 3D SDF shells with a world-space uncertainty ring, without
+an inferred pose or facing direction. The scene stores surface height in its
+sample alpha channel, allowing the small ghost SDF pass to respect walls and
+furniture without retracing the house. Ghost updates preserve scene AA history;
+only the resolve/ghost pass needs to run at interactive rate. Camera gestures
+keep a fixed full-resolution sample grid, anchor movement to the original grab
+point, and overlap the next display refresh with GPU completion. The WebSocket
+client is Rust/WASM, with no JavaScript/CSS/SVG presence drawing or added UI.
+
+`LARES_PORT=8130 cargo run -p lares` starts an isolated server for testing.
+`LARES_BENCH_PRESENCE=1` checks live world-space ghosts with a native server.
+Cold driver shader compilation remains slower than cached loads. Startup
+reports CPU submission separately from waiting for the first GPU frame, so a
+quick scene decode must not be reported as a quick cold first view.
+
+## Temporary motion reference
+
+`render::MOTION_PROBE` currently enables a pink 3D ball in the lounge. It moves
+three metres along a straight line at 0.75 m/s, reversing every four seconds
+with a triangle wave. Its position comes directly from renderer elapsed time,
+without sensor data or smoothing. It is composited after accumulated room
+samples using the same depth and camera as the ghost pass. While enabled, the
+resolve pass stays active at display refresh; the room retains its 8 Hz refresh.
+Set `MOTION_PROBE` to false to remove the temporary reference.

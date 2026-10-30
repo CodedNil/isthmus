@@ -43,6 +43,8 @@ pub struct ShaderEntry {
     pub blend: Blend,
     /// Number of image bindings required by this shader.
     pub images: usize,
+    /// Optional offscreen attachment format; otherwise the presentation format.
+    pub format: Option<wgpu::TextureFormat>,
 }
 
 #[cfg(not(target_arch = "spirv"))]

@@ -43,6 +43,7 @@ pub struct Probe {
     pub square_negative: Vec3,
 }
 impl Probe {
+    #[inline(never)]
     fn receiver_weight(self, delta: Vec3, normal: Vec3) -> f32 {
         let distance = delta.length().max_num(0.0001);
         let direction = delta / distance;

@@ -16,7 +16,7 @@ const server = createServer(async (request, response) => {
     const name = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
     const file = resolve(assets, '.' + (name === '/' ? '/index.html' : name));
     if (!file.startsWith(assets + sep)) { response.writeHead(403).end(); return; }
-    const mime = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm', '.webp': 'image/webp' };
+    const mime = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.wasm': 'application/wasm', '.webp': 'image/webp' };
     const data = await readFile(file);
     response.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream' }).end(data);
   } catch { response.writeHead(404).end(); }
@@ -45,13 +45,14 @@ try {
   browser = spawn('chromium', [
     '--headless=new', '--no-sandbox', '--disable-dev-shm-usage',
     '--user-data-dir=' + profile, '--remote-debugging-port=0',
-    '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan',
+    '--enable-gpu', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist', '--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan', '--use-angle=vulkan',
     '--disable-vulkan-surface', 'about:blank',
   ], { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
   const port = await new Promise((resolve, reject) => {
     let output = '';
     browser.stderr.on('data', chunk => {
       output += chunk;
+      if (process.env.LARES_BENCH_GPU_LOG === "1") process.stderr.write(chunk);
       const match = output.match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//);
       if (match) resolve(match[1]);
     });

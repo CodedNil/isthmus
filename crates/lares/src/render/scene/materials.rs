@@ -37,6 +37,15 @@ impl Default for Surface {
         }
     }
 }
+pub(super) const fn family(kind: Material) -> u32 {
+    match kind {
+        Material::Wood | Material::Maple | Material::MapleHorizontal | Material::Floorboards => 1,
+        Material::Carpet | Material::Fabric | Material::Satin | Material::Knit | Material::Shag => 2,
+        Material::Stone | Material::Tile | Material::GlazedTile | Material::BathroomTile => 3,
+        _ => 4,
+    }
+}
+
 pub(super) fn hash(cell: Vec2) -> f32 {
     let bits = (cell.x as i32 as u32).wrapping_mul(0x9e37_79b9) ^ (cell.y as i32 as u32).wrapping_mul(0x85eb_ca6b);
     let bits = (bits ^ (bits >> 16)).wrapping_mul(0x7feb_352d);
@@ -217,14 +226,14 @@ fn floorboards(tint: Vec3, uv: Vec2, footprint: Vec2) -> Surface {
     }
 }
 #[inline(never)]
-fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
+fn sample_plane<const GROUP: u32>(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
     let mut surface =
         Surface { albedo: tint, roughness: 0.65, coat_roughness: 0.35, occlusion: 1.0, ..Surface::default() };
     match kind {
-        Material::Floorboards => {
+        Material::Floorboards if GROUP == 0 || GROUP == 1 => {
             surface = floorboards(tint, uv, Vec2::splat(pixel));
         }
-        Material::Wood | Material::Maple | Material::MapleHorizontal => {
+        Material::Wood | Material::Maple | Material::MapleHorizontal if GROUP == 0 || GROUP == 1 => {
             let maple = matches!(kind, Material::Maple | Material::MapleHorizontal);
             let uv = if kind == Material::MapleHorizontal { uv.yx() } else { uv };
             let warp = detail(uv, vec2(1.8, 6.0), pixel);
@@ -243,8 +252,8 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
                 * if maple { 0.25 } else { 1.0 })
             .extend(0.0);
         }
-        Material::Shag => return shag(tint, uv.extend(0.0), Vec3::Z, Vec3::Z, pixel),
-        Material::Carpet | Material::Fabric | Material::Satin | Material::Knit => {
+        Material::Shag if GROUP == 0 || GROUP == 2 => return shag(tint, uv.extend(0.0), Vec3::Z, Vec3::Z, pixel),
+        Material::Carpet | Material::Fabric | Material::Satin | Material::Knit if GROUP == 0 || GROUP == 2 => {
             let carpet = kind == Material::Carpet;
             let mottling = detail(uv, Vec2::splat(7.0), pixel);
             let pile = detail(uv, Vec2::splat(65.0), pixel);
@@ -291,7 +300,7 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
             }
             surface.gradient = gradient.extend(0.0);
         }
-        Material::Stone => {
+        Material::Stone if GROUP == 0 || GROUP == 3 => {
             // Interlocking feldspar/quartz grains, dark mica inclusions and
             // a finer polished crystal population; never a blurred grey wash.
             let facets = mineral_grains(uv, pixel);
@@ -312,7 +321,7 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
             surface.gradient =
                 (grains.yz() * 0.000_035 + crystals.yz() * 0.000_015 + mica.yz() * 0.000_004 + facets.yz()).extend(0.0);
         }
-        Material::Tile => {
+        Material::Tile if GROUP == 0 || GROUP == 3 => {
             let mineral = detail(uv, Vec2::splat(44.0), pixel);
             let c = uv / 0.4;
             let f = c - c.floor();
@@ -323,8 +332,8 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
             surface.coat = 0.06 * (1.0 - grout);
             surface.gradient = (mineral.yz() * 0.00032).extend(0.0);
         }
-        Material::Emissive => {}
-        Material::GlazedTile | Material::BathroomTile => {
+        Material::Emissive if GROUP == 0 || GROUP == 4 => {}
+        Material::GlazedTile | Material::BathroomTile if GROUP == 0 || GROUP == 3 => {
             let uneven = detail(uv, vec2(13.0, 17.0), pixel);
             let ripple = detail(uv + uneven.x * 0.004, vec2(41.0, 53.0), pixel);
             let glaze = detail(uv, Vec2::splat(135.0), pixel);
@@ -346,14 +355,14 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
                 surface.gradient += (bevel * sign * 0.13 * (1.0 - grout)).extend(0.0);
             }
         }
-        Material::Ceramic => {
+        Material::Ceramic if GROUP == 0 || GROUP == 4 => {
             let glaze = detail(uv, vec2(38.0, 38.0), pixel);
             surface.roughness = 0.20 + glaze.x * 0.06;
             surface.coat = 0.30;
             surface.coat_roughness = 0.19;
             surface.gradient = (glaze.yz() * 0.00004).extend(0.0);
         }
-        Material::Metal | Material::Mirror => {
+        Material::Metal | Material::Mirror if GROUP == 0 || GROUP == 4 => {
             let brushed = detail(uv, vec2(220.0, 4.0), pixel);
             surface.metallic = 0.95;
             surface.anisotropy = if kind == Material::Mirror { 0.0 } else { 0.48 };
@@ -362,23 +371,24 @@ fn sample_plane(kind: Material, tint: Vec3, uv: Vec2, pixel: f32) -> Surface {
             surface.albedo = tint * (1.0 + brushed.x * 0.04);
             surface.gradient = (brushed.yz() * 0.00015).extend(0.0);
         }
-        Material::Paint => {
+        Material::Paint if GROUP == 0 || GROUP == 4 => {
             let plaster = detail(uv, Vec2::splat(9.0), pixel);
             surface.roughness = 0.80 + plaster.x * 0.07;
             surface.albedo = tint * (1.0 + plaster.x * 0.012);
             surface.gradient = (detail(uv, Vec2::splat(120.0), pixel).yz() * 0.00015).extend(0.0);
         }
-        Material::Foliage | Material::VariegatedFoliage | Material::MarbledFoliage => {
+        Material::Foliage | Material::VariegatedFoliage | Material::MarbledFoliage if GROUP == 0 || GROUP == 4 => {
             let cuticle = detail(uv, vec2(70.0, 140.0), pixel);
             surface.roughness = 0.43 + cuticle.x * 0.12;
             surface.gradient = (cuticle.yz() * 0.00006).extend(0.0);
             surface.sheen = 0.15;
         }
-        Material::Soil => {
+        Material::Soil if GROUP == 0 || GROUP == 4 => {
             surface.roughness = 1.0;
             surface.gradient = (detail(uv, Vec2::splat(90.0), pixel).yz() * 0.0004).extend(0.0);
             surface.albedo = tint * (1.0 + detail(uv, Vec2::splat(65.0), pixel).x * 0.2);
         }
+        _ => {}
     }
 
     surface.albedo = linear(surface.albedo);
@@ -435,13 +445,24 @@ fn shag(tint: Vec3, point: Vec3, normal: Vec3, view: Vec3, cone: f32) -> Surface
 }
 /// Blend projections on bevels instead of abruptly switching axes. Each plane
 /// also filters by its projected pixel footprint, including grazing side faces.
-#[inline(never)]
+#[cfg(test)]
 pub(super) fn sample(kind: Material, tint: Vec3, p: Vec3, n: Vec3, view: Vec3, cone: f32) -> Surface {
-    if kind == Material::Shag {
+    sample_group::<0>(kind, tint, p, n, view, cone)
+}
+
+pub(super) fn sample_group<const GROUP: u32>(
+    kind: Material,
+    tint: Vec3,
+    p: Vec3,
+    n: Vec3,
+    view: Vec3,
+    cone: f32,
+) -> Surface {
+    if (GROUP == 0 || GROUP == 2) && kind == Material::Shag {
         return shag(tint, p, n, view, cone);
     }
     let incidence = n.dot(view).abs().max_num(0.10);
-    if kind == Material::Floorboards && n.z.abs() > 0.999 {
+    if (GROUP == 0 || GROUP == 1) && kind == Material::Floorboards && n.z.abs() > 0.999 {
         // The long axis of the grazing ray footprint follows the viewing
         // direction. Do not blur cross-grain with that much larger footprint.
         let tangent_view = view - n * n.dot(view);
@@ -456,7 +477,7 @@ pub(super) fn sample(kind: Material, tint: Vec3, p: Vec3, n: Vec3, view: Vec3, c
         || kind == Material::Ceramic
         || (kind == Material::Metal && pixel >= 1.0 / 440.0)
     {
-        return sample_plane(kind, tint, p.xy(), pixel);
+        return sample_plane::<GROUP>(kind, tint, p.xy(), pixel);
     }
     let square = n * n;
     let weights = square * square;
@@ -471,7 +492,7 @@ pub(super) fn sample(kind: Material, tint: Vec3, p: Vec3, n: Vec3, view: Vec3, c
         if weight < 0.001 {
             continue;
         }
-        let surface = sample_plane(kind, tint, uv, pixel / facing.abs().max_num(0.12));
+        let surface = sample_plane::<GROUP>(kind, tint, uv, pixel / facing.abs().max_num(0.12));
         result.albedo += surface.albedo * weight;
         result.roughness += surface.roughness * weight;
         result.metallic += surface.metallic * weight;
@@ -538,6 +559,42 @@ mod tests {
                 for pixel in [0.0001, 0.005, 0.1] {
                     for point in [Vec3::ZERO, vec3(-1.65, -0.19, 0.4), vec3(12.5, 0.001, -2.0)] {
                         let surface = sample(material, Vec3::ONE, point, normal, normal, pixel);
+                        let specialized = match family(material) {
+                            1 => sample_group::<1>(material, Vec3::ONE, point, normal, normal, pixel),
+                            2 => sample_group::<2>(material, Vec3::ONE, point, normal, normal, pixel),
+                            3 => sample_group::<3>(material, Vec3::ONE, point, normal, normal, pixel),
+                            _ => sample_group::<4>(material, Vec3::ONE, point, normal, normal, pixel),
+                        };
+                        assert_eq!(
+                            (
+                                surface.albedo,
+                                surface.gradient,
+                                surface.tangent,
+                                surface.roughness,
+                                surface.metallic,
+                                surface.specular,
+                                surface.anisotropy,
+                                surface.sheen,
+                                surface.coat,
+                                surface.coat_roughness,
+                                surface.occlusion,
+                                surface.fiber_depth
+                            ),
+                            (
+                                specialized.albedo,
+                                specialized.gradient,
+                                specialized.tangent,
+                                specialized.roughness,
+                                specialized.metallic,
+                                specialized.specular,
+                                specialized.anisotropy,
+                                specialized.sheen,
+                                specialized.coat,
+                                specialized.coat_roughness,
+                                specialized.occlusion,
+                                specialized.fiber_depth
+                            )
+                        );
                         assert!(surface.albedo.is_finite() && surface.gradient.is_finite());
                         assert!((0.12..=1.0).contains(&surface.roughness));
                         assert!((0.0..=1.0).contains(&surface.specular));

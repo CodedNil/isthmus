@@ -39,15 +39,15 @@ impl Scene {
         source_signature(rooms)
     }
 
-    pub fn encode_light_controls(&self) -> Result<Vec<u8>, io::Error> {
-        self.indirect.encode_controls(self.signature)
+    pub fn encode_light_controls(&mut self) -> Result<Vec<u8>, io::Error> {
+        self.indirect.encode_controls(self.signature, self.sun, &self.objects, &self.nodes)
     }
 
     pub const fn signature(&self) -> u64 {
         self.signature
     }
 
-    pub const fn transport_statistics(&self) -> (usize, usize, usize) {
+    pub fn transport_statistics(&self) -> (usize, usize, usize) {
         self.indirect.statistics()
     }
 

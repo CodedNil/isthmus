@@ -10,7 +10,11 @@ use crate::{
     },
 };
 use core::{array::from_fn, f32::consts::PI};
-use isthmus::glam::{IVec3, UVec3, Vec2, Vec3, uvec3, vec3};
+pub(super) use daylight::Packed;
+use isthmus::{
+    ShaderData,
+    glam::{IVec3, UVec3, Vec2, Vec3, uvec3, vec3},
+};
 use std::collections::BTreeMap;
 
 const RAYS: usize = 256;
@@ -53,7 +57,7 @@ impl Irradiance {
         self.z += other.z * weight;
     }
 }
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, ShaderData)]
 struct Bounce {
     object: u32,
     direction: Vec3,
@@ -65,11 +69,16 @@ struct Bounce {
     volume_length: u32,
 }
 
+mod daylight;
+mod transport;
+
 pub struct Cache {
+    pub(super) daylight: Option<daylight::Daylight>,
+    surface_slots: Box<[u32]>,
     paths: Vec<Bounce>,
     volume_weights: Vec<(u32, f32)>,
     /// Solved unit response, keyed by the fixtures controlled together.
-    pub(super) responses: BTreeMap<Vec<u32>, Box<[Irradiance]>>,
+    pub(super) responses: BTreeMap<Vec<u32>, Box<[Packed]>>,
     applied: Vec<Vec3>,
     groups: Vec<Vec<u32>>,
     path_offsets: Box<[usize]>,
@@ -90,7 +99,18 @@ pub struct Cache {
     remaining: usize,
 }
 impl Cache {
-    pub(crate) const fn statistics(&self) -> (usize, usize, usize) {
+    pub(crate) fn light_count(&self) -> usize {
+        self.lights.len()
+    }
+
+    pub(crate) fn probe_count(&self) -> usize {
+        self.direct.len()
+    }
+
+    pub(crate) fn statistics(&self) -> (usize, usize, usize) {
+        if let Some(daylight) = &self.daylight {
+            return (0, 0, daylight.bytes());
+        }
         (
             self.paths.len(),
             self.volume_weights.len(),
@@ -227,10 +247,14 @@ impl Cache {
 
     /// Solve cached daylight transport, then add the solved fixture field.
     pub(crate) fn compose(&mut self, sun: Sun, objects: &[Object], probes: &mut [Probe]) {
-        for slot in 0..self.active.len() {
-            self.daylight_at(self.active[slot], sun);
+        if let Some(daylight) = &self.daylight {
+            daylight.compose(sun, &self.active, &self.direct, probes);
+        } else {
+            for slot in 0..self.active.len() {
+                self.daylight_at(self.active[slot], sun);
+            }
+            self.solve(probes);
         }
-        self.solve(probes);
         self.add_fixtures(objects, probes);
         self.applied = self
             .lights
@@ -286,7 +310,7 @@ impl Cache {
             }
             let mut response = self.direct.clone();
             self.solve(&mut response);
-            self.responses.insert(group, self.active.iter().map(|&index| response[index].light).collect());
+            self.responses.insert(group, self.active.iter().map(|&index| Packed::new(response[index].light)).collect());
         }
         // Runtime fixture transport is now a solved field. It never enters
         // the daylight solver again, and the large first-bounce bank is freed.
@@ -300,7 +324,7 @@ impl Cache {
             let weight = fixture.emission_color * fixture.emission;
             let response = &self.responses[group];
             for (slot, &index) in self.active.iter().enumerate() {
-                probes[index].light.add(response[slot], weight);
+                probes[index].light.add(response[slot].unpack(), weight);
             }
         }
     }
@@ -322,7 +346,7 @@ impl Cache {
             }
             let response = &self.responses[group];
             for (slot, &index) in self.active.iter().enumerate() {
-                probes[index].light.add(response[slot], delta);
+                probes[index].light.add(response[slot].unpack(), delta);
             }
         }
         self.applied = current;
@@ -350,6 +374,12 @@ impl Cache {
     /// At most 64 probes / 16384 cached paths per frame, independent of resolution.
     pub(crate) fn step(&mut self, sun: Sun, objects: &[Object], nodes: &[Node], probes: &mut [Probe]) {
         if self.remaining == 0 {
+            return;
+        }
+        if self.daylight.is_some() {
+            self.compose(sun, objects, probes);
+            self.remaining = 0;
+            self.cursor = 0;
             return;
         }
         let count = self.active.len();
@@ -384,8 +414,10 @@ impl Cache {
     }
 
     pub(crate) fn relight(&mut self, sun: Sun, objects: &[Object], nodes: &[Node], probes: &mut [Probe]) {
-        for &index in &self.active {
-            self.sun[index] = self.sun_at(index, sun, objects, nodes);
+        if self.daylight.is_none() {
+            for &index in &self.active {
+                self.sun[index] = self.sun_at(index, sun, objects, nodes);
+            }
         }
         self.compose(sun, objects, probes);
         self.remaining = 0;
@@ -417,7 +449,19 @@ pub fn bake_cached(
     sun: Sun,
     controls: Option<super::Controls>,
 ) -> (Grid, Box<[Probe]>, Cache) {
-    let cached = controls.is_some();
+    if let Some(controls) = controls {
+        let mut cache = controls.transport;
+        assert_eq!(cache.surface_slots.len(), objects.len(), "baked object layout differs");
+        for (object, &slot) in objects.iter_mut().zip(&cache.surface_slots) {
+            object.surface_cache = slot;
+        }
+        cache.active = controls.active;
+        cache.groups = controls.responses.keys().cloned().collect();
+        cache.responses = controls.responses;
+        let mut probes = cache.direct.clone();
+        cache.relight(sun, objects, nodes, &mut probes);
+        return (cache.grid, probes, cache);
+    }
     let origin = vec3(min.x, min.y, 0.10);
     let size = ((vec3(max.x, max.y, 2.6) - origin) / SPACING).ceil().as_uvec3() + UVec3::ONE;
     let grid = Grid { origin, size };
@@ -431,6 +475,8 @@ pub fn bake_cached(
         vec3(r * cos, r * sin, h)
     });
     let mut cache = Cache {
+        daylight: None,
+        surface_slots: objects.iter().map(|object| object.surface_cache).collect(),
         paths: Vec::new(),
         volume_weights: Vec::new(),
         responses: BTreeMap::new(),
@@ -441,7 +487,7 @@ pub fn bake_cached(
         sky: vec![Irradiance::default(); count].into_boxed_slice(),
         ground: vec![Irradiance::default(); count].into_boxed_slice(),
         sun: vec![Irradiance::default(); count].into_boxed_slice(),
-        fixtures: vec![Irradiance::default(); if cached { 0 } else { count * lights.len() }].into_boxed_slice(),
+        fixtures: vec![Irradiance::default(); count * lights.len()].into_boxed_slice(),
         direct: vec![Probe::default(); count].into_boxed_slice(),
         raw: vec![Probe::default(); count].into_boxed_slice(),
         bounces: from_fn(|_| vec![Probe::default(); count].into_boxed_slice()),
@@ -671,7 +717,7 @@ pub fn bake_cached(
     // rather than ray-tracing all fixtures again at every transport-ray hit.
     // The primary shadow atlas remains full resolution; only the already
     // 20 cm projected diffuse transport uses this shared spatial field.
-    if !cached {
+    {
         let mut needed = vec![false; count];
         for path in &cache.paths {
             if path.lookup.confidence() >= 0.95 {
@@ -729,11 +775,6 @@ pub fn bake_cached(
             cache.volume_weights.extend(grid.stencil(&cache.direct, path.point, path.normal));
         }
         path.volume_length = cache.volume_weights.len() as u32 - path.volume_offset;
-    }
-    if let Some(controls) = controls {
-        assert!(controls.active == cache.active, "baked receiver layout differs; rebuild lighting assets");
-        cache.groups = controls.responses.keys().cloned().collect();
-        cache.responses = controls.responses;
     }
     cache.raw = cache.direct.clone();
     cache.bounces = from_fn(|_| cache.direct.clone());

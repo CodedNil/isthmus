@@ -152,6 +152,11 @@ impl<P: Program> Renderer<P> {
         Ok(())
     }
 
+    /// Describes the selected adapter, including CPU software fallbacks.
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.gpu.adapter.get_info()
+    }
+
     /// Returns the selected GPU adapter's name.
     pub fn device_name(&self) -> &str {
         &self.gpu.device_name
@@ -176,13 +181,19 @@ impl<P: Program> Renderer<P> {
     /// Its contents are preserved between render batches. Release its surface
     /// handle with `remove_surface` when no further updates are needed.
     pub fn add_image(&mut self, size: [u32; 2]) -> (SurfaceHandle, crate::Image) {
+        self.add_image_format(size, self.gpu.format)
+    }
+
+    /// Adds a persistent offscreen image with an explicit filterable, renderable format.
+    /// Its draw shader must declare the matching `.format(...)`.
+    pub fn add_image_format(&mut self, size: [u32; 2], format: wgpu::TextureFormat) -> (SurfaceHandle, crate::Image) {
         let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("isthmus render image"),
             size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: self.gpu.format,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
@@ -191,7 +202,7 @@ impl<P: Program> Renderer<P> {
         let image = crate::Image::from_texture(&texture);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: self.gpu.format,
+            format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: size[0],
             height: size[1],

@@ -32,12 +32,12 @@ pub fn ensure_assets() -> Result<(), io::Error> {
     let rooms = home::rooms();
     let signature = Scene::geometry_signature(&rooms);
     let visibility_current = current(&visibility_path, *b"LARESV02", signature);
-    let lighting_current = current(&lighting_path, *b"LARESL01", signature);
+    let lighting_current = current(&lighting_path, *b"LARESL04", signature);
     if visibility_current && lighting_current {
         println!("Lighting assets are current ({:?}); no rebake.", started.elapsed());
         return Ok(());
     }
-    let scene = Scene::new_at(&rooms, 1_782_043_200.0, SunSettings::default());
+    let mut scene = Scene::new_at(&rooms, 1_782_043_200.0, SunSettings::default());
     fs::create_dir_all(&root)?;
     if !lighting_current {
         let bytes = scene.encode_light_controls()?;

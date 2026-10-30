@@ -70,6 +70,8 @@ const injected = await call('Page.addScriptToEvaluateOnNewDocument', {
         bench.adapter = Object.fromEntries(['vendor', 'architecture', 'device', 'description'].map(key => [key, this.info[key]]));
         if (!this.features.has('timestamp-query')) throw Error('GPU timestamps unavailable');
         const device = await request.call(this, { ...descriptor, requiredFeatures: [...(descriptor.requiredFeatures || []), 'timestamp-query'] });
+        console.info("Lares GPU", JSON.stringify(bench.adapter));
+        device.lost.then(info => { bench.errors.push("GPU device lost: " + info.message); });
         const create = device.createCommandEncoder.bind(device);
         const results = new WeakMap();
         device.createCommandEncoder = function(descriptor) {
@@ -139,12 +141,15 @@ const injected = await call('Page.addScriptToEvaluateOnNewDocument', {
 ` });
 await call('Page.navigate', { url });
 try {
-  for (let i = 0; i < 120; i++) {
+  const startupDeadline = Date.now() + Number(process.env.LARES_BENCH_STARTUP_MS || 60_000);
+  for (;;) {
     await new Promise(resolve => setTimeout(resolve, 500));
     const state = await evaluate(`({ ready: document.body?.dataset.ready, error: document.querySelector('#error:not([hidden])')?.textContent })`);
     if (state.error) throw Error(state.error);
+    const errors = await evaluate("bench.errors");
+    if (errors.length) throw Error(errors.join("\n"));
     if (state.ready) break;
-    if (i === 119) throw Error('Scene readiness timed out: ' + await evaluate('document.body.innerText'));
+    if (Date.now() >= startupDeadline) throw Error('Scene readiness timed out: ' + await evaluate('document.body.innerText'));
   }
   await new Promise(resolve => setTimeout(resolve, 1000));
   if (process.env.LARES_BENCH_TARGET || process.env.LARES_BENCH_ZOOM) {
@@ -214,6 +219,13 @@ try {
   const started = performance.now();
   await new Promise(resolve => setTimeout(resolve, +(process.env.LARES_BENCH_MS || 10000)));
   const result = await evaluate('JSON.parse(JSON.stringify(bench))');
+  result.presence = await evaluate(`({
+    online: document.querySelector('canvas')?.dataset.presenceConnected,
+    ghosts: +(document.querySelector('canvas')?.dataset.presenceCount || 0)
+  })`);
+  if (process.env.LARES_BENCH_PRESENCE === '1' && (result.presence.online !== 'true' || !result.presence.ghosts)) {
+    throw Error('Live world-space presence missing: ' + JSON.stringify(result.presence));
+  }
   result.startup = await evaluate(`performance.getEntriesByType('mark').filter(entry => entry.name.startsWith('lares:')).map(entry => ({ stage: entry.name, milliseconds: entry.startTime }))`);
   result.seconds = (performance.now() - started) / 1000;
   result.size = [+width, +height];
@@ -241,6 +253,10 @@ try {
   }
   if (!captured) throw Error('WebGPU framebuffer capture timed out');
   await writeFile(prefix + '.png', png(captured.width, captured.height, Buffer.from(captured.rgba, 'base64')));
+  if (process.env.LARES_BENCH_PRESENCE === '1') {
+    const screenshot = await call('Page.captureScreenshot', { format: 'png' });
+    await writeFile(prefix + '-page.png', Buffer.from(screenshot.data, 'base64'));
+  }
 } finally {
   await call('Page.removeScriptToEvaluateOnNewDocument', { identifier: injected.identifier });
   await call('Page.navigate', { url: 'about:blank' });

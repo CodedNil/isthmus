@@ -7,11 +7,13 @@ edition.workspace = true
 anyhow = "1"
 cargo_metadata = "0.23"
 form_urlencoded.workspace = true
-naga = { version = "=30.0.1", features = ["spv-in", "wgsl-in", "wgsl-out"] }
+naga = { version = "=30.0.1", features = ["spv-in", "spv-out", "wgsl-in", "wgsl-out"] }
 prettyplease = "0.3"
 proc-macro2.workspace = true
 quote.workspace = true
 spirv-builder.workspace = true
+spirv-tools = "0.13.3"
+spirv = "0.4"
 syn = { workspace = true, features = ["visit", "visit-mut"] }
 toml = { workspace = true, features = ["display"] }
 

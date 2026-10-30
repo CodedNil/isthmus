@@ -4,5 +4,6 @@ use crate::{
     home,
     render::{Scene, SunSettings, temporal::Accumulation},
 };
+mod deferred;
 mod geometry;
 mod lifecycle;

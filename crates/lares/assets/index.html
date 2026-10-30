@@ -55,7 +55,9 @@
             box-shadow: 0 4px 24px #30282020;
         }
 
-        #loading[hidden] { display: none; }
+        #loading[hidden] {
+            display: none;
+        }
 
         #error {
             position: absolute;
@@ -98,6 +100,19 @@
         try {
             if (!isSecureContext) throw new Error("Open Lares over HTTPS or on localhost to use WebGPU.");
             if (!navigator.gpu) throw new Error("GPU adapter unavailable: this browser does not expose WebGPU.");
+            // Check before downloading lighting or running CPU scene work.
+            let adapter;
+            // A newly started Linux GPU process can briefly return no adapter.
+            for (let attempt = 0; attempt < 4 && !adapter; attempt++) {
+                if (attempt) await new Promise(resolve => setTimeout(resolve, 250));
+                adapter = await navigator.gpu.requestAdapter({powerPreference: "high-performance"});
+            }
+            if (!adapter) throw new Error("GPU adapter unavailable.");
+            const info = adapter.info;
+            console.info("Lares GPU adapter", info);
+            if (info?.isFallbackAdapter || /swiftshader|llvmpipe|software/i.test(`${info?.architecture} ${info?.description}`)) {
+                throw new Error("Only CPU software graphics is available. Enable browser graphics acceleration and restart the browser. If the GPU driver was recently updated, restart the computer before reloading Lares.");
+            }
             const {default: init, start} = await import("./web/lares.js");
             const assets = Promise.all(["visibility", "lighting"].map(async name => {
                 const response = await fetch(`./baked/${name}.bin`);

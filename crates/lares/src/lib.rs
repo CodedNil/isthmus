@@ -6,6 +6,7 @@ pub mod render;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bake;
+pub mod presence;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 #[cfg(target_arch = "wasm32")]
