@@ -1,4 +1,4 @@
-//! Linear-light GGX / Smith / Schlick shading and an analytic room environment.
+//! Linear-light GGX / Smith / Schlick shading driven by the shared local transport field.
 use super::materials::Surface;
 use crate::render::Sun;
 use core::f32::consts::PI;
@@ -45,15 +45,6 @@ fn microfacet(s: Surface, n: Vec3, view: Vec3, light: Vec3, half: Vec3) -> f32 {
     let l = vec3(ax * tangent.dot(light), ay * bitangent.dot(light), no_l).length();
     distribution * 0.5 / (no_l * v + no_v * l).max_num(0.0001)
 }
-fn environment(direction: Vec3, roughness: f32) -> Vec3 {
-    let sky = vec3(0.62, 0.71, 0.85);
-    let ceiling = vec3(0.72, 0.73, 0.74);
-    let base = vec3(0.18, 0.14, 0.10).lerp(ceiling, direction.z * 0.5 + 0.5);
-    // Broad analytic windows: blur grows with roughness, with constant average energy.
-    let window = direction.dot(vec3(-0.8, -0.2, 0.56).normalize()).max_num(0.0);
-    let power = 2.0 + (1.0 - roughness) * 26.0;
-    base + sky * window.powf(power) * ((power + 1.0) * 0.04)
-}
 #[inline(never)]
 pub(super) fn direct(s: Surface, n: Vec3, view: Vec3, light: Vec3, radiance: Vec3) -> Vec3 {
     let no_v = n.dot(view).max_num(0.001);
@@ -96,32 +87,24 @@ pub(super) fn shade(
     let mut color =
         if visibility > 0.0 { direct(s, n, view, sun.direction, sun.radiance) * visibility } else { Vec3::ZERO };
     let f = fresnel(f0, no_v) * s.specular;
-    let reflected = 2.0 * n.dot(view) * n - view;
     let diffuse_env = indirect * s.albedo * (1.0 - s.metallic) * (Vec3::ONE - f);
     // Analytic prefiltered environment and integrated specular approximation.
     let r = vec4(-1.0, -0.0275, -0.572, 0.022) * s.roughness + vec4(1.0, 0.0425, 1.04, -0.04);
     let a004 = (r.x * r.x).min_num((-9.28 * no_v).exp2()) * r.x + r.y;
     let ab = vec2(-1.04, 1.04) * a004 + vec2(r.z, r.w);
-    // Interior reflections must share the locally occluded transport field.
-    // Global sky here bypassed the roof/walls and bleached dark worktops and
-    // foliage when daylight strength increased.
-    let environment_scale = indirect * 1.5;
-    let filtered_environment = |roughness: f32| {
-        let approximate = environment(reflected, roughness) * environment_scale;
-        approximate.lerp(reflection.truncate(), reflection.w * (1.0 - roughness).powi(2))
-    };
+    // Mobile prefiltered environment approximation: use the same occluded
+    // radiance estimate as diffuse transport. An invented directional window
+    // cannot follow actual apertures or source controls. Traced reference
+    // reflections replace this estimate where available.
+    let filtered_environment =
+        |roughness: f32| indirect.lerp(reflection.truncate(), reflection.w * (1.0 - roughness).powi(2));
     let specular_env =
         filtered_environment(s.roughness) * (f0 * ab.x + Vec3::splat(ab.y)).max_num(Vec3::ZERO) * s.specular;
-    // Environment highlights follow local visibility instead of shining equally
-    // inside cupboards and beside windows. The bounce field is already cached.
-    let specular_occlusion = (indirect.element_sum() * 0.9).clamp_num(0.18, 1.0);
     let edge = 1.0 - no_v;
     let sheen_env = indirect * s.albedo * (s.sheen * (edge * edge * edge) * 0.35);
     let coat_env = fresnel(Vec3::splat(0.04), no_v) * s.coat;
-    let coat =
-        if s.coat > 0.0 { filtered_environment(s.coat_roughness) * coat_env * specular_occlusion } else { Vec3::ZERO };
-    color +=
-        ((diffuse_env + sheen_env + specular_env * specular_occlusion) * (Vec3::ONE - coat_env) + coat) * s.occlusion;
+    let coat = if s.coat > 0.0 { filtered_environment(s.coat_roughness) * coat_env } else { Vec3::ZERO };
+    color += ((diffuse_env + sheen_env + specular_env) * (Vec3::ONE - coat_env) + coat) * s.occlusion;
     color
 }
 #[inline(never)]
@@ -149,6 +132,27 @@ mod tests {
             (first - second).abs().max_element() < 0.00001,
             "the roof's cached occlusion must also apply to reflections"
         );
+    }
+    #[test]
+    fn indirect_finishes_scale_linearly_with_the_shared_transport() {
+        let sun = Sun { direction: Vec3::Z, radiance: Vec3::ZERO, sky: Vec3::ZERO };
+        for metallic in [0.0, 1.0] {
+            for coat in [0.0, 0.5] {
+                let material = Surface {
+                    albedo: Vec3::splat(0.4),
+                    metallic,
+                    coat,
+                    roughness: 0.3,
+                    occlusion: 1.0,
+                    ..Surface::default()
+                };
+                let light = vec3(0.02, 0.06, 0.1);
+                let first = shade(material, Vec3::Z, Vec3::Z, 0.0, light, sun, Vec4::ZERO);
+                let second = shade(material, Vec3::Z, Vec3::Z, 0.0, light * 4.0, sun, Vec4::ZERO);
+                assert!((second - first * 4.0).abs().max_element() < 0.00001);
+                assert_eq!(shade(material, Vec3::Z, Vec3::Z, 0.0, Vec3::ZERO, sun, Vec4::ZERO), Vec3::ZERO);
+            }
+        }
     }
     #[test]
     fn microfacet_reflection_is_finite_and_reciprocal_across_finishes_and_tangent_frames() {

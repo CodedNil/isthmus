@@ -10,7 +10,6 @@ use quote::{format_ident, quote};
 use spirv_builder::{ModuleResult, SpirvBuilder, SpirvMetadata};
 use std::{collections::BTreeMap, env, fs, path::Path};
 
-mod optimize;
 mod source;
 mod syntax;
 
@@ -162,18 +161,7 @@ pub fn build(source: &str) -> Result<()> {
         // when unrelated Rust edits move shader! declarations to new lines.
         module.entry_points[0].name = "main".into();
         compact(&mut module, KeepUnused::No);
-        let mut info = validator.validate(&module)?;
-        if package
-            .metadata
-            .get("isthmus")
-            .and_then(|value| value.get("optimize-shaders"))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-            && module.entry_points[0].stage == naga::ShaderStage::Fragment
-        {
-            module = optimize::shader(&module, &info)?;
-            info = validator.validate(&module)?;
-        }
+        let info = validator.validate(&module)?;
         // Tint rejects Naga's rounded decimal spelling of the largest finite float.
         let code =
             write_string(&module, &info, WriterFlags::empty())?.replace(&format!("{}f", f32::MAX), "0x1.fffffep+127f");

@@ -198,15 +198,20 @@ pub(super) fn stem(o: Vec3, d: Vec3, size: Vec3) -> f32 {
 }
 
 #[inline(never)]
-pub(super) fn normal(point: Vec3, distance: impl Fn(Vec3) -> f32) -> Vec3 {
-    let a = vec3(1.0, -1.0, -1.0);
-    let b = vec3(-1.0, -1.0, 1.0);
-    let c = vec3(-1.0, 1.0, -1.0);
-    let d = Vec3::ONE;
-    let gradient = a * distance(point + a * super::NORMAL_OFFSET)
-        + b * distance(point + b * super::NORMAL_OFFSET)
-        + c * distance(point + c * super::NORMAL_OFFSET)
-        + d * distance(point + d * super::NORMAL_OFFSET);
+pub(super) fn normal(point: Vec3, samples: u32, distance: impl Fn(Vec3) -> f32) -> Vec3 {
+    // The interactive renderer supplies four through a uniform. An unrolled
+    // four-call expression makes drivers inline the entire house SDF four times.
+    let mut gradient = Vec3::ZERO;
+    let mut index = 0;
+    while index < samples {
+        let offset = vec3(
+            if (index ^ (index >> 1)) & 1 == 0 { 1.0 } else { -1.0 },
+            if index & 2 == 0 { -1.0 } else { 1.0 },
+            if index & 1 == 0 { -1.0 } else { 1.0 },
+        );
+        gradient += offset * distance(point + offset * super::NORMAL_OFFSET);
+        index += 1;
+    }
     let length = gradient.length();
     if length > 0.0 { gradient / length } else { Vec3::Z }
 }

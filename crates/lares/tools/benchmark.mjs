@@ -71,6 +71,16 @@ const injected = await call('Page.addScriptToEvaluateOnNewDocument', {
         if (!this.features.has('timestamp-query')) throw Error('GPU timestamps unavailable');
         const device = await request.call(this, { ...descriptor, requiredFeatures: [...(descriptor.requiredFeatures || []), 'timestamp-query'] });
         console.info("Lares GPU", JSON.stringify(bench.adapter));
+        if (${process.env.LARES_BENCH_COMPILE === '1'}) {
+            const pipeline = device.createRenderPipeline.bind(device);
+            let index = 0;
+            device.createRenderPipeline = descriptor => {
+                const id = index++, start = performance.now();
+                const result = pipeline(descriptor);
+                device.queue.onSubmittedWorkDone().then(() => console.info('Pipeline compile', id, descriptor.label, performance.now() - start));
+                return result;
+            };
+        }
         device.lost.then(info => { bench.errors.push("GPU device lost: " + info.message); });
         const create = device.createCommandEncoder.bind(device);
         const results = new WeakMap();
@@ -226,6 +236,7 @@ try {
   if (process.env.LARES_BENCH_PRESENCE === '1' && (result.presence.online !== 'true' || !result.presence.ghosts)) {
     throw Error('Live world-space presence missing: ' + JSON.stringify(result.presence));
   }
+  result.renderState = await evaluate(`(async () => { const renderer = await import('./web/lares.js'); return renderer.render_diagnostics ? JSON.parse(renderer.render_diagnostics()) : null; })()`);
   result.startup = await evaluate(`performance.getEntriesByType('mark').filter(entry => entry.name.startsWith('lares:')).map(entry => ({ stage: entry.name, milliseconds: entry.startTime }))`);
   result.seconds = (performance.now() - started) / 1000;
   result.size = [+width, +height];

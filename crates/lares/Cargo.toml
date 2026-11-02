@@ -55,6 +55,3 @@ image = { version = "0.25.10", default-features = false, features = ["webp", "pn
 
 [lints]
 workspace = true
-
-[package.metadata.isthmus]
-optimize-shaders = true

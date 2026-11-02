@@ -163,3 +163,44 @@ fn thin_glazing_is_visible_to_cameras_but_transmits_transport_and_shadow_rays() 
         assert!((light_depth(origin, direction, &nodes, &objects, FAR) - 2.95).abs() < 0.002);
     }
 }
+
+#[test]
+fn solar_penumbra_is_continuous_and_grows_with_blocker_separation() {
+    let blocker = Object::new(Kind::Box, vec3(0.0, 0.0, 1.05), vec3(0.2, 0.2, 0.1), Material::Wood);
+    let extent = blocker.extent();
+    let nodes = [Node { min: blocker.pos - extent, max: blocker.pos + extent, object: 0, skip: 1 }];
+    let objects = [blocker];
+    assert_eq!(solar_visibility(Vec3::ZERO, Vec3::Z, &nodes, &objects), 0.0);
+    assert_eq!(solar_visibility(vec3(0.2, 0.0, 0.0), Vec3::Z, &nodes, &objects), 1.0);
+    let far = solar_visibility(vec3(0.102, 0.0, 0.0), Vec3::Z, &nodes, &objects);
+    let close = solar_visibility(vec3(0.102, 0.0, 0.85), Vec3::Z, &nodes, &objects);
+    assert!(far > 0.0 && far < 0.9, "partial penumbra {far}");
+    assert!(close > far + 0.1, "contacts sharpen: near {close}, far {far}");
+    let mut previous = 0.0;
+    for step in 0..60 {
+        let value = solar_visibility(vec3(0.1001 + step as f32 * 0.0001, 0.0, 0.0), Vec3::Z, &nodes, &objects);
+        assert!(value >= previous && value - previous < 0.1, "continuous edge {previous} -> {value}");
+        previous = value;
+    }
+}
+
+#[test]
+fn ceiling_fittings_follow_the_camera_cutaway() {
+    let fitting = Object::new(Kind::Downlight, vec3(0.0, 0.0, 2.368), vec3(0.11, 0.11, 0.032), Material::Paint);
+    let extent = fitting.extent();
+    let nodes = [Node { min: fitting.pos - extent, max: fitting.pos + extent, object: 0, skip: 1 }];
+    assert_eq!(cast::<false, true>(Vec3::Z * 4.0, -Vec3::Z, &nodes, &[fitting], 0.0, FAR).0, FAR);
+    assert!(cast::<false, false>(Vec3::Z * 4.0, -Vec3::Z, &nodes, &[fitting], 0.0, FAR).0 < FAR);
+}
+
+#[test]
+fn lounge_opening_does_not_leave_detached_skirting_posts() {
+    let objects = crate::render::layout::compile(&home::rooms());
+    for x in [-2.958, -2.842] {
+        let point = vec3(x, 0.258, 0.072);
+        assert!(
+            !objects.iter().any(|item| item.kind == Kind::Box && box_sdf(point - item.pos, item.size) < 0.0),
+            "detached trim at {point:?}"
+        );
+    }
+}

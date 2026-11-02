@@ -17,8 +17,14 @@ const server = createServer(async (request, response) => {
     const file = resolve(assets, '.' + (name === '/' ? '/index.html' : name));
     if (!file.startsWith(assets + sep)) { response.writeHead(403).end(); return; }
     const mime = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.wasm': 'application/wasm', '.webp': 'image/webp' };
-    const data = await readFile(file);
-    response.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream' }).end(data);
+    const headers = { 'Content-Type': mime[extname(file)] || 'application/octet-stream', Vary: 'Accept-Encoding' };
+    let data;
+    // Match the application's precompressed asset serving during startup tests.
+    if (/\bgzip\b/.test(request.headers['accept-encoding'] || '')) {
+      try { data = await readFile(file + '.gz'); headers['Content-Encoding'] = 'gzip'; } catch { }
+    }
+    data ??= await readFile(file);
+    response.writeHead(200, headers).end(data);
   } catch { response.writeHead(404).end(); }
 });
 let browser, benchmark;

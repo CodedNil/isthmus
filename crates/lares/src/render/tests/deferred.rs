@@ -2,6 +2,24 @@ use super::*;
 use crate::{camera::Camera, render::shadows::ShadowAtlas};
 
 #[test]
+fn looped_normals_preserve_the_four_tetrahedral_samples() {
+    for point in [vec3(0.3, -0.7, 0.2), vec3(-0.4, 0.1, 0.8), Vec3::Z] {
+        let calls = core::cell::Cell::new(0);
+        let distance = |p: Vec3| {
+            calls.set(calls.get() + 1);
+            (p * vec3(0.7, 1.1, 1.4)).length() - 0.5
+        };
+        let actual = trace::normal(point, 4, distance);
+        assert_eq!(calls.get(), 4);
+        let mut gradient = Vec3::ZERO;
+        for offset in [vec3(1.0, -1.0, -1.0), vec3(-1.0, -1.0, 1.0), vec3(-1.0, 1.0, -1.0), Vec3::ONE] {
+            gradient += offset * distance(point + offset * NORMAL_OFFSET);
+        }
+        assert_eq!(actual, gradient / gradient.length());
+    }
+}
+
+#[test]
 fn half_payloads_survive_half_precision_storage_exactly() {
     for value in 0..32768 {
         let encoded = half_payload(value);
@@ -11,19 +29,32 @@ fn half_payloads_survive_half_precision_storage_exactly() {
     }
     for direction in [Vec3::X, -Vec3::Y, Vec3::Z, -Vec3::Z, vec3(0.3, -0.7, 0.4).normalize()] {
         for height in [-0.12, 0.0, 0.34, 1.1, 2.4] {
-            let record = encode_visibility(4238, SUN_VISIBLE | REFLECTED | GLAZED, height, direction, 0.73);
+            let record =
+                encode_visibility(4238, SUN_VISIBLE | REFLECTED | GLAZED | (11 << 17), height, direction, 0.73);
             let word = read_half_payload(record.x);
             let extra = read_half_payload(record.z);
-            let decoded_height = (read_half_payload(record.y) | ((extra & 3) << 15)) as f32 * (3.2 / 131_071.0) - 0.2;
+            let decoded_height = read_half_payload(record.y) as f32 * (3.2 / 32767.0) - 0.2;
             assert_eq!(word & VISIBILITY_OBJECTS, 4238);
             assert_eq!(word & (SUN_VISIBLE | REFLECTED), SUN_VISIBLE | REFLECTED);
-            assert_ne!(extra & 4, 0);
-            assert!((height - decoded_height).abs() < 0.000_025);
-            let normal = decode_normal((read_half_payload(record.w) & 16383) | ((extra >> 11) << 14));
-            assert!(normal.dot(direction) > 0.9999);
-            assert!((((extra >> 3) & 255) as f32 / 255.0 - 0.73).abs() < 0.002);
+            assert_ne!(extra & 1, 0);
+            assert_eq!((extra >> 5) & 255, 11);
+            assert!((height - decoded_height).abs() < 0.000_05);
+            let normal = decode_normal((read_half_payload(record.w) & 16383) | ((extra >> 13) << 14));
+            assert!(normal.dot(direction) > 0.9998);
+            assert!((((extra >> 1) & 15) as f32 / 15.0 - 0.73).abs() < 0.034);
         }
     }
+}
+
+#[test]
+fn solar_visibility_preserves_dark_hdr_penumbrae() {
+    for visibility in [0.0_f32, 0.00001, 0.0001, 0.001, 0.003, 0.01, 0.1, 0.5, 1.0] {
+        let decoded = decode_sun(encode_sun(visibility));
+        let bound = visibility.sqrt() / 255.0 + 1.0 / (255.0 * 255.0);
+        assert!((decoded - visibility).abs() <= bound);
+    }
+    assert!(decode_sun(encode_sun(0.0001)) > 0.0, "tiny penumbrae must not snap between zero and 1/255");
+    assert!(decode_sun(encode_sun(0.0002)) > decode_sun(encode_sun(0.0001)));
 }
 
 #[test]
@@ -49,6 +80,7 @@ fn deferred_pixels_match_the_direct_reference() {
         sample_index: 0,
         interleaved: false,
         parity: 0,
+        normal_samples: 4,
     };
     let mut error = 0.0;
     let mut maximum: f32 = 0.0;

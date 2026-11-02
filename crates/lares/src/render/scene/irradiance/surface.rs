@@ -9,16 +9,30 @@ use isthmus::prelude::*;
 
 const SPACING: f32 = 0.20;
 
+fn spacing(item: Object) -> f32 {
+    if item.kind == Kind::LinenStack {
+        0.05
+    } else if item.kind == Kind::Box && item.pos.z < 0.0 {
+        0.10
+    } else {
+        SPACING
+    }
+}
+
 fn architectural(item: Object) -> bool {
     item.kind == Kind::Box || item.kind == Kind::Ceiling
 }
-fn dimensions(item: Object) -> UVec3 {
-    if architectural(item) {
-        let lo = ((item.pos - item.size * 0.5) / SPACING).floor();
-        let hi = ((item.pos + item.size * 0.5) / SPACING).ceil();
-        (hi - lo + 5.0).as_uvec3()
+#[cfg(not(target_arch = "spirv"))]
+fn allocate_layout(item: &mut Object) {
+    let spacing = spacing(*item);
+    if architectural(*item) {
+        let lo = ((item.pos - item.size * 0.5) / spacing).floor();
+        let hi = ((item.pos + item.size * 0.5) / spacing).ceil();
+        item.surface_origin = lo;
+        item.surface_grid = (hi - lo + 5.0).as_uvec3();
     } else {
-        (item.size / SPACING).ceil().max_num(Vec3::ONE).as_uvec3()
+        item.surface_origin = Vec3::ZERO;
+        item.surface_grid = (item.size / spacing).ceil().max_num(Vec3::ONE).as_uvec3();
     }
 }
 fn plane(v: Vec3, axis: u32) -> Vec2 {
@@ -31,10 +45,10 @@ fn plane(v: Vec3, axis: u32) -> Vec2 {
     }
 }
 fn cell_origin(item: Object, axis: u32) -> Vec2 {
-    (plane(item.pos - item.size * 0.5, axis) / SPACING).floor() - 2.0
+    plane(item.surface_origin, axis) - 2.0
 }
 fn face(item: Object, axis: u32, negative: bool) -> (u32, UVec2) {
-    let size = dimensions(item);
+    let size = item.surface_grid;
     let (offset, shape) = if axis == 0 {
         (0, size.yz())
     } else if axis == 1 {
@@ -130,7 +144,7 @@ fn lookup_axis(probes: &[Probe], item: Object, local: Vec3, normal: Vec3, axis: 
     let (offset, shape) = face(item, axis, negative);
     let uv = plane(local, axis);
     let cell = if architectural(item) {
-        (uv + plane(item.pos, axis)) / SPACING - cell_origin(item, axis)
+        (uv + plane(item.pos, axis)) / spacing(item) - cell_origin(item, axis)
     } else {
         (uv / plane(item.size, axis) + 0.5) * shape.as_vec2() - 0.5
     };
@@ -156,8 +170,8 @@ fn lookup_axis(probes: &[Probe], item: Object, local: Vec3, normal: Vec3, axis: 
         }
         let normal_weight = ((probe.normal.dot(normal) - 0.45) / 0.55).max_num(0.0);
         // Prevent a top projection from crossing a step onto a lower cushion.
-        let separation = (point - probe.position).dot(normal).abs();
-        let plane_weight = (1.0 - separation / 0.12).max_num(0.0);
+        let separation = ((point - probe.position).dot(normal).abs() - 0.002).max_num(0.0);
+        let plane_weight = (1.0 - separation / (spacing(item) * 0.6)).max_num(0.0);
         let w = Vec2::ONE - (step.as_vec2() - fraction).abs();
         let weight = w.x * w.y * normal_weight * plane_weight;
         if corner == 0 {
@@ -192,17 +206,22 @@ pub(super) fn sites(objects: &mut [Object], nodes: &[Node], base: u32) -> Sites 
     let mut neighbours = Vec::new();
     for index in 0..objects.len() {
         let mut item = objects[index];
-        // A single depth projection covers architecture and the footstool.
-        // Layered fronts, sofa seats/pillows and handles need multiple depth layers;
+        // Single depth projections cover architecture, the footstool and the
+        // exposed faces of folded linen. Layered sofa seats/pillows and handles need multiple depth layers;
         // retain the directional volume there rather than switching layers.
         // Sub-grid-height trim uses the volume, just like other fine detail.
         // Its padded charts would otherwise consist almost entirely of holes.
-        let trim = item.kind == Kind::Box && item.pos.z > 0.0 && item.size.z < SPACING;
-        if trim || !matches!(item.kind, Kind::Box | Kind::Ceiling | Kind::Ottoman) {
+        let trim = item.kind == Kind::Box
+            && item.pos.z > 0.0
+            && item.size.z < SPACING
+            && item.pos.z + item.size.z * 0.5 < SPACING;
+        if trim || !matches!(item.kind, Kind::Box | Kind::Ceiling | Kind::Ottoman | Kind::LinenStack) {
             continue;
         }
+        allocate_layout(&mut item);
         item.surface_cache = base + result.len() as u32;
-        let size = dimensions(item);
+        let size = item.surface_grid;
+        let spacing = spacing(item);
         let count = 2 * (size.x * size.y + size.x * size.z + size.y * size.z);
         result.resize(result.len() + count as usize, Probe {
             positive: Vec3::splat(-FAR),
@@ -232,7 +251,7 @@ pub(super) fn sites(objects: &mut [Object], nodes: &[Node], base: u32) -> Sites 
                             }
                         }
                         let uv = if architectural(item) {
-                            (cell_origin(item, axis) + vec2(x as f32, y as f32)) * SPACING - plane(item.pos, axis)
+                            (cell_origin(item, axis) + vec2(x as f32, y as f32)) * spacing - plane(item.pos, axis)
                         } else {
                             ((vec2(x as f32, y as f32) + 0.5) / shape.as_vec2() - 0.5) * plane(item.size, axis)
                         };
@@ -292,7 +311,7 @@ pub(super) fn sites(objects: &mut [Object], nodes: &[Node], base: u32) -> Sites 
                             footprints[slot] = [
                                 scene::rotate_z(
                                     if architectural(item) {
-                                        u.normalize() * (SPACING * 0.5)
+                                        u.normalize() * (spacing * 0.5)
                                     } else {
                                         u / shape.x as f32 * 0.5
                                     },
@@ -300,7 +319,7 @@ pub(super) fn sites(objects: &mut [Object], nodes: &[Node], base: u32) -> Sites 
                                 ),
                                 scene::rotate_z(
                                     if architectural(item) {
-                                        v.normalize() * (SPACING * 0.5)
+                                        v.normalize() * (spacing * 0.5)
                                     } else {
                                         v / shape.y as f32 * 0.5
                                     },
@@ -320,6 +339,8 @@ pub(super) fn sites(objects: &mut [Object], nodes: &[Node], base: u32) -> Sites 
             }
         }
         objects[index].surface_cache = item.surface_cache;
+        objects[index].surface_origin = item.surface_origin;
+        objects[index].surface_grid = item.surface_grid;
     }
     Sites { probes: result, footprints, neighbours }
 }
@@ -331,6 +352,27 @@ mod tests {
         home::{Material, Room, Walls},
         render::{Scene, SunSettings},
     };
+
+    #[test]
+    fn chart_layout_does_not_depend_on_runtime_float_rounding() {
+        let boundary = 2.6_f32;
+        assert_ne!(
+            (boundary / 0.1).floor(),
+            (boundary * 10.0).floor(),
+            "the spare-room boundary straddles an integer under reciprocal lowering"
+        );
+        let mut item = Object::new(Kind::Box, vec3(4.2, -1.8, -0.06), vec3(3.2, 2.0, 0.12), Material::Carpet);
+        allocate_layout(&mut item);
+        item.surface_cache = 17;
+        for axis in 0..3 {
+            let shape = face(item, axis, false);
+            let origin = cell_origin(item, axis);
+            let perturbed =
+                Object { pos: item.pos + Vec3::splat(0.000001), size: item.size - Vec3::splat(0.000001), ..item };
+            assert_eq!(face(perturbed, axis, false), shape);
+            assert_eq!(cell_origin(perturbed, axis), origin);
+        }
+    }
 
     #[test]
     fn projected_interpolation_does_not_borrow_light_across_partitions() {
@@ -354,6 +396,59 @@ mod tests {
                 assert!(
                     value.truncate().max_element() < 0.0001,
                     "projected cache leaked across a wall at {point:?}: {value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn thin_furniture_shelves_have_their_own_transport_instead_of_coarse_volume_light() {
+        let rooms = [Room::new(Vec2::ZERO, vec2(1.0, 1.2), Material::Floorboards).furniture_material(
+            Kind::Box,
+            (0.0, 0.0, 1.79),
+            (0.76, 0.87, 0.025),
+            0.0,
+            Material::MapleHorizontal,
+        )];
+        let mut scene = Scene::new_at(&rooms, 1_782_043_200.0, SunSettings::default());
+        let shelf = *scene.objects.iter().find(|item| item.material == Material::MapleHorizontal).unwrap();
+        assert_ne!(shelf.surface_cache, u32::MAX, "thin furniture is not architectural trim");
+        for probe in &mut scene.probes {
+            probe.light.constant = if probe.normal == Vec3::ZERO { Vec3::splat(1000.0) } else { Vec3::ZERO };
+        }
+        for x in [-0.3, 0.0, 0.3] {
+            for y in [-0.35, 0.0, 0.35] {
+                let value = sample(&scene.probes, shelf, vec3(x, y, shelf.size.z * 0.5), Vec3::Z);
+                assert!(value.w > 0.95 && value.truncate() == Vec3::ZERO, "shelf coverage {value:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn folded_linen_tops_do_not_borrow_bright_volume_light() {
+        let rooms = [Room::new(Vec2::ZERO, vec2(1.0, 1.2), Material::Floorboards).furniture(
+            Kind::LinenStack,
+            (0.0, 0.0, 1.82),
+            (0.36, 0.51, 0.32),
+            0.0,
+        )];
+        let mut scene = Scene::new_at(&rooms, 1_782_043_200.0, SunSettings::default());
+        let linen = *scene.objects.iter().find(|item| item.kind == Kind::LinenStack).unwrap();
+        assert_ne!(linen.surface_cache, u32::MAX);
+        for probe in &mut scene.probes {
+            probe.light.constant = if probe.normal == Vec3::ZERO { Vec3::splat(1000.0) } else { Vec3::ZERO };
+        }
+        for x in [-0.1, 0.0, 0.1] {
+            for y in [-0.15, 0.0, 0.15] {
+                let origin = vec3(x, y, 0.3);
+                let t = crate::render::scene::trace::march(origin, -Vec3::Z, 0.0, 0.5, 0.0, |p| {
+                    crate::render::scene::render_furniture::<crate::render::scene::Distance>(linen.kind, p, linen.size)
+                        .0
+                });
+                let value = sample(&scene.probes, linen, origin - Vec3::Z * t, Vec3::Z);
+                assert!(
+                    value.w > 0.95 && value.truncate() == Vec3::ZERO,
+                    "linen top must use its visible surface field: {value:?}"
                 );
             }
         }

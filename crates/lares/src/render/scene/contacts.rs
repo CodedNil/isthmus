@@ -10,7 +10,7 @@ use isthmus::prelude::*;
 const CELL: f32 = 0.40;
 const WIDE: f32 = 0.12;
 
-/// One cosine-weighted visibility ray per existing accumulation sample. Unlike
+/// Fixed cosine-weighted visibility rays, independent of camera accumulation. Unlike
 /// a distance deficit, a conservative SDF only controls stepping, not darkness.
 fn contact_hit(item: Object, point: Vec3, direction: Vec3) -> f32 {
     let local = super::unrotate_z(point - item.pos, item.rotation);
@@ -50,38 +50,43 @@ pub(super) fn visibility(
     receiver: u32,
     point: Vec3,
     normal: Vec3,
-    sample: u32,
+    _sample: u32,
 ) -> f32 {
     let origin = vec3(f32::from_bits(data[0]), f32::from_bits(data[1]), f32::from_bits(data[2]));
     let size = uvec3(data[3], data[4], data[5]);
     let cell = ((point - origin) / CELL).floor().max_num(Vec3::ZERO).min_num((size - UVec3::ONE).as_vec3()).as_uvec3();
     let slot = (cell.x + size.x * (cell.y + size.y * cell.z)) as usize;
-    let mut index = data[6 + slot] as usize;
+    let begin = data[6 + slot] as usize;
     let end = data[7 + slot] as usize;
-    let phase = (sample % 4) as f32;
-    let radius = ((phase + 0.5) / 4.0).sqrt();
-    let angle = phase * 2.399_963_1;
-    let tangent =
-        if normal.z.abs() < 0.9 { normal.cross(Vec3::Z).normalize() } else { normal.cross(Vec3::X).normalize() };
-    let direction = tangent * (radius * angle.cos())
-        + normal.cross(tangent) * (radius * angle.sin())
-        + normal * (1.0 - radius * radius).sqrt();
-    let start = point + normal * 0.0008;
-    let mut closest = WIDE;
-    while index < end {
-        let object = data[index];
-        index += 1;
-        let item = objects[object as usize];
-        // Architectural occlusion is already integrated into the GI field.
-        // Applying it twice produces artificial dark wall-corner outlines.
-        if object != receiver
-            && !(item.kind == Kind::Ceiling || (item.kind == Kind::Box && item.material == Material::Paint))
-        {
-            closest = closest.min_num(contact_hit(item, start, direction));
+    let mut visibility = 0.0;
+    for sample in 0..4 {
+        let mut index = begin;
+        let phase = sample as f32;
+        let radius = ((phase + 0.5) / 4.0).sqrt();
+        let angle = phase * 2.399_963_1;
+        let tangent =
+            if normal.z.abs() < 0.9 { normal.cross(Vec3::Z).normalize() } else { normal.cross(Vec3::X).normalize() };
+        let direction = tangent * (radius * angle.cos())
+            + normal.cross(tangent) * (radius * angle.sin())
+            + normal * (1.0 - radius * radius).sqrt();
+        let start = point + normal * 0.0008;
+        let mut closest = WIDE;
+        while index < end {
+            let object = data[index];
+            index += 1;
+            let item = objects[object as usize];
+            // Architectural occlusion is already integrated into the GI field.
+            // Applying it twice produces artificial dark wall-corner outlines.
+            if object != receiver
+                && !(item.kind == Kind::Ceiling || (item.kind == Kind::Box && item.material == Material::Paint))
+            {
+                closest = closest.min_num(contact_hit(item, start, direction));
+            }
         }
+        let contact = (1.0 - closest / WIDE).max_num(0.0);
+        visibility += 1.0 - 0.5 * contact * contact;
     }
-    let contact = (1.0 - closest / WIDE).max_num(0.0);
-    1.0 - 0.5 * contact * contact
+    visibility * 0.25
 }
 
 #[cfg(not(target_arch = "spirv"))]
@@ -169,6 +174,12 @@ mod tests {
         let data = index(&objects);
         let close = averaged(&data, &objects, 0, vec3(0.052, 0.0, 0.0), Vec3::Z);
         let far = averaged(&data, &objects, 0, vec3(0.5, 0.0, 0.0), Vec3::Z);
+        for sample in 0..4 {
+            assert!(
+                (visibility(&data, &objects, 0, vec3(0.052, 0.0, 0.0), Vec3::Z, sample) - close).abs() < 0.000001,
+                "contact softness must be complete in the first camera sample"
+            );
+        }
         assert!((0.5..0.99).contains(&close));
         assert!((far - 1.0).abs() < 0.00001);
         assert_eq!(averaged(&index(&[floor]), &[floor], 0, Vec3::ZERO, Vec3::Z), 1.0);

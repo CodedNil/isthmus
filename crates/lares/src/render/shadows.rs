@@ -1,4 +1,4 @@
-//! SDF-traced variance shadows, independent of camera, dimming and light colour.
+//! Static SDF depth with receiver-plane-corrected percentage-closer filtering.
 use super::{acceleration::Node, scene};
 use crate::home::{Kind, Object};
 #[cfg(not(target_arch = "spirv"))]
@@ -52,11 +52,6 @@ fn encode(direction: Vec3) -> Vec2 {
     xy * 0.5 + 0.5
 }
 
-fn emitter(light: Object) -> Vec3 {
-    let down = light.kind == Kind::Downlight;
-    light.pos + Vec3::Z * if down { -0.025 } else { 0.005 }
-}
-
 fn pack(value: f32) -> Vec2 {
     let bits = (value * 65535.0).clamp_num(0.0, 65535.0).round();
     let high = (bits / 256.0).floor();
@@ -65,74 +60,107 @@ fn pack(value: f32) -> Vec2 {
 fn unpack(value: Vec2) -> f32 {
     value.dot(vec2(65280.0, 255.0)) / 65535.0
 }
-fn moments(value: Vec4) -> Vec2 {
-    vec2(unpack(value.xy()), unpack(value.zw()))
+fn direction(light: Object, uv: Vec2) -> Vec3 {
+    if light.kind != Kind::Downlight {
+        return decode(uv);
+    }
+    // Rotate and expand the octahedron's downward diamond into a full square.
+    // Every texel covers the emitting hemisphere, including the tile corners.
+    let q = uv * 2.0 - 1.0;
+    let p = vec2(q.x - q.y, q.x + q.y) * 0.5;
+    p.extend(p.abs().element_sum() - 1.0).normalize()
 }
-fn packed(value: Vec2) -> Vec4 {
-    let a = pack(value.x);
-    let b = pack(value.y);
-    vec4(a.x, a.y, b.x, b.y)
+fn coordinates(light: Object, delta: Vec3) -> Vec2 {
+    if light.kind != Kind::Downlight {
+        return encode(delta);
+    }
+    let p = delta.xy() / delta.abs().element_sum().max_num(0.001);
+    vec2(p.x + p.y, p.y - p.x) * 0.5 + 0.5
 }
 
 pub fn depth_pixel(nodes: &[Node], objects: &[Object], light: Object, uv: Vec2) -> Vec4 {
-    let direction = decode(uv.clamp_num(Vec2::ZERO, Vec2::ONE));
+    let direction = direction(light, uv.clamp_num(Vec2::ZERO, Vec2::ONE));
     let distance = if light.kind == Kind::Downlight && direction.z >= 0.0 {
         RANGE
     } else {
-        scene::light_depth(emitter(light), direction, nodes, objects, RANGE)
+        scene::light_depth(scene::fixtures::source(light), direction, nodes, objects, RANGE)
     };
     let d = distance / RANGE;
-    packed(vec2(d, d * d))
+    pack(d).extend(0.0).extend(1.0)
 }
 
-pub fn visible(
-    atlas: &Image,
-    info: AtlasInfo,
-    slot: u32,
-    _sample: u32,
-    light: Object,
-    point: Vec3,
-    normal: Vec3,
-) -> f32 {
-    let source = emitter(light);
-    let delta = point - source;
-    let uv = encode(delta);
-    let value = moments(
-        atlas.sample_raw((info.origin(slot) + Vec2::splat(PADDING as f32) + uv * info.resolution as f32) / info.size),
-    );
-    // A filtered texel covers a larger depth interval on grazing receivers.
-    // Account for that footprint rather than letting a surface shadow itself
-    // at rounded rims and wall junctions. Cap the offset to retain contacts.
+// Compare each unfiltered depth against the receiver plane before interpolating
+// visibility. Averaging depths/moments first invents light behind thin blockers.
+fn gather(atlas: &Image, info: AtlasInfo, slot: u32, light: Object, delta: Vec3, normal: Vec3, uv: Vec2) -> Vec2 {
+    let texel = uv * info.resolution as f32 - 0.5;
+    let base = texel.floor();
+    let fraction = texel - base;
     let distance = delta.length();
-    let cosine = normal.dot(-delta / distance.max_num(0.001)).abs().max_num(0.15);
-    let slope = (1.0 - cosine * cosine).max_num(0.0).sqrt() / cosine;
-    let footprint = distance * 4.0 / info.resolution as f32;
-    let bias = (0.003 + footprint * slope * 0.5).min_num(0.025);
-    let receiver = (distance - bias) / RANGE;
-    if receiver <= value.x {
-        return 1.0;
+    let mut visibility = 0.0;
+    let mut blocker = 0.0;
+    let mut blocked = 0.0;
+    for tap in 0..4 {
+        let step = vec2((tap & 1) as f32, (tap >> 1) as f32);
+        let pixel = (base + step).clamp_num(Vec2::ZERO, Vec2::splat(info.resolution as f32 - 1.0));
+        let depth = unpack(atlas.texel((info.origin(slot) + PADDING as f32 + pixel).as_ivec2()).xy()) * RANGE;
+        let ray = direction(light, (pixel + 0.5) / info.resolution as f32);
+        let denominator = normal.dot(ray);
+        let receiver = if denominator.abs() > 0.02 { (normal.dot(delta) / denominator).max_num(0.0) } else { distance };
+        let receiver = receiver.min_num(distance * 1.1).max_num(distance * 0.9);
+        let w = Vec2::ONE - (step - fraction).abs();
+        let weight = w.x * w.y;
+        if depth + 0.0015 + distance / 65535.0 >= receiver {
+            visibility += weight;
+        } else {
+            blocker += depth * weight;
+            blocked += weight;
+        }
     }
-    let variance = (value.y - value.x * value.x).max_num(0.000_000_2);
-    let difference = receiver - value.x;
-    let probability = variance / (variance + difference * difference);
-    // Suppress the low-probability tail that otherwise leaks behind blockers.
-    ((probability - 0.22) / 0.78).clamp_num(0.0, 1.0)
+    vec2(visibility, if blocked > 0.0001 { blocker / blocked } else { distance })
 }
 
-pub fn filter_pixel(source: &Image, info: AtlasInfo, origin: Vec2, pixel: Vec2, axis: Vec2) -> Vec4 {
-    let mut sum = Vec2::ZERO;
-    for tap in 0..5 {
-        let weight = if tap == 0 || tap == 4 {
-            1.0
-        } else if tap == 1 || tap == 3 {
-            4.0
-        } else {
-            6.0
-        };
-        let p = (pixel + axis * (tap as f32 - 2.0)).clamp_num(origin + 0.5, origin + info.pitch() as f32 - 0.5);
-        sum += moments(source.sample_raw(p / info.size)) * (weight / 16.0);
+pub fn visible(atlas: &Image, info: AtlasInfo, slot: u32, light: Object, point: Vec3, normal: Vec3) -> f32 {
+    let delta = point - scene::fixtures::source(light);
+    if light.kind == Kind::Downlight && delta.z >= 0.0 {
+        return 0.0;
     }
-    packed(sum)
+    let uv = coordinates(light, delta);
+    let first = gather(atlas, info, slot, light, delta, normal, uv);
+    let distance = delta.length().max_num(0.001);
+    let radius = scene::fixtures::radius(light);
+    let scale = if light.kind == Kind::Downlight { core::f32::consts::FRAC_1_SQRT_2 } else { 0.5 };
+    // Search on both sides of the silhouette. A lit centre must also receive
+    // the penumbra; filtering only blocked centres clips half of every edge.
+    let search = (radius * info.resolution as f32 * scale / distance).clamp_num(1.0, 8.0);
+    let mut blocker = first.y * (1.0 - first.x);
+    let mut blocked = 1.0 - first.x;
+    for tap in 0..4 {
+        let offset = vec2((tap & 1) as f32 * 2.0 - 1.0, (tap >> 1) as f32 * 2.0 - 1.0)
+            * (search * 0.707 / info.resolution as f32);
+        let result = gather(atlas, info, slot, light, delta, normal, uv + offset);
+        blocker += result.y * (1.0 - result.x);
+        blocked += 1.0 - result.x;
+    }
+    if blocked < 0.0001 || blocked > 4.9999 {
+        return first.x;
+    }
+    let depth = blocker / blocked;
+    let spread = (radius * (distance - depth).max_num(0.0) / depth.max_num(0.01) * info.resolution as f32 * scale
+        / distance)
+        .min_num(8.0);
+    if spread <= 0.5 {
+        return first.x;
+    }
+    // A filled disc, evaluated in every frame, rather than four displaced
+    // silhouettes or a different emitter sample for each accumulation frame.
+    let mut sum = 0.0;
+    for tap in 0..16 {
+        let r = ((tap as f32 + 0.5) / 16.0).sqrt();
+        let angle = tap as f32 * 2.399_963_1;
+        let offset = vec2(angle.cos(), angle.sin()) * (r * spread / info.resolution as f32);
+        sum += gather(atlas, info, slot, light, delta, normal, uv + offset).x;
+    }
+    first.x + (sum / 16.0 - first.x) * ((spread - 0.5) * 2.0).min_num(1.0)
 }
 
 #[cfg(not(target_arch = "spirv"))]
@@ -146,7 +174,7 @@ impl ShadowAtlas {
     pub fn encode(&self, scene: &super::Scene) -> Result<Vec<u8>, io::Error> {
         use std::io::Write;
         let mut output = GzEncoder::new(Vec::new(), Compression::best());
-        output.write_all(b"LARESV02")?;
+        output.write_all(b"LARESV03")?;
         output.write_all(&scene.signature().to_le_bytes())?;
         output.write_all(&self.info.resolution.to_le_bytes())?;
         let size = self.image.size();
@@ -167,7 +195,7 @@ impl ShadowAtlas {
         let mut decoder = GzDecoder::new(bytes);
         let mut header = [0; 20];
         decoder.read_exact(&mut header).map_err(|_error| "invalid visibility asset")?;
-        if &header[..8] != b"LARESV02" || header[8..16] != scene.signature().to_le_bytes() {
+        if &header[..8] != b"LARESV03" || header[8..16] != scene.signature().to_le_bytes() {
             return Err("visibility asset is stale; rebuild with just lares");
         }
         let resolution = u32::from_le_bytes(header[16..20].try_into().map_err(|_error| "invalid resolution")?);
@@ -217,35 +245,7 @@ impl ShadowAtlas {
                 });
             }
         });
-        let mut image = Image::raw_rgba8([width as u32, height as u32], pixels);
-        for axis in [Vec2::X, Vec2::Y] {
-            let mut filtered = vec![255u8; width * height * 4];
-            let source = &image;
-            thread::scope(|scope| {
-                for (chunk, bytes) in filtered.chunks_mut(rows * width * 4).enumerate() {
-                    scope.spawn(move || {
-                        for (index, rgba) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                            let x = index % width;
-                            let y = chunk * rows + index / width;
-                            let pitch = info.pitch() as usize;
-                            let tile = y / pitch * info.columns as usize + x / pitch;
-                            if tile >= scene.lights.len() {
-                                continue;
-                            }
-                            let value = filter_pixel(
-                                source,
-                                info,
-                                info.origin(tile as u32),
-                                vec2(x as f32 + 0.5, y as f32 + 0.5),
-                                axis,
-                            );
-                            *rgba = value.to_array().map(|v| (v * 255.0).round() as u8);
-                        }
-                    });
-                }
-            });
-            image = Image::raw_rgba8([width as u32, height as u32], filtered);
-        }
+        let image = Image::raw_rgba8([width as u32, height as u32], pixels);
         Self { info, image }
     }
 }
@@ -265,14 +265,50 @@ mod tests {
     }
 
     #[test]
-    fn depth_moments_filter_without_alpha_coupling() {
+    fn packed_depth_roundtrips_without_filtering() {
         for value in [0.0, 0.1, 0.25, 0.5, 0.75, 1.0] {
-            let encoded = packed(vec2(value, value * value));
-            let bytes = encoded.to_array().map(|v| (v * 255.0).round() as u8).to_vec();
-            let image = Image::raw_rgba8([1, 1], bytes);
-            let decoded = moments(image.sample_raw(Vec2::splat(0.5)));
-            assert!((decoded.x - value).abs() < 1.0 / 65535.0);
-            assert!((decoded.y - value * value).abs() < 1.0 / 65535.0);
+            assert!((unpack(pack(value)) - value).abs() < 1.0 / 65535.0);
+        }
+    }
+    #[test]
+    fn depth_discontinuities_filter_visibility_without_inventing_transmitted_light() {
+        let light = Object::new(Kind::Downlight, Vec3::ZERO, vec3(0.11, 0.11, 0.032), crate::home::Material::Paint);
+        let info = AtlasInfo::new(1, 16);
+        let [width, height] = info.size.to_array().map(|v| v as usize);
+        let mut pixels = vec![255; width * height * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let depth = if x < PADDING as usize + 8 { 1.0 } else { 5.0 };
+                let packed = pack(depth / RANGE);
+                let index = (y * width + x) * 4;
+                pixels[index] = (packed.x * 255.0).round() as u8;
+                pixels[index + 1] = (packed.y * 255.0).round() as u8;
+            }
+        }
+        let atlas = Image::raw_rgba8([width as u32, height as u32], pixels);
+        for x in [0.46, 0.48, 0.5, 0.52, 0.54] {
+            let uv = vec2(x, 0.5);
+            let delta = direction(light, uv) * 3.0;
+            let actual = gather(&atlas, info, 0, light, delta, -delta.normalize(), uv).x;
+            let expected = (x * 16.0 - 7.5).clamp(0.0, 1.0);
+            assert!(
+                (actual - expected).abs() < 0.00001,
+                "visibility must be the fraction of unblocked taps: {actual} vs {expected}"
+            );
+        }
+    }
+    #[test]
+    fn downward_projection_roundtrips_and_allocates_no_texels_to_the_upper_hemisphere() {
+        let light = Object::new(Kind::Downlight, Vec3::ZERO, Vec3::ONE, crate::home::Material::Paint);
+        for y in 0..31 {
+            for x in 0..31 {
+                let uv = vec2((x as f32 + 0.5) / 31.0, (y as f32 + 0.5) / 31.0);
+                let ray = direction(light, uv);
+                assert!(ray.z <= 0.0);
+                if ray.z < 0.0 {
+                    assert!((coordinates(light, ray) - uv).length() < 0.00001);
+                }
+            }
         }
     }
 }

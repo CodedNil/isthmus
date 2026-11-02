@@ -47,6 +47,30 @@ pub fn set_light_color(entity: &str, red: f32, green: f32, blue: f32) -> bool {
     })
 }
 
+/// Read-only diagnostics for matching GPU captures to reference renders.
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn render_diagnostics() -> String {
+    APPLICATION.with(|application| {
+        let application = application.borrow();
+        let Some(app) = application.as_ref() else {
+            return String::new();
+        };
+        let app = app.borrow();
+        let globals = app.globals(vec2(1280.0, 800.0));
+        serde_json::json!({
+            "eye": globals.eye.to_array(),
+            "exposure": globals.exposure,
+            "whiteBalance": globals.white_balance.to_array(),
+            "sunDirection": globals.sun.direction.to_array(),
+            "sunRadiance": globals.sun.radiance.to_array(),
+            "sky": globals.sun.sky.to_array(),
+            "probes": app.scene.probes.len(),
+            "surfaceCharts": app.scene.objects.iter().filter(|item| item.surface_cache != u32::MAX).count(),
+        })
+        .to_string()
+    })
+}
+
 #[wasm_bindgen::prelude::wasm_bindgen]
 extern "C" {
     fn laresProgress(stage: &str);
@@ -121,6 +145,7 @@ async fn run(visibility: Vec<u8>, lighting: Vec<u8>) -> Result<(), Box<dyn Error
     let (mut samples, mut images) = sample_images(&mut gpu, physical);
     let mut visibility = gpu.add_image_format(physical, TextureFormat::Rgba16Float);
     let mut materials = gpu.add_image_format(physical, TextureFormat::Rgba16Float);
+    let mut geometry = gpu.alias_image(materials.0).expect("offscreen material target");
     laresProgress("Drawing the first view…");
     draw_sample(
         &mut gpu,
@@ -132,6 +157,7 @@ async fn run(visibility: Vec<u8>, lighting: Vec<u8>) -> Result<(), Box<dyn Error
         &images,
         &visibility,
         &materials,
+        geometry,
         0,
         1,
         true,
@@ -232,7 +258,7 @@ async fn run(visibility: Vec<u8>, lighting: Vec<u8>) -> Result<(), Box<dyn Error
         // 60 FPS during interaction/convergence;
         // keep refreshing slow animation at up to 8 Hz once converged.
         let scene_active = changed || !accumulation.converged();
-        let active = render::MOTION_PROBE || moving || scene_active || presence_moving;
+        let active = moving || scene_active || presence_moving;
         let redraw_scene = scene_active || timestamp >= next_scene_refresh;
         let interval = if active { 1.0 / 60.0 } else { 1.0 / 8.0 };
         let gap = if active { 0.0 } else { frame_seconds * 4.0 };
@@ -249,8 +275,10 @@ async fn run(visibility: Vec<u8>, lighting: Vec<u8>) -> Result<(), Box<dyn Error
             (samples, images) = sample_images(&mut gpu, render_size);
             gpu.remove_surface(visibility.0);
             visibility = gpu.add_image_format(render_size, TextureFormat::Rgba16Float);
+            gpu.remove_surface(geometry);
             gpu.remove_surface(materials.0);
             materials = gpu.add_image_format(render_size, TextureFormat::Rgba16Float);
+            geometry = gpu.alias_image(materials.0).expect("offscreen material target");
             accumulation = Accumulation::new(interleaved(to_vec2(render_size)));
         }
         let (phase, mask) = if redraw_scene { accumulation.advance(changed) } else { (0, accumulation.valid_mask()) };
@@ -275,6 +303,7 @@ async fn run(visibility: Vec<u8>, lighting: Vec<u8>) -> Result<(), Box<dyn Error
                 &images,
                 &visibility,
                 &materials,
+                geometry,
                 phase,
                 mask,
                 redraw_scene,
@@ -311,6 +340,7 @@ fn draw_sample(
     images: &[isthmus::Image; 4],
     visibility: &(isthmus::SurfaceHandle, isthmus::Image),
     materials: &(isthmus::SurfaceHandle, isthmus::Image),
+    geometry: isthmus::SurfaceHandle,
     phase: u32,
     mask: u32,
     redraw_scene: bool,
@@ -320,7 +350,17 @@ fn draw_sample(
         let checker = interleaved(render_size);
         let sample = if checker { phase / 2 } else { phase };
         if redraw_scene {
-            app.draw(render, samples[sample as usize], render_size, shadows, visibility, materials, phase, checker);
+            app.draw(
+                render,
+                samples[sample as usize],
+                render_size,
+                shadows,
+                visibility,
+                materials,
+                geometry,
+                phase,
+                checker,
+            );
         }
         render.surface(surface, size, app.globals(size), |mut frame| {
             render::resolve(&mut frame, images, mask, checker, &app.presence.ghosts);

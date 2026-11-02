@@ -184,6 +184,17 @@ impl<P: Program> Renderer<P> {
         self.add_image_format(size, self.gpu.format)
     }
 
+    /// Adds another recording target for the same offscreen image, without
+    /// allocating another texture. This allows ordered passes to reuse scratch
+    /// storage within a batch. Remove both handles when replacing the image.
+    /// Returns `None` for stale handles or presentation surfaces.
+    pub fn alias_image(&mut self, source: SurfaceHandle) -> Option<SurfaceHandle> {
+        let source = self.surfaces.get(source)?;
+        let view = source.image.as_ref()?.clone();
+        let target = SurfaceTarget::from_image(&self.gpu.device, source.config.clone(), view);
+        Some(self.surfaces.insert(target))
+    }
+
     /// Adds a persistent offscreen image with an explicit filterable, renderable format.
     /// Its draw shader must declare the matching `.format(...)`.
     pub fn add_image_format(&mut self, size: [u32; 2], format: wgpu::TextureFormat) -> (SurfaceHandle, crate::Image) {

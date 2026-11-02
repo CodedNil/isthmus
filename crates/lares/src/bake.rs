@@ -31,8 +31,8 @@ pub fn ensure_assets() -> Result<(), io::Error> {
     let lighting_path = root.join("lighting.bin");
     let rooms = home::rooms();
     let signature = Scene::geometry_signature(&rooms);
-    let visibility_current = current(&visibility_path, *b"LARESV02", signature);
-    let lighting_current = current(&lighting_path, *b"LARESL04", signature);
+    let visibility_current = current(&visibility_path, *b"LARESV03", signature);
+    let lighting_current = current(&lighting_path, *b"LARESL05", signature);
     if visibility_current && lighting_current {
         println!("Lighting assets are current ({:?}); no rebake.", started.elapsed());
         return Ok(());

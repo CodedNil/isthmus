@@ -75,6 +75,7 @@ mod transport;
 pub struct Cache {
     pub(super) daylight: Option<daylight::Daylight>,
     surface_slots: Box<[u32]>,
+    surface_layouts: Box<[[u32; 6]]>,
     paths: Vec<Bounce>,
     volume_weights: Vec<(u32, f32)>,
     /// Solved unit response, keyed by the fixtures controlled together.
@@ -94,6 +95,7 @@ pub struct Cache {
     pub(super) active: Box<[usize]>,
     grid: Grid,
     surface_neighbours: Box<[[u32; 9]]>,
+    volume_neighbours: Box<[[u32; 6]]>,
     lights: Box<[u32]>,
     cursor: usize,
     remaining: usize,
@@ -181,33 +183,26 @@ impl Cache {
             normalized.add(result, Vec3::splat(1.0 / total.max(1.0)));
             return normalized;
         }
-        let size = self.grid.size;
-        let coordinate = uvec3(index as u32 % size.x, index as u32 / size.x % size.y, index as u32 / (size.x * size.y));
         let source = self.raw[index];
         let mut result = Irradiance::default();
         result.add(source.light, Vec3::splat(2.0));
         let mut total = 2.0;
-        for axis in 0..3 {
-            for sign in [-1, 1] {
-                let mut neighbour = coordinate.as_ivec3();
-                neighbour[axis] += sign;
-                if neighbour.cmplt(IVec3::ZERO).any() || neighbour.cmpge(size.as_ivec3()).any() {
-                    continue;
-                }
-                let neighbour = neighbour.as_uvec3();
-                let probe = self.raw[(neighbour.x + size.x * (neighbour.y + size.y * neighbour.z)) as usize];
-                let delta = probe.position - source.position;
-                if delta.cmpgt(source.positive).any()
-                    || (-delta).cmpgt(source.negative).any()
-                    || (-delta).cmpgt(probe.positive).any()
-                    || delta.cmpgt(probe.negative).any()
-                {
-                    continue;
-                }
-                let weight = 1.0 / (1.0 + delta.length_squared() / (SPACING * SPACING));
-                result.add(probe.light, Vec3::splat(weight));
-                total += weight;
+        for &neighbour in &self.volume_neighbours[index] {
+            if neighbour == u32::MAX {
+                continue;
             }
+            let probe = self.raw[neighbour as usize];
+            let delta = probe.position - source.position;
+            if delta.cmpgt(source.positive).any()
+                || (-delta).cmpgt(source.negative).any()
+                || (-delta).cmpgt(probe.positive).any()
+                || delta.cmpgt(probe.negative).any()
+            {
+                continue;
+            }
+            let weight = 1.0 / (1.0 + delta.length_squared() / (SPACING * SPACING));
+            result.add(probe.light, Vec3::splat(weight));
+            total += weight;
         }
         let mut normalized = Irradiance::default();
         normalized.add(result, Vec3::splat(1.0 / total));
@@ -452,8 +447,11 @@ pub fn bake_cached(
     if let Some(controls) = controls {
         let mut cache = controls.transport;
         assert_eq!(cache.surface_slots.len(), objects.len(), "baked object layout differs");
-        for (object, &slot) in objects.iter_mut().zip(&cache.surface_slots) {
+        for ((object, &slot), layout) in objects.iter_mut().zip(&cache.surface_slots).zip(&cache.surface_layouts) {
             object.surface_cache = slot;
+            object.surface_origin =
+                vec3(f32::from_bits(layout[0]), f32::from_bits(layout[1]), f32::from_bits(layout[2]));
+            object.surface_grid = uvec3(layout[3], layout[4], layout[5]);
         }
         cache.active = controls.active;
         cache.groups = controls.responses.keys().cloned().collect();
@@ -477,6 +475,19 @@ pub fn bake_cached(
     let mut cache = Cache {
         daylight: None,
         surface_slots: objects.iter().map(|object| object.surface_cache).collect(),
+        surface_layouts: objects
+            .iter()
+            .map(|object| {
+                [
+                    object.surface_origin.x.to_bits(),
+                    object.surface_origin.y.to_bits(),
+                    object.surface_origin.z.to_bits(),
+                    object.surface_grid.x,
+                    object.surface_grid.y,
+                    object.surface_grid.z,
+                ]
+            })
+            .collect(),
         paths: Vec::new(),
         volume_weights: Vec::new(),
         responses: BTreeMap::new(),
@@ -494,6 +505,7 @@ pub fn bake_cached(
         active: Box::default(),
         grid,
         surface_neighbours: surfaces.neighbours.into_boxed_slice(),
+        volume_neighbours: vec![[u32::MAX; 6]; lattice_count].into_boxed_slice(),
         lights: lights.into(),
         cursor: 0,
         remaining: 0,
@@ -620,12 +632,7 @@ pub fn bake_cached(
                 let candidate = point + footprint[0] * jitter.x + footprint[1] * jitter.y;
                 // A free endpoint can still lie across a thin partition. Never
                 // teleport transport origins through geometry at texel edges.
-                let offset = candidate - point;
-                let length = offset.length();
-                if inside(candidate)
-                    || (length > 0.0001
-                        && scene::cast::<false, false>(point, offset / length, nodes, objects, 0.0, length).0 < length)
-                {
+                if inside(candidate) || !scene::segment_visible(point, candidate, nodes, objects) {
                     point
                 } else {
                     candidate
@@ -704,12 +711,34 @@ pub fn bake_cached(
             if *neighbour == u32::MAX {
                 continue;
             }
-            let offset = cache.direct[*neighbour as usize].position - from;
-            let length = offset.length();
-            if length > 0.0001
-                && scene::cast::<false, false>(from, offset / length, nodes, objects, 0.0, length).0 < length
-            {
+            if !scene::segment_visible(from, cache.direct[*neighbour as usize].position, nodes, objects) {
                 *neighbour = u32::MAX;
+            }
+        }
+    }
+    // Relocated volume sites can be diagonal neighbours even though their
+    // lattice slots share an axis. Certify these denoising links once as well.
+    for index in 0..lattice_count {
+        let coordinate = uvec3(index as u32 % size.x, index as u32 / size.x % size.y, index as u32 / (size.x * size.y));
+        if cache.direct[index].positive.x < 0.0 {
+            continue;
+        }
+        for axis in 0..3 {
+            for side in 0..2 {
+                let mut neighbour = coordinate.as_ivec3();
+                neighbour[axis] += if side == 0 { -1 } else { 1 };
+                if neighbour.cmplt(IVec3::ZERO).any() || neighbour.cmpge(size.as_ivec3()).any() {
+                    continue;
+                }
+                let n = neighbour.as_uvec3();
+                let slot = (n.x + size.x * (n.y + size.y * n.z)) as usize;
+                if cache.direct[slot].positive.x < 0.0 {
+                    continue;
+                }
+                let from = cache.direct[index].position;
+                if scene::segment_visible(from, cache.direct[slot].position, nodes, objects) {
+                    cache.volume_neighbours[index][axis * 2 + side] = slot as u32;
+                }
             }
         }
     }
@@ -772,7 +801,18 @@ pub fn bake_cached(
     for path in &mut cache.paths {
         path.volume_offset = cache.volume_weights.len() as u32;
         if path.lookup.confidence() <= 0.01 {
-            cache.volume_weights.extend(grid.stencil(&cache.direct, path.point, path.normal));
+            // Axis clearances and depth moments cannot certify diagonal
+            // connectivity around thin partitions. Validate transport links
+            // once during authoring; no runtime ray work is added.
+            let mut taps = grid.stencil(&cache.direct, path.point, path.normal);
+            taps.retain(|&(index, _)| {
+                scene::segment_visible(path.point, cache.direct[index as usize].position, nodes, objects)
+            });
+            let total: f32 = taps.iter().map(|&(_, weight)| weight).sum();
+            for (_, weight) in &mut taps {
+                *weight /= total.max(1.0e-20);
+            }
+            cache.volume_weights.extend(taps);
         }
         path.volume_length = cache.volume_weights.len() as u32 - path.volume_offset;
     }

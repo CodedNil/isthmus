@@ -3,7 +3,7 @@ use crate::render::{
 };
 use isthmus::{
     ShaderData,
-    glam::{Vec2, Vec3, vec2},
+    glam::{UVec3, Vec2, Vec3, vec2},
 };
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, ShaderData)]
@@ -124,6 +124,9 @@ pub struct Object {
     pub material: Material,
     /// Base of automatically projected surface irradiance samples, or MAX.
     pub surface_cache: u32,
+    /// Baked chart layout. Sampling must not recompute integer bounds with GPU floats.
+    pub surface_origin: Vec3,
+    pub surface_grid: UVec3,
     /// Preview light output; zero for objects that do not emit light.
     pub emission: f32,
     /// Linear RGB source colour, separate from the fixture's material.
@@ -141,6 +144,8 @@ impl Object {
             kind,
             material,
             surface_cache: u32::MAX,
+            surface_origin: Vec3::ZERO,
+            surface_grid: UVec3::ZERO,
             emission: 0.0,
             emission_color: DEFAULT_LIGHT_COLOR,
             exterior: Vec3::ZERO,

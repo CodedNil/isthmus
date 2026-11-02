@@ -12,10 +12,6 @@ pub use sun::{Sun, SunSettings};
 
 pub mod acceleration;
 mod ghosts;
-mod motion_probe;
-
-/// Temporary deterministic animation for diagnosing presentation jitter.
-pub const MOTION_PROBE: bool = true;
 mod layout;
 #[cfg(not(target_arch = "spirv"))]
 mod light_culling;
@@ -56,18 +52,57 @@ pub struct Globals {
     pub sample_index: u32,
     pub interleaved: bool,
     pub parity: u32,
+    /// Four tetrahedral SDF samples; uniform so drivers keep one distance evaluator.
+    pub normal_samples: u32,
 }
 
 isthmus::program!(Globals, ());
 
 #[allow(clippy::needless_borrow, reason = "Shader captures become owned GPU image handles")]
-pub fn visibility(frame: &mut Frame<'_>, scene: &Scene) {
+pub fn visibility_geometry(frame: &mut Frame<'_>, scene: &Scene) {
     assert!(scene.objects.len() < scene::VISIBILITY_OBJECTS as usize, "visibility object ID capacity exceeded");
     shader!(
         frame
             .format(isthmus::wgpu::TextureFormat::Rgba16Float)
             .blend(Blend::Raw)
             .upload({
+                let nodes: &[Node] = &scene.nodes;
+                let objects: &[Object] = &scene.objects;
+            })
+            .primitive(|frame| {
+                let half = (frame.screen_size.x * 0.5).ceil();
+                let start = if frame.globals.interleaved && frame.globals.parity != 0 { half } else { 0.0 };
+                let end =
+                    if frame.globals.interleaved && frame.globals.parity == 0 { half } else { frame.screen_size.x };
+                raster(Rect::new(vec2(start, 0.0), vec2(end, frame.screen_size.y)))
+            })
+            .fragment(|frame, surface| {
+                let (globals, size) = (frame.globals, frame.screen_size);
+                let mut pixel = surface.pixel;
+                if globals.interleaved {
+                    let half = (size.x * 0.5).ceil();
+                    let start = if globals.parity != 0 { half } else { 0.0 };
+                    let end = if globals.parity == 0 { half } else { size.x };
+                    if pixel.x < start || pixel.x >= end {
+                        kill();
+                    }
+                    pixel.x = (pixel.x - start) * 2.0 - 0.5 + globals.parity as f32;
+                }
+                scene::visibility_geometry(globals, nodes, objects, pixel, size, frame.pixel_size)
+            })
+    );
+}
+
+#[allow(clippy::needless_borrow, reason = "Shader captures become owned GPU image handles")]
+pub fn visibility(frame: &mut Frame<'_>, scene: &Scene, geometry: &Image) {
+    assert!(scene.objects.len() < scene::VISIBILITY_OBJECTS as usize, "visibility object ID capacity exceeded");
+    shader!(
+        frame
+            .format(isthmus::wgpu::TextureFormat::Rgba16Float)
+            .blend(Blend::Raw)
+            .upload({
+                let geometry: &Image;
+                let mirror: u32 = scene.objects.iter().position(|item| item.kind == Kind::Mirror).unwrap_or(0) as u32;
                 let contacts: &[u32] = &scene.contacts;
                 let nodes: &[Node] = &scene.nodes;
                 let objects: &[Object] = &scene.objects;
@@ -91,7 +126,17 @@ pub fn visibility(frame: &mut Frame<'_>, scene: &Scene) {
                     }
                     pixel.x = (pixel.x - start) * 2.0 - 0.5 + globals.parity as f32;
                 }
-                scene::visibility_pixel(globals, nodes, objects, contacts, pixel, size, frame.pixel_size)
+                scene::finish_visibility(
+                    globals,
+                    nodes,
+                    objects,
+                    contacts,
+                    pixel,
+                    size,
+                    frame.pixel_size,
+                    geometry.texel(surface.pixel.as_ivec2()),
+                    mirror,
+                )
             })
     );
 }
@@ -426,11 +471,6 @@ pub fn resolve(frame: &mut Frame<'_>, images: &[Image; 4], mask: u32, interleave
                     height,
                     globals.pixel_angle,
                 );
-                let color = if MOTION_PROBE {
-                    motion_probe::composite(color, globals.eye, ray, height, frame.time)
-                } else {
-                    color
-                };
                 color.powf(1.0 / 2.2).extend(1.0)
             })
     );
