@@ -14,7 +14,7 @@ mod bedroom;
 pub(super) mod contacts;
 mod decor;
 mod entry;
-mod fixtures;
+pub(super) mod fixtures;
 pub(super) mod irradiance;
 mod kitchen;
 mod lighting;
@@ -158,7 +158,7 @@ fn rotate_z(point: Vec3, rotation: Vec2) -> Vec3 {
     unrotate_z(point, vec2(-rotation.x, rotation.y))
 }
 
-/// One of four fixed offsets in [-0.5, 0.5], shared by pixel, sun and emitter samples.
+/// Four subpixel offsets for antialiasing only. Lighting is independent of this sequence.
 fn subpixel(sample: u32) -> Vec2 {
     vec2((sample & 1) as f32 - 0.5, (sample >> 1) as f32 - 0.5)
 }
@@ -229,7 +229,7 @@ fn background(origin: Vec3, sun: super::Sun, exposure: f32, white_balance: Vec3)
 
 /// Const specialization shares source without putting a mode branch in the GPU loop.
 #[inline(never)]
-fn cast<const SHADOW: bool, const CUTAWAY: bool>(
+fn walk<const SHADOW: bool, const CUTAWAY: bool, const ANY_HIT: bool>(
     origin: Vec3,
     direction: Vec3,
     nodes: &[Node],
@@ -253,7 +253,7 @@ fn cast<const SHADOW: bool, const CUTAWAY: bool>(
             continue;
         }
         let item = objects[node.object as usize];
-        if (item.kind == Kind::Ceiling && CUTAWAY && !SHADOW && origin.z > super::WALL_HEIGHT)
+        if (matches!(item.kind, Kind::Ceiling | Kind::Downlight) && CUTAWAY && !SHADOW && origin.z > super::WALL_HEIGHT)
             || (SHADOW && item.is_light())
             || (item.kind == Kind::GlassPane && (SHADOW || !CUTAWAY))
         {
@@ -267,26 +267,55 @@ fn cast<const SHADOW: bool, const CUTAWAY: bool>(
             intersect(item, origin, direction, enter, exit.min_num(nearest), pixel_angle)
         };
         if hit < nearest {
-            if SHADOW {
-                return (0.0, node.object);
+            if ANY_HIT {
+                return (hit, node.object);
             }
             nearest = hit;
             object = node.object;
         }
     }
-    (if SHADOW { 1.0 } else { nearest }, object)
+    (nearest, object)
 }
 
-/// Nearest opaque surface from an emitter, excluding the fittings themselves.
-/// Used only when baking camera-independent SDF shadow depth.
-pub(super) fn light_depth(origin: Vec3, direction: Vec3, nodes: &[Node], objects: &[Object], limit: f32) -> f32 {
+/// Camera and binary visibility queries share the same geometry traversal as
+/// nearest-blocker atlas baking. Only the early-out policy differs.
+#[inline(never)]
+fn cast<const SHADOW: bool, const CUTAWAY: bool>(
+    origin: Vec3,
+    direction: Vec3,
+    nodes: &[Node],
+    objects: &[Object],
+    pixel_angle: f32,
+    limit: f32,
+) -> (f32, u32) {
+    let hit = walk::<SHADOW, CUTAWAY, SHADOW>(origin, direction, nodes, objects, pixel_angle, limit);
+    (if SHADOW { if hit.0 < limit { 0.0 } else { 1.0 } } else { hit.0 }, hit.1)
+}
+
+/// Shared bake-time optical connection test. Lights and thin glass follow the
+/// same visibility rules as direct illumination; endpoints keep a 1 mm guard.
+#[cfg(not(target_arch = "spirv"))]
+pub(super) fn segment_visible(from: Vec3, to: Vec3, nodes: &[Node], objects: &[Object]) -> bool {
+    let delta = to - from;
+    let length = delta.length();
+    length <= 0.001 || cast::<true, false>(from, delta / length, nodes, objects, 0.0, length - 0.001).0 > 0.0
+}
+
+/// Continuous cone visibility for the sun's 0.53 degree disc. Expanded BVH
+/// bounds include near misses, so penumbrae are not clipped to hard silhouettes.
+/// One bounded walk per candidate replaces four separated binary silhouettes.
+#[inline(never)]
+fn solar_visibility(origin: Vec3, direction: Vec3, nodes: &[Node], objects: &[Object]) -> f32 {
+    const ANGLE: f32 = 0.00465;
     let ray = trace::Ray::new(origin, direction);
+    let mut visibility: f32 = 1.0;
     let mut index = 0;
-    let mut nearest = limit;
     while index < nodes.len() {
         let node = nodes[index];
-        let (enter, exit) = ray.bounds(node.min, node.max);
-        if enter > exit || enter >= nearest {
+        let reach = (node.max - origin).abs().max_num((node.min - origin).abs()).length();
+        let margin = Vec3::splat(reach * ANGLE);
+        let (enter, exit) = ray.bounds(node.min - margin, node.max + margin);
+        if enter > exit || enter >= FAR {
             index = node.skip as usize;
             continue;
         }
@@ -298,14 +327,30 @@ pub(super) fn light_depth(origin: Vec3, direction: Vec3, nodes: &[Node], objects
         if item.is_light() || item.kind == Kind::GlassPane {
             continue;
         }
-        let hit = if matches!(item.kind, Kind::Box | Kind::Ceiling) && item.rotation == Vec2::Y {
-            if enter > 0.0 { enter } else { exit }
-        } else {
-            intersect(item, origin, direction, enter, exit.min_num(nearest), 0.0)
-        };
-        nearest = nearest.min_num(hit);
+        let local = unrotate_z(origin - item.pos, item.rotation);
+        let axis = unrotate_z(direction, item.rotation);
+        let mut t = enter.max_num(0.001);
+        for _ in 0..48 {
+            if t > exit.min_num(FAR) {
+                break;
+            }
+            let d = render_furniture::<Distance>(item.kind, local + axis * t, item.size).0;
+            if d < 0.0001 {
+                return 0.0;
+            }
+            visibility = visibility.min_num(d / (t * ANGLE));
+            // The SDF certifies the step; budget exhaustion never invents a hit.
+            t += d.max_num(0.0001);
+        }
     }
-    nearest
+    let v = visibility.clamp_num(0.0, 1.0);
+    v * v * (3.0 - 2.0 * v)
+}
+
+/// Nearest opaque surface from an emitter, excluding the fittings themselves.
+/// Used only when baking camera-independent SDF shadow depth.
+pub(super) fn light_depth(origin: Vec3, direction: Vec3, nodes: &[Node], objects: &[Object], limit: f32) -> f32 {
+    walk::<true, false, false>(origin, direction, nodes, objects, 0.0, limit).0
 }
 
 /// Structural visibility bounds for the indoor probe field. Furniture must
@@ -368,6 +413,11 @@ fn bounds_normal(local: Vec3, size: Vec3) -> Vec3 {
 
 #[inline(never)]
 fn object_normal(item: Object, local: Vec3) -> Vec3 {
+    object_normal_samples(item, local, 4)
+}
+
+#[inline(never)]
+fn object_normal_samples(item: Object, local: Vec3, samples: u32) -> Vec3 {
     if matches!(item.kind, Kind::Box | Kind::Ceiling | Kind::GlassPane) {
         bounds_normal(local, item.size)
     } else if matches!(item.kind, Kind::Leaf | Kind::ShieldLeaf) {
@@ -378,7 +428,7 @@ fn object_normal(item: Object, local: Vec3) -> Vec3 {
             .min_num(1.0);
         (local + item.size * 0.5 - item.size * along).normalize()
     } else {
-        trace::normal(local, |p| render_furniture::<Distance>(item.kind, p, item.size).0)
+        trace::normal(local, samples, |p| render_furniture::<Distance>(item.kind, p, item.size).0)
     }
 }
 
@@ -401,7 +451,7 @@ fn octahedral(normal: Vec3) -> Vec2 {
     if normal.z < 0.0 { (Vec2::ONE - normal.yx().abs()) * signs } else { normal.xy() }
 }
 fn decode_normal(value: u32) -> Vec3 {
-    let plane = uvec2(value & 511, value >> 9).as_vec2() * (2.0 / 511.0) - Vec2::ONE;
+    let plane = uvec2(value & 255, value >> 8).as_vec2() * (2.0 / 255.0) - Vec2::ONE;
     let normal = plane.extend(1.0 - plane.abs().element_sum());
     let correction = (-normal.z).clamp_num(0.0, 1.0);
     vec3(
@@ -411,15 +461,26 @@ fn decode_normal(value: u32) -> Vec3 {
     )
     .normalize()
 }
+// Resolve much finer transmittance near zero: linear 8-bit steps can become
+// bright bands under solar radiance even though fixture visibility looks smooth.
+fn encode_sun(visibility: f32) -> u32 {
+    ((visibility.clamp_num(0.0, 1.0).sqrt() * 255.0).round() as u32) << 17
+}
+fn decode_sun(flags: u32) -> f32 {
+    let value = ((flags >> 17) & 255) as f32 / 255.0;
+    value * value
+}
+
 fn encode_visibility(object: u32, flags: u32, height: f32, normal: Vec3, contact: f32) -> Vec4 {
-    let height = ((height + 0.2) * (131_071.0 / 3.2)).round().clamp_num(0.0, 131_071.0) as u32;
-    let normal = ((octahedral(normal) * 0.5 + Vec2::splat(0.5)) * 511.0).round().as_uvec2();
-    let normal = normal.x | (normal.y << 9);
-    let contact = (contact.clamp_num(0.0, 1.0) * 255.0).round() as u32;
+    let height = ((height + 0.2) * (32767.0 / 3.2)).round().clamp_num(0.0, 32767.0) as u32;
+    let normal = ((octahedral(normal) * 0.5 + Vec2::splat(0.5)) * 255.0).round().as_uvec2();
+    let normal = normal.x | (normal.y << 8);
+    let contact = (contact.clamp_num(0.0, 1.0) * 15.0).round() as u32;
+    let sun = (flags >> 17) & 255;
     vec4(
         half_payload(object | (flags & (SUN_VISIBLE | REFLECTED))),
         half_payload(height & 32767),
-        half_payload((height >> 15) | ((flags & GLAZED) >> 13) | (contact << 3) | ((normal >> 14) << 11)),
+        half_payload(((flags & GLAZED) >> 15) | (contact << 1) | (sun << 5) | ((normal >> 14) << 13)),
         half_payload((normal & 16383) | ((flags & (GLAZED << 1)) >> 2)),
     )
 }
@@ -428,11 +489,10 @@ fn primary_direction(globals: Globals, pixel: Vec2, size: Vec2, pixel_size: f32)
     (globals.forward + globals.right * ndc.x - globals.up * ndc.y).normalize()
 }
 
-pub(super) fn visibility_pixel(
+pub(super) fn visibility_geometry(
     globals: Globals,
     nodes: &[Node],
     objects: &[Object],
-    contacts: &[u32],
     pixel: Vec2,
     size: Vec2,
     pixel_size: f32,
@@ -470,39 +530,84 @@ pub(super) fn visibility_pixel(
             && item.kind == Kind::Mirror
             && entry::mirror::<Hit>(local, item.size).material == Material::Mirror
         {
-            let normal = rotate_z(object_normal(item, local), item.rotation);
+            let normal = rotate_z(vec3(0.0, if local.y >= 0.012 { 1.0 } else { -1.0 }, 0.0), item.rotation);
             direction -= normal * (2.0 * direction.dot(normal));
             origin = point + normal * 0.002;
             flags |= REFLECTED;
             continue;
         }
-        let normal = rotate_z(object_normal(item, local), item.rotation);
-        let cap = globals.eye.z > super::WALL_HEIGHT
-            && point.z >= super::WALL_HEIGHT - 0.001
-            && normal.z > 0.5
-            && matches!(item.kind, Kind::Box | Kind::Downlight);
-        if globals.sun.radiance.max_element() > 0.0 && normal.dot(globals.sun.direction) > 0.0 {
-            let start = point + normal * 0.001 + Vec3::Z * if cap { super::CEILING_THICKNESS + 0.02 } else { 0.0 };
-            let light = (globals.sun.direction + (subpixel(globals.sample_index) * 0.05).extend(0.0)).normalize();
-            if cast::<true, false>(start, light, nodes, objects, 0.0, FAR).0 > 0.0 {
-                flags |= SUN_VISIBLE;
-            }
-        }
-        let contact = if cap || item.exterior.dot(normal) > 0.5 {
-            1.0
-        } else {
-            contacts::visibility(
-                contacts,
-                objects,
-                object,
-                point,
-                if item.kind == Kind::Rug { Vec3::Z } else { normal },
-                globals.sample_index,
-            )
-        };
-        return encode_visibility(object, flags, point.z, normal, contact);
+        return encode_visibility(object, flags, point.z, Vec3::Z, 1.0);
     }
     encode_visibility(VISIBILITY_OBJECTS, 0, 0.0, Vec3::Z, 1.0)
+}
+
+/// Finish visibility in a separate pipeline: keeping independent SDF walks
+/// out of the primary marcher limits the driver's inlining/optimization work.
+pub(super) fn finish_visibility(
+    globals: Globals,
+    nodes: &[Node],
+    objects: &[Object],
+    contacts: &[u32],
+    pixel: Vec2,
+    size: Vec2,
+    pixel_size: f32,
+    record: Vec4,
+    mirror: u32,
+) -> Vec4 {
+    let hit = visible_surface(globals, objects, pixel, size, pixel_size, record, mirror);
+    if hit.object == VISIBILITY_OBJECTS {
+        return record;
+    }
+    let object = hit.object;
+    let item = objects[object as usize];
+    let point = hit.origin + hit.direction * hit.nearest;
+    let local = unrotate_z(point - item.pos, item.rotation);
+    let normal = rotate_z(object_normal_samples(item, local, globals.normal_samples), item.rotation);
+    let mut flags = hit.flags;
+    let cap = globals.eye.z > super::WALL_HEIGHT
+        && point.z >= super::WALL_HEIGHT - 0.001
+        && normal.z > 0.5
+        && matches!(item.kind, Kind::Box | Kind::Downlight);
+    if !cap
+        && item.exterior.dot(normal) <= 0.5
+        && globals.sun.radiance.max_element() > 0.0
+        && normal.dot(globals.sun.direction) > 0.0
+    {
+        let start = point + normal * 0.001 + Vec3::Z * if cap { super::CEILING_THICKNESS + 0.02 } else { 0.0 };
+        let sun = solar_visibility(start, globals.sun.direction, nodes, objects);
+        flags |= encode_sun(sun);
+        if sun > 0.0 {
+            flags |= SUN_VISIBLE;
+        }
+    }
+    let contact = if cap || item.exterior.dot(normal) > 0.5 {
+        1.0
+    } else {
+        contacts::visibility(
+            contacts,
+            objects,
+            object,
+            point,
+            if item.kind == Kind::Rug { Vec3::Z } else { normal },
+            globals.sample_index,
+        )
+    };
+    encode_visibility(object, flags, point.z, normal, contact)
+}
+
+#[cfg(test)]
+pub(super) fn visibility_pixel(
+    globals: Globals,
+    nodes: &[Node],
+    objects: &[Object],
+    contacts: &[u32],
+    pixel: Vec2,
+    size: Vec2,
+    pixel_size: f32,
+) -> Vec4 {
+    let record = visibility_geometry(globals, nodes, objects, pixel, size, pixel_size);
+    let mirror = objects.iter().position(|item| item.kind == Kind::Mirror).unwrap_or(0) as u32;
+    finish_visibility(globals, nodes, objects, contacts, pixel, size, pixel_size, record, mirror)
 }
 
 #[derive(Clone, Copy)]
@@ -529,9 +634,9 @@ fn visible_surface(
     let word = read_half_payload(record.x);
     let extra = read_half_payload(record.z);
     let object = word & VISIBILITY_OBJECTS;
-    let height = (read_half_payload(record.y) | ((extra & 3) << 15)) as f32 * (3.2 / 131_071.0) - 0.2;
-    let normal = decode_normal((read_half_payload(record.w) & 16383) | ((extra >> 11) << 14));
-    let contact = ((extra >> 3) & 255) as f32 / 255.0;
+    let height = read_half_payload(record.y) as f32 * (3.2 / 32767.0) - 0.2;
+    let normal = decode_normal((read_half_payload(record.w) & 16383) | ((extra >> 13) << 14));
+    let contact = ((extra >> 1) & 15) as f32 / 15.0;
     let mut origin = globals.eye;
     let mut direction = primary_direction(globals, pixel, size, pixel_size);
     let mut surface_height = (height / 3.0).clamp_num(0.0, 1.0);
@@ -553,7 +658,7 @@ fn visible_surface(
     let nearest = ((height - origin.z) / direction.z).max_num(0.0);
     VisibleSurface {
         object,
-        flags: word | ((extra & 4) << 13) | ((read_half_payload(record.w) & 16384) << 2),
+        flags: word | ((extra & 1) << 15) | ((read_half_payload(record.w) & 16384) << 2) | (((extra >> 5) & 255) << 17),
         normal,
         contact,
         origin,
@@ -637,7 +742,7 @@ pub(super) fn shade_visibility<const GROUP: u32>(
         globals.sample_index,
         atlas,
         info,
-        if word & SUN_VISIBLE != 0 { 1.0 } else { 0.0 },
+        decode_sun(word),
         normal,
         contact,
         material,
@@ -708,12 +813,7 @@ pub(super) fn material_visibility(
     } else {
         Vec4::ZERO
     };
-    let light = if cached.w >= 0.95 {
-        cached.truncate()
-    } else {
-        grid.sample(probes, lighting_point + hit.normal * 0.002, hit.normal)
-            .lerp(cached.truncate(), (cached.w / 0.95).min_num(1.0))
-    };
+    let light = grid.resolve_surface(probes, item, lighting_point + hit.normal * 0.002, hit.normal, cached);
     encode_material(material, light)
 }
 
@@ -1198,14 +1298,12 @@ fn shade_surface<const CACHED: bool, const PRECOMPUTED: bool, const GROUP: u32>(
     if fixture && surface.material == Material::Emissive {
         (surface.material, surface.tint) = (Material::Ceramic, vec3(0.85, 0.83, 0.78));
     }
-    // The four pixel samples also cover the emitter, keeping four shadow rays per pixel.
+    // Continuous source visibility is independent of progressive AA history.
     let visibility = if PRECOMPUTED {
         sun_visibility
     } else if globals.sun.radiance.max_element() > 0.0 && world_normal.dot(globals.sun.direction) > 0.0 {
         let start = lighting_point + world_normal * 0.001;
-        let offset = subpixel(light_sample) * 0.05;
-        let light = (globals.sun.direction + offset.extend(0.0)).normalize();
-        cast::<true, false>(start, light, nodes, objects, 0.0, FAR).0
+        solar_visibility(start, globals.sun.direction, nodes, objects)
     } else {
         0.0
     };
@@ -1241,12 +1339,7 @@ fn shade_surface<const CACHED: bool, const PRECOMPUTED: bool, const GROUP: u32>(
         } else {
             Vec4::ZERO
         };
-        if cached.w >= 0.95 {
-            cached.truncate()
-        } else {
-            grid.sample(probes, lighting_point + world_normal * 0.002, world_normal)
-                .lerp(cached.truncate(), (cached.w / 0.95).min_num(1.0))
-        }
+        grid.resolve_surface(probes, item, lighting_point + world_normal * 0.002, world_normal, cached)
     };
 
     let contact_visibility =
@@ -1293,8 +1386,9 @@ fn shade_surface<const CACHED: bool, const PRECOMPUTED: bool, const GROUP: u32>(
         if light.emission <= 0.0 {
             continue;
         }
-        // Reuse the four antialiasing samples across a finite emitter as well.
-        let emitter = subpixel(light_sample) * if light.kind == Kind::Downlight { 0.055 } else { 0.035 };
+        // The filtered atlas represents the finite emitter; do not move its
+        // BRDF source between AA samples while visibility stays fixed.
+        let emitter = Vec2::ZERO;
         let (to_light, radiance, distance) = fixtures::incident(light, point, emitter);
         if radiance.max_element() <= 0.0 || bumped.dot(to_light) <= 0.0 {
             continue;
@@ -1305,15 +1399,7 @@ fn shade_surface<const CACHED: bool, const PRECOMPUTED: bool, const GROUP: u32>(
             continue;
         }
         let visible = if CACHED {
-            super::shadows::visible(
-                atlas,
-                info,
-                current as u32,
-                light_sample,
-                light,
-                point + world_normal * 0.002,
-                world_normal,
-            )
+            super::shadows::visible(atlas, info, current as u32, light, point + world_normal * 0.002, world_normal)
         } else {
             cast::<true, false>(point + world_normal * 0.002, to_light, nodes, objects, 0.0, distance - 0.002).0
         };
@@ -1351,8 +1437,7 @@ pub(super) fn camera_settings(scene: &super::Scene, eye: Vec3, forward: Vec3, ri
             } else {
                 irradiance::Grid::surface(&scene.probes, item, unrotate_z(point - item.pos, item.rotation), normal)
             };
-            let mut incident =
-                scene.grid.sample(&scene.probes, source, normal).lerp(cached.truncate(), (cached.w / 0.95).min(1.0));
+            let mut incident = scene.grid.resolve_surface(&scene.probes, item, source, normal, cached);
             let cosine = normal.dot(scene.sun.direction).max(0.0);
             if cosine > 0.0
                 && cast::<true, false>(source, scene.sun.direction, &scene.nodes, &scene.objects, 0.0, FAR).0 > 0.0

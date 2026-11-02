@@ -28,7 +28,7 @@ impl Controls {
         let mut input = GzDecoder::new(bytes);
         let mut header = [0; 16];
         input.read_exact(&mut header).map_err(|_error| "invalid lighting asset")?;
-        if &header[..8] != b"LARESL04" || header[8..] != signature.to_le_bytes() {
+        if &header[..8] != b"LARESL05" || header[8..] != signature.to_le_bytes() {
             return Err("lighting asset is stale; rebuild with just lares");
         }
         let mut parse = || -> Result<Self, io::Error> {
@@ -88,7 +88,7 @@ impl Cache {
         nodes: &[Node],
     ) -> Result<Vec<u8>, io::Error> {
         let mut output = GzEncoder::new(Vec::new(), Compression::best());
-        output.write_all(b"LARESL04")?;
+        output.write_all(b"LARESL05")?;
         output.write_all(&signature.to_le_bytes())?;
         output.write_all(&(self.active.len() as u32).to_le_bytes())?;
         output.write_all(&(self.responses.len() as u32).to_le_bytes())?;

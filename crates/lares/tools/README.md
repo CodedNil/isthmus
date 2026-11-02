@@ -124,7 +124,7 @@ controls already do. Geometry is decoded in bounded byte-plane chunks.
 The separate visibility asset retains the full 512-pixel SDF atlas.
 The browser fetches both in parallel with WASM loading. It no longer compiles a
 shadow-bake shader or traces the atlas during startup. GPU lamp visibility and
-CPU captures use the same packed depth moments and filter.
+CPU captures use the same packed raw depths and percentage-closer visibility filter.
 
 Runtime GI has one final irradiance field: solved fixture responses plus the
 interpolated eight-bounce daylight solution. Daylight changes publish a complete
@@ -133,8 +133,8 @@ The temporary first-bounce fixture bank exists only while authoring a new bake.
 Receiver-side filtering rejects samples behind opaque surfaces, including when
 surface charts fall back to the volume at tile edges and wall junctions.
 
-Static SDF visibility maps filter fixture shadows. Hybrid diffuse GI uses 20 cm
-samples projected onto the SDF surfaces of architecture and the lounge footstool,
+Static SDF visibility maps filter fixture shadows. Hybrid diffuse GI uses 10 cm floor samples and 20 cm
+samples projected onto the SDF surfaces of other architecture, thin furniture shelves and the lounge footstool,
 backed by a 50 cm indoor directional volume for foliage, small
 objects, layered sofa cushions and cabinet fronts and gaps in projected coverage. There are no authored UVs or meshes.
 Surface samples retain the cosine integral and its normal derivative in their
@@ -148,9 +148,9 @@ variance. The final bounced field receives two geometry-constrained filtering pa
 Projection weights blend continuously across rounded surfaces. Both projected and volume reconstruction enforce architectural clearance bounds, preventing interpolation across partitions. Volume queries additionally use receiver-normal weights and six-cone depth moments,
 with a continuous cubic fallback where nearby sites are missing.
 
-Short-range ambient contact visibility traces one cosine-weighted SDF ray per
-existing lighting sample against solid furnishings in a static 40 cm cell index.
-The four-sample sequence covers the receiver hemisphere. Rays are limited to
+Short-range ambient contact visibility averages four fixed cosine-weighted SDF rays in every
+lighting sample against solid furnishings in a static 40 cm cell index.
+The same hemisphere average is available immediately after camera movement. Rays are limited to
 12 cm and 16 conservative steps, with direct intersections for boxes; unresolved grazing rays stay visible. Actual intersections, rather than conservative SDF distance deficits,
 control contact darkening. Architectural walls are excluded because GI already
 integrates their occlusion. It affects indirect light only. Fine foliage keeps
@@ -183,13 +183,23 @@ Rust-GPU to duplicate large SDF dispatch functions. The compiler lowering is
 checked against native Rust across nested loops, labels, continues, side effects
 and inclusive integer limits.
 
+Interactive rendering separates primary intersections, surface visibility,
+material/GI evaluation and material-family finishing. Two reusable RGBA16Float
+targets hold packed intermediate data; an alias lets primary intersections reuse
+the material target before its final contents are needed. Surface normals retain
+four tetrahedral SDF samples, with a uniform loop count to prevent drivers from
+inlining four copies of the complete furniture distance evaluator.
+
 Materials include procedural normal gradients, roughness, metallic Fresnel,
 sheen and clear coat. The rug uses one procedural SDF yarn field across its
 entire pile, with varied lean/height, a gently curved backing and broad nap
-variation. There is no separate edge fringe. Granite and glazed kitchen tiles
-trace one rough reflection ray into the SDF scene, using mean reflected finishes
-and cached GI; other materials use an analytic reflection environment scaled by
-local GI. The BÖJA lamp is 40 cm high and 20 cm wide; the STARKVIND table is
+variation. There is no separate edge fringe. Interactive glossy reflections use
+the same locally occluded GI radiance estimate as diffuse shading, avoiding
+another copy of the house tracer in the material shaders. There is no invented
+window lobe or brightness-dependent second occlusion factor; diffuse, metal and
+clear-coat indirect light scale linearly with the solved field. This inexpensive
+isotropic approximation does not reproduce detailed reflected objects. Offline reference rendering retains
+traced stone and tile reflections. The BÖJA lamp is 40 cm high and 20 cm wide; the STARKVIND table is
 55 cm high and 54 cm wide, matching IKEA's product dimensions.
 
 Progressive rendering converges all native pixels to four AA samples. Large
@@ -247,12 +257,91 @@ Cold driver shader compilation remains slower than cached loads. Startup
 reports CPU submission separately from waiting for the first GPU frame, so a
 quick scene decode must not be reported as a quick cold first view.
 
-## Temporary motion reference
+`LARES_BENCH_COMPILE=1` reports queue-completion times after each pipeline is
+created. These are cumulative timings because pipeline compilation is queued;
+adjacent differences help locate expensive stages. Use
+`__GL_SHADER_DISK_CACHE=0` with a fresh browser profile for NVIDIA cold tests.
+The benchmark server serves precompressed assets, matching the application.
+After the visibility split and uniform normal loop, two fresh-profile Firefox
+159 headless runs reached ready in 4.18 and 4.59 seconds with NVIDIA's shader
+disk cache disabled and direct presentation enabled. Chromium cold loads took
+5.2–5.8 seconds; its 2560×1600 camera-motion test sustained 59.9 FPS with
+4.73 ms p95 GPU time and one frame in flight. Headless startup measurements do
+not validate the desktop compositor's presentation behaviour.
 
-`render::MOTION_PROBE` currently enables a pink 3D ball in the lounge. It moves
-three metres along a straight line at 0.75 m/s, reversing every four seconds
-with a triangle wave. Its position comes directly from renderer elapsed time,
-without sensor data or smoothing. It is composited after accumulated room
-samples using the same depth and camera as the ghost pass. While enabled, the
-resolve pass stays active at display refresh; the room retains its 8 Hz refresh.
-Set `MOTION_PROBE` to false to remove the temporary reference.
+On affected Linux/NVIDIA Firefox versions, DMABUF presentation can display stale
+frames even when the GPU output is correct. The former debug ball reproduced
+this independently of sensor input; it has been removed. Disabling
+`dom.webgpu.allow-present-without-readback` is a browser-side workaround;
+[Mozilla bug 2078553](https://bugzilla.mozilla.org/show_bug.cgi?id=2078553)
+tracks the matching presentation regression and its Firefox 160 fix. Shader
+optimization reduces startup work but cannot repair browser buffer recycling.
+
+
+
+Sun shadows use a continuous SDF cone with the physical 0.53-degree solar disc,
+independent of the four camera AA offsets. Expanded BVH bounds retain penumbra
+near misses. Candidate walks are bounded to 48 conservative steps and stop at
+opaque hits. The existing visibility target stores 8-bit sunlight and 4-bit
+ambient contacts, 16-bit octahedral normals and a 15-bit height (under 0.1 mm
+steps across 3.2 m), without another render target or shadow sample history.
+Penumbra width grows with receiver/blocker separation. This is a bounded SDF
+approximation, not an exact integral of the solar disc, and thin grazing geometry
+can exceed the walk budget. Fixture visibility uses raw baked depths and receiver-plane-corrected
+percentage-closer filtering (twenty search depth taps, up to 84 including the filled-disc penumbra filter); fixture BRDF directions use the same central
+source as that atlas rather than shifting between AA updates. Ceiling fittings
+follow camera-only ceiling cutaways, while their lighting remains active.
+The room compiler removes low trim fragments without a surviving supporting
+wall, preventing opening cuts from leaving isolated skirting posts in the lounge.
+
+
+Fixture source position and lens radius are shared by direct shading, visibility
+and baked unit-light transport. Brightness and linear RGB remain runtime inputs:
+source changes recompose independently controllable fixture-group responses,
+including their baked diffuse bounces. Geometry visibility does not depend on
+brightness or colour. Sunlight, sky and fixtures share the same linear shading
+and transport conventions; their geometric projections follow source shape.
+
+Shadow atlas version 3 stores unblurred 16-bit depths. Downlights use a downward
+hemisphere projection, allocating more directional detail than the former
+full-sphere map at the same 512-pixel tile size. Depth comparisons precede
+visibility filtering, avoiding variance-shadow light bleeding. Receiver-plane
+correction replaces the former slope bias of up to 25 mm with a 1.5 mm guard.
+A four-position blocker search covers both sides of silhouettes. A fixed 16-position
+filled-disc filter integrates the resulting penumbra in every frame, bounded to
+eight projected texels. Uniform search regions skip the disc filter. This remains
+a finite-resolution approximation rather than exact area-light integration.
+
+Camera queries, nearest-blocker atlas baking and binary connection checks now
+share one geometry traversal. Bake footprint, surface-filter, volume-filter and
+bounce-interpolation links use one optical segment-visibility helper. These
+connection tests run during authoring, not during smart-light updates. Thin
+maple shelves now get projected surface samples instead of being mistaken for
+skirting and falling back to the 50 cm volume. Volume reconstruction is still
+an approximation for layered furnishings without surface charts.
+
+
+Exposed folded-linen layers use 5 cm projected samples, with a projection-plane
+limit proportional to sample spacing. These dense opaque-layer charts retain
+surface reconstruction at rounded rims instead of blending back to the coarse
+volume. Deferred shading, offline shading and metering share this reconstruction
+policy. Floor charts use a 10 cm world lattice; other architectural faces keep
+20 cm spacing. Both retain four-neighbour gathers. The denser fields increase
+bake time and storage; runtime source RGB/brightness composition remains linear.
+The `spare-plan` and `boiler-plan` capture cameras reproduce overhead diagnostics.
+
+
+Chart origins and integer dimensions are stored in lighting asset version 5
+and copied directly to GPU object records. The shader never infers chart offsets
+with floating-point floor/ceil. Division versus reciprocal multiplication can
+straddle an integer boundary (the spare room's 2.6 m boundary is one example),
+so recomputing the allocation on the GPU can address a different chart row.
+Sun visibility uses square-root encoding in its existing eight bits, retaining
+fine dark-penumbra values under HDR solar radiance.
+
+For a CPU capture matching the browser benchmark's daylight, fixture states and
+locked full-plan meter, use `LARES_TIMESTAMP=1782043200`,
+`LARES_CAPTURE_LIGHTS=on` and `LARES_CAPTURE_METER=plan`. Without those options,
+photo captures use their documented evening-on/daytime-off setups and separate
+view metering. Benchmark JSON now records the read-only `render_diagnostics()`
+snapshot of camera, sun and display inputs to make mismatches visible.

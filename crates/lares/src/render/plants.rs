@@ -18,6 +18,8 @@ impl Growth<'_> {
             rotation: vec2(sin * r.y + cos * r.x, cos * r.y - sin * r.x),
             kind,
             surface_cache: u32::MAX,
+            surface_origin: Vec3::ZERO,
+            surface_grid: isthmus::glam::UVec3::ZERO,
             emission: 0.0,
             emission_color: DEFAULT_LIGHT_COLOR,
             exterior: Vec3::ZERO,

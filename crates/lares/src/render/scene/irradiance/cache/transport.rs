@@ -64,6 +64,7 @@ impl Cache {
     pub(crate) fn encode_transport(&self, output: &mut impl Write, daylight: &Daylight) -> io::Result<()> {
         append(output, &[self.grid])?;
         append(output, &self.surface_slots)?;
+        append(output, &self.surface_layouts)?;
         let receivers: Vec<_> =
             self.direct.iter().map(|&probe| Probe { light: Irradiance::default(), ..probe }).collect();
         append(output, &receivers)?;
@@ -85,6 +86,7 @@ impl Cache {
             return None;
         }
         let surface_slots = input.take::<u32>()?;
+        let surface_layouts = input.take::<[u32; 6]>()?;
         let direct = input.take::<Probe>()?;
         let lights = input.take::<u32>()?;
         let sky = input.take::<Packed>()?;
@@ -93,6 +95,21 @@ impl Cache {
         let count = direct.len();
         let lattice = (grid.size.x as usize).checked_mul(grid.size.y as usize)?.checked_mul(grid.size.z as usize)?;
         if sky.iter().chain(&ground).chain(&sun).any(|value| !value.valid())
+            || surface_layouts.len() != surface_slots.len()
+            || surface_slots.iter().zip(&surface_layouts).any(|(&slot, layout)| {
+                if slot == u32::MAX {
+                    return false;
+                }
+                let [x, y, z] = [layout[3] as u64, layout[4] as u64, layout[5] as u64];
+                x == 0
+                    || y == 0
+                    || z == 0
+                    || x > 10000
+                    || y > 10000
+                    || z > 10000
+                    || slot as u64 + 2 * (x * y + x * z + y * z) > count as u64
+                    || layout[..3].iter().any(|&word| !f32::from_bits(word).is_finite())
+            })
             || lattice > count
             || sky.len() != active
             || ground.len() != active
@@ -105,6 +122,7 @@ impl Cache {
         Some(Self {
             daylight: Some(Daylight { sky, ground, sun }),
             surface_slots,
+            surface_layouts,
             paths: Vec::new(),
             volume_weights: Vec::new(),
             path_offsets: Box::default(),
@@ -119,6 +137,7 @@ impl Cache {
             active: Box::default(),
             grid,
             surface_neighbours: Box::default(),
+            volume_neighbours: Box::default(),
             lights,
             responses: BTreeMap::new(),
             applied: Vec::new(),

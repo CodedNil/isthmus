@@ -21,11 +21,19 @@ pub(super) fn lamp<S: Sample>(p: Vec3, size: Vec3) -> S {
     super::decor::table_lamp(p + Vec3::Z * size.z * 0.5)
 }
 
+/// Shared source geometry for direct shading, visibility and baked transport.
+pub(crate) fn source(light: super::Object) -> Vec3 {
+    light.pos + Vec3::Z * if light.kind == super::Kind::Downlight { -0.025 } else { 0.005 }
+}
+pub(crate) fn radius(light: super::Object) -> f32 {
+    if light.kind == super::Kind::Downlight { light.size.x * 0.225 } else { 0.035 }
+}
+
 /// A finite, downward-facing emitter shared by direct light and cached bounce.
 /// Returns direction, incident radiance and distance; visibility is traced separately.
 pub(super) fn incident(light: super::Object, point: Vec3, emitter: Vec2) -> (Vec3, Vec3, f32) {
     let downlight = light.kind == super::Kind::Downlight;
-    let source = light.pos + emitter.extend(0.0) + Vec3::Z * if downlight { -0.025 } else { 0.005 };
+    let source = source(light) + emitter.extend(0.0);
     let delta = source - point;
     let distance = delta.length();
     if distance < 0.001 || distance >= LIGHT_RANGE {

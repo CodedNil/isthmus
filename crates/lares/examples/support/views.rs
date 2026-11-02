@@ -25,8 +25,10 @@ impl View {
         (forward, right * (aspect * scale), up * scale)
     }
 }
-pub fn all(radius: f32) -> [View; 23] {
+pub fn all(radius: f32) -> [View; 25] {
     [
+        View::new("spare-plan", vec3(4.2, -1.8, 5.0), vec3(4.2, -1.8, 0.0)).with_fov(0.65),
+        View::new("boiler-plan", vec3(1.5, 0.7, 4.0), vec3(1.5, 0.7, 0.0)).with_fov(0.40),
         View::new("plan", vec3(0.0, 0.0, (radius * 2.0).clamp(6.0, 40.0)), Vec3::ZERO).with_fov(0.65),
         View::new("entrance", vec3(-0.85431, -0.38029, 1.35667), vec3(-0.17642, -1.07997, 1.13102)).with_fov(1.10561),
         View::new("bookshelf", vec3(-1.15423, 0.72441, 1.11246), vec3(-1.39835, -0.22112, 0.89707)).with_fov(1.12711),

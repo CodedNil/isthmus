@@ -82,6 +82,24 @@ impl Grid {
         surface::sample_normal(probes, item, local, normal, shading - normal)
     }
 
+    /// One reconstruction policy for deferred shading, reference shading and
+    /// camera metering. Dense folded-linen charts describe opaque layers; a
+    /// missing rim sample must not borrow unrelated volume light through them.
+    pub(super) fn resolve_surface(
+        self,
+        probes: &[Probe],
+        item: Object,
+        point: Vec3,
+        normal: Vec3,
+        cached: Vec4,
+    ) -> Vec3 {
+        if cached.w >= 0.95 || (item.kind == crate::home::Kind::LinenStack && item.surface_cache != u32::MAX) {
+            cached.truncate()
+        } else {
+            self.sample(probes, point, normal).lerp(cached.truncate(), (cached.w / 0.95).min_num(1.0))
+        }
+    }
+
     pub fn sample(self, probes: &[Probe], point: Vec3, normal: Vec3) -> Vec3 {
         if point.z >= WALL_HEIGHT {
             return Vec3::ZERO;

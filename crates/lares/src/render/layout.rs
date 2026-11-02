@@ -120,6 +120,22 @@ pub(super) fn compile(rooms: &[Room]) -> Vec<Object> {
         for cut in &cuts {
             walls = walls.into_iter().flat_map(|wall| subtract(wall, cut)).collect();
         }
+        // Trim extends past wall ends to close return corners. An opening can
+        // remove the wall completely yet leave those extensions as isolated
+        // little posts. Keep low trim only where a surviving wall supports it.
+        let supported: Vec<_> = walls.iter().copied().filter(|wall| wall.size.z > 0.5).collect();
+        walls.retain(|trim| {
+            if trim.pos.z + trim.size.z * 0.5 > 0.123 {
+                return true;
+            }
+            let min = trim.pos.truncate() - trim.size.truncate() * 0.5;
+            let max = trim.pos.truncate() + trim.size.truncate() * 0.5;
+            supported.iter().any(|wall| {
+                let lo = wall.pos.truncate() - wall.size.truncate() * 0.5 - Vec2::splat(0.023);
+                let hi = wall.pos.truncate() + wall.size.truncate() * 0.5 + Vec2::splat(0.023);
+                min.cmplt(hi).all() && max.cmpgt(lo).all()
+            })
+        });
         objects.extend(walls);
         objects.extend(room.furniture.iter().chain(room.lights.iter().map(|light| &light.fixture)).map(|item| {
             Object {

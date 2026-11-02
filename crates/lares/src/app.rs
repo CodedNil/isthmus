@@ -83,6 +83,7 @@ impl App {
             sample_index: 0,
             interleaved: false,
             parity: 0,
+            normal_samples: 4,
         }
     }
 
@@ -94,6 +95,7 @@ impl App {
         shadows: &render::shadows::ShadowAtlas,
         visibility: &(SurfaceHandle, Image),
         materials: &(SurfaceHandle, Image),
+        geometry: SurfaceHandle,
         sample: u32,
         interleaved: bool,
     ) {
@@ -103,8 +105,12 @@ impl App {
             parity: sample & 1,
             ..self.globals(size)
         };
+        // Reuse the material target as scratch before material evaluation.
+        render.surface(geometry, size, globals, |mut frame: Frame<'_>| {
+            render::visibility_geometry(&mut frame, &self.scene);
+        });
         render.surface(visibility.0, size, globals, |mut frame: Frame<'_>| {
-            render::visibility(&mut frame, &self.scene);
+            render::visibility(&mut frame, &self.scene, &materials.1);
         });
         render.surface(materials.0, size, globals, |mut frame: Frame<'_>| {
             render::materials(&mut frame, &self.scene, &visibility.1);

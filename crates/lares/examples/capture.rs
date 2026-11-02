@@ -46,7 +46,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let evening = (timestamp / 86_400.0).floor() * 86_400.0 + 21.0 * 3600.0;
     let mut scene = Scene::new_at(&rooms, evening, SunSettings::default());
     println!("Scene: {:?}", started.elapsed());
-    println!("Captures: evening lights on (21:00 UTC) above daytime lights off; independently metered");
+    println!(
+        "Captures: evening (21:00 UTC) above daytime; daytime fixtures {}; meter {}",
+        if env::var("LARES_CAPTURE_LIGHTS").as_deref() == Ok("on") { "on" } else { "off" },
+        if env::var("LARES_CAPTURE_METER").as_deref() == Ok("plan") { "full plan" } else { "per view" }
+    );
     let luminance = vec3(0.2126, 0.7152, 0.0722);
     println!(
         "Evening daylight: {:.0} lx direct normal, {:.0} lx diffuse horizontal; clear sky, view-metered camera",
@@ -66,7 +70,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let entities: BTreeSet<_> =
                 rooms.iter().flat_map(|room| room.lights.iter().map(|light| light.entity_id)).collect();
             let states: Vec<_> = entities.into_iter().map(|entity| (entity, 0.0)).collect();
-            scene.set_light_states(&states);
+            if env::var("LARES_CAPTURE_LIGHTS").as_deref() != Ok("on") {
+                scene.set_light_states(&states);
+            }
         }
         for view in views::all(scene.radius) {
             let name = view.name;
@@ -118,7 +124,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn pixels(scene: &Scene, view: views::View, width: usize, height: usize, shadows: Option<&ShadowAtlas>) -> Vec<u8> {
     let eye = view.eye;
     let (forward, right, up) = view.rays(width as f32 / height as f32);
-    let (exposure, white_balance) = scene.camera_settings(eye, forward, right, up);
+    let (exposure, white_balance) = if env::var("LARES_CAPTURE_METER").as_deref() == Ok("plan") {
+        let camera = lares::camera::Camera { distance: (scene.radius * 2.0).clamp(6.0, 40.0), ..Default::default() };
+        let (eye, forward, right, up) = camera.rays(1.0);
+        scene.camera_settings(eye, forward, right, up)
+    } else {
+        scene.camera_settings(eye, forward, right, up)
+    };
     println!("Camera EV100: {:.2}", (100.0 / (1.2 * exposure)).log2());
     let globals = Globals {
         eye,
@@ -132,6 +144,7 @@ fn pixels(scene: &Scene, view: views::View, width: usize, height: usize, shadows
         sample_index: 0,
         interleaved: false,
         parity: 0,
+        normal_samples: 4,
     };
     // Keep the original exposure when isolating direct lighting, so a
     // diagnostic difference measures transport rather than camera adaptation.
