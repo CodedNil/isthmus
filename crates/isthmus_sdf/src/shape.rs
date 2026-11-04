@@ -22,10 +22,18 @@ impl Shape {
 
     /// Creates a rounded rectangle preserving the supplied outer dimensions.
     pub fn rounded_rect(quad: impl Into<Quad>, radius: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+        Self::side_rounded_rect(quad, radius, radius)
+    }
+
+    /// Creates a rounded rectangle whose left and right corners use separate radii.
+    pub fn side_rounded_rect(quad: impl Into<Quad>, left: f32, right: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         let quad = quad.into();
-        let radius = radius.clamp(0.0, (quad.size.min_element() * 0.5).max(0.0));
+        let limit = (quad.size.min_element() * 0.5).max(0.0);
+        let (left, right) = (left.clamp(0.0, limit), right.clamp(0.0, limit));
         Self::from_fn(quad, move |point| {
-            let corner = quad.local(point).abs() - quad.size * 0.5 + radius;
+            let local = quad.local(point);
+            let radius = if local.x < 0.0 { left } else { right };
+            let corner = local.abs() - quad.size * 0.5 + radius;
             corner.max(Vec2::ZERO).length() + corner.max_element().min(0.0) - radius
         })
     }

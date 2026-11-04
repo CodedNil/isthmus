@@ -107,15 +107,7 @@ mod tests {
     use super::*;
 
     fn app(id: &str, name: &str) -> DesktopApp {
-        DesktopApp {
-            id: id.into(),
-            name: name.into(),
-            search_terms: vec![],
-            exec: vec![id.into()],
-            comment: String::new(),
-            action: None,
-            icon: None,
-        }
+        DesktopApp { id: id.into(), name: name.into(), exec: vec![id.into()], ..Default::default() }
     }
 
     #[test]

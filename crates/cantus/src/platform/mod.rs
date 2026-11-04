@@ -25,7 +25,7 @@ pub enum PowerAction {
 pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// One launchable application entry exposed to the launcher.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DesktopApp {
     pub id: String,
     pub name: String,

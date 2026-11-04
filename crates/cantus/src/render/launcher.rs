@@ -405,8 +405,7 @@ impl LauncherState {
             Some(Entry::Timer { request, .. }) => self.pending_timer = Some(*request),
             Some(Entry::Search(index)) => {
                 let engine = &self.providers[*index];
-                let terms = self.search_query().1;
-                let encoded = form_urlencoded::byte_serialize(terms.as_bytes()).collect::<String>();
+                let encoded = form_urlencoded::byte_serialize(self.search_query().1.as_bytes()).collect::<String>();
                 platform::open_url(&engine.config.url.replace("{searchTerms}", &encoded));
             }
             None => return,
@@ -700,11 +699,8 @@ mod tests {
         let make_app = |id: &str, name: &str| DesktopApp {
             id: id.into(),
             name: name.into(),
-            search_terms: vec![],
             exec: vec![id.into()],
-            comment: String::new(),
-            action: None,
-            icon: None,
+            ..Default::default()
         };
         let mut launcher = LauncherState::default();
         launcher.set_catalog(AppCatalog::new(vec![make_app("steam", "Steam"), make_app("tools", "Steam Tools")]));

@@ -27,13 +27,14 @@ const AUDIO_BAR_SPACING: f32 = 4.0;
 const AUDIO_BAR_RADIUS: f32 = 1.25;
 const AUDIO_HALF_WIDTH: f32 = AUDIO_BAR_SPACING * (AUDIO_SPECTRUM_BANDS - 1) as f32 * 0.5 + AUDIO_BAR_RADIUS;
 /// Graph width, fixed so the battery slot does not resize it.
-const GRAPH_WIDTH: f32 = 60.0 + f32::midpoint(DATA_WIDTH, GAP);
+const GRAPH_WIDTH: f32 = (60.0 + f32::midpoint(DATA_WIDTH, GAP)) * 0.8;
 const CHART_LINE_WIDTH: f32 = 0.85;
 const USAGE_COLOR: Vec3 = Vec3::new(0.32, 0.68, 1.0);
 const MEMORY_COLOR: Vec3 = Vec3::new(0.78, 0.3, 1.0);
 const MUTED_AUDIO_COLOR: Vec3 = Vec3::new(1.0, 0.24, 0.3);
 const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
-const STATUS_INSET: f32 = GAP * 2.0;
+/// Padding around the contents, matching the gap above and below the graphs.
+const STATUS_INSET: f32 = GAP;
 const BASE_WIDTH: f32 = GRAPH_WIDTH * 2.0 + DATA_WIDTH + ACTION_WIDTH * 2.0 + GAP * 4.0 + STATUS_INSET * 2.0;
 
 #[derive(Default)]
@@ -279,8 +280,7 @@ impl StatusPanel {
                     let middle = (AUDIO_SPECTRUM_BANDS - 1) as f32 * 0.5;
                     let bar =
                         (point.x / AUDIO_BAR_SPACING + middle).round().clamp(0.0, AUDIO_SPECTRUM_BANDS as f32 - 1.0);
-                    let active = audio_spectrum[bar as usize] * (1.0 - muted);
-                    let height = 1.2 + 7.7 * active;
+                    let height = 1.2 + 7.7 * audio_spectrum[bar as usize] * (1.0 - muted);
                     let bars = Shape::pill(vec2(AUDIO_BAR_RADIUS, height) * 2.0)
                         .fill_at(point - vec2((bar - middle) * AUDIO_BAR_SPACING, -1.5));
                     let rail_point = point - vec2(0.0, 11.5);
