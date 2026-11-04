@@ -170,8 +170,7 @@ pub async fn load_desktop_icons(sources: Vec<String>) -> Vec<(String, Option<Ima
                 } else {
                     freedesktop_icons::lookup(&source).with_size(64).find()
                 };
-                let image = path.and_then(|path| fs::read(path).ok()).and_then(|bytes| decode_icon(&bytes));
-                (source, image)
+                (source, path.and_then(|path| fs::read(path).ok()).and_then(|bytes| decode_icon(&bytes)))
             })
             .collect()
     })

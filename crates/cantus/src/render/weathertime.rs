@@ -161,8 +161,7 @@ fn rainfall(background: Vec3, p: Vec2, time: f32, strength: f32) -> Vec3 {
         }
     }
     // Keep the sky's palette, with enough contrast to read through the panel's glass.
-    let rain_color = background * 0.3 + vec3(0.06, 0.09, 0.12);
-    background.lerp(rain_color, coverage.saturate())
+    background.lerp(background * 0.3 + vec3(0.06, 0.09, 0.12), coverage.saturate())
 }
 
 /// Snow and hail share a drifting particle field; `kind` is literal at each call site.
@@ -199,8 +198,7 @@ fn cloud_noise(mut p: Vec2) -> f32 {
     let mut density = simplex_noise(p) * 0.5;
     for octave in 0..2 {
         p = vec2(p.x * 1.6 + p.y * 1.2, p.y * 1.6 - p.x * 1.2);
-        let amplitude = if octave == 0 { 0.25 } else { 0.125 };
-        density += simplex_noise(p) * amplitude;
+        density += simplex_noise(p) * if octave == 0 { 0.25 } else { 0.125 };
     }
     0.5 + density * 0.5
 }
@@ -461,8 +459,7 @@ mod monitor {
             {
                 break;
             }
-            let interval = if retry { Duration::from_secs(30) } else { Duration::from_mins(15) };
-            platform::sleep(interval).await;
+            platform::sleep(if retry { Duration::from_secs(30) } else { Duration::from_mins(15) }).await;
         }
     }
 
@@ -825,8 +822,7 @@ impl WeatherPanel {
                         } else {
                             (start_hour + position * HOURLY_STEP_HOURS as f32) % 24.0
                         };
-                        let pane_center = forecast_pill.center() - pill.min;
-                        let p = pane_center + (surface.pixel - forecast_pill.center()) * 2.0;
+                        let p = forecast_pill.center() - pill.min + (surface.pixel - forecast_pill.center()) * 2.0;
                         let color = scene(
                             frame.time,
                             frame.globals.bar_height,

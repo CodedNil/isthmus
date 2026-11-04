@@ -58,16 +58,6 @@ fn sample_status(time: f32) -> SystemSample {
     }
 }
 
-/// Uses a demo spectrum because browsers require explicit speaker capture.
-fn sample_audio(time: f32, audio: &AudioMonitor) {
-    let level = 0.52 + (time * 1.7).sin() * 0.18;
-    audio.volume.store(level.to_bits(), Ordering::Relaxed);
-    for (index, band) in audio.spectrum.iter().enumerate() {
-        let phase = time * (1.2 + index as f32 * 0.15) + index as f32 * 0.8;
-        band.store((0.18 + phase.sin().abs() * 0.62).to_bits(), Ordering::Relaxed);
-    }
-}
-
 pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
     let start = Instant::now();
     wasm_bindgen_futures::spawn_local(async move {
@@ -80,7 +70,12 @@ pub fn start_status_monitor(updates: AppUpdater, audio: Arc<AudioMonitor>) {
             }) {
                 break;
             }
-            sample_audio(time, &audio);
+            // Browsers require explicit speaker capture, so use a demo spectrum.
+            audio.volume.store((0.52 + (time * 1.7).sin() * 0.18).to_bits(), Ordering::Relaxed);
+            for (index, band) in audio.spectrum.iter().enumerate() {
+                let phase = time * (1.2 + index as f32 * 0.15) + index as f32 * 0.8;
+                band.store((0.18 + phase.sin().abs() * 0.62).to_bits(), Ordering::Relaxed);
+            }
             TimeoutFuture::new(STATUS_SAMPLE_INTERVAL.as_millis() as u32).await;
         }
     });
@@ -112,11 +107,9 @@ pub fn start_app_catalog(updater: &AppUpdater) {
         .map(|(name, comment)| DesktopApp {
             id: format!("demo:{name}"),
             name: name.into(),
-            search_terms: Vec::new(),
             exec: vec![format!("demo:{name}")],
             comment: comment.into(),
-            action: None,
-            icon: None,
+            ..Default::default()
         })
         .collect();
         send_update(&updater, move |app| app.launcher.set_catalog(crate::catalog::AppCatalog::new(apps)));

@@ -113,8 +113,7 @@ fn decode_art(bytes: &[u8]) -> Result<AlbumArt, image::ImageError> {
         image
     }
     .into_rgba8();
-    let (width, height) = image.dimensions();
-    Ok(AlbumArt { palette: image_palette(&image), image: Image::rgba8((width, height).into(), image.into_raw()) })
+    Ok(AlbumArt { palette: image_palette(&image), image: Image::rgba8(image.dimensions().into(), image.into_raw()) })
 }
 
 impl CantusApp {
