@@ -28,15 +28,34 @@ impl Queue {
             .map(|track| (track.interaction_id, -self.timeline.start_ms - self.offset_ms(self.index)));
         let mut previous = mem::take(&mut self.tracks);
         for track in &mut tracks {
+            // Connect reports can omit metadata, including after reconnecting
+            // with new queue UIDs. Recording metadata survives those reports;
+            // interaction state still belongs to a particular queue occurrence.
+            if let Some(old) = previous.iter().find(|old| !track.uri.is_empty() && old.uri == track.uri) {
+                if track.duration_ms == 0 {
+                    track.duration_ms = old.duration_ms;
+                }
+                for (new, old) in [(&mut track.name, &old.name), (&mut track.album, &old.album)] {
+                    if new.trim().is_empty() {
+                        new.clone_from(old);
+                    }
+                }
+                if track.artists.iter().all(|artist| artist.trim().is_empty()) {
+                    track.artists.clone_from(&old.artists);
+                }
+                if track.original_title.as_ref().is_none_or(|title| title.trim().is_empty()) {
+                    track.original_title.clone_from(&old.original_title);
+                }
+                track.isrc = track.isrc.take().or_else(|| old.isrc.clone());
+                track.image = track.image.take().or_else(|| old.image.clone());
+                track.id = track.id.or(old.id);
+            }
+        }
+        for track in &mut tracks {
             if let Some(index) =
                 previous.iter().position(|old| old.uri == track.uri && old.queue_uid == track.queue_uid)
             {
                 let old = previous.remove(index);
-                // Unknown duration is missing information, not a new zero-length recording.
-                if track.duration_ms == 0 {
-                    track.duration_ms = old.duration_ms;
-                }
-                track.image = track.image.take().or(old.image);
                 track.interaction_id = old.interaction_id;
                 track.runtime = old.runtime;
             }
