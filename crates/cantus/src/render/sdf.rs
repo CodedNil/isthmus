@@ -119,7 +119,12 @@ impl Paint for DeformedSample {
 }
 
 /// Shades the main glass surface over its distance-based shadow.
-pub fn glass(surface: Fragment<DeformedSample>, mut color: Vec3) -> Vec4 {
+pub fn glass(surface: Fragment<DeformedSample>, color: Vec3) -> Vec4 {
+    glass_masked(surface, color, Vec2::ONE)
+}
+
+/// Independent face and shadow masks let shadows extend beyond content clips.
+pub fn glass_masked(surface: Fragment<DeformedSample>, mut color: Vec3, mask: Vec2) -> Vec4 {
     let facing = (surface.sdf.gradient / surface.sdf.gradient.length().max(f32::MIN_POSITIVE)).dot(vec2(-0.6, -0.8));
     let inward = (-surface.sdf.distance).max(0.0);
     let sheen = (1.0 - inward / 6.0).saturate().powi(2)
@@ -128,7 +133,7 @@ pub fn glass(surface: Fragment<DeformedSample>, mut color: Vec3) -> Vec4 {
     color = color.lerp(Vec3::ONE, sheen);
     color = color.lerp(color * 1.5 + 0.1, surface.flash);
     let shadow = (-surface.sdf.distance.max(0.0) * SHADOW_DECAY).exp() * SHADOW_OPACITY;
-    surface.paint(color.extend(1.0), Vec3::ZERO.extend(shadow))
+    surface.paint(color.extend(mask.x), Vec3::ZERO.extend(shadow * mask.y))
 }
 
 /// Core 2-lane avalanche mixer for hash functions

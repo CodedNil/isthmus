@@ -3,12 +3,12 @@ use crate::{
     render::{
         BarLayout, GAP, HISTORY_WIDTH, PANEL_START, Program, SUPPORT_BLEND, SUPPORT_INSET, TEXT_BODY, TEXT_COLOR,
         TEXT_TITLE, UiContext,
-        sdf::{deform, glass, hash, refract},
+        sdf::{deform, glass_masked, hash, refract},
         support_row,
     },
 };
 use core::{
-    f32::consts::{FRAC_PI_2, TAU},
+    f32::consts::{FRAC_PI_2, PI, TAU},
     f64,
 };
 use isthmus::{prelude::*, spirv_std::arch::kill};
@@ -46,17 +46,9 @@ struct TrackLayout {
 }
 
 impl TrackLayout {
-    fn new(
-        index: usize,
-        duration_ms: u32,
-        start_ms: f32,
-        bar: BarLayout,
-        future_end: f32,
-        trim: f32,
-        left: f32,
-    ) -> Self {
+    fn new(index: usize, duration_ms: u32, start_ms: f32, bar: BarLayout, future_end: f32, left: f32) -> Self {
         let natural_start = bar.playhead_x + start_ms * bar.px_per_ms;
-        let end = natural_start + (duration_ms as f32 * bar.px_per_ms - trim).max(0.0);
+        let end = natural_start + duration_ms as f32 * bar.px_per_ms;
         let clipped = end.min(future_end) - natural_start.max(left);
         let width = clipped.max(if natural_start < left { HISTORY_TRACK_WIDTH } else { 0.0 });
         Self {
@@ -85,20 +77,150 @@ struct Actions {
     playlist_toggle: Option<(TrackId, PlaylistId)>,
 }
 
-/// Fade the whole history track before its leading edge or shadow reaches the playlists.
-fn history_visibility(left: f32, boundary: f32, height: f32) -> f32 {
-    (left - boundary).smoothstep(24.0, 24.0 + height)
+/// Mirror the future-edge fade: keep the minimum-size card inside the boundary
+/// while its remaining timeline span fades away.
+fn history_visibility(right: f32, boundary: f32, height: f32) -> f32 {
+    (right - boundary).smoothstep(0.0, height)
+}
+
+fn shadow_fade(point: Vec2, viewport: Rect) -> f32 {
+    (point.x - viewport.min.x + GAP).smoothstep(0.0, GAP)
+}
+
+fn history_collapse(size: Vec2, history_depth: f32) -> f32 {
+    let tween = size.y * 0.16;
+    history_depth.smoothstep(0.0, tween) * (1.0 - (size.x - size.y).smoothstep(0.0, tween))
+}
+
+/// Integrates bounded motion rather than chasing a target, so a fast scrub
+/// cannot leave a backlog of animation after the pointer stops.
+#[derive(Clone, Default)]
+pub struct DropletMotion {
+    previous: Option<Vec2>,
+    progress: Vec2,
+}
+
+impl DropletMotion {
+    fn advance(&mut self, target: Vec2, delta_time: f32) -> Vec2 {
+        if let Some(previous) = self.previous {
+            let limit = Vec2::splat(delta_time.clamp(0.0, 0.1) * 2.0);
+            self.progress += (target - previous).clamp(-limit, limit);
+        } else {
+            self.progress = target;
+        }
+        self.previous = Some(target);
+        self.progress
+    }
+}
+
+/// Two overlapping droplets per band keep all six bands of each edge alive.
+/// Paths and shape variations are prepared once per frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, ShaderData)]
+struct Drop {
+    center: Vec2,
+    radii: Vec2,
+    axis: Vec2,
+    opacity: f32,
+    skew: f32,
+}
+
+#[derive(Clone, Copy, Default, ShaderData)]
+struct Droplets {
+    balls: [Drop; 24],
+    count: u32,
+    vertical_limits: Vec2,
+}
+
+impl Droplets {
+    fn new(pill: Rect, rounding: Vec2, strength: Vec2, seed: f32, progress: Vec2) -> Self {
+        let mut result = Self { vertical_limits: vec2(pill.min.y, pill.max.y), ..Self::default() };
+        let height = pill.size().y;
+        let body = track_shape(pill, rounding);
+        for side in 0..2 {
+            let strength = strength[side];
+            if strength == 0.0 {
+                continue;
+            }
+            let direction = if side == 0 { -1.0 } else { 1.0 };
+            let edge = if side == 0 { pill.min.x } else { pill.max.x };
+            for index in 0..12 {
+                let band = index / 2;
+                let clock = progress[side] + band as f32 * 0.618_034 + (index % 2) as f32 * 0.5 + seed;
+                let phase = clock - clock.floor();
+                let random = hash(vec2(seed * 65536.0 + band as f32 * 17.0, clock.floor() * 31.0 + side as f32 * 97.0));
+                let arc = ((band as f32 + 0.5) / 6.0 - 0.5) * PI * 0.64 + (random.y - 0.5) * 0.03;
+                let y = pill.center().y + height * 0.5 * arc.sin();
+                let (mut inside, mut outside) = (edge - direction * height.min(pill.size().x) * 0.5, edge);
+                for _ in 0..6 {
+                    let middle = f32::midpoint(inside, outside);
+                    if body.contains(vec2(middle, y)) {
+                        inside = middle;
+                    } else {
+                        outside = middle;
+                    }
+                }
+                let angle = (0.6 + random.y * 0.4) * (PI / 9.0) * if band < 3 { -1.0 } else { 1.0 };
+                let center =
+                    vec2(inside, y) + vec2(direction * angle.cos(), angle.sin()) * height * (phase * 0.38 - 0.08);
+                let envelope = (phase * PI).sin();
+                let alpha = (1.0 - phase).smoothstep(0.0, 0.7) * envelope.smoothstep(0.0, 0.2) * strength;
+                let radius = height * (0.08 + random.x * 0.017) * envelope;
+                let stretch = 0.97 + random.y * 0.06;
+                result.balls[result.count as usize] = Drop {
+                    center,
+                    radii: vec2(radius * stretch, radius / stretch),
+                    axis: vec2(direction * angle.cos(), angle.sin()),
+                    opacity: alpha,
+                    skew: (random.x - 0.5) * 0.12,
+                };
+                result.count += 1;
+            }
+        }
+        result
+    }
+
+    /// The same field defines both the contour and its material transparency.
+    fn field(self, base: f32, point: Vec2, height: f32) -> Vec2 {
+        let blend = height * 0.22;
+        let mut distance = base;
+        let mut alpha = 1.0 - base.smoothstep(0.0, blend * 0.25);
+        for index in 0..self.count as usize {
+            let ball = self.balls[index];
+            if ball.opacity == 0.0 {
+                continue;
+            }
+            let offset = point - ball.center;
+            let local = vec2(offset.dot(ball.axis), offset.dot(ball.axis.perp())) / ball.radii;
+            let droplet = (local.length() - 1.0 - ball.skew * local.x.clamp(-1.0, 1.0)) * ball.radii.min_element();
+            let neck = (1.0 - (base - droplet).abs() / blend).saturate();
+            let merged = base.min(droplet) - neck * neck * blend * 0.25;
+            distance = distance.min(base.lerp(merged, ball.opacity.smoothstep(0.0, 0.2)));
+            alpha = alpha.max(ball.opacity * (1.0 - (droplet - distance).abs() / blend).saturate());
+        }
+        let edge_margin = (point.y - self.vertical_limits.x).min(self.vertical_limits.y - point.y);
+        distance = base.lerp(distance, edge_margin.smoothstep(0.0, height * 0.15));
+        let fade = 1.0 - base.smoothstep(0.0, height * 0.32);
+        vec2(distance, 1.0f32.lerp(alpha * fade, (base - distance).smoothstep(0.0, 0.5)))
+    }
+
+    fn shape(self, body: impl Sdf, height: f32) -> impl Sdf {
+        let reach = if self.count == 0 { 0.0 } else { height * 0.4 };
+        Shape::from_fn(body.bounds(reach), move |point| self.field(body.distance_at(point), point, height).x)
+    }
 }
 
 /// Squircle corners on complete edges blend into circular ends as they are clipped.
 fn track_shape(rect: Rect, rounding: Vec2) -> impl Sdf {
+    // Narrow incoming cards keep the curved ends and full height as they grow.
+    let scale = vec2((rect.size().y / rect.size().x.max(0.001)).max(1.0), 1.0);
     Shape::from_fn(rect, move |point| {
-        let local = point - rect.center();
+        let local = (point - rect.center()) * scale;
         let amount = if local.x < 0.0 { rounding.x } else { rounding.y };
         let radius = rect.size().y * TRACK_RADIUS.lerp(0.5, amount);
-        let corner = local.abs() - rect.size() * 0.5 + radius;
+        let corner = local.abs() - rect.size() * scale * 0.5 + radius;
         let outside = corner.max(Vec2::ZERO);
-        (outside * outside).length().sqrt().lerp(outside.length(), amount) + corner.max_element().min(0.0) - radius
+        ((outside * outside).length().sqrt().lerp(outside.length(), amount) + corner.max_element().min(0.0) - radius)
+            / scale.x
     })
 }
 
@@ -262,15 +384,14 @@ impl MusicView {
             .filter(|(index, elapsed)| *elapsed < music.queue.tracks[*index].duration_ms as f32);
 
         let future_end = HISTORY_WIDTH + context.config.timeline_future_minutes * 60_000.0 * bar.px_per_ms;
-        let gap = GAP.max(TRACK_SPACING_MS * bar.px_per_ms);
-        let trim = gap - TRACK_SPACING_MS * bar.px_per_ms;
+        let gap = TRACK_SPACING_MS * bar.px_per_ms;
         let mut start_ms = music.queue.timeline.start_ms + music.queue.offset_ms(music.queue.tracks.len());
         let mut next_left = None;
         let mut visible = SmallVec::<[_; 16]>::new();
         for (queue_index, track) in music.queue.tracks.iter_mut().enumerate().rev() {
             start_ms -= f64::from(track.queue_span_ms());
             let mut layout =
-                TrackLayout::new(queue_index, track.duration_ms, start_ms as f32, bar, future_end, trim, HISTORY_WIDTH);
+                TrackLayout::new(queue_index, track.duration_ms, start_ms as f32, bar, future_end, HISTORY_WIDTH);
             // Queue snapshots arrive before metadata and artwork. Keep unresolved entries out
             // of layout and interaction instead of drawing minimum-size placeholder circles.
             if track.duration_ms == 0
@@ -347,8 +468,7 @@ impl MusicView {
             track.runtime.track_expansion = 0.0;
             return;
         }
-        let history_alpha =
-            history_visibility(layout.right - layout.width.max(panel_height), tracks_left, panel_height);
+        let history_alpha = history_visibility(layout.right, tracks_left, panel_height);
         let opacity = (future_end - natural_start).smoothstep(0.0, panel_height);
         if opacity * history_alpha <= 1.0 / 1024.0 {
             track.runtime.track_expansion = 0.0;
@@ -358,7 +478,7 @@ impl MusicView {
         if !can_expand {
             track.runtime.track_expansion = 0.0;
         }
-        let mut width = layout.width.max(panel_height);
+        let mut width = if opacity < 1.0 { layout.width } else { layout.width.max(panel_height) };
         let mut x = layout.right - width;
         let pill_top = PANEL_START;
         let expansion = track.runtime.track_expansion.smoothstep(0.0, 1.0);
@@ -424,12 +544,20 @@ impl MusicView {
             vec2(row_width(primary_icons) * primary_alpha, primary_alpha * PRIMARY_SUPPORT_DEPTH),
             vec2(row_width(secondary_count as f32) * secondary_alpha, secondary_alpha * SECONDARY_SUPPORT_DEPTH),
         ];
+        x = x.max(tracks_left);
         let pill = Rect::new(vec2(x, pill_top), vec2(x + width, pill_top + panel_height));
         // Clipping rounds each end; hover expansion restores the complete squircle shape.
-        let rounding = vec2((HISTORY_WIDTH - natural_start).max(0.0), layout.overhang_right)
-            .smoothstep(Vec2::ZERO, Vec2::splat(panel_height * 2.0))
-            * (1.0 - expansion);
-        let visible_area = Shape::rectangle(Rect::new(vec2(tracks_left, 0.0), context.frame.screen_size));
+        let clipping = vec2((HISTORY_WIDTH - natural_start).max(0.0), layout.overhang_right);
+        // Normal playback runs at 0.625 cycles/second; scrubbing is capped at 2.
+        let droplet_progress =
+            track.runtime.droplet_motion.advance(clipping / (scale * 1600.0).max(0.001), context.frame.delta_time);
+        let collapse = history_collapse(pill.size(), HISTORY_WIDTH - natural_start);
+        let rounding = (clipping.smoothstep(Vec2::ZERO, Vec2::splat(panel_height * 2.0)) * (1.0 - expansion))
+            .lerp(Vec2::ONE, collapse);
+        let droplet_strength =
+            clipping.smoothstep(Vec2::ZERO, Vec2::splat(panel_height * 0.3)) * (1.0 - expansion) * (1.0 - collapse);
+        let viewport = Rect::new(vec2(tracks_left, 0.0), context.frame.screen_size);
+        let visible_area = Shape::rectangle(viewport);
         let shape = music_shape(pill, rounding, icon_supports);
         let hit_shape = shape.offset(if expansion > 0.0 { 12.0 } else { 0.0 });
         let bounds = hit_shape.bounds(0.0);
@@ -507,7 +635,7 @@ impl MusicView {
             context
                 .frame
                 .upload({
-                    let tracks_left: f32;
+                    let viewport: Rect;
                     let opacity: f32;
                     let pointer_active: f32;
                     let image: &Image =
@@ -520,6 +648,7 @@ impl MusicView {
                     let audio: AudioFeatures = music.resources.audio(track.id);
                     let pill: Rect;
                     let rounding: Vec2;
+                    let droplets: Droplets = Droplets::new(pill, rounding, droplet_strength, seed, droplet_progress);
                     let icon_supports: [Vec2; 2];
                     let flow_time: f32 = {
                         let pace = ((audio.tempo - 0.2) * 2.5).saturate();
@@ -539,12 +668,14 @@ impl MusicView {
                 })
                 .primitive(|mut frame| {
                     frame.globals.pressure *= pointer_active;
-                    deform(music_shape(pill, rounding, icon_supports), frame)
+                    deform(droplets.shape(music_shape(pill, rounding, icon_supports), pill.size().y), frame)
                 })
                 .fragment(|frame, surface| {
-                    if surface.pixel.x < tracks_left {
+                    let shadow = shadow_fade(surface.pixel, viewport);
+                    if shadow <= 0.0 {
                         kill();
                     }
+                    let face = if Shape::rectangle(viewport).contains(surface.pixel) { 1.0 } else { 0.0 };
                     let uv = pill.uv(surface.pixel);
                     let lens = (1.0 + surface.sdf.distance.min(0.0) / 120.0).saturate();
                     let deformation = (uv - 0.5) * lens * lens * 0.6 + surface.ripple;
@@ -581,15 +712,21 @@ impl MusicView {
                     color *= 1.0 + caustics(uv * pill.size() / pill.size().y, frame.time, seed, audio);
                     let center = pill.center() + vec2((pill.size().x - pill.size().y) * 0.5, 0.0);
                     let radius = f32::midpoint(pill.size().y, surface.bulge);
-                    // Only the artwork's right edge follows the pill's clipped corners; its left stays circular.
-                    let art =
-                        track_shape(Rect::from_center_size(center, Vec2::splat(radius * 2.0)), vec2(1.0, rounding.y));
-                    let edge = art.distance_at(surface.pixel).max(surface.sdf.distance);
+                    // Follow the animated contour halfway from the original
+                    // crop, retaining a slight inset around the glass rim.
+                    let original_crop =
+                        track_shape(Rect::from_center_size(center, Vec2::splat(radius * 2.0)), vec2(1.0, rounding.y))
+                            .distance_at(surface.pixel)
+                            .max(surface.sdf.distance);
+                    let edge = original_crop.lerp(surface.sdf.distance, 0.5) + 1.5;
+                    let art_uv = (surface.refracted - center) / (radius * 2.0) + 0.5;
+                    let art_alpha = edge.smoothstep(0.0, -1.0) * art_uv.x.smoothstep(0.0, 0.08) * face;
+                    let base = music_shape(pill, rounding, icon_supports).distance_at(surface.pixel);
+                    let alpha = opacity * droplets.field(base, surface.pixel, pill.size().y).y;
                     source_over(
-                        image.sample((surface.refracted - center) / (radius * 2.0) + 0.5)
-                            * vec4(1.0, 1.0, 1.0, edge.smoothstep(0.0, -4.0)),
-                        glass(surface, color),
-                    ) * vec4(1.0, 1.0, 1.0, opacity)
+                        image.sample(art_uv) * vec4(1.0, 1.0, 1.0, art_alpha),
+                        glass_masked(surface, color, vec2(face, shadow)),
+                    ) * vec4(1.0, 1.0, 1.0, alpha)
                 })
         );
 
@@ -605,7 +742,7 @@ impl MusicView {
                         .upload({
                             let pill: Rect;
                             let rounding: Vec2;
-                            let tracks_left: f32;
+                            let viewport: Rect;
                             let opacity: f32;
                             let expansion: f32;
                             let pointer_active: f32;
@@ -617,7 +754,7 @@ impl MusicView {
                             refract(track_shape(pill, rounding), frame, compact.union(full))
                         })
                         .fragment(|_, surface| {
-                            if surface.pixel.x < tracks_left {
+                            if !Shape::rectangle(viewport).contains(surface.pixel) {
                                 kill();
                             }
                             let image_center = pill.center() + vec2((pill.size().x - pill.size().y) * 0.5, 0.0);
@@ -670,7 +807,7 @@ impl MusicView {
                             let image: &Image = playlist
                                 .and_then(|playlist| music.resources.art(playlist.image_url.as_deref()))
                                 .map_or(&*EMPTY_ART, |art| &art.image);
-                            let tracks_left: f32;
+                            let viewport: Rect;
                             let is_star: bool;
                             let fill: f32 = (rating.unwrap_or(0) as f32 * 0.5 - slot as f32).saturate();
                             let desaturation: f32 = 0.2 * f32::from(secondary && !response.hovered);
@@ -679,7 +816,7 @@ impl MusicView {
                         })
                         .primitive(quad)
                         .fragment(|_, surface| {
-                            if surface.pixel.x < tracks_left {
+                            if !Shape::rectangle(viewport).contains(surface.pixel) {
                                 kill();
                             }
                             let point = (surface.uv * 2.0 - 1.0) * 18.0;
@@ -833,6 +970,120 @@ mod tests {
     use super::*;
 
     #[test]
+    fn history_compaction_tweens_before_crossing_the_stack_boundary() {
+        let bar = BarLayout { playhead_x: HISTORY_WIDTH, px_per_ms: 0.1 };
+        for (remaining, expected) in [(60.0, 0.0), (54.0, 0.5), (50.0, 1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let start = (remaining - 100.0) / bar.px_per_ms;
+            let layout = TrackLayout::new(0, 1000, start, bar, HISTORY_WIDTH + 500.0, HISTORY_WIDTH);
+            let collapse = history_collapse(vec2(layout.width.max(50.0), 50.0), -start * bar.px_per_ms);
+            assert!((collapse - expected).abs() < 0.001);
+        }
+        assert!((history_collapse(Vec2::splat(50.0), 4.0) - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn track_shadows_fade_only_at_playlist_edge() {
+        let viewport = Rect::new(vec2(100.0, 0.0), vec2(500.0, 120.0));
+        for (x, alpha) in [(100.0 - GAP, 0.0), (100.0 - GAP * 0.5, 0.5), (100.0, 1.0)] {
+            for y in [0.0, 60.0, 120.0] {
+                assert_eq!(shadow_fade(vec2(x, y), viewport), alpha);
+            }
+        }
+    }
+
+    #[test]
+    fn droplet_motion_caps_scrubbing_without_a_catch_up_backlog() {
+        for hz in [30, 60, 165] {
+            let mut motion = DropletMotion::default();
+            let dt = 1.0 / hz as f32;
+            motion.advance(Vec2::ZERO, dt);
+            let direction = vec2(1.0, -1.0);
+            for step in 1..=hz {
+                let target = direction * step as f32 * dt * 0.625;
+                assert_eq!(motion.advance(target, dt), target);
+            }
+            let start = motion.progress;
+            for step in 1..=hz {
+                motion.advance(direction * step as f32 * 1000.0, dt);
+            }
+            let stopped = motion.progress;
+            assert!((stopped - start - direction * 2.0).abs().max_element() < 0.000_01);
+            for _ in 0..hz {
+                assert_eq!(motion.advance(direction * hz as f32 * 1000.0, dt), stopped);
+            }
+            let reversed = motion.advance(Vec2::ZERO, dt);
+            assert!((reversed - (stopped - direction * 2.0 * dt)).abs().max_element() < 0.000_01);
+        }
+    }
+
+    #[test]
+    fn droplets_cover_the_edge_continuously_and_fade() {
+        let mut translucent = false;
+        for (height, seed) in [(20.0, 0.0), (50.0, 0.371), (80.0, 0.99)] {
+            let pill = Rect::from_center_size(vec2(200.0, 100.0), vec2(240.0, height));
+            let body = track_shape(pill, Vec2::ONE);
+            let build = |progress| Droplets::new(pill, Vec2::ONE, Vec2::ONE, seed, progress);
+            let compact = Rect::from_center_size(pill.center(), Vec2::splat(height));
+            let strength = Vec2::splat(1.0 - history_collapse(compact.size(), height));
+            let square = Droplets::new(compact, Vec2::ONE, strength, seed, Vec2::ONE);
+            assert_eq!(history_collapse(compact.size(), -height), 0.0);
+            let partial = history_collapse(vec2(height * 1.08, height), height);
+            assert!(partial > 0.0 && partial < 1.0);
+            assert!(Droplets::new(compact, Vec2::ONE, Vec2::ONE, seed, Vec2::ONE).count > 0);
+            assert!(square.balls.iter().all(|ball| *ball == Drop::default()));
+            for step in 0..64 {
+                let progress = Vec2::splat(step as f32 / 16.0 - 2.0);
+                let (drops, next) = (build(progress), build(progress + 0.000_01));
+                assert_eq!(drops.balls, build(progress).balls);
+                assert_ne!(drops.balls, build(progress + 1.0).balls);
+                let mut covered = 0;
+                for side in [-1.0, 1.0] {
+                    for row in 0..40 {
+                        let cap = Vec2::from_angle((row as f32 / 39.0 - 0.5) * PI * 0.70) * height * 0.5;
+                        let point = pill.center() + vec2(side * ((pill.size().x - height) * 0.5 + cap.x), cap.y);
+                        let base = body.distance_at(point);
+                        let sample = drops.field(base, point, height);
+                        assert!(sample.x.is_finite() && (0.0..=1.0).contains(&sample.y));
+                        assert!((sample.x - next.field(base, point, height).x).abs() < 0.05);
+                        covered += usize::from(base - sample.x > height * 0.005);
+                    }
+                }
+                assert!(covered >= 64, "only {covered}/80 edge samples affected at {progress:?}, height {height}");
+                assert_eq!(drops.field(body.distance_at(pill.center()), pill.center(), height).y, 1.0);
+                for ball in drops.balls {
+                    let point = ball.center;
+                    let base = body.distance_at(point);
+                    let sample = drops.field(base, point, height);
+                    translucent |= sample.x < 0.0 && sample.y > 0.0 && sample.y < 0.8;
+                    if base >= height * 0.16 && sample.x < 0.0 {
+                        assert!(sample.y <= 0.501, "distant droplet remained opaque");
+                    }
+                    if sample.x < 0.0 {
+                        assert!(Shape::rectangle(drops.shape(body, height).bounds(0.0)).contains(point));
+                    }
+                    for y in [pill.min.y - 0.5, pill.max.y + 0.5] {
+                        let point = vec2(ball.center.x, y);
+                        let base = body.distance_at(point);
+                        assert_eq!(drops.field(base, point, height).x, base, "droplet increased the pill height");
+                    }
+                }
+            }
+        }
+        assert!(translucent, "detached droplets never became translucent");
+    }
+
+    #[test]
+    fn narrow_incoming_tracks_keep_full_height_and_curved_corners() {
+        for width in [2.0, 8.0, 25.0, 50.0] {
+            let pill = Rect::from_center_size(vec2(200.0, 100.0), vec2(width, 50.0));
+            let shape = track_shape(pill, Vec2::ONE);
+            assert!(shape.contains(pill.center() + vec2(0.0, 24.0)));
+            assert!(shape.contains(pill.center() + vec2(width * 0.45, 0.0)));
+            assert!(!shape.contains(pill.center() + vec2(width * 0.45, 24.0)));
+        }
+    }
+
+    #[test]
     fn track_shapes_remain_finite_at_different_bar_heights() {
         for height in [20.0, 32.0, 40.0, 50.0, 80.0] {
             let pill = Rect::from_center_size(vec2(200.0, 100.0), vec2(240.0, height));
@@ -854,10 +1105,10 @@ mod tests {
     }
 
     #[test]
-    fn history_fades_before_reaching_playlist_boundary() {
-        assert_eq!(history_visibility(124.0, 100.0, 50.0), 0.0);
-        assert_eq!(history_visibility(174.0, 100.0, 50.0), 1.0);
-        assert!((history_visibility(149.0, 100.0, 50.0) - 0.5).abs() < 0.001);
+    fn history_fades_only_at_playlist_boundary() {
+        assert_eq!(history_visibility(100.0, 100.0, 50.0), 0.0);
+        assert_eq!(history_visibility(150.0, 100.0, 50.0), 1.0);
+        assert!((history_visibility(125.0, 100.0, 50.0) - 0.5).abs() < 0.001);
     }
 
     #[test]
@@ -873,9 +1124,9 @@ mod tests {
     fn clips_tracks_and_preserves_collapsed_history() {
         let bar = BarLayout { playhead_x: 200.0, px_per_ms: 0.1 };
         for (start_ms, width, right) in
-            [(0.0, 80.0, 280.0), (-500.0, 42.0, 242.0), (-2000.0, HISTORY_TRACK_WIDTH, 200.0), (1000.0, 0.0, 280.0)]
+            [(0.0, 80.0, 280.0), (-500.0, 50.0, 250.0), (-2000.0, HISTORY_TRACK_WIDTH, 200.0), (1000.0, 0.0, 280.0)]
         {
-            let layout = TrackLayout::new(0, 1000, start_ms, bar, 280.0, 8.0, 200.0);
+            let layout = TrackLayout::new(0, 1000, start_ms, bar, 280.0, 200.0);
             assert!((layout.width - width).abs() < 0.001, "unexpected width at {start_ms} ms");
             assert!((layout.right - right).abs() < 0.001, "unexpected right edge at {start_ms} ms");
         }
