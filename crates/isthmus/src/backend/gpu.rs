@@ -1,7 +1,10 @@
-use super::{buffer::UploadBuffer, image::ImageCache, surface::SurfaceTarget};
+use super::{buffer::UploadBuffer, image::ImageCache, renderer::RenderError, surface::SurfaceTarget};
 use crate::{Blend, Image, Program, ResourceData, ShaderData, bindings};
 use core::array::from_fn;
-use std::ops::Range;
+use std::{
+    ops::Range,
+    sync::{Arc, OnceLock},
+};
 
 pub struct Gpu {
     pub instance: wgpu::Instance,
@@ -10,10 +13,15 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     pub device_name: String,
     pub format: wgpu::TextureFormat,
-    pipelines: Vec<wgpu::RenderPipeline>,
+    pipelines: Vec<OnceLock<wgpu::RenderPipeline>>,
+    layouts: Vec<wgpu::PipelineLayout>,
     bind_layout: wgpu::BindGroupLayout,
-    pub buffers: [UploadBuffer; 4],
-    images: ImageCache,
+    pub words: Vec<u32>,
+    buffers: [UploadBuffer; bindings::BUFFER_COUNT],
+    binding: Option<([wgpu::Buffer; bindings::BUFFER_COUNT], wgpu::BindGroup)>,
+    pub(super) images: ImageCache,
+    record_error: Option<RenderError>,
+    errors: Arc<GpuErrors>,
 }
 
 impl Gpu {
@@ -24,6 +32,15 @@ impl Gpu {
         queue: wgpu::Queue,
         format: wgpu::TextureFormat,
     ) -> Self {
+        let errors = Arc::new(GpuErrors::default());
+        let uncaptured = Arc::clone(&errors);
+        device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+            let _ = uncaptured.validation.set(RenderError::Gpu(error.to_string()));
+        }));
+        let lost = Arc::clone(&errors);
+        device.set_device_lost_callback(move |reason, message| {
+            let _ = lost.loss.set(RenderError::DeviceLost(format!("{reason:?}: {message}")));
+        });
         let entries = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|binding| wgpu::BindGroupLayoutEntry {
             binding: binding as u32,
             visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -49,80 +66,116 @@ impl Gpu {
                 })
             })
             .collect();
-        let pipelines = P::SHADERS
-            .iter()
-            .map(|entry| {
-                let [vertex, fragment] = entry.code.map(|code| {
-                    device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                        label: Some(entry.name),
-                        source: wgpu::ShaderSource::Wgsl(code.into()),
-                    })
-                });
-                let blend = match entry.blend {
-                    Blend::Over => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    Blend::Replace | Blend::Raw => None,
-                    Blend::Add => Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING.alpha,
-                    }),
-                };
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(entry.name),
-                    layout: Some(&layouts[entry.images]),
-                    vertex: wgpu::VertexState {
-                        module: &vertex,
-                        entry_point: None,
-                        buffers: &[],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &fragment,
-                        entry_point: None,
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: entry.format.unwrap_or(format),
-                            blend,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleStrip,
-                        ..Default::default()
-                    },
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            })
-            .collect();
-        let buffers = from_fn(|_| UploadBuffer::new(&device));
+        let labels: [&str; bindings::BUFFER_COUNT] = ["isthmus frame", "isthmus resources"];
+        let buffers = from_fn(|index| UploadBuffer::new(&device, labels[index]));
         let device_name = adapter.get_info().name;
-        Self { instance, adapter, device, queue, device_name, format, pipelines, bind_layout, buffers, images }
+        Self {
+            instance,
+            adapter,
+            device,
+            queue,
+            device_name,
+            format,
+            pipelines: (0..P::SHADERS.len()).map(|_| OnceLock::new()).collect(),
+            layouts,
+            bind_layout,
+            buffers,
+            images,
+            record_error: None,
+            errors,
+            words: Vec::new(),
+            binding: None,
+        }
+    }
+
+    fn pipeline<P: Program>(&self, shader: usize) -> &wgpu::RenderPipeline {
+        self.pipelines[shader].get_or_init(|| {
+            let entry = &P::SHADERS[shader];
+            let [vertex, fragment] = entry.code.map(|code| {
+                self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(entry.name),
+                    source: wgpu::ShaderSource::Wgsl(code.into()),
+                })
+            });
+            let blend = match entry.blend {
+                Blend::Over => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                Blend::Replace | Blend::Raw => None,
+                Blend::Add => Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING.alpha,
+                }),
+            };
+            self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry.name),
+                layout: Some(&self.layouts[entry.images]),
+                vertex: wgpu::VertexState {
+                    module: &vertex,
+                    entry_point: None,
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &fragment,
+                    entry_point: None,
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: entry.format.unwrap_or(self.format),
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        })
+    }
+
+    pub(super) fn check(&self) -> Result<(), RenderError> {
+        self.errors.loss.get().or_else(|| self.errors.validation.get()).cloned().map_or(Ok(()), Err)
     }
 
     pub fn begin_frame(&mut self) {
-        self.buffers[bindings::DRAWS as usize].words.clear();
-        self.buffers[bindings::PAYLOAD as usize].words.clear();
+        self.words.clear();
         self.images.retain_live();
     }
 
-    pub(crate) fn emit(
+    pub(crate) fn emit<T: ShaderData>(
         &mut self,
         surface: &mut SurfaceTarget,
         shader: usize,
         vertices: u32,
-        value: impl ShaderData,
+        value: T,
         images: &[&Image],
     ) {
-        let image = (!images.is_empty()).then(|| self.images.images(&self.device, &self.queue, images));
-        let payload = value.append(&mut self.buffers[bindings::PAYLOAD as usize].words);
-        let draws = &mut self.buffers[bindings::DRAWS as usize];
-        let start = payload.append(&mut draws.words);
+        let image = if images.is_empty() {
+            None
+        } else {
+            match self.images.images(&self.device, &self.queue, images) {
+                Ok(binding) => Some(binding),
+                Err(error) => {
+                    self.record_error.get_or_insert(error);
+                    return;
+                }
+            }
+        };
+        // A shader's fixed-width records are addressed directly by instance index.
+        // Slice captures may precede them; padding keeps every record aligned to its stride.
+        let stride = T::WORDS + 1;
+        let offset = self.words.len().next_multiple_of(stride);
+        self.words.resize(offset, 0);
+        surface.frame.append(&mut self.words);
+        value.append(&mut self.words);
+        let start = (offset / stride) as u32;
         let end = start + 1;
         if let Some(previous) = surface.paints.last_mut()
             && previous.shader == shader
@@ -136,37 +189,32 @@ impl Gpu {
         }
     }
 
-    pub fn prepare(&mut self, resources: ResourceData<'_>) {
-        self.buffers[bindings::DRAWS as usize].flush(&self.device, &self.queue);
-        self.buffers[bindings::PAYLOAD as usize].flush(&self.device, &self.queue);
-        self.buffers[bindings::TRANSIENT as usize].upload_if_changed(&self.device, &self.queue, resources.transient);
-        self.buffers[bindings::PERSISTENT as usize].upload_appended(&self.device, &self.queue, resources.persistent);
-    }
-
-    pub(crate) fn draw_surface(&self, pass: &mut wgpu::RenderPass<'_>, surface: &mut SurfaceTarget) {
-        let buffers = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|index| match index as u32 {
-            bindings::FRAMES => &surface.frame,
-            _ => &self.buffers[index],
-        });
-        if surface
-            .binding
-            .as_ref()
-            .is_none_or(|(previous, _)| buffers.iter().zip(previous).any(|(buffer, old)| buffer.buffer != *old))
-        {
+    pub fn prepare(&mut self, resources: ResourceData<'_>) -> Result<(), RenderError> {
+        if let Some(error) = self.record_error.take() {
+            return Err(error);
+        }
+        self.buffers[bindings::FRAME as usize].upload(&self.device, &self.queue, &self.words)?;
+        self.buffers[bindings::RESOURCES as usize].upload(&self.device, &self.queue, resources)?;
+        let buffers = self.buffers.each_ref().map(|buffer| buffer.buffer.clone());
+        if self.binding.as_ref().is_none_or(|(old, _)| *old != buffers) {
             let entries = from_fn::<_, { bindings::BUFFER_COUNT }, _>(|index| wgpu::BindGroupEntry {
                 binding: index as u32,
-                resource: buffers[index].buffer.as_entire_binding(),
+                resource: buffers[index].as_entire_binding(),
             });
-            let frame = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let binding = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("frame"),
                 layout: &self.bind_layout,
                 entries: &entries,
             });
-            surface.binding = Some((buffers.map(|buffer| buffer.buffer.clone()), frame));
+            self.binding = Some((buffers, binding));
         }
-        pass.set_bind_group(0, &surface.binding.as_ref().unwrap().1, &[]);
+        self.check()
+    }
+
+    pub(crate) fn draw_surface<P: Program>(&self, pass: &mut wgpu::RenderPass<'_>, surface: &SurfaceTarget) {
+        pass.set_bind_group(0, &self.binding.as_ref().unwrap().1, &[]);
         for paint in &surface.paints {
-            pass.set_pipeline(&self.pipelines[paint.shader]);
+            pass.set_pipeline(self.pipeline::<P>(paint.shader));
             if let Some(image) = &paint.image {
                 pass.set_bind_group(1, image, &[]);
             }
@@ -180,4 +228,10 @@ pub(super) struct Paint {
     vertices: u32,
     draws: Range<u32>,
     image: Option<wgpu::BindGroup>,
+}
+
+#[derive(Default)]
+struct GpuErrors {
+    loss: OnceLock<RenderError>,
+    validation: OnceLock<RenderError>,
 }

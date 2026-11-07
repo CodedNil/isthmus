@@ -4,6 +4,7 @@ use core::f32::consts::PI;
 use image::{RgbImage, imageops::overlay};
 use isthmus::glam::{Vec3, vec2, vec3};
 use lares::{
+    camera::Camera,
     home::{self, Kind, Material},
     render::{Globals, Scene, SunSettings, pixel, pixel_cached, shadows::ShadowAtlas, sun::utc_now},
 };
@@ -125,7 +126,7 @@ fn pixels(scene: &Scene, view: views::View, width: usize, height: usize, shadows
     let eye = view.eye;
     let (forward, right, up) = view.rays(width as f32 / height as f32);
     let (exposure, white_balance) = if env::var("LARES_CAPTURE_METER").as_deref() == Ok("plan") {
-        let camera = lares::camera::Camera { distance: (scene.radius * 2.0).clamp(6.0, 40.0), ..Default::default() };
+        let camera = Camera { distance: (scene.radius * 2.0).clamp(6.0, 40.0), ..Default::default() };
         let (eye, forward, right, up) = camera.rays(1.0);
         scene.camera_settings(eye, forward, right, up)
     } else {

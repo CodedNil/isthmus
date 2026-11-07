@@ -350,12 +350,15 @@ mod tests {
     use super::*;
     use crate::{
         home::{Material, Room, Walls},
-        render::{Scene, SunSettings},
+        render::{
+            self, Scene, SunSettings,
+            scene::{render_furniture, trace},
+        },
     };
 
     #[test]
     fn chart_layout_does_not_depend_on_runtime_float_rounding() {
-        let boundary = 2.6_f32;
+        let boundary = 2.6f32;
         assert_ne!(
             (boundary / 0.1).floor(),
             (boundary * 10.0).floor(),
@@ -368,7 +371,7 @@ mod tests {
             let shape = face(item, axis, false);
             let origin = cell_origin(item, axis);
             let perturbed =
-                Object { pos: item.pos + Vec3::splat(0.000001), size: item.size - Vec3::splat(0.000001), ..item };
+                Object { pos: item.pos + Vec3::splat(0.000_001), size: item.size - Vec3::splat(0.000_001), ..item };
             assert_eq!(face(perturbed, axis, false), shape);
             assert_eq!(cell_origin(perturbed, axis), origin);
         }
@@ -441,9 +444,8 @@ mod tests {
         for x in [-0.1, 0.0, 0.1] {
             for y in [-0.15, 0.0, 0.15] {
                 let origin = vec3(x, y, 0.3);
-                let t = crate::render::scene::trace::march(origin, -Vec3::Z, 0.0, 0.5, 0.0, |p| {
-                    crate::render::scene::render_furniture::<crate::render::scene::Distance>(linen.kind, p, linen.size)
-                        .0
+                let t = trace::march(origin, -Vec3::Z, 0.0, 0.5, 0.0, |p| {
+                    render_furniture::<render::scene::Distance>(linen.kind, p, linen.size).0
                 });
                 let value = sample(&scene.probes, linen, origin - Vec3::Z * t, Vec3::Z);
                 assert!(

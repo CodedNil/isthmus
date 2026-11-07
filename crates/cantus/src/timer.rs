@@ -56,8 +56,6 @@ impl Timer {
         Some(if elapsed >= self.duration {
             format!("{} Timer Complete at {}", describe(self.duration), clock(&end))
         } else {
-            // Remaining first, since that is what you glance for. The deadline is the useful
-            // context; the start time is not.
             format!("{} · ends {}", countdown(self.duration.saturating_sub(elapsed)), clock(&end))
         })
     }

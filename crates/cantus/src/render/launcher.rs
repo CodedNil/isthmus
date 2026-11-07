@@ -12,7 +12,7 @@ use crate::{
 };
 use fend_core::Context;
 use isthmus::prelude::*;
-use isthmus_sdf::prelude::*;
+use isthmus_2d::prelude::*;
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -21,6 +21,7 @@ use std::{
     sync::OnceLock,
 };
 use unicode_segmentation::UnicodeSegmentation;
+use web_time::Instant;
 
 const PANEL_WIDTH: f32 = 520.0;
 const ROW_HEIGHT: f32 = UNIT * 12.0;
@@ -99,10 +100,8 @@ pub struct TextField {
     /// Byte offset of the caret, and of the other end of the selection.
     cursor: usize,
     anchor: usize,
-    /// Frame time the caret blink last restarted at, so typing keeps it solid.
-    blink_start: f32,
-    /// Set by an edit, consumed by the next context to restart the blink.
-    touched: bool,
+    /// Editing owns its clock independently of rendering and GPU restarts.
+    edited_at: Option<Instant>,
 }
 
 impl TextField {
@@ -120,7 +119,7 @@ impl TextField {
         if !select {
             self.anchor = self.cursor;
         }
-        self.touched = true;
+        self.edited_at = Some(Instant::now());
     }
 
     /// Where the caret lands moving one character in `forward`'s direction.
@@ -244,7 +243,7 @@ impl LauncherState {
     pub fn toggle(&mut self) {
         self.session = self.session.wrapping_add(1);
         self.open = Self::ALWAYS_OPEN || !self.open;
-        self.edit(|field| *field = TextField { touched: true, ..Default::default() });
+        self.edit(|field| *field = TextField::default());
     }
 
     /// Publish metadata atomically, preserving the user's highlighted application.
@@ -298,6 +297,7 @@ impl LauncherState {
     }
 
     /// Refresh visible icons in the background, keeping their current pixels on screen.
+    #[cfg(target_os = "linux")]
     pub(crate) fn refresh_icons(&mut self) {
         self.icon_revision = self.icon_revision.wrapping_add(1);
         self.icon_requests.clear();
@@ -411,7 +411,7 @@ impl LauncherState {
             None => return,
         }
         self.open = Self::ALWAYS_OPEN;
-        self.edit(|field| *field = TextField { touched: true, ..Default::default() });
+        self.edit(|field| *field = TextField::default());
     }
 
     fn search_query(&self) -> (Option<usize>, &str) {
@@ -479,14 +479,11 @@ impl LauncherState {
     fn show_search(&mut self, context: &mut UiContext, rect: Rect) {
         let origin = rect.min;
         let (left, right) = (PADDING + 34.0, rect.size().x - PADDING);
-        if self.field.touched {
-            self.field.touched = false;
-            self.field.blink_start = context.frame.time;
-        }
         let empty = self.field.text.is_empty();
         let query = if empty { "Search anything…" } else { &self.field.text };
         let line = context.frame.resources.line(query, TEXT_HEADING, 600.0).translated(vec2(left, HEADER_HEIGHT * 0.5));
-        let blink = ((context.frame.time - self.field.blink_start) * 1.4).fract();
+        let elapsed = self.field.edited_at.get_or_insert_with(Instant::now).elapsed().as_secs_f32();
+        let blink = (elapsed * 1.4).fract();
         let (caret, selection): (Vec2, Vec2) = {
             let text = &mut *context.frame.resources;
             let mut at = |offset: usize| {
@@ -499,26 +496,20 @@ impl LauncherState {
         };
 
         shader!(
-            context
-                .frame
-                .upload({
-                    let caret: Vec2;
-                    let selection: Vec2;
-                    let rect: Rect;
-                })
-                .primitive(|frame| deform(Shape::rounded_rect(rect, CORNER_RADIUS), frame))
-                .fragment(|_, surface| {
-                    let point = surface.content - rect.min;
-                    let mut color = Vec3::splat(0.09)
-                        .lerp(ICON_COLOR, magnifier_icon(point - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
-                    let selection_width = selection.y - selection.x;
-                    let highlight = Shape::rounded_rect(vec2(selection_width, 26.0), 3.0)
-                        .fill_at(point - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5));
-                    color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
-                    let caret_mask = Shape::pill(vec2(1.8, 24.0)).fill_at(point - vec2(caret.x, HEADER_HEIGHT * 0.5));
-                    color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
-                    glass(surface, color) * vec4(1.0, 1.0, 1.0, 0.82)
-                })
+            context.frame,
+            |frame, caret: Vec2, selection: Vec2, rect: Rect| deform(Shape::rounded_rect(rect, CORNER_RADIUS), frame),
+            |_, surface| {
+                let point = surface.content - rect.min;
+                let mut color = Vec3::splat(0.09)
+                    .lerp(ICON_COLOR, magnifier_icon(point - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
+                let selection_width = selection.y - selection.x;
+                let highlight = Shape::rounded_rect(vec2(selection_width, 26.0), 3.0)
+                    .fill_at(point - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5));
+                color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
+                let caret_mask = Shape::pill(vec2(1.8, 24.0)).fill_at(point - vec2(caret.x, HEADER_HEIGHT * 0.5));
+                color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
+                glass(surface, color) * vec4(1.0, 1.0, 1.0, 0.82)
+            },
         );
         context.paint_text(
             rect,
@@ -611,52 +602,41 @@ impl LauncherState {
             let detail_line =
                 context.frame.resources.line(entry.detail, TEXT_SMALL, 600.0).translated(vec2(text_left, detail_y));
 
+            let icon_kind = if entry.image.is_some() { 0 } else { entry.icon_kind };
             shader!(
-                context
-                    .frame
-                    .upload({
-                        let icon_kind: u32 = if entry.image.is_some() { 0 } else { entry.icon_kind };
-                        let enter_badge: Vec2;
-                        let alternate_badge: Vec2;
-                        let pill: Rect;
-                    })
-                    .primitive(|frame| deform(Shape::pill(pill), frame))
-                    .fragment(|_, surface| {
-                        let mut color = Vec3::splat(0.15)
-                            .lerp(Vec3::splat(0.235), presence(enter_badge.y))
-                            .lerp(Vec3::splat(0.3), (surface.bulge / 8.0).min(1.0));
-                        let icon_point = pill.local(surface.pixel) + vec2((pill.size().x - pill.size().y) * 0.5, 0.0);
-                        if icon_kind == CALCULATOR_ICON {
-                            color = source_over(calculator_icon(icon_point), color.extend(1.0)).truncate();
-                        } else if icon_kind == SEARCH_ICON {
-                            color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
-                        } else if icon_kind == TIMER_ICON {
-                            color = color.lerp(ICON_COLOR, timer_icon(icon_point));
-                        }
-                        let point = surface.content - pill.min;
-                        let paint_badge = |color: Vec3, badge: Vec2, shift: bool| {
-                            let ink = action_badge(point - vec2(badge.x, ROW_HEIGHT * 0.5), badge.y, shift);
-                            source_over(ink, color.extend(1.0)).truncate()
-                        };
-                        color = paint_badge(color, enter_badge, false);
-                        color = paint_badge(color, alternate_badge, true);
-                        glass(surface, color) * vec4(1.0, 1.0, 1.0, 0.7)
-                    })
+                context.frame,
+                |frame, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2, pill: Rect| deform(
+                    Shape::pill(pill),
+                    frame
+                ),
+                |_, surface| {
+                    let mut color = Vec3::splat(0.15)
+                        .lerp(Vec3::splat(0.235), presence(enter_badge.y))
+                        .lerp(Vec3::splat(0.3), (surface.bulge / 8.0).min(1.0));
+                    let icon_point = pill.local(surface.pixel) + vec2((pill.size().x - pill.size().y) * 0.5, 0.0);
+                    if icon_kind == CALCULATOR_ICON {
+                        color = source_over(calculator_icon(icon_point), color.extend(1.0)).truncate();
+                    } else if icon_kind == SEARCH_ICON {
+                        color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
+                    } else if icon_kind == TIMER_ICON {
+                        color = color.lerp(ICON_COLOR, timer_icon(icon_point));
+                    }
+                    let point = surface.content - pill.min;
+                    let paint_badge = |color: Vec3, badge: Vec2, shift: bool| {
+                        let ink = action_badge(point - vec2(badge.x, ROW_HEIGHT * 0.5), badge.y, shift);
+                        source_over(ink, color.extend(1.0)).truncate()
+                    };
+                    color = paint_badge(color, enter_badge, false);
+                    color = paint_badge(color, alternate_badge, true);
+                    glass(surface, color) * vec4(1.0, 1.0, 1.0, 0.7)
+                },
             );
             if let Some(image) = entry.image {
-                shader!(
-                    context
-                        .frame
-                        .upload({
-                            let image: &Image;
-                            let rect: Rect = Rect::from_center_size(
-                                pill.center() - vec2((pill.size().x - pill.size().y) * 0.5, 0.0),
-                                Vec2::splat(ICON_SIZE),
-                            );
-                        })
-                        .primitive(rect)
-                        .fragment(|_, surface| image.sample(surface.uv))
+                let rect = Rect::from_center_size(
+                    pill.center() - vec2((pill.size().x - pill.size().y) * 0.5, 0.0),
+                    Vec2::splat(ICON_SIZE),
                 );
+                context.paint_image(image, rect);
             }
 
             let origin = vec2(x, y);

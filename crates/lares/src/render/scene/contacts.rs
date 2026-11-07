@@ -176,7 +176,7 @@ mod tests {
         let far = averaged(&data, &objects, 0, vec3(0.5, 0.0, 0.0), Vec3::Z);
         for sample in 0..4 {
             assert!(
-                (visibility(&data, &objects, 0, vec3(0.052, 0.0, 0.0), Vec3::Z, sample) - close).abs() < 0.000001,
+                (visibility(&data, &objects, 0, vec3(0.052, 0.0, 0.0), Vec3::Z, sample) - close).abs() < 0.000_001,
                 "contact softness must be complete in the first camera sample"
             );
         }

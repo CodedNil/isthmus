@@ -1,5 +1,5 @@
 use super::*;
-use crate::render::WALL_HEIGHT;
+use crate::render::{WALL_HEIGHT, layout::compile};
 
 #[test]
 fn rejected_lights_have_no_visible_emitter_samples_at_receiver_bounds() {
@@ -189,13 +189,13 @@ fn ceiling_fittings_follow_the_camera_cutaway() {
     let fitting = Object::new(Kind::Downlight, vec3(0.0, 0.0, 2.368), vec3(0.11, 0.11, 0.032), Material::Paint);
     let extent = fitting.extent();
     let nodes = [Node { min: fitting.pos - extent, max: fitting.pos + extent, object: 0, skip: 1 }];
-    assert_eq!(cast::<false, true>(Vec3::Z * 4.0, -Vec3::Z, &nodes, &[fitting], 0.0, FAR).0, FAR);
+    assert!((cast::<false, true>(Vec3::Z * 4.0, -Vec3::Z, &nodes, &[fitting], 0.0, FAR).0 - FAR).abs() < 1e-6);
     assert!(cast::<false, false>(Vec3::Z * 4.0, -Vec3::Z, &nodes, &[fitting], 0.0, FAR).0 < FAR);
 }
 
 #[test]
 fn lounge_opening_does_not_leave_detached_skirting_posts() {
-    let objects = crate::render::layout::compile(&home::rooms());
+    let objects = compile(&home::rooms());
     for x in [-2.958, -2.842] {
         let point = vec3(x, 0.258, 0.072);
         assert!(

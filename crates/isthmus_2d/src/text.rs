@@ -3,7 +3,7 @@ use core::ops::{Deref, Range};
 #[cfg(target_arch = "spirv")]
 use isthmus::Float;
 use isthmus::{
-    F16x2, Fragment, Primitive, Program, Rect, ResourceData, ShaderData, Vertex, VertexInput,
+    F16x2, Fragment, MinMax, Primitive, Program, Rect, ResourceData, ShaderData, Vertex, VertexInput,
     glam::{UVec2, Vec2, vec2},
     raster,
 };
@@ -19,7 +19,7 @@ impl Curve {
     }
 }
 
-/// A placed text run with analytic antialiasing and optional outline space.
+/// Text placed in the current frame; retain a `ShapedLine` to reuse it later.
 #[derive(Clone, Copy, Default, ShaderData)]
 #[shader_data(view = Glyphs<'a>)]
 pub struct Text {
@@ -37,7 +37,7 @@ pub struct Text {
     /// Number of placed glyphs in the run.
     pub count: u32,
     /// First glyph in the current frame's placement buffer.
-    pub first: u32,
+    pub(super) first: u32,
     pub(super) outline: f32,
 }
 
@@ -81,8 +81,7 @@ impl Text {
 #[derive(Clone, Copy)]
 pub struct Glyphs<'a> {
     pub line: Text,
-    pub placed_glyphs: &'a [u32],
-    pub outlines: &'a [u32],
+    pub resources: &'a [u32],
 }
 
 impl Deref for Glyphs<'_> {
@@ -96,7 +95,7 @@ impl Deref for Glyphs<'_> {
 impl<'a> Glyphs<'a> {
     /// Resolves a text handle against its frame resources on either CPU or GPU.
     pub const fn new(line: Text, resources: ResourceData<'a>) -> Self {
-        Self { line, placed_glyphs: resources.transient, outlines: resources.persistent }
+        Self { line, resources }
     }
 }
 
@@ -110,7 +109,7 @@ impl Sdf for Glyphs<'_> {
     }
 
     fn distance_at(self, point: Vec2) -> f32 {
-        let Self { line, placed_glyphs, outlines } = self;
+        let Self { line, resources } = self;
         if line.count == 0 || line.size <= 0.0 {
             return f32::MAX;
         }
@@ -120,7 +119,7 @@ impl Sdf for Glyphs<'_> {
         let mut high = line.count;
         while low < high {
             let middle = low + (high - low) / 2;
-            let glyph = PlacedGlyph::read(placed_glyphs, (line.first + middle) as usize * PlacedGlyph::WORDS);
+            let glyph = PlacedGlyph::read(resources, (line.first + middle) as usize * PlacedGlyph::WORDS);
             if glyph.left <= line_point.x {
                 low = middle + 1;
             } else {
@@ -130,11 +129,9 @@ impl Sdf for Glyphs<'_> {
         let (mut left, mut right) = (low, low);
         let mut best = f32::MAX;
         while left > 0 || right < line.count {
-            let before = PlacedGlyph::read(placed_glyphs, (line.first + left.max(1) - 1) as usize * PlacedGlyph::WORDS);
-            let after = PlacedGlyph::read(
-                placed_glyphs,
-                (line.first + right.min(line.count - 1)) as usize * PlacedGlyph::WORDS,
-            );
+            let before = PlacedGlyph::read(resources, (line.first + left.max(1) - 1) as usize * PlacedGlyph::WORDS);
+            let after =
+                PlacedGlyph::read(resources, (line.first + right.min(line.count - 1)) as usize * PlacedGlyph::WORDS);
             let left_gap = if left > 0 { line_point.x - before.right } else { f32::MAX };
             let right_gap = if right < line.count { after.left - line_point.x } else { f32::MAX };
             if left_gap.min(right_gap) >= best {
@@ -147,13 +144,13 @@ impl Sdf for Glyphs<'_> {
                 right += 1;
                 after
             };
-            let glyph = Glyph::read(outlines, placed.glyph as usize);
+            let glyph = Glyph::read(resources, placed.glyph as usize);
             let glyph_point = vec2(line_point.x - placed.x, placed.y - line_point.y);
             if Shape::rectangle(Rect::new(glyph.min, glyph.max)).distance_at(glyph_point) < best {
                 let distance = if glyph.field_size.x > 0 {
-                    glyph.field_distance(outlines, glyph_point)
+                    glyph.field_distance(resources, glyph_point)
                 } else {
-                    glyph_distance(outlines, glyph.start, glyph.count, glyph_point)
+                    glyph_distance(resources, glyph.start, glyph.count, glyph_point)
                 };
                 best = best.min(distance);
             }
@@ -196,7 +193,7 @@ impl Glyph {
     fn field_distance(self, words: &[u32], point: Vec2) -> f32 {
         let grid = (point - self.min + FIELD_PADDING) * FIELD_RESOLUTION;
         let limit = vec2(self.field_size.x as f32 - 1.0, self.field_size.y as f32 - 1.0);
-        let bounded = grid.clamp(Vec2::ZERO, limit);
+        let bounded = grid.clamp_num(Vec2::ZERO, limit);
         let base = bounded.floor().min(limit - 1.0);
         let blend = bounded - base;
         let x = base.x as u32;
@@ -269,7 +266,7 @@ fn curve_distance([start, control, end]: [Vec2; 3], point: Vec2, best: f32) -> (
     let min = start.min(control).min(end);
     let max = start.max(control).max(end);
     let winding = if point.y >= min.y && point.y <= max.y { curve_winding(start, control, end, point) } else { 0 };
-    if (point - point.clamp(min, max)).length_squared() >= best {
+    if (point - point.clamp_num(min, max)).length_squared() >= best {
         return (best, winding);
     }
     let a = start - control * 2.0 + end;
@@ -277,13 +274,13 @@ fn curve_distance([start, control, end]: [Vec2; 3], point: Vec2, best: f32) -> (
     let c = start - point;
     let mut distance = best.min(c.length_squared()).min((end - point).length_squared());
     if a.length_squared() == 0.0 {
-        let t = (-c.dot(b) / b.length_squared().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0);
+        let t = (-c.dot(b) / b.length_squared().max(f32::MIN_POSITIVE)).clamp_num(0.0, 1.0);
         return (distance.min((c + b * t).length_squared()), winding);
     }
     let coefficients = [2.0 * a.dot(a), 3.0 * a.dot(b), b.dot(b) + 2.0 * a.dot(c), b.dot(c)];
     let evaluate = |t: f32| ((coefficients[0] * t + coefficients[1]) * t + coefficients[2]) * t + coefficients[3];
     let turns = quadratic_roots(3.0 * coefficients[0], 2.0 * coefficients[1], coefficients[2]);
-    let intervals = [0.0, turns[0].min(turns[1]).clamp(0.0, 1.0), turns[0].max(turns[1]).clamp(0.0, 1.0), 1.0];
+    let intervals = [0.0, turns[0].min(turns[1]).clamp_num(0.0, 1.0), turns[0].max(turns[1]).clamp_num(0.0, 1.0), 1.0];
     for index in 0..3 {
         let mut lo = intervals[index];
         let mut hi = intervals[index + 1];

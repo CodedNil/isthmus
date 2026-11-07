@@ -1,5 +1,5 @@
-use super::{gpu::Gpu, surface::SurfaceTarget};
-use crate::Program;
+use super::{gpu::Gpu, renderer::RenderError, surface::SurfaceTarget};
+use crate::{Program, bindings};
 
 /// A failure while selecting a GPU or creating a presentation surface.
 #[derive(Debug, thiserror::Error)]
@@ -7,6 +7,9 @@ pub enum SetupError {
     /// No suitable GPU adapter could be selected.
     #[error("GPU adapter error: {0}")]
     Adapter(#[from] wgpu::RequestAdapterError),
+    /// GPU resource initialization failed.
+    #[error(transparent)]
+    Gpu(#[from] RenderError),
     /// The GPU device could not be created with the required capabilities.
     #[error("GPU device error: {0}")]
     Device(#[from] wgpu::RequestDeviceError),
@@ -25,10 +28,7 @@ pub(super) async fn new<P: Program>(
     source: impl Into<wgpu::SurfaceTarget<'static>>,
     [width, height]: [u32; 2],
 ) -> Result<(Gpu, SurfaceTarget), SetupError> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Instance::enabled_backend_features(),
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let surface = instance.create_surface(source)?;
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -37,11 +37,23 @@ pub(super) async fn new<P: Program>(
             ..Default::default()
         })
         .await?;
+    let config = configure_surface(&adapter, &surface, [width, height], None)?;
+    let gpu = device::<P>(instance, adapter, config.format).await?;
+    let target = SurfaceTarget::from_raw(&gpu.device, surface, config);
+    Ok((gpu, target))
+}
+
+pub(super) async fn device<P: Program>(
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    format: wgpu::TextureFormat,
+) -> Result<Gpu, SetupError> {
     let images = u32::try_from(P::max_images()).unwrap_or(u32::MAX);
     let mut limits = wgpu::Limits::default().using_resolution(adapter.limits());
+    limits.max_storage_buffers_per_shader_stage = bindings::BUFFER_COUNT as u32;
     limits.max_sampled_textures_per_shader_stage = limits.max_sampled_textures_per_shader_stage.max(images);
-    limits.max_samplers_per_shader_stage = limits.max_samplers_per_shader_stage.max(images);
-    limits.max_bindings_per_bind_group = limits.max_bindings_per_bind_group.max(images.saturating_mul(2));
+    limits.max_samplers_per_shader_stage = 1;
+    limits.max_bindings_per_bind_group = limits.max_bindings_per_bind_group.max(images.saturating_add(1));
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("isthmus"),
@@ -51,10 +63,9 @@ pub(super) async fn new<P: Program>(
             ..Default::default()
         })
         .await?;
-    let config = configure_surface(&adapter, &surface, [width, height], None)?;
-    let gpu = Gpu::new::<P>(instance, adapter, device, queue, config.format);
-    let target = SurfaceTarget::from_raw(&gpu.device, surface, config);
-    Ok((gpu, target))
+    let gpu = Gpu::new::<P>(instance, adapter, device, queue, format);
+    gpu.check()?;
+    Ok(gpu)
 }
 
 pub(super) fn configure_surface(
@@ -89,8 +100,8 @@ pub(super) fn configure_surface(
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format,
         color_space: wgpu::SurfaceColorSpace::Auto,
-        width: width.max(1),
-        height: height.max(1),
+        width: width.clamp(1, adapter.limits().max_texture_dimension_2d),
+        height: height.clamp(1, adapter.limits().max_texture_dimension_2d),
         present_mode: wgpu::PresentMode::Fifo,
         alpha_mode,
         view_formats: vec![],

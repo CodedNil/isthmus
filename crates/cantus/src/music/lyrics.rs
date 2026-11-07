@@ -198,7 +198,7 @@ pub(super) async fn fetch(
 }
 
 async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics> {
-    // BiniLyrics now redirects to lrc.red, which serves the same search/TTML API.
+    // lrc.red serves BiniLyrics search results and TTML.
     // This endpoint requires integer seconds, unlike LyricsPlus.
     let duration = (track.duration_ms / 1000).to_string();
     let mut request = http.get("https://lyrics-api.binimum.org/").query(&[

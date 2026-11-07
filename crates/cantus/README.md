@@ -48,3 +48,13 @@ To build Cantus from source, ensure the following dependencies are installed:
 Then, from the root of the repository, run:
 
 ```cargo build --release```
+
+## Profiling
+
+Run the isolated text and status rendering workload without starting desktop integrations:
+
+```sh
+nix develop --command cargo test --release -p cantus --lib profile_rendering -- --ignored --nocapture
+```
+
+It warms up for 100 frames, then reports CPU recording time, time waiting for completion, encoded resource bytes, and Linux resident memory. Set `CANTUS_PROFILE_FRAMES` to change the measured frame count. Completion time includes synchronization and driver overhead; it is not a GPU timestamp measurement. The workload runs uncapped and does not represent the whole app or its usual frame rate.

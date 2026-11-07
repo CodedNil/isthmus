@@ -1,19 +1,17 @@
 use super::{
-    buffer::UploadBuffer,
     gpu::{Gpu, Paint},
     renderer::RenderError,
 };
-use crate::bindings;
 
 pub struct SurfaceTarget {
-    pub(super) surface: Option<wgpu::Surface<'static>>,
-    pub(super) image: Option<wgpu::TextureView>,
-    pub(super) config: wgpu::SurfaceConfiguration,
-    pub(super) binding: Option<([wgpu::Buffer; bindings::BUFFER_COUNT], wgpu::BindGroup)>,
-    pub(super) recorded: bool,
+    pub(super) target: Target,
     pub(super) paints: Vec<Paint>,
-    pub(super) frame: UploadBuffer,
-    needs_reconfigure: bool,
+    pub(super) frame: u32,
+}
+
+pub(super) enum Target {
+    Window { surface: wgpu::Surface<'static>, config: wgpu::SurfaceConfiguration, needs_reconfigure: bool },
+    Image(crate::Image),
 }
 
 impl SurfaceTarget {
@@ -23,52 +21,45 @@ impl SurfaceTarget {
         config: wgpu::SurfaceConfiguration,
     ) -> Self {
         surface.configure(device, &config);
-        Self {
-            surface: Some(surface),
-            image: None,
-            config,
-            needs_reconfigure: false,
-            binding: None,
-            recorded: false,
-            paints: Vec::new(),
-            frame: UploadBuffer::new(device),
+        Self { target: Target::Window { surface, config, needs_reconfigure: false }, paints: Vec::new(), frame: 0 }
+    }
+
+    pub(super) const fn from_image(image: crate::Image) -> Self {
+        Self { target: Target::Image(image), paints: Vec::new(), frame: 0 }
+    }
+
+    pub(super) const fn size(&self) -> [u32; 2] {
+        match &self.target {
+            Target::Window { config, .. } => [config.width, config.height],
+            Target::Image(image) => image.size(),
         }
     }
 
-    pub(super) fn from_image(
-        device: &wgpu::Device,
-        config: wgpu::SurfaceConfiguration,
-        view: wgpu::TextureView,
-    ) -> Self {
-        Self {
-            surface: None,
-            image: Some(view),
-            config,
-            binding: None,
-            recorded: false,
-            paints: Vec::new(),
-            frame: UploadBuffer::new(device),
-            needs_reconfigure: false,
-        }
-    }
-
-    pub(super) fn acquire(&mut self, gpu: &Gpu) -> Result<Option<wgpu::SurfaceTexture>, RenderError> {
-        let Some(surface) = self.surface.as_ref() else { return Ok(None) };
+    pub(super) fn acquire(
+        &mut self,
+        gpu: &Gpu,
+    ) -> Result<Option<(wgpu::TextureView, Option<wgpu::SurfaceTexture>)>, RenderError> {
+        let (surface, config, needs_reconfigure) = match &mut self.target {
+            Target::Window { surface, config, needs_reconfigure } => (surface, config, needs_reconfigure),
+            Target::Image(image) => {
+                return Ok(Some((gpu.images.view(image).ok_or(RenderError::MissingImage)?.clone(), None)));
+            }
+        };
         // Outdated swapchains get one immediate reconfiguration attempt.
         for _ in 0..2 {
-            if self.needs_reconfigure {
-                surface.configure(&gpu.device, &self.config);
-                self.needs_reconfigure = false;
+            if *needs_reconfigure {
+                surface.configure(&gpu.device, config);
+                *needs_reconfigure = false;
             }
             let output = match surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(output) => output,
                 wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
                     // Reconfiguration must wait until this texture is released.
-                    self.needs_reconfigure = true;
+                    *needs_reconfigure = true;
                     output
                 }
                 wgpu::CurrentSurfaceTexture::Outdated => {
-                    self.needs_reconfigure = true;
+                    *needs_reconfigure = true;
                     continue;
                 }
                 wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
@@ -77,18 +68,20 @@ impl SurfaceTarget {
                 wgpu::CurrentSurfaceTexture::Lost => return Err(RenderError::SurfaceLost),
                 wgpu::CurrentSurfaceTexture::Validation => return Err(RenderError::Validation),
             };
-            return Ok(Some(output));
+            return Ok(Some((output.texture.create_view(&wgpu::TextureViewDescriptor::default()), Some(output))));
         }
         Ok(None)
     }
 
     pub(crate) fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) {
-        let Some(surface) = self.surface.as_ref() else { return };
-        if width != 0 && height != 0 && [self.config.width, self.config.height] != [width, height] {
-            self.config.width = width;
-            self.config.height = height;
-            surface.configure(&gpu.device, &self.config);
-            self.needs_reconfigure = false;
+        let Target::Window { surface, config, needs_reconfigure } = &mut self.target else { return };
+        let limit = gpu.device.limits().max_texture_dimension_2d;
+        let (width, height) = (width.min(limit), height.min(limit));
+        if width != 0 && height != 0 && [config.width, config.height] != [width, height] {
+            config.width = width;
+            config.height = height;
+            surface.configure(&gpu.device, config);
+            *needs_reconfigure = false;
         }
     }
 }

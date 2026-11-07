@@ -1,6 +1,6 @@
 use core::{f32::consts::TAU, ops::Range};
 use isthmus::{
-    Fragment, Paint, Primitive, Program, Quad, Rect, Vertex, VertexInput,
+    Fragment, MinMax, Paint, Primitive, Program, Quad, Rect, Vertex, VertexInput,
     glam::{FloatExt, Vec2, Vec4, vec2},
     raster,
     spirv_std::arch::Derivative,
@@ -29,7 +29,7 @@ impl Shape {
     pub fn side_rounded_rect(quad: impl Into<Quad>, left: f32, right: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         let quad = quad.into();
         let limit = (quad.size.min_element() * 0.5).max(0.0);
-        let (left, right) = (left.clamp(0.0, limit), right.clamp(0.0, limit));
+        let (left, right) = (left.clamp_num(0.0, limit), right.clamp_num(0.0, limit));
         Self::from_fn(quad, move |point| {
             let local = quad.local(point);
             let radius = if local.x < 0.0 { left } else { right };
@@ -65,7 +65,7 @@ impl Shape {
 
     /// Creates an unsigned circular arc centerline.
     pub fn arc(center: Vec2, radius: f32, start: f32, sweep: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-        let sweep = sweep.clamp(-TAU, TAU);
+        let sweep = sweep.clamp_num(-TAU, TAU);
         let radius = radius.max(0.0);
         let axis = Vec2::from_angle(start + sweep * 0.5);
         let edge = Vec2::from_angle(sweep.abs() * 0.5);
@@ -90,7 +90,7 @@ impl Shape {
     /// Creates a five-pointed star centered at the origin.
     pub fn star(radius: f32, inner_radius: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         let radius = radius.max(0.0);
-        let inner_radius = inner_radius.clamp(0.0, radius);
+        let inner_radius = inner_radius.clamp_num(0.0, radius);
         Self::from_fn(Vec2::splat(radius * 2.0), move |point| {
             if radius == 0.0 {
                 return point.length();
@@ -110,7 +110,7 @@ impl Shape {
 
     /// Creates a rounded equilateral triangle.
     pub fn rounded_triangle(size: f32, radius: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-        let radius = radius.clamp(0.0, size.max(0.0));
+        let radius = radius.clamp_num(0.0, size.max(0.0));
         let extent = size.max(0.0) - radius;
         let k = 1.732_050_8;
         Self::from_fn(
@@ -119,7 +119,7 @@ impl Shape {
                 let mut point = vec2(point.x.abs(), point.y);
                 let h = (point.x + k * point.y).max(0.0);
                 point -= 0.5 * vec2(h, h * k);
-                point -= vec2(point.x.clamp(-0.5 * extent * k, 0.5 * extent * k), -0.5 * extent);
+                point -= vec2(point.x.clamp_num(-0.5 * extent * k, 0.5 * extent * k), -0.5 * extent);
                 point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius
             },
         )

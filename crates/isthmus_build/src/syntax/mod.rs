@@ -26,8 +26,8 @@ pub fn program() -> TokenStream2 {
 
 pub mod shader;
 
-fn image_names(name: &syn::Ident) -> (syn::Ident, syn::Ident) {
-    (format_ident!("__isthmus_image_{name}"), format_ident!("__isthmus_sampler_{name}"))
+fn image_name(name: &syn::Ident) -> syn::Ident {
+    format_ident!("__isthmus_image_{name}")
 }
 
 fn shader_entry(
@@ -56,47 +56,39 @@ fn shader_entry(
         }
     };
     let name = format_ident!("{}", entry_name.value());
-    let draws_binding = bindings::DRAWS;
-    let payload_binding = bindings::PAYLOAD;
-    let transient_binding = bindings::TRANSIENT;
-    let persistent_binding = bindings::PERSISTENT;
-    let frames_binding = bindings::FRAMES;
+    let frame_binding = bindings::FRAME;
+    let resources_binding = bindings::RESOURCES;
     let image_resources = images.iter().enumerate().map(|(index, name)| {
-        let image_binding = index as u32 * 2;
-        let sampler_binding = image_binding + 1;
-        let (image, sampler) = image_names(name);
+        let image_binding = index as u32 + 1;
+        let image = image_name(name);
         quote! {
             #[spirv(descriptor_set = 1, binding = #image_binding)]
             #image: &#isthmus::spirv_std::image::Image2d,
-            #[spirv(descriptor_set = 1, binding = #sampler_binding)]
-            #sampler: &#isthmus::spirv_std::Sampler,
+        }
+    });
+    let sampler = (!images.is_empty()).then(|| {
+        quote! {
+            #[spirv(descriptor_set = 1, binding = 0)] __isthmus_sampler: &#isthmus::spirv_std::Sampler,
         }
     });
     quote! {
         #[#isthmus::spirv_std::spirv(#stage(entry_point_name = #entry_name))]
         pub fn #name(
             #interface
-            #[spirv(storage_buffer, descriptor_set = 0, binding = #draws_binding)]
-            __draws: &[u32],
-            #[spirv(storage_buffer, descriptor_set = 0, binding = #frames_binding)]
-            __frames: &[u32],
-            #[spirv(storage_buffer, descriptor_set = 0, binding = #payload_binding)]
+            #[spirv(storage_buffer, descriptor_set = 0, binding = #frame_binding)]
             __payload: &[u32],
-            #[spirv(storage_buffer, descriptor_set = 0, binding = #transient_binding)]
-            __transient: &[u32],
-            #[spirv(storage_buffer, descriptor_set = 0, binding = #persistent_binding)]
-            __persistent: &[u32],
+            #[spirv(storage_buffer, descriptor_set = 0, binding = #resources_binding)]
+            __resources: &[u32],
+            #sampler
             #(#image_resources)*
         ) {
-            type __FrameData = #isthmus::__private::FrameData<<Program as #isthmus::Program>::Globals>;
-            // SAFETY: Renderer draw ranges and frame uploads use these generated codecs.
-            let (__draw, __frame_data) = unsafe {
-                (<u32 as #isthmus::ShaderData>::read_unchecked(__draws, __draw_index as usize),
-                 <__FrameData as #isthmus::ShaderData>::read_unchecked(__frames, 0))
-            };
-            // SAFETY: Draw offsets address complete payloads encoded by this generated shader interface.
-            let __instance = unsafe {
-                <#payload as #isthmus::ShaderData>::read_unchecked(__payload, __draw as usize)
+            type __FrameData = #isthmus::ShaderFrame<Program>;
+            let __draw = __draw_index as usize * (<#payload as #isthmus::ShaderData>::WORDS + 1);
+            // SAFETY: The recorder aligns complete payloads and their frame offsets to this stride.
+            let (__frame_data, __instance) = unsafe {
+                let frame = <u32 as #isthmus::ShaderData>::read_unchecked(__payload, __draw) as usize;
+                (<__FrameData as #isthmus::ShaderData>::read_unchecked(__payload, frame),
+                 <#payload as #isthmus::ShaderData>::read_unchecked(__payload, __draw + 1))
             };
             #body
         }

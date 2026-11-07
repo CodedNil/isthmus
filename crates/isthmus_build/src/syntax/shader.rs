@@ -1,9 +1,12 @@
-use super::{image_names, shader_entry};
+use super::{image_name, shader_entry};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, mem};
 use syn::{
-    Expr, Ident, Pat, Stmt, Type, parse_quote,
+    Expr, Ident, Pat, Token, Type,
+    parse::Parser,
+    parse_quote,
+    punctuated::Punctuated,
     spanned::Spanned,
     visit_mut::{self, VisitMut},
 };
@@ -11,7 +14,6 @@ use syn::{
 struct Binding {
     name: Ident,
     ty: Type,
-    value: Expr,
     kind: CaptureKind,
 }
 
@@ -23,17 +25,19 @@ enum CaptureKind {
 }
 
 impl Binding {
-    fn parse(local: syn::Local) -> syn::Result<Self> {
-        if let Pat::Type(pat) = &local.pat
+    fn parse(pat: Pat) -> syn::Result<Self> {
+        if let Pat::Type(pat) = &pat
             && let Pat::Ident(name) = &*pat.pat
             && name.mutability.is_none()
             && name.by_ref.is_none()
             && name.subpat.is_none()
-            && local.init.as_ref().is_none_or(|init| init.diverge.is_none())
-            && local.attrs.is_empty()
         {
+            if let Type::Reference(reference) = &*pat.ty
+                && reference.mutability.is_some()
+            {
+                return Err(syn::Error::new_spanned(&pat.ty, "shader captures must be immutable"));
+            }
             let name = name.ident.clone();
-            let value = local.init.as_ref().map_or_else(|| parse_quote!(#name), |init| (*init.expr).clone());
             let image = |ty: &Type| matches!(ty, Type::Path(path) if path.path.segments.last().is_some_and(|s| s.ident == "Image"));
             let kind = match &*pat.ty {
                 Type::Reference(reference) if matches!(&*reference.elem, Type::Slice(_)) => CaptureKind::Slice,
@@ -41,9 +45,9 @@ impl Binding {
                 ty if image(ty) => CaptureKind::Image,
                 _ => CaptureKind::Data,
             };
-            return Ok(Self { name, ty: (*pat.ty).clone(), value, kind });
+            return Ok(Self { name, ty: (*pat.ty).clone(), kind });
         }
-        Err(syn::Error::new_spanned(local, "expected let name: Type; or let name: Type = value;"))
+        Err(syn::Error::new_spanned(pat, "expected a typed capture: name: Type"))
     }
 }
 
@@ -96,28 +100,26 @@ impl Shader {
         column: usize,
         isthmus: &TokenStream,
     ) -> syn::Result<Self> {
-        let mut frame: Expr = syn::parse2(tokens)?;
-        let mut fragment = argument(&mut frame, "fragment")?
-            .ok_or_else(|| syn::Error::new_spanned(&frame, "end the shader with .fragment(|frame, fragment| color)"))?;
+        let arguments = Punctuated::<Expr, Token![,]>::parse_terminated.parse2(tokens)?;
+        if arguments.len() != 3 {
+            return Err(syn::Error::new_spanned(
+                arguments,
+                "expected shader!(frame, |frame, name: Type| primitive, |frame, fragment| color)",
+            ));
+        }
+        let mut arguments = arguments.into_iter();
+        let mut frame = arguments.next().unwrap();
+        let mut stage = arguments.next().unwrap();
+        let mut fragment = arguments.next().unwrap();
         let fragment = closure(&mut fragment, 2)?.clone();
-        let mut stage = argument(&mut frame, "primitive")?
-            .ok_or_else(|| syn::Error::new_spanned(&frame, "select .primitive(shape) or .primitive(|frame| shape)"))?;
-        if !matches!(stage, Expr::Closure(_)) {
-            stage = parse_quote!(|_| #stage);
-        }
+        let Expr::Closure(factory) = &mut stage else {
+            return Err(syn::Error::new_spanned(stage, "expected |frame, name: Type| primitive"));
+        };
+        let mut inputs = mem::take(&mut factory.inputs).into_iter();
+        let input = inputs.next().ok_or_else(|| syn::Error::new_spanned(&*factory, "expected a frame parameter"))?;
+        let captures = inputs.map(Binding::parse).collect::<syn::Result<Vec<_>>>()?;
+        factory.inputs.push(input);
         closure(&mut stage, 1)?;
-        let mut captures = Vec::new();
-        if let Some(upload) = argument(&mut frame, "upload")? {
-            let Expr::Block(block) = upload else {
-                return Err(syn::Error::new_spanned(upload, "expected { let name: Type = value; }"));
-            };
-            for statement in block.block.stmts {
-                let Stmt::Local(local) = statement else {
-                    return Err(syn::Error::new_spanned(statement, "uploads must be typed let declarations"));
-                };
-                captures.push(Binding::parse(local)?);
-            }
-        }
         let blend = argument(&mut frame, "blend")?.unwrap_or_else(|| parse_quote!(#isthmus::Blend::Over));
         let Expr::Path(blend) = blend else {
             return Err(syn::Error::new_spanned(blend, "expected a Blend variant"));
@@ -129,12 +131,9 @@ impl Shader {
             })
             .transpose()?;
         if let Expr::MethodCall(call) = &frame
-            && ["format", "blend", "upload", "primitive", "fragment"].iter().any(|name| call.method == *name)
+            && ["format", "blend"].iter().any(|name| call.method == *name)
         {
-            return Err(syn::Error::new_spanned(
-                call,
-                "shader operations must occur once, in format/blend/upload/primitive/fragment order",
-            ));
+            return Err(syn::Error::new_spanned(call, "frame options must occur once, in format/blend order"));
         }
         let inputs = captures.iter().map(|Binding { name, ty, .. }| quote!(#name: #ty));
         let declaration = parse_quote!(|#(#inputs),*| {
@@ -205,7 +204,7 @@ impl Shader {
     pub fn host(&self, isthmus: &TokenStream) -> TokenStream {
         let (frame, fragment, blend, entry) = (&self.frame, &self.fragment, &self.blend, &self.entry);
         let variant = &blend.segments.last().unwrap().ident;
-        let bindings = self.captures.iter().map(|Binding { name, ty, value, .. }| quote!(let #name: #ty = #value;));
+        let bindings = self.captures.iter().map(|Binding { name, ty, .. }| quote!(let #name: #ty = #name;));
         let views = self.captures.iter().filter(|capture| capture.kind == CaptureKind::Data).map(|capture| {
             let name = &capture.name;
             quote!(let #name = #isthmus::ShaderData::resolve(
@@ -259,16 +258,15 @@ impl Shader {
             .collect::<BTreeSet<_>>();
         SliceIndices(slices.clone()).visit_expr_mut(&mut body);
         SliceIndices(slices).visit_expr_mut(&mut stage);
-        let bindings = self.captures.iter().map(|Binding { name, ty, kind, .. }| {
+        let bindings = self.captures.iter().map(|Binding { name, ty, kind }| {
             let value = match kind {
                 CaptureKind::Image => {
-                    let (image, sampler) = image_names(name);
-                    quote!(#isthmus::Image::new(#image, *#sampler))
+                    let image = image_name(name);
+                    let value = quote!(#isthmus::Image::new(#image, *__isthmus_sampler));
+                    if matches!(ty, Type::Reference(_)) { quote!(&#value) } else { value }
                 }
                 CaptureKind::Slice => quote!(crate::ShaderSlice::from_words(__payload, __instance.#name)),
-                CaptureKind::Data => quote!(#isthmus::ShaderData::resolve(__instance.#name, #isthmus::ResourceData {
-                    transient: __transient, persistent: __persistent,
-                })),
+                CaptureKind::Data => quote!(#isthmus::ShaderData::resolve(__instance.#name, __resources)),
             };
             let annotation = (*kind == CaptureKind::Slice).then(|| {
                 let Type::Reference(reference) = ty else { return quote!() };
@@ -282,10 +280,7 @@ impl Shader {
         let setup = quote! {
             type __Program = Program;
             #(#bindings)*
-            let __frame = #isthmus::ShaderFrame::<__Program> {
-                time: __frame_data.time, screen_size: __frame_data.screen_size,
-                pixel_size: __frame_data.pixel_scale.max_element(), globals: __frame_data.globals,
-            };
+            let __frame = __frame_data;
             let __stage = (#stage)(__frame);
         };
         let images = self.images().collect::<Vec<_>>();
@@ -357,6 +352,25 @@ impl VisitMut for SliceIndices {
             let receiver = (*index.expr).clone();
             let subscript = (*index.index).clone();
             *i = parse_quote!(#receiver.load(#subscript));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mutable_captures_are_rejected_at_the_shader_boundary() {
+        for ty in [quote!(&mut Image), quote!(&mut [u32]), quote!(&mut Vec4)] {
+            let shader = Shader::parse(
+                quote!(frame, |_, value: #ty| rect, |_, _| color),
+                "src/render.rs",
+                1,
+                0,
+                &quote!(::isthmus),
+            );
+            assert!(shader.is_err_and(|error| error.to_string() == "shader captures must be immutable"));
         }
     }
 }

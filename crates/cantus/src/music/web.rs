@@ -4,7 +4,11 @@ use crate::{
     config::Config,
 };
 use serde_json::{Value, value::RawValue};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::{Ready, ready},
+    sync::Arc,
+};
 use web_time::Instant;
 
 #[derive(Clone)]
@@ -14,7 +18,11 @@ pub struct Spotify {
 }
 
 impl Spotify {
-    #[allow(clippy::unused_async, reason = "matches the native Spotify client")]
+    #[expect(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "the browser fixture implements the native async client interface"
+    )]
     pub(super) async fn get_lyrics(&self, _id: TrackId) -> MusicResult<Value> {
         Ok(Value::Null)
     }
@@ -77,12 +85,13 @@ impl Spotify {
         });
     }
 
-    #[allow(clippy::unused_async, clippy::unused_async_trait_impl, reason = "matches the native Spotify client")]
-    pub(super) async fn get_json(&self, path: &str) -> MusicResult<&str> {
-        self.responses
-            .get(path)
-            .map(|response| response.get())
-            .ok_or_else(|| format!("No demo Spotify response for {path}").into())
+    pub(super) fn get_json(&self, path: &str) -> Ready<MusicResult<&str>> {
+        ready(
+            self.responses
+                .get(path)
+                .map(|response| response.get())
+                .ok_or_else(|| format!("No demo Spotify response for {path}").into()),
+        )
     }
 }
 

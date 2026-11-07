@@ -75,6 +75,7 @@ impl Background {
 }
 
 pub struct CantusApp {
+    started: Instant,
     pub(crate) music: Music,
     pub(crate) launcher: LauncherState,
     pub(crate) bar: Bar,
@@ -94,6 +95,7 @@ impl CantusApp {
         let config = config::load();
         platform::start_launcher_listener(&background.updater);
         Self {
+            started: Instant::now(),
             launcher: LauncherState::new(&background, config.search_providers.iter().cloned()),
             bar: Bar::new(&config, &background),
             music: Music::new(&config, &background.updater),
@@ -122,6 +124,8 @@ impl CantusApp {
         screen_size: Vec2,
         view: View,
     ) {
+        // Input animations belong to the app, including across cold GPU restarts.
+        render.time = self.started.elapsed().as_secs_f32();
         let owns_input = if self.launcher.open { view.launcher } else { view.bar };
         self.interaction.enabled = owns_input;
         if owns_input {

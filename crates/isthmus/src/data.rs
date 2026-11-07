@@ -1,15 +1,12 @@
 use crate::{
-    ResourceData,
+    MinMax, ResourceData,
     glam::{Mat4, UVec2, UVec3, UVec4, Vec2, Vec3, Vec4},
 };
 use core::ops::Index;
-use isthmus_macros::ShaderData;
 use spirv_std::arch::IndexUnchecked;
 
 /// A fixed-capacity vector that can be shared with shaders.
-#[derive(Clone, Copy)]
-// Nested shader arrays require 16-byte alignment.
-#[repr(C, align(16))]
+#[derive(Clone, Copy, crate::ShaderData)]
 pub struct InlineVec<T, const N: usize> {
     len: u32,
     items: [T; N],
@@ -21,11 +18,12 @@ impl<T: ShaderData, const N: usize> InlineVec<T, N> {
     }
 
     pub const fn len(&self) -> usize {
-        self.len as usize
+        let len = self.len as usize;
+        if len < N { len } else { N }
     }
 
     pub const fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
 
     pub const fn push(&mut self, item: T) {
@@ -54,37 +52,6 @@ impl<T: ShaderData, const N: usize> Default for InlineVec<T, N> {
     }
 }
 
-impl<T: ShaderData, const N: usize> ShaderData for InlineVec<T, N> {
-    type View<'a> = Self;
-
-    const WORDS: usize = 1 + N * T::WORDS;
-    const ZERO: Self = Self::new();
-
-    fn resolve(self, _: ResourceData<'_>) -> Self {
-        self
-    }
-
-    unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
-        // SAFETY: The caller guarantees the complete record.
-        let len = unsafe { u32::read_unchecked(words, offset) }.min(N as u32);
-        let mut items = [T::ZERO; N];
-        let mut index = 0;
-        while index < len as usize {
-            // SAFETY: Active items lie within the complete record.
-            items[index] = unsafe { T::read_unchecked(words, offset + 1 + index * T::WORDS) };
-            index += 1;
-        }
-        Self { len, items }
-    }
-
-    fn write(self, words: &mut [u32], offset: usize) {
-        self.len.write(words, offset);
-        for index in 0..self.len() {
-            self.items[index].write(words, offset + 1 + index * T::WORDS);
-        }
-    }
-}
-
 /// Two normalized channels stored in one 32-bit word.
 #[derive(Clone, Copy, Default)]
 pub struct Unorm16x2(u32);
@@ -92,7 +59,7 @@ pub struct Unorm16x2(u32);
 impl Unorm16x2 {
     /// Clamps two channels to 0..=1 and rounds each to 16 bits.
     pub fn from_vec2(value: Vec2) -> Self {
-        let channel = |value: f32| (value.clamp(0.0, 1.0) * 65535.0 + 0.5) as u32;
+        let channel = |value: f32| (value.clamp_num(0.0, 1.0) * 65535.0 + 0.5) as u32;
         Self(channel(value.x) | (channel(value.y) << 16))
     }
 
@@ -139,7 +106,7 @@ pub struct Unorm8x4(u32);
 impl Unorm8x4 {
     /// Clamps four channels to 0..=1 and rounds each to eight bits.
     pub fn from_vec4(value: Vec4) -> Self {
-        let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+        let channel = |value: f32| (value.clamp_num(0.0, 1.0) * 255.0 + 0.5) as u32;
         Self(channel(value.x) | (channel(value.y) << 8) | (channel(value.z) << 16) | (channel(value.w) << 24))
     }
 
@@ -320,10 +287,19 @@ impl<T: ShaderData, const N: usize> ShaderData for [T; N] {
     }
 }
 
-#[derive(Clone, Copy, Default, ShaderData)]
-pub struct FrameData<G> {
-    pub screen_size: Vec2,
-    pub time: f32,
-    pub pixel_scale: Vec2,
-    pub globals: G,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_vectors_bound_decoded_lengths_and_round_trip_active_items() {
+        let mut value = InlineVec::<u32, 2>::new();
+        value.push(7);
+        let mut words = Vec::new();
+        value.append(&mut words);
+        assert_eq!(InlineVec::<u32, 2>::read(&words, 0).as_slice(), &[7]);
+        words[0] = u32::MAX;
+        assert_eq!(InlineVec::<u32, 2>::read(&words, 0).as_slice(), &[7, 0]);
+        assert!(InlineVec::<u32, 0>::read(&[u32::MAX], 0).is_empty());
+    }
 }

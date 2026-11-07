@@ -50,7 +50,7 @@ pub fn program(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Draws inline Rust: `shader!(frame.upload({ typed captures }).primitive(shape).fragment(shader))`.
+/// Draws inline Rust: `shader!(frame, |frame, name: Type| primitive, |frame, fragment| color)`.
 #[proc_macro]
 pub fn shader(input: TokenStream) -> TokenStream {
     let span = proc_macro2::Span::call_site();

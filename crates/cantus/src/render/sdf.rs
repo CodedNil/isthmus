@@ -1,6 +1,6 @@
 use crate::render::{Program, RipplePulse};
 use isthmus::prelude::*;
-use isthmus_sdf::prelude::*;
+use isthmus_2d::prelude::*;
 
 const SHADOW_OPACITY: f32 = 0.16;
 const SHADOW_DECAY: f32 = 0.3;

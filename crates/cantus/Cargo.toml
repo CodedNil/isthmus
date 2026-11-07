@@ -19,7 +19,7 @@ image = { version = "0.25.10", default-features = false, features = [
     "png",
 ] }
 isthmus.workspace = true
-isthmus_sdf.workspace = true
+isthmus_2d.workspace = true
 jiff = { version = "0.2.39", default-features = false, features = [
     "js",
     "serde",
@@ -38,6 +38,7 @@ roxmltree = "0.21.2"
 serde.workspace = true
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 smallvec.workspace = true
+strsim = "0.11.1"
 strum_macros = "0.28.0"
 tokio = { workspace = true, features = ["macros", "sync"] }
 toml.workspace = true
@@ -50,7 +51,7 @@ web-time.workspace = true
 bytemuck.workspace = true
 calloop = "0.14"
 calloop-wayland-source = "0.4.1"
-flate2 = "1.1.10"
+flate2 = "1.1.11"
 freedesktop-desktop-entry = { version = "0.8.4", default-features = false }
 freedesktop-icons = "0.4.0"
 librespot-core = { version = "0.8.0", default-features = false, features = [

@@ -1,21 +1,31 @@
 use crate::{
-    Program, Rect,
+    Program, Rect, ShaderData,
     glam::{Vec2, Vec4, vec4},
 };
 use core::ops::Deref;
 
-/// Immutable frame data shared by stage construction and shader invocations.
-#[derive(Clone, Copy)]
-pub struct ShaderFrame<P: Program> {
-    /// Frame time in seconds.
-    pub time: f32,
+/// The same typed frame state is used by host recording and GPU invocations.
+#[derive(Clone, Copy, ShaderData)]
+pub struct FrameState<G> {
     /// Surface dimensions in logical pixels.
     pub screen_size: Vec2,
-    /// Conservative logical footprint of one framebuffer pixel.
-    pub pixel_size: f32,
+    /// Frame time in seconds.
+    pub time: f32,
+    /// Logical size of each physical pixel, preserving nonuniform scaling.
+    pub pixel_scale: Vec2,
     /// Application data shared by every draw on this surface.
-    pub globals: P::Globals,
+    pub globals: G,
 }
+
+impl<G> FrameState<G> {
+    /// Conservative logical footprint of one framebuffer pixel.
+    pub fn pixel_size(&self) -> f32 {
+        self.pixel_scale.max_element()
+    }
+}
+
+/// Frame state specialized to a program's globals.
+pub type ShaderFrame<P> = FrameState<<P as Program>::Globals>;
 
 /// One vertex's index and shared frame data.
 #[derive(Clone, Copy)]
@@ -80,7 +90,7 @@ impl<P: Program, T, F: FnOnce(Vec2) -> (T, f32) + Copy> Primitive<P> for Surface
     }
 
     fn vertex(self, input: VertexInput<P>) -> Vertex {
-        self.bounds.expanded(input.frame.pixel_size).vertex(input)
+        self.bounds.expanded(input.frame.pixel_size()).vertex(input)
     }
 
     fn sample(self, fragment: Fragment) -> (T, f32) {

@@ -1,6 +1,7 @@
 //! Static SDF depth with receiver-plane-corrected percentage-closer filtering.
 use super::{acceleration::Node, scene};
 use crate::home::{Kind, Object};
+use core::f32::consts::FRAC_1_SQRT_2;
 #[cfg(not(target_arch = "spirv"))]
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use isthmus::prelude::*;
@@ -98,7 +99,7 @@ fn gather(atlas: &Image, info: AtlasInfo, slot: u32, light: Object, delta: Vec3,
     let distance = delta.length();
     let mut visibility = 0.0;
     let mut blocker = 0.0;
-    let mut blocked = 0.0;
+    let mut occlusion = 0.0;
     for tap in 0..4 {
         let step = vec2((tap & 1) as f32, (tap >> 1) as f32);
         let pixel = (base + step).clamp_num(Vec2::ZERO, Vec2::splat(info.resolution as f32 - 1.0));
@@ -113,10 +114,10 @@ fn gather(atlas: &Image, info: AtlasInfo, slot: u32, light: Object, delta: Vec3,
             visibility += weight;
         } else {
             blocker += depth * weight;
-            blocked += weight;
+            occlusion += weight;
         }
     }
-    vec2(visibility, if blocked > 0.0001 { blocker / blocked } else { distance })
+    vec2(visibility, if occlusion > 0.0001 { blocker / occlusion } else { distance })
 }
 
 pub fn visible(atlas: &Image, info: AtlasInfo, slot: u32, light: Object, point: Vec3, normal: Vec3) -> f32 {
@@ -128,23 +129,23 @@ pub fn visible(atlas: &Image, info: AtlasInfo, slot: u32, light: Object, point: 
     let first = gather(atlas, info, slot, light, delta, normal, uv);
     let distance = delta.length().max_num(0.001);
     let radius = scene::fixtures::radius(light);
-    let scale = if light.kind == Kind::Downlight { core::f32::consts::FRAC_1_SQRT_2 } else { 0.5 };
+    let scale = if light.kind == Kind::Downlight { FRAC_1_SQRT_2 } else { 0.5 };
     // Search on both sides of the silhouette. A lit centre must also receive
-    // the penumbra; filtering only blocked centres clips half of every edge.
+    // the penumbra; filtering only shadowed centres clips half of every edge.
     let search = (radius * info.resolution as f32 * scale / distance).clamp_num(1.0, 8.0);
     let mut blocker = first.y * (1.0 - first.x);
-    let mut blocked = 1.0 - first.x;
+    let mut occlusion = 1.0 - first.x;
     for tap in 0..4 {
         let offset = vec2((tap & 1) as f32 * 2.0 - 1.0, (tap >> 1) as f32 * 2.0 - 1.0)
             * (search * 0.707 / info.resolution as f32);
         let result = gather(atlas, info, slot, light, delta, normal, uv + offset);
         blocker += result.y * (1.0 - result.x);
-        blocked += 1.0 - result.x;
+        occlusion += 1.0 - result.x;
     }
-    if blocked < 0.0001 || blocked > 4.9999 {
+    if occlusion < 0.0001 || occlusion > 4.9999 {
         return first.x;
     }
-    let depth = blocker / blocked;
+    let depth = blocker / occlusion;
     let spread = (radius * (distance - depth).max_num(0.0) / depth.max_num(0.01) * info.resolution as f32 * scale
         / distance)
         .min_num(8.0);
@@ -253,6 +254,7 @@ impl ShadowAtlas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::home::Material::Paint;
     #[test]
     fn octahedral_mapping_roundtrips_both_hemispheres() {
         for y in 0..31 {
@@ -272,7 +274,7 @@ mod tests {
     }
     #[test]
     fn depth_discontinuities_filter_visibility_without_inventing_transmitted_light() {
-        let light = Object::new(Kind::Downlight, Vec3::ZERO, vec3(0.11, 0.11, 0.032), crate::home::Material::Paint);
+        let light = Object::new(Kind::Downlight, Vec3::ZERO, vec3(0.11, 0.11, 0.032), Paint);
         let info = AtlasInfo::new(1, 16);
         let [width, height] = info.size.to_array().map(|v| v as usize);
         let mut pixels = vec![255; width * height * 4];
@@ -299,7 +301,7 @@ mod tests {
     }
     #[test]
     fn downward_projection_roundtrips_and_allocates_no_texels_to_the_upper_hemisphere() {
-        let light = Object::new(Kind::Downlight, Vec3::ZERO, Vec3::ONE, crate::home::Material::Paint);
+        let light = Object::new(Kind::Downlight, Vec3::ZERO, Vec3::ONE, Paint);
         for y in 0..31 {
             for x in 0..31 {
                 let uv = vec2((x as f32 + 0.5) / 31.0, (y as f32 + 0.5) / 31.0);
