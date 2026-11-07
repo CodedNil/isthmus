@@ -282,7 +282,13 @@ impl SpotifyWorker {
                     "play_origin": { "feature_identifier": "cantus" },
                     "options": {
                         "initially_paused": false,
+                        "skip_to": {},
                         "player_options_override": { "shuffling_context": true },
+                    },
+                    "play_options": {
+                        "reason": "interactive",
+                        "operation": "replace",
+                        "trigger": "immediately",
                     },
                 })
             }
@@ -301,8 +307,9 @@ impl SpotifyWorker {
                 return;
             }
         };
+        let option_group = if command["endpoint"] == "play" { "play_options" } else { "options" };
         for option in ["override_restrictions", "only_for_local_device", "system_initiated"] {
-            command["options"][option] = false.into();
+            command[option_group][option] = false.into();
         }
         command["logging_params"] = json!({});
         let Some(target) = &self.active_device else { return };

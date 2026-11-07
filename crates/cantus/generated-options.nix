@@ -54,6 +54,11 @@
     default = builtins.fromJSON "true";
     description = "Whether to show synchronized lyrics.";
   };
+  lyrics_publish_enabled = lib.mkOption {
+    type = lib.types.bool;
+    default = builtins.fromJSON "true";
+    description = "Whether fallback lyrics are submitted to LRCLIB when they improve on its result.";
+  };
   weathertime_enabled = lib.mkOption {
     type = lib.types.bool;
     default = builtins.fromJSON "true";

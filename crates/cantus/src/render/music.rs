@@ -32,7 +32,8 @@ const HISTORY_TRACK_WIDTH: f32 = 12.0;
 /// Corner radius of an unclipped track edge, as a fraction of bar height.
 const TRACK_RADIUS: f32 = 0.4;
 /// Fraction of the bar height spanned by the playhead line.
-const PLAYHEAD_HEIGHT: f32 = 0.8;
+const PLAYHEAD_HEIGHT: f32 = 0.86;
+const PAUSED_PARTICLE_FADE: f32 = 0.15;
 /// Transparent texture used while artwork is unavailable and for rating icons.
 static EMPTY_ART: LazyLock<Image> = LazyLock::new(|| Image::rgba8([1, 1], vec![0; 4]));
 
@@ -269,6 +270,13 @@ struct Particle {
     expires_at: f32 = 0.0,
     color: Vec3 = Vec3::ZERO,
     size: Vec2 = Vec2::new(10.0, 5.0),
+    playback: bool = false,
+}
+
+fn fade_playback_particles(particles: &mut [Particle], time: f32) {
+    for particle in particles.iter_mut().filter(|particle| particle.playback && particle.expires_at > time) {
+        particle.expires_at = particle.expires_at.min(time + PAUSED_PARTICLE_FADE);
+    }
 }
 
 fn shade_icon(color: Vec3, shape: impl Sdf, point: Vec2) -> Vec4 {
@@ -712,13 +720,11 @@ impl MusicView {
                 color *= 1.0 + caustics(uv * pill.size() / pill.size().y, frame.time, seed, audio);
                 let center = pill.center() + vec2((pill.size().x - pill.size().y) * 0.5, 0.0);
                 let radius = f32::midpoint(pill.size().y, surface.bulge);
-                // Follow the animated contour halfway from the original
-                // crop, retaining a slight inset around the glass rim.
-                let original_crop =
-                    track_shape(Rect::from_center_size(center, Vec2::splat(radius * 2.0)), vec2(1.0, rounding.y))
+                // Match the artwork crop's cornering on both sides.
+                let edge =
+                    track_shape(Rect::from_center_size(center, Vec2::splat(radius * 2.0)), Vec2::splat(rounding.y))
                         .distance_at(surface.pixel)
-                        .max(surface.sdf.distance);
-                let edge = original_crop.lerp(surface.sdf.distance, 0.5) + 1.5;
+                        + 1.5;
                 let art_uv = (surface.refracted - center) / (radius * 2.0) + 0.5;
                 let art_alpha = edge.smoothstep(0.0, -1.0) * art_uv.x.smoothstep(0.0, 0.08) * face;
                 let base = music_shape(pill, rounding, icon_supports).distance_at(surface.pixel);
@@ -850,7 +856,7 @@ impl MusicView {
     fn show_particles(&mut self, context: &mut UiContext, music: &Music, bar: BarLayout, track: Option<&Track>) {
         let panel_height = context.config.height;
         let time = context.frame.time;
-        if let Some(track) = track {
+        if let Some(track) = track.filter(|_| music.playing) {
             let audio = music.resources.audio(track.id);
             self.particles_debt = (self.particles_debt + context.frame.delta_time * (20.0 + audio.energy * 35.0))
                 * f32::from(music.queue.timeline.movement.abs() > 0.00001);
@@ -872,10 +878,12 @@ impl MusicView {
                     expires_at: time + 0.8 + audio.acousticness * 0.8 + fastrand::f32() * 0.3,
                     color: palette[fastrand::usize(0..palette.len())].to_vec3(),
                     size: vec2(7.0 + audio.acousticness * 9.0, 3.0 + audio.energy * 4.0),
+                    playback: true,
                 };
             }
         } else {
             self.particles_debt = 0.0;
+            fade_playback_particles(&mut self.particles, time);
         }
 
         for particle in self.particles.iter().filter(|particle| particle.expires_at > time) {
@@ -969,6 +977,19 @@ mod tests {
     }
 
     #[test]
+    fn artwork_crop_shares_cornering_on_both_sides() {
+        let crop = Rect::from_center_size(Vec2::ZERO, Vec2::splat(20.0));
+        let left_corner = vec2(-9.0, -9.0);
+        let right_corner = vec2(9.0, -9.0);
+        let square = track_shape(crop, Vec2::ZERO);
+        let round = track_shape(crop, Vec2::ONE);
+
+        assert_eq!(square.distance_at(left_corner), square.distance_at(right_corner));
+        assert_eq!(round.distance_at(left_corner), round.distance_at(right_corner));
+        assert_ne!(square.distance_at(left_corner), round.distance_at(left_corner));
+    }
+
+    #[test]
     fn track_shadows_fade_only_at_playlist_edge() {
         let viewport = Rect::new(vec2(100.0, 0.0), vec2(500.0, 120.0));
         for (x, alpha) in [(100.0 - GAP, 0.0), (100.0 - GAP * 0.5, 0.5), (100.0, 1.0)] {
@@ -1001,6 +1022,34 @@ mod tests {
             let reversed = motion.advance(Vec2::ZERO, dt);
             assert!((reversed - (stopped - direction * 2.0 * dt)).abs().max_element() < 0.000_01);
         }
+    }
+
+    #[test]
+    fn playback_particles_fade_quickly_when_paused() {
+        let now = 4.0;
+        let mut particles = [
+            Particle {
+                origin: Vec2::ZERO,
+                velocity: Vec2::ZERO,
+                spawned_at: 3.5,
+                expires_at: 5.0,
+                color: Vec3::ZERO,
+                size: Vec2::ZERO,
+                playback: true,
+            },
+            Particle {
+                origin: Vec2::ZERO,
+                velocity: Vec2::ZERO,
+                spawned_at: 3.5,
+                expires_at: 5.0,
+                color: Vec3::ZERO,
+                size: Vec2::ZERO,
+                playback: false,
+            },
+        ];
+        fade_playback_particles(&mut particles, now);
+        assert_eq!(particles[0].expires_at, now + PAUSED_PARTICLE_FADE);
+        assert_eq!(particles[1].expires_at, 5.0);
     }
 
     #[test]
