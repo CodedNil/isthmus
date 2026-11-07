@@ -7,7 +7,7 @@ use crate::{
 use arrayvec::ArrayVec;
 use image::{RgbaImage, imageops};
 use isthmus::{Image, Unorm8x4, glam::Vec3};
-use isthmus_sdf::layout::TextCache;
+use isthmus_2d::layout::TextCache;
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use std::{array, collections::HashMap, fmt::Display, hash::Hash, ops::Range, sync::Arc, time::Duration};
 use tokio::sync::Mutex;

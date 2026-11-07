@@ -100,14 +100,14 @@ impl Cache {
                 if slot == u32::MAX {
                     return false;
                 }
-                let [x, y, z] = [layout[3] as u64, layout[4] as u64, layout[5] as u64];
+                let [x, y, z] = [u64::from(layout[3]), u64::from(layout[4]), u64::from(layout[5])];
                 x == 0
                     || y == 0
                     || z == 0
                     || x > 10000
                     || y > 10000
                     || z > 10000
-                    || slot as u64 + 2 * (x * y + x * z + y * z) > count as u64
+                    || u64::from(slot) + 2 * (x * y + x * z + y * z) > count as u64
                     || layout[..3].iter().any(|&word| !f32::from_bits(word).is_finite())
             })
             || lattice > count

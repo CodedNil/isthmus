@@ -15,7 +15,7 @@ use calloop::{EventLoop, channel};
 pub use catalog::{load_desktop_icons, start_app_catalog};
 use futures_util::StreamExt;
 use isthmus::{
-    SurfaceHandle,
+    RenderError, SurfaceHandle,
     glam::{FloatExt, Vec2, vec2},
     wgpu::rwh::{
         DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WaylandWindowHandle,
@@ -653,6 +653,7 @@ impl Clipboard {
 
 struct LayerShellApp {
     gpu: Option<Renderer> = None,
+    gpu_retry: Option<Instant> = None,
     cantus: CantusApp,
 
     should_exit: bool = false,
@@ -800,6 +801,17 @@ impl LayerShellApp {
     }
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
+        if let Some(at) = self.gpu_retry {
+            if Instant::now() < at {
+                return;
+            }
+            self.gpu = None;
+            self.frame_callback = None;
+            for surface in self.surfaces.iter_mut().flatten() {
+                surface.gpu = None;
+            }
+            self.gpu_retry = None;
+        }
         self.sync_launcher_surface(qhandle);
         let height = self.bar_height() as u32;
         if let Some(surface) = &self.surfaces[0]
@@ -822,16 +834,34 @@ impl LayerShellApp {
             }
             let size = (surface.size * surface.scale).to_array().map(|size| size.round().max(1.0) as u32);
             if self.gpu.is_none() {
-                let (gpu, handle) = pollster::block_on(Renderer::new(Arc::clone(&surface.native), size, text_cache()))
-                    .expect("failed to initialize renderer");
+                let (gpu, handle) =
+                    match pollster::block_on(Renderer::new(Arc::clone(&surface.native), size, text_cache())) {
+                        Ok(renderer) => renderer,
+                        Err(error) => {
+                            tracing::error!(%error, "Could not initialize renderer; retrying");
+                            self.gpu_retry = Some(Instant::now() + Duration::from_secs(1));
+                            return;
+                        }
+                    };
                 tracing::info!("Using GPU device: {}", gpu.device_name());
                 self.gpu = Some(gpu);
                 surface.gpu = Some(handle);
             }
             let gpu = self.gpu.as_mut().unwrap();
-            let handle = *surface.gpu.get_or_insert_with(|| {
-                gpu.add_surface(Arc::clone(&surface.native), size).expect("incompatible surface")
-            });
+            let handle = if let Some(handle) = surface.gpu {
+                handle
+            } else {
+                let handle = match gpu.add_surface(Arc::clone(&surface.native), size) {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        tracing::error!(%error, "Could not attach surface; retrying");
+                        self.gpu_retry = Some(Instant::now() + Duration::from_secs(1));
+                        return;
+                    }
+                };
+                surface.gpu = Some(handle);
+                handle
+            };
             gpu.resize(handle, size);
         }
         if let Err(error) = self.gpu.as_mut().unwrap().render(|render| {
@@ -845,6 +875,17 @@ impl LayerShellApp {
             }
         }) {
             tracing::error!(%error, "Could not render frame");
+            if !matches!(error, RenderError::Validation | RenderError::ResourceLimit { .. } | RenderError::MissingImage)
+                && (matches!(error, RenderError::SurfaceLost)
+                    || pollster::block_on(self.gpu.as_mut().unwrap().recover())
+                        .inspect_err(|error| tracing::error!(%error, "Could not recover GPU device"))
+                        .is_err())
+            {
+                // A fresh instance is the fallback if the adapter itself is gone.
+                self.gpu_retry = Some(Instant::now() + Duration::from_secs(1));
+            }
+            // Still request the Wayland callback below so recovery gets a frame
+            // even when there are no pending input or background updates.
         }
         let input_regions: SmallVec<[[i32; 4]; 16]> = self
             .cantus

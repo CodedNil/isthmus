@@ -1,5 +1,8 @@
 //! Sparse directional irradiance; geometry transport is cached on the CPU.
-use crate::{home::Object, render::WALL_HEIGHT};
+use crate::{
+    home::{Kind::LinenStack, Object},
+    render::WALL_HEIGHT,
+};
 #[cfg(not(target_arch = "spirv"))]
 pub use baked::Controls;
 #[cfg(not(target_arch = "spirv"))]
@@ -93,7 +96,7 @@ impl Grid {
         normal: Vec3,
         cached: Vec4,
     ) -> Vec3 {
-        if cached.w >= 0.95 || (item.kind == crate::home::Kind::LinenStack && item.surface_cache != u32::MAX) {
+        if cached.w >= 0.95 || (item.kind == LinenStack && item.surface_cache != u32::MAX) {
             cached.truncate()
         } else {
             self.sample(probes, point, normal).lerp(cached.truncate(), (cached.w / 0.95).min_num(1.0))

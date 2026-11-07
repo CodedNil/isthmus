@@ -1,10 +1,11 @@
 use super::*;
 use crate::{camera::Camera, render::shadows::ShadowAtlas};
+use core::cell::Cell;
 
 #[test]
 fn looped_normals_preserve_the_four_tetrahedral_samples() {
     for point in [vec3(0.3, -0.7, 0.2), vec3(-0.4, 0.1, 0.8), Vec3::Z] {
-        let calls = core::cell::Cell::new(0);
+        let calls = Cell::new(0);
         let distance = |p: Vec3| {
             calls.set(calls.get() + 1);
             (p * vec3(0.7, 1.1, 1.4)).length() - 0.5
@@ -48,7 +49,7 @@ fn half_payloads_survive_half_precision_storage_exactly() {
 
 #[test]
 fn solar_visibility_preserves_dark_hdr_penumbrae() {
-    for visibility in [0.0_f32, 0.00001, 0.0001, 0.001, 0.003, 0.01, 0.1, 0.5, 1.0] {
+    for visibility in [0.0, 0.00001, 0.0001, 0.001, 0.003, 0.01, 0.1, 0.5, 1.0] {
         let decoded = decode_sun(encode_sun(visibility));
         let bound = visibility.sqrt() / 255.0 + 1.0 / (255.0 * 255.0);
         assert!((decoded - visibility).abs() <= bound);

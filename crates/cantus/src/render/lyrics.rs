@@ -3,11 +3,11 @@ use crate::{
     render::{BarLayout, PANEL_START, Program, TEXT_SHADOW, TEXT_SMALL, UiContext},
 };
 use isthmus::prelude::*;
-use isthmus_sdf::{
+use isthmus_2d::{
     layout::{ShapedLine, TextCache},
     prelude::*,
 };
-use std::{ops::Range, sync::Arc};
+use std::ops::Range;
 
 const LYRIC_SIZE: f32 = 14.0;
 const LYRIC_WEIGHT: f32 = 800.0;
@@ -49,7 +49,7 @@ struct Run {
     time: Range<f32>,
     x: f32,
     width: f32,
-    line: Arc<ShapedLine>,
+    line: ShapedLine,
     scale: f32,
     /// Rows raised by earlier voices overlapping this section.
     lane: u32,
@@ -201,7 +201,7 @@ impl PreparedLyrics {
             occupied.push(phrases);
         }
         for run in channels.iter_mut().flat_map(|channel| &mut channel.runs) {
-            run.line = text.cached_distance(&run.line);
+            run.line = run.line.clone().cached_distance();
         }
         self.channels = channels;
     }
@@ -299,21 +299,15 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
             let local = lyrics.position(section.time.start, track.duration_ms as f32);
             let label = context.frame.resources.shape(&section.text, TEXT_SMALL, f32::MAX);
             let origin = vec2(x + local, baseline + lyrics.rows_at(local) * ROW_SPACING);
-            shader!(
-                context
-                    .frame
-                    .upload({
-                        let playhead_x: f32 = layout.playhead_x;
-                        let line: Text = context.frame.resources.place(&label, origin).outlined(BACKDROP_REACH);
-                    })
-                    .primitive(line)
-                    .fragment(|_, surface| {
-                        let sample = lyric_sample(surface.sample);
-                        let color = sample.paint(Vec4::ONE, lyric_shadow(sample.distance));
-                        color.with_w(color.w / surface.coverage.max(f32::MIN_POSITIVE))
-                            * vec4(1.0, 1.0, 1.0, history_opacity(surface.pixel.x, playhead_x))
-                    })
-            );
+
+            let playhead_x = layout.playhead_x;
+            let line = context.frame.resources.place(&label, origin).outlined(BACKDROP_REACH);
+            shader!(context.frame, |_, playhead_x: f32, line: Text| line, |_, surface| {
+                let sample = lyric_sample(surface.sample);
+                let color = sample.paint(Vec4::ONE, lyric_shadow(sample.distance));
+                color.with_w(color.w / surface.coverage.max(f32::MIN_POSITIVE))
+                    * vec4(1.0, 1.0, 1.0, history_opacity(surface.pixel.x, playhead_x))
+            },);
         }
         for channel in &lyrics.channels {
             let color = channel.singer.map_or(GROUP_COLOR, |singer| CHANNEL_COLORS[singer % CHANNEL_COLORS.len()]);
@@ -331,42 +325,46 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                 )
                 .expanded(BACKDROP_REACH * run.scale + 2.0);
                 // One continuous light field crosses every fragment and vocal lane at the playhead.
+
+                let playhead_x = layout.playhead_x;
+                let row = run.lane as f32;
+                let scale = run.scale;
+                let phase = context.frame.time;
+                let color = color.extend(1.0);
+                let line = context.frame.resources.place(&run.line, origin).outlined(BACKDROP_REACH);
                 shader!(
-                    context
-                        .frame
-                        .upload({
-                            let playhead_x: f32 = layout.playhead_x;
-                            let row: f32 = run.lane as f32;
-                            let scale: f32 = run.scale;
-                            let baseline: f32;
-                            let phase: f32 = context.frame.time;
-                            let color: Vec4 = color.extend(1.0);
-                            let bounds: Rect;
-                            let line: Text = context.frame.resources.place(&run.line, origin).outlined(BACKDROP_REACH);
-                        })
-                        .primitive(raster(bounds))
-                        .fragment(|_, fragment| {
-                            let distance = fragment.pixel.x - playhead_x;
-                            let active = (1.0 - (distance / 52.0).powi(2)).max(0.0).powi(2);
-                            let wave = distance * 0.16 - phase * 3.0;
-                            let mut point = line.origin + (fragment.pixel - line.origin) / vec2(scale, 1.0);
-                            point.y -= ROW_SPACING * row;
-                            point.y += active * (0.6 + 0.4 * wave.sin());
-                            let surface = lyric_sample(line.sample_at(point));
-                            let mut ink = color.truncate();
-                            let mut halo = lyric_shadow(surface.distance);
-                            if active > 0.0 {
-                                let sheen = (wave + (fragment.pixel.y - baseline) * 0.25).sin().max(0.0).powi(8);
-                                ink = ink.lerp(Vec3::ONE, active * (0.3 + 0.7 * sheen));
-                                let glow = active
-                                    * (0.1 + 0.12 * sheen)
-                                    * (-surface.distance.max(0.0) * 0.6).exp()
-                                    * surface.distance.smoothstep(GLOW_REACH, GLOW_REACH - 2.0);
-                                halo = source_over(color.truncate().lerp(Vec3::ONE, 0.7).extend(glow), halo);
-                            }
-                            let opacity = history_opacity(fragment.pixel.x, playhead_x);
-                            surface.paint(ink.extend(1.0), halo) * vec4(1.0, 1.0, 1.0, opacity)
-                        })
+                    context.frame,
+                    |_,
+                     playhead_x: f32,
+                     row: f32,
+                     scale: f32,
+                     baseline: f32,
+                     phase: f32,
+                     color: Vec4,
+                     bounds: Rect,
+                     line: Text| raster(bounds),
+                    |_, fragment| {
+                        let distance = fragment.pixel.x - playhead_x;
+                        let active = (1.0 - (distance / 52.0).powi(2)).max(0.0).powi(2);
+                        let wave = distance * 0.16 - phase * 3.0;
+                        let mut point = line.origin + (fragment.pixel - line.origin) / vec2(scale, 1.0);
+                        point.y -= ROW_SPACING * row;
+                        point.y += active * (0.6 + 0.4 * wave.sin());
+                        let surface = lyric_sample(line.sample_at(point));
+                        let mut ink = color.truncate();
+                        let mut halo = lyric_shadow(surface.distance);
+                        if active > 0.0 {
+                            let sheen = (wave + (fragment.pixel.y - baseline) * 0.25).sin().max(0.0).powi(8);
+                            ink = ink.lerp(Vec3::ONE, active * (0.3 + 0.7 * sheen));
+                            let glow = active
+                                * (0.1 + 0.12 * sheen)
+                                * (-surface.distance.max(0.0) * 0.6).exp()
+                                * surface.distance.smoothstep(GLOW_REACH, GLOW_REACH - 2.0);
+                            halo = source_over(color.truncate().lerp(Vec3::ONE, 0.7).extend(glow), halo);
+                        }
+                        let opacity = history_opacity(fragment.pixel.x, playhead_x);
+                        surface.paint(ink.extend(1.0), halo) * vec4(1.0, 1.0, 1.0, opacity)
+                    },
                 );
             }
         }
@@ -382,19 +380,18 @@ mod tests {
         render::text_cache,
     };
     use isthmus::Resources;
-    use isthmus_sdf::text::Glyphs;
+    use isthmus_2d::text::Glyphs;
 
     #[test]
     fn cached_glyph_fields_preserve_edges_and_reuse_storage() {
         let mut cache = text_cache();
         let original = cache.shape("AVOxy gj♪", LYRIC_SIZE, LYRIC_WEIGHT);
-        let prefix = cache.data().persistent.to_vec();
-        let cached = cache.cached_distance(&original);
-        assert_eq!(&cache.data().persistent[..prefix.len()], prefix.as_slice());
-        let words = cache.data().persistent.len();
-        let again = cache.cached_distance(&original);
-        assert!(Arc::ptr_eq(&cached, &again));
-        assert_eq!(cache.data().persistent.len(), words);
+        let prefix = cache.data().to_vec();
+        let cached = original.clone().cached_distance();
+        assert_eq!(&cache.data()[..prefix.len()], prefix.as_slice());
+        let words = cache.data().len();
+        let again = original.clone().cached_distance();
+        assert_eq!(cache.data().len(), words);
         assert_eq!(again.text.width, original.text.width);
         let exact = cache.place(&original, Vec2::ZERO);
         let field = cache.place(&cached, Vec2::ZERO);

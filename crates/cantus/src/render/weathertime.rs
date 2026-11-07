@@ -13,7 +13,7 @@ use crate::{
 use arrayvec::{ArrayString, ArrayVec};
 use core::f32::consts::PI;
 use isthmus::prelude::*;
-use isthmus_sdf::prelude::*;
+use isthmus_2d::prelude::*;
 use jiff::{
     Span, Timestamp, Zoned,
     civil::{DateTime, Time},
@@ -590,22 +590,21 @@ mod monitor {
 }
 impl WeatherLayout {
     fn paint_text(&self, context: &mut UiContext, line: Text, color: Vec4, clip: bool) {
+        let pill = self.pill;
+        let expansion = self.expansion;
+        let timer_support = self.timer_support;
+        let line = line.outlined(TEXT_SHADOW_REACH);
         shader!(
-            context
-                .frame
-                .upload({
-                    let pill: Rect = self.pill;
-                    let expansion: f32 = self.expansion;
-                    let timer_support: Vec2 = self.timer_support;
-                    let line: Text = line.outlined(TEXT_SHADOW_REACH);
-                    let color: Vec4;
-                    let clip: bool;
-                })
-                .primitive(|frame| refract(weather_panel(pill, expansion, timer_support), frame, line))
-                .fragment(|_, surface| {
-                    surface.paint(color.with_w(1.0), TEXT_SHADOW.with_w(TEXT_SHADOW.w * TEXT_SHADOW_STRENGTH))
-                        * vec4(1.0, 1.0, 1.0, color.w * if clip { surface.parent_fill } else { 1.0 })
-                })
+            context.frame,
+            |frame, pill: Rect, expansion: f32, timer_support: Vec2, line: Text, color: Vec4, clip: bool| refract(
+                weather_panel(pill, expansion, timer_support),
+                frame,
+                line
+            ),
+            |_, surface| {
+                surface.paint(color.with_w(1.0), TEXT_SHADOW.with_w(TEXT_SHADOW.w * TEXT_SHADOW_STRENGTH))
+                    * vec4(1.0, 1.0, 1.0, color.w * if clip { surface.parent_fill } else { 1.0 })
+            },
         );
     }
 
@@ -651,7 +650,6 @@ impl WeatherPanel {
             .timer_presence
             .move_towards(f32::from(readout.is_some()), context.frame.delta_time.min(1.0 / 30.0) * 6.0);
         let presence = self.timer_presence.smoothstep(0.0, 1.0);
-        // Sized from a fixed run so the pulsing text never resizes its support.
         let text = readout.as_deref().unwrap_or_default();
         let width = context.frame.resources.shape(text, TEXT_SMALL, 900.0).text.width;
         let timer_support = vec2((width + TIMER_PADDING * 2.0) * presence, TIMER_DEPTH * presence);
@@ -669,34 +667,32 @@ impl WeatherPanel {
         if expansion > 0.0 {
             context.interaction.input_region(panel.bounds(0.0));
         }
+
+        let phase = sky_phase(sun.y);
+        let sun_center = vec2(16.0 + sun.x * (pill.size().x - 32.0), pill.size().y * (0.72 - sun.y.saturate() * 0.45));
+        let sun_color = vec3(0.96, 0.98, 1.0)
+            .lerp(vec3(0.98, 0.74, 0.66), sun.y.smoothstep(0.55, 0.02))
+            .extend(sun.y.smoothstep(-0.02, 0.04) * (1.0 - current.cloud * 0.95) * (1.0 - current.fog * 0.85));
         shader!(
-            context
-                .frame
-                .upload({
-                    let current: WeatherCondition;
-                    let pill: Rect;
-                    let expansion: f32;
-                    let timer_support: Vec2;
-                    let phase: Vec3 = sky_phase(sun.y);
-                    let sun_center: Vec2 =
-                        vec2(16.0 + sun.x * (pill.size().x - 32.0), pill.size().y * (0.72 - sun.y.saturate() * 0.45));
-                    let sun_color: Vec4 =
-                        vec3(0.96, 0.98, 1.0).lerp(vec3(0.98, 0.74, 0.66), sun.y.smoothstep(0.55, 0.02)).extend(
-                            sun.y.smoothstep(-0.02, 0.04) * (1.0 - current.cloud * 0.95) * (1.0 - current.fog * 0.85),
-                        );
-                })
-                .primitive(|frame| deform(weather_panel(pill, expansion, timer_support), frame))
-                .fragment(|frame, surface| {
-                    let body_local = surface.pixel - pill.min;
-                    let mut color =
-                        scene(frame.time, frame.globals.bar_height, body_local, pill.size().x, phase, current);
-                    let distance = body_local.distance(sun_center);
-                    color = color.lerp(
-                        sun_color.truncate(),
-                        (distance.smoothstep(62.0, 4.0) * 0.24 + distance.smoothstep(11.0, 1.0) * 0.7) * sun_color.w,
-                    );
-                    glass(surface, color)
-                })
+            context.frame,
+            |frame,
+             current: WeatherCondition,
+             pill: Rect,
+             expansion: f32,
+             timer_support: Vec2,
+             phase: Vec3,
+             sun_center: Vec2,
+             sun_color: Vec4| deform(weather_panel(pill, expansion, timer_support), frame),
+            |frame, surface| {
+                let body_local = surface.pixel - pill.min;
+                let mut color = scene(frame.time, frame.globals.bar_height, body_local, pill.size().x, phase, current);
+                let distance = body_local.distance(sun_center);
+                color = color.lerp(
+                    sun_color.truncate(),
+                    (distance.smoothstep(62.0, 4.0) * 0.24 + distance.smoothstep(11.0, 1.0) * 0.7) * sun_color.w,
+                );
+                glass(surface, color)
+            },
         );
         let line = context
             .frame
@@ -791,48 +787,43 @@ impl WeatherPanel {
                 hovered_detail = Some(items[column.min(items.len() - 1)].hover_text.as_str());
             }
 
+            let conditions = from_fn(|index| items[index.min(items.len() - 1)].conditions);
+            let count = items.len() as u32;
+            let start_hour = items[0].hour;
+            let sun_hours = self.sun_hours;
+            let timer_support = layout.timer_support;
             shader!(
-                context
-                    .frame
-                    .upload({
-                        let conditions: [WeatherCondition; HOURLY_FORECASTS] =
-                            from_fn(|index| items[index.min(items.len() - 1)].conditions);
-                        let count: u32 = items.len() as u32;
-                        let start_hour: f32 = items[0].hour;
-                        let sun_hours: [f32; 2] = self.sun_hours;
-                        let alpha: f32;
-                        let forecast_pill: Rect;
-                        let pill: Rect;
-                        let expansion: f32;
-                        let timer_support: Vec2 = layout.timer_support;
-                    })
-                    .primitive(|frame| deform(Shape::pill(forecast_pill), frame))
-                    .fragment(|frame, surface| {
-                        let panel =
-                            sample_deformation(weather_panel(pill, expansion, timer_support), frame, surface.pixel);
-                        let position =
-                            (forecast_pill.uv(surface.pixel).x * count as f32 - 0.5).clamp(0.0, count as f32 - 1.0);
-                        let index = position.floor() as usize;
-                        let conditions = conditions[index].lerp(
-                            conditions[(index + 1).min(count as usize - 1)],
-                            position.fract().smoothstep(0.0, 1.0),
-                        );
-                        let hour = if start_hour < 0.0 {
-                            12.0
-                        } else {
-                            (start_hour + position * HOURLY_STEP_HOURS as f32) % 24.0
-                        };
-                        let p = forecast_pill.center() - pill.min + (surface.pixel - forecast_pill.center()) * 2.0;
-                        let color = scene(
-                            frame.time,
-                            frame.globals.bar_height,
-                            p,
-                            forecast_pill.size().x * 2.0,
-                            sky_phase(sun_position(hour, sun_hours)[1]),
-                            conditions,
-                        );
-                        glass(surface, color) * vec4(1.0, 1.0, 1.0, alpha * panel.sdf.fill())
-                    })
+                context.frame,
+                |frame,
+                 conditions: [WeatherCondition; HOURLY_FORECASTS],
+                 count: u32,
+                 start_hour: f32,
+                 sun_hours: [f32; 2],
+                 alpha: f32,
+                 forecast_pill: Rect,
+                 pill: Rect,
+                 expansion: f32,
+                 timer_support: Vec2| deform(Shape::pill(forecast_pill), frame),
+                |frame, surface| {
+                    let panel = sample_deformation(weather_panel(pill, expansion, timer_support), frame, surface.pixel);
+                    let position =
+                        (forecast_pill.uv(surface.pixel).x * count as f32 - 0.5).clamp_num(0.0, count as f32 - 1.0);
+                    let index = position.floor() as usize;
+                    let conditions = conditions[index]
+                        .lerp(conditions[(index + 1).min(count as usize - 1)], position.fract().smoothstep(0.0, 1.0));
+                    let hour =
+                        if start_hour < 0.0 { 12.0 } else { (start_hour + position * HOURLY_STEP_HOURS as f32) % 24.0 };
+                    let p = forecast_pill.center() - pill.min + (surface.pixel - forecast_pill.center()) * 2.0;
+                    let color = scene(
+                        frame.time,
+                        frame.globals.bar_height,
+                        p,
+                        forecast_pill.size().x * 2.0,
+                        sky_phase(sun_position(hour, sun_hours)[1]),
+                        conditions,
+                    );
+                    glass(surface, color) * vec4(1.0, 1.0, 1.0, alpha * panel.sdf.fill())
+                },
             );
             for (column, forecast) in items.iter().enumerate() {
                 let center = origin + row_origin + vec2(step * (column as f32 + 0.5), size.y * 0.5);

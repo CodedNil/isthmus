@@ -24,28 +24,29 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
     let curvature = height * ((variation - 0.5) * 0.05 + gust * (0.009 + variation * 0.012));
     let spacing = (0.035 + plant.depth * 0.16) * (0.8 + hash(plant.seed + 3.0) * 0.4);
     let node_offset = hash(plant.seed);
-    shader!(
-        frame
-            .upload({
-                let size: Vec2;
-                let root: Vec2;
-                let top: Vec2;
-                let width: f32;
-                let height: f32;
-                let curvature: f32;
-                let spacing: f32;
-                let node_offset: f32;
-                let seed: f32 = plant.seed;
-                let depth: f32 = plant.depth;
-                let reflected: bool;
-            })
-            .primitive({
+    {
+        let seed: f32 = plant.seed;
+        let depth: f32 = plant.depth;
+        shader!(
+            frame,
+            |_,
+             size: Vec2,
+             root: Vec2,
+             top: Vec2,
+             width: f32,
+             height: f32,
+             curvature: f32,
+             spacing: f32,
+             node_offset: f32,
+             seed: f32,
+             depth: f32,
+             reflected: bool| {
                 let start = if reflected { root } else { top };
                 let end = if reflected { vec2(top.x, root.y * 2.0 - top.y) } else { root };
                 Rect::new(screen_point(start.min(end), size), screen_point(start.max(end), size))
                     .expanded((width * 1.5 + curvature.abs() * 1.44 + 0.006) * size.y)
-            })
-            .fragment(|frame, surface| {
+            },
+            |frame, surface| {
                 let (point, reflection_mask) = plant_point(surface.pixel, size, root, frame.time, reflected);
                 let point = bend(point, root, curvature, height);
                 let along = root.y - point.y;
@@ -83,8 +84,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                 stem = stem.lerp(vec3(0.46, 0.45, 0.25), sheath * 0.7);
                 let alpha = mask * reflection_mask * if reflected { 0.2 } else { 1.0 };
                 plant_color(pigment(stem, vec2(along, across) + seed, aa), surface.pixel / size, depth, alpha)
-            })
-    );
+            },
+        );
+    }
     let branches = if young { 3 } else { 4 + (hash(plant.seed + 11.0) * 3.0) as u32 };
     for branch in 0..branches + 2 {
         let seed = plant.seed + branch as f32 * 13.7;
@@ -101,29 +103,29 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
         } else {
             -1.95 - hash(seed + 3.0) * 1.3
         });
-        shader!(
-            frame
-                .upload({
-                    let size: Vec2;
-                    let origin: Vec2;
-                    let direction: Vec2;
-                    let root: Vec2;
-                    let seed: f32;
-                    let curvature: f32;
-                    let reach: f32;
-                    let height: f32;
-                    let depth: f32 = plant.depth;
-                    let reflected: bool;
-                })
-                .primitive({
+        {
+            let depth: f32 = plant.depth;
+            shader!(
+                frame,
+                |_,
+                 size: Vec2,
+                 origin: Vec2,
+                 direction: Vec2,
+                 root: Vec2,
+                 seed: f32,
+                 curvature: f32,
+                 reach: f32,
+                 height: f32,
+                 depth: f32,
+                 reflected: bool| {
                     let center = origin + (direction * 0.78 + direction.perp() * 0.35) * reach;
                     Quad::new(
                         screen_point(if reflected { vec2(center.x, root.y * 2.0 - center.y) } else { center }, size),
                         (vec2(2.0, 2.4) * reach + curvature.abs() * 2.88 + 0.012) * size.y,
                         if reflected { vec2(direction.x, -direction.y) } else { direction },
                     )
-                })
-                .fragment(|frame, surface| {
+                },
+                |frame, surface| {
                     let (point, reflection_mask) = plant_point(surface.pixel, size, root, frame.time, reflected);
                     let point = bend(point, root, curvature, height);
                     let delta = point - origin;
@@ -165,8 +167,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                     }
                     let opacity = alpha * reflection_mask * if reflected { 0.28 } else { 1.0 };
                     plant_color(pigment(color / alpha, local + seed, aa), surface.pixel / size, depth, opacity)
-                })
-        );
+                },
+            );
+        }
     }
     if !reflected {
         undergrowth::draw(frame, root, plant.depth, plant.seed);

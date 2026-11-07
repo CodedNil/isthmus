@@ -1,6 +1,7 @@
 use super::{DesktopApp, STATUS_SAMPLE_INTERVAL};
 use crate::{
     app::{AppUpdater, CantusApp, View, send_update},
+    catalog::AppCatalog,
     interaction::InputEvent,
     render::{
         Renderer,
@@ -112,7 +113,7 @@ pub fn start_app_catalog(updater: &AppUpdater) {
             ..Default::default()
         })
         .collect();
-        send_update(&updater, move |app| app.launcher.set_catalog(crate::catalog::AppCatalog::new(apps)));
+        send_update(&updater, move |app| app.launcher.set_catalog(AppCatalog::new(apps)));
     });
 }
 

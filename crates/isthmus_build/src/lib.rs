@@ -166,6 +166,7 @@ pub fn build(source: &str) -> Result<()> {
         let code =
             write_string(&module, &info, WriterFlags::empty())?.replace(&format!("{}f", f32::MAX), "0x1.fffffep+127f");
         // Preserve SPIR-V derivatives when WGSL cannot prove control-flow uniformity.
+        let code = code.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n");
         let code = format!("diagnostic(warning, derivative_uniformity);\n{code}");
         validator.validate(&wgsl::parse_str(&code)?)?;
         write_if_changed(&output.join(format!("{name}.wgsl")), &code)?;

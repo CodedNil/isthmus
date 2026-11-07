@@ -1,6 +1,6 @@
 use crate::render::{HELD_PRESSURE, RIPPLE_COUNT, RipplePulse};
 use isthmus::{Rect, glam::Vec2};
-use isthmus_sdf::Sdf;
+use isthmus_2d::Sdf;
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     mem,
@@ -281,7 +281,7 @@ impl Interaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use isthmus_sdf::Shape;
+    use isthmus_2d::Shape;
 
     #[test]
     fn distinguishes_clicks_from_drags_released_outside_the_widget() {

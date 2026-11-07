@@ -12,7 +12,9 @@ pub use isthmus_macros::{ShaderData, program, shader};
 pub use math::MinMax;
 pub use program::{Blend, Program};
 pub use resources::ResourceData;
-pub use shader::{Fragment, Paint, Primitive, ShaderFrame, Surface, Vertex, VertexInput, raster, source_over, surface};
+pub use shader::{
+    Fragment, FrameState, Paint, Primitive, ShaderFrame, Surface, Vertex, VertexInput, raster, source_over, surface,
+};
 use spirv_std::num_traits;
 pub use spirv_std::{self, glam};
 #[cfg(not(target_arch = "spirv"))]
@@ -56,7 +58,6 @@ pub mod prelude {
 
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::data::FrameData;
     #[cfg(not(target_arch = "spirv"))]
     pub use crate::program::{ShaderEntry, shader_index};
 }

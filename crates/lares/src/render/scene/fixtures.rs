@@ -22,10 +22,11 @@ pub(super) fn lamp<S: Sample>(p: Vec3, size: Vec3) -> S {
 }
 
 /// Shared source geometry for direct shading, visibility and baked transport.
-pub(crate) fn source(light: super::Object) -> Vec3 {
+pub fn source(light: super::Object) -> Vec3 {
     light.pos + Vec3::Z * if light.kind == super::Kind::Downlight { -0.025 } else { 0.005 }
 }
-pub(crate) fn radius(light: super::Object) -> f32 {
+
+pub fn radius(light: super::Object) -> f32 {
     if light.kind == super::Kind::Downlight { light.size.x * 0.225 } else { 0.035 }
 }
 

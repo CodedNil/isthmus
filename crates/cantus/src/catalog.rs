@@ -1,7 +1,6 @@
 //! Metadata snapshots with pre-normalized search terms; icons load separately.
 
 use crate::platform::DesktopApp;
-use std::mem;
 
 const MIN_CONFIDENCE: f32 = 0.6;
 
@@ -85,21 +84,10 @@ impl AppCatalog {
 
 /// Normalized edit distance between two words, from 0 to 1.
 pub fn similarity(a: &str, b: &str) -> f32 {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    let mut current = vec![0; b.len() + 1];
-    for (row, left) in a.iter().enumerate() {
-        current[0] = row + 1;
-        for (column, right) in b.iter().enumerate() {
-            let substitute = previous[column] + usize::from(left != right);
-            current[column + 1] = substitute.min(previous[column + 1] + 1).min(current[column] + 1);
-        }
-        mem::swap(&mut previous, &mut current);
-    }
-    1.0 - previous[b.len()] as f32 / a.len().max(b.len()) as f32
+    1.0 - strsim::levenshtein(a, b) as f32 / a.chars().count().max(b.chars().count()) as f32
 }
 
 #[cfg(test)]

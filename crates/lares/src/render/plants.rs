@@ -1,7 +1,7 @@
 //! Grow static branches on the CPU; leaves remain individually culled SDF sheets.
 use crate::home::{DEFAULT_LIGHT_COLOR, Kind, Material, Object};
 use core::f32::consts::PI;
-use isthmus::glam::{Vec3, vec2, vec3};
+use isthmus::glam::{UVec3, Vec3, vec2, vec3};
 
 struct Growth<'a> {
     objects: &'a mut Vec<Object>,
@@ -19,7 +19,7 @@ impl Growth<'_> {
             kind,
             surface_cache: u32::MAX,
             surface_origin: Vec3::ZERO,
-            surface_grid: isthmus::glam::UVec3::ZERO,
+            surface_grid: UVec3::ZERO,
             emission: 0.0,
             emission_color: DEFAULT_LIGHT_COLOR,
             exterior: Vec3::ZERO,

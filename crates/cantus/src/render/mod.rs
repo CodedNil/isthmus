@@ -1,6 +1,6 @@
 use crate::{app::Background, config::Config, interaction::Interaction, music::Music, timer::Timer};
 use isthmus::prelude::*;
-use isthmus_sdf::{layout::TextCache, prelude::*};
+use isthmus_2d::{layout::TextCache, prelude::*};
 use sdf::refract;
 
 pub mod launcher;
@@ -9,6 +9,10 @@ pub mod music;
 pub mod sdf;
 pub mod status;
 pub mod weathertime;
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests;
 
 /// Space for playlist buttons and compact history tracks, in logical pixels.
 pub const HISTORY_WIDTH: f32 = 200.0;
@@ -58,9 +62,9 @@ pub struct Globals {
 isthmus::program!(Globals, TextCache);
 
 pub fn text_cache() -> TextCache {
-    TextCache::new(&[
-        include_bytes!("../../assets/NotoSans-Variable.ttf"),
-        include_bytes!("../../assets/NotoSansSymbols-Music.ttf"),
+    TextCache::new([
+        include_bytes!("../../assets/NotoSans-Variable.ttf").as_slice(),
+        include_bytes!("../../assets/NotoSansSymbols-Music.ttf").as_slice(),
     ])
 }
 
@@ -127,17 +131,19 @@ impl Bar {
 }
 
 impl UiContext<'_> {
+    fn paint_image(&mut self, image: &Image, rect: Rect) {
+        shader!(self.frame, |_, image: &Image, rect: Rect| rect, |_, fragment| image.sample(fragment.uv));
+    }
+
     fn paint_text(&mut self, rect: Rect, radius: f32, line: Text, color: Vec4) {
         shader!(
-            self.frame
-                .upload({
-                    let rect: Rect;
-                    let radius: f32;
-                    let line: Text;
-                    let color: Vec4;
-                })
-                .primitive(|frame| refract(Shape::rounded_rect(rect, radius), frame, line))
-                .fragment(|_, _| color)
+            self.frame,
+            |frame, rect: Rect, radius: f32, line: Text, color: Vec4| refract(
+                Shape::rounded_rect(rect, radius),
+                frame,
+                line
+            ),
+            |_, _| color,
         );
     }
 }

@@ -1,7 +1,8 @@
-use crate::Image;
+use crate::{Image, RenderError};
 use smallvec::SmallVec;
 use std::{
     collections::HashMap,
+    iter,
     sync::{Arc, Weak},
 };
 use wgpu::util::{DeviceExt, TextureDataOrder};
@@ -27,28 +28,23 @@ impl ImageCache {
             .map(|count| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("image"),
-                    entries: &(0..count)
-                        .flat_map(|index| {
-                            [
-                                wgpu::BindGroupLayoutEntry {
-                                    binding: index as u32 * 2,
-                                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                                    ty: wgpu::BindingType::Texture {
-                                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                        view_dimension: wgpu::TextureViewDimension::D2,
-                                        multisampled: false,
-                                    },
-                                    count: None,
-                                },
-                                wgpu::BindGroupLayoutEntry {
-                                    binding: index as u32 * 2 + 1,
-                                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                                    count: None,
-                                },
-                            ]
-                        })
-                        .collect::<Vec<_>>(),
+                    entries: &iter::once(wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    })
+                    .chain((0..count).map(|index| wgpu::BindGroupLayoutEntry {
+                        binding: index as u32 + 1,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    }))
+                    .collect::<Vec<_>>(),
                 })
             })
             .collect();
@@ -68,40 +64,47 @@ impl ImageCache {
         self.groups.retain(|key, _| key.iter().all(|image| self.images.contains_key(image)));
     }
 
-    pub fn images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, images: &[&Image]) -> wgpu::BindGroup {
+    pub fn view(&self, image: &Image) -> Option<&wgpu::TextureView> {
+        self.images.get(&(image.pixels.as_ptr() as usize, image.size)).map(|cached| &cached.view)
+    }
+
+    pub fn insert(&mut self, image: &Image, view: wgpu::TextureView) {
+        self.images.insert((image.pixels.as_ptr() as usize, image.size), CachedImage {
+            source: Arc::downgrade(&image.pixels),
+            view,
+        });
+    }
+
+    pub fn images(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        images: &[&Image],
+    ) -> Result<wgpu::BindGroup, RenderError> {
         let key: ImageBindings = images.iter().map(|image| (image.pixels.as_ptr() as usize, image.size)).collect();
         if let Some(group) = self.groups.get(&key) {
-            return group.clone();
+            return Ok(group.clone());
         }
         for (&key, image) in key.iter().zip(images) {
-            self.images.entry(key).or_insert_with(|| CachedImage {
-                source: Arc::downgrade(&image.pixels),
-                view: image.texture_view().unwrap_or_else(|| upload(device, queue, image.size, &image.pixels)),
-            });
+            if !self.images.contains_key(&key) {
+                let pixels = image.pixels().ok_or(RenderError::MissingImage)?;
+                self.insert(image, upload(device, queue, image.size, pixels));
+            }
         }
-        let entries: Vec<_> = key
-            .iter()
-            .enumerate()
-            .flat_map(|(index, key)| {
-                [
-                    wgpu::BindGroupEntry {
-                        binding: index as u32 * 2,
-                        resource: wgpu::BindingResource::TextureView(&self.images[key].view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: index as u32 * 2 + 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ]
-            })
-            .collect();
+        let entries: Vec<_> =
+            iter::once(wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&self.sampler) })
+                .chain(key.iter().enumerate().map(|(index, key)| wgpu::BindGroupEntry {
+                    binding: index as u32 + 1,
+                    resource: wgpu::BindingResource::TextureView(&self.images[key].view),
+                }))
+                .collect();
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("images"),
             layout: &self.layouts[images.len()],
             entries: &entries,
         });
         self.groups.insert(key, group.clone());
-        group
+        Ok(group)
     }
 }
 

@@ -14,12 +14,12 @@ gloo-render = "0.3.0"
 isthmus = { path = "crates/isthmus" }
 isthmus-build = { path = "crates/isthmus_build" }
 isthmus_macros = { path = "crates/isthmus_macros" }
-isthmus_sdf = { path = "crates/isthmus_sdf" }
+isthmus_2d = { path = "crates/isthmus_2d" }
 pollster = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 serde = { version = "1.0", features = ["derive"] }
-smallvec = "1.16.4"
+smallvec = "1.16.5"
 spirv-builder = "0.11.0"
 spirv-std = "0.11.0"
 syn = { version = "3", features = ["full"] }
