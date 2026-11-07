@@ -119,6 +119,7 @@ fn decode_art(bytes: &[u8]) -> Result<AlbumArt, image::ImageError> {
 impl CantusApp {
     pub(crate) fn refresh_enrichment(&mut self) {
         let now = Instant::now();
+        let publish_lyrics = self.config.lyrics_publish_enabled;
         let music = &mut self.music;
         let resources = &mut music.resources;
         let queue = &music.queue;
@@ -134,10 +135,12 @@ impl CantusApp {
         resources
             .lyrics
             .retain(|uri, state| matches!(state, Fetch::Fetching) || tracks.clone().any(|track| &track.uri == uri));
-        if self.config.lyrics_enabled {
-            let current = queue.index.min(queue.tracks.len());
-            let end = (current + 3).min(queue.tracks.len());
-            let candidates = queue.tracks[current..end].iter().chain(&queue.tracks[current.saturating_sub(1)..current]);
+        if self.config.lyrics_enabled
+            && let Some((playhead, _)) = queue.span_at_playhead()
+        {
+            let end = (playhead + 3).min(queue.tracks.len());
+            let candidates =
+                queue.tracks[playhead..end].iter().chain(&queue.tracks[playhead.saturating_sub(1)..playhead]);
             if let Some(track) = candidates
                 .filter(|track| {
                     !track.name.trim().is_empty() && !track.primary_artist().trim().is_empty() && track.duration_ms > 0
@@ -150,7 +153,12 @@ impl CantusApp {
                 let spotify = music.spotify.clone();
                 self.background.fetch(
                     track.uri.clone(),
-                    async move { lyrics::fetch(&track, &http, &session, &spotify).await.map(PreparedLyrics::new) },
+                    async move {
+                        lyrics::fetch(&track, &http, &session, &spotify, publish_lyrics).await.map(|source| {
+                            let contributed = lyrics::contributed_by_us(&track, &source);
+                            PreparedLyrics::new(source, contributed)
+                        })
+                    },
                     |cache| &mut cache.lyrics,
                 );
             }

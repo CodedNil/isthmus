@@ -1,5 +1,8 @@
 use crate::{
-    music::{Music, TRACK_SPACING_MS, lyrics::Lyrics},
+    music::{
+        Music, TRACK_SPACING_MS,
+        lyrics::{LyricSegment, Lyrics},
+    },
     render::{BarLayout, PANEL_START, Program, TEXT_SHADOW, TEXT_SMALL, UiContext},
 };
 use isthmus::prelude::*;
@@ -7,7 +10,7 @@ use isthmus_2d::{
     layout::{ShapedLine, TextCache},
     prelude::*,
 };
-use std::ops::Range;
+use std::{collections::BTreeMap, ops::Range};
 
 const LYRIC_SIZE: f32 = 14.0;
 const LYRIC_WEIGHT: f32 = 800.0;
@@ -34,6 +37,7 @@ const CHANNEL_COLORS: [Vec3; 3] = [Vec3::ONE, vec3(0.66, 0.82, 1.00), vec3(0.76,
 #[derive(Default)]
 pub struct PreparedLyrics {
     source: Lyrics,
+    contributed_to_lrclib: bool,
     channels: Vec<Channel>,
     // Time, position and velocity at each timing boundary.
     scroll: Vec<Vec3>,
@@ -58,8 +62,8 @@ struct Run {
 impl PreparedLyrics {
     const SILENCE_SPEED: f32 = 0.035;
 
-    pub fn new(source: Lyrics) -> Self {
-        Self { source, ..Default::default() }
+    pub fn new(source: Lyrics, contributed_to_lrclib: bool) -> Self {
+        Self { source, contributed_to_lrclib, ..Default::default() }
     }
 
     pub(crate) fn prepare(&mut self, duration: f32, text: &mut TextCache) {
@@ -76,9 +80,29 @@ impl PreparedLyrics {
         let space = text.shape(" ", LYRIC_SIZE, LYRIC_WEIGHT).text.width.max(6.0);
         let mut channels = Vec::new();
         let mut run_text = Vec::new();
-        for source in &mut self.source.channels {
-            let mut channel = Channel { singer: source.singer, runs: Vec::new() };
-            let segments = &mut source.segments;
+        let mut source_lanes = BTreeMap::<usize, Vec<_>>::new();
+        for line in &self.source.lines {
+            source_lanes.entry(line.lane).or_default().push(line);
+        }
+        for (_, mut source_lines) in source_lanes {
+            source_lines.sort_by(|a, b| a.time.start.total_cmp(&b.time.start));
+            let singer = source_lines.iter().find_map(|line| line.singer);
+            let mut channel = Channel { singer, runs: Vec::new() };
+            let mut segments: Vec<_> = source_lines
+                .into_iter()
+                .flat_map(|line| {
+                    let mut segments = line
+                        .words
+                        .clone()
+                        .unwrap_or_else(|| vec![LyricSegment { time: line.time.clone(), text: line.text.clone() }]);
+                    if let Some(last) = segments.last_mut()
+                        && !last.text.ends_with(char::is_whitespace)
+                    {
+                        last.text.push(' ');
+                    }
+                    segments
+                })
+                .collect();
             segments.retain(|s| s.time.start.is_finite() && s.time.end.is_finite() && !s.text.trim().is_empty());
             segments.sort_by(|a, b| a.time.start.total_cmp(&b.time.start));
             segments.dedup_by(|b, a| {
@@ -267,7 +291,7 @@ pub fn height(music: &Music) -> f32 {
         .lyrics
         .values()
         .filter_map(|state| state.ready())
-        .map(|lyrics| lyrics.source.channels.len())
+        .map(|lyrics| lyrics.source.lines.iter().map(|line| line.lane).max().unwrap_or(0) + 1)
         .max()
         .unwrap_or(1);
     LYRIC_INSET + rows as f32 * ROW_SPACING
@@ -281,6 +305,17 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     let screen = -BACKDROP_REACH * 1.2..context.frame.screen_size.x + BACKDROP_REACH * 1.2;
     let current = &tracks[index];
     let lyrics = resources.lyrics(current, context.frame.resources).unwrap_or(&silence);
+    let contributed = lyrics.contributed_to_lrclib;
+    let row_center = if contributed {
+        let row = lyrics
+            .channels
+            .iter()
+            .find_map(|channel| channel.runs.first())
+            .map_or_else(|| context.frame.resources.shape("M", LYRIC_SIZE, LYRIC_WEIGHT).text, |run| run.line.text);
+        f32::midpoint(row.min.y, row.max.y)
+    } else {
+        0.0
+    };
     let mut x = layout.playhead_x - lyrics.position(time, current.duration_ms as f32);
     let mut first = index;
     while first > 0 && x >= screen.start {
@@ -288,6 +323,16 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         let track = &tracks[first];
         let lyrics = resources.lyrics(track, context.frame.resources).unwrap_or(&silence);
         x -= lyrics.position(track.queue_span_ms(), track.duration_ms as f32);
+    }
+    if contributed {
+        let baseline = PANEL_START + context.config.height + LYRIC_INSET;
+        let center = vec2(10.0, baseline + row_center);
+        let bounds = Rect::from_center_size(center, Vec2::splat(10.0)).expanded(BACKDROP_REACH);
+        shader!(context.frame, |_, bounds: Rect, center: Vec2| raster(bounds), |_, fragment| {
+            let sample = lyric_sample(Shape::star(4.0, 2.56).offset(0.8).sample_at(fragment.pixel - center));
+            let color = sample.paint(vec4(1.0, 0.82, 0.24, 1.0), lyric_shadow(sample.distance));
+            color.with_w(color.w / sample.coverage.max(f32::MIN_POSITIVE))
+        },);
     }
     for track in &tracks[first..] {
         if x > screen.end {
@@ -376,7 +421,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
 mod tests {
     use super::*;
     use crate::{
-        music::lyrics::{Channel as SourceChannel, LyricSegment},
+        music::lyrics::{LyricLine, LyricSegment, Timing},
         render::text_cache,
     };
     use isthmus::Resources;
@@ -466,21 +511,21 @@ mod tests {
     fn prepares_text_in_channel_order_across_empty_channels() {
         let mut text = text_cache();
         let source = Lyrics {
-            channels: vec![
-                SourceChannel::default(),
-                SourceChannel {
-                    segments: vec![LyricSegment { time: 0.0..100.0, text: "  ".into() }, LyricSegment {
-                        time: 100.0..200.0,
-                        text: "🎵 ".into(),
-                    }],
-                    ..
+            lines: vec![
+                LyricLine { text: "  ".into(), time: 0.0..100.0, lane: 1, singer: Some(0), ..Default::default() },
+                LyricLine { text: "🎵 ".into(), time: 100.0..200.0, lane: 1, singer: Some(0), ..Default::default() },
+                LyricLine {
+                    text: "Hello ".into(),
+                    time: 200.0..1000.0,
+                    lane: 3,
+                    singer: Some(1),
+                    ..Default::default()
                 },
-                SourceChannel::default(),
-                SourceChannel { segments: vec![LyricSegment { time: 200.0..1000.0, text: "Hello ".into() }], .. },
             ],
+            timing: Timing::Line,
             ..Default::default()
         };
-        let mut lyrics = PreparedLyrics::new(source);
+        let mut lyrics = PreparedLyrics::new(source, false);
         lyrics.prepare(1000.0, &mut text);
         assert_eq!(lyrics.channels.len(), 2);
         for (channel, value) in lyrics.channels.iter().zip(["♪", "Hello"]) {
@@ -499,21 +544,57 @@ mod tests {
     }
 
     #[test]
+    fn separates_syllable_synced_lyric_lines() {
+        let mut text = text_cache();
+        let source = Lyrics {
+            lines: vec![
+                LyricLine {
+                    text: "somehow".into(),
+                    time: 0.0..500.0,
+                    words: Some(vec![LyricSegment { time: 0.0..500.0, text: "somehow".into() }]),
+                    lane: 0,
+                    singer: Some(0),
+                },
+                LyricLine {
+                    text: "If you're walking".into(),
+                    time: 500.0..1000.0,
+                    words: Some(vec![LyricSegment { time: 500.0..1000.0, text: "If you're walking".into() }]),
+                    lane: 0,
+                    singer: Some(0),
+                },
+            ],
+            timing: Timing::Syllable,
+            ..Default::default()
+        };
+        let space = text.shape(" ", LYRIC_SIZE, LYRIC_WEIGHT).text.width.max(6.0);
+        let mut lyrics = PreparedLyrics::new(source, false);
+        lyrics.prepare(1000.0, &mut text);
+
+        let runs = &lyrics.channels[0].runs;
+        assert_eq!(runs.len(), 2);
+        assert!(runs.iter().all(|run| run.width - ink_width(run.line.text) >= space));
+    }
+
+    #[test]
     fn stretches_held_words_without_losing_their_text() {
         let mut text = text_cache();
         let source = Lyrics {
-            channels: vec![SourceChannel {
-                segments: vec![
+            lines: vec![LyricLine {
+                text: String::new(),
+                time: 0.0..2000.0,
+                words: Some(vec![
                     LyricSegment { time: 0.0..100.0, text: "sing ".into() },
                     LyricSegment { time: 100.0..200.0, text: "sing ".into() },
                     LyricSegment { time: 200.0..2000.0, text: "sing ".into() },
-                ],
-                ..
+                ]),
+                lane: 0,
+                singer: Some(0),
             }],
+            timing: Timing::Word,
             ..Default::default()
         };
         let normal_width = text.shape("sing", LYRIC_SIZE, LYRIC_WEIGHT).text.width;
-        let mut lyrics = PreparedLyrics::new(source);
+        let mut lyrics = PreparedLyrics::new(source, false);
         lyrics.prepare(2000.0, &mut text);
         let runs = &lyrics.channels[0].runs;
         assert_eq!(runs.len(), 3);

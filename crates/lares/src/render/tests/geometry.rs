@@ -42,6 +42,21 @@ fn rejected_lights_have_no_visible_emitter_samples_at_receiver_bounds() {
 #[test]
 fn acceleration_agrees_with_exhaustive_intersection_and_normals_stay_finite() {
     let scene = Scene::new_at(&home::rooms(), 1_782_043_200.0, SunSettings::default());
+    // The exhaustive oracle deliberately checks every object for every ray.
+    // Cache its direction independent bounds once instead of rebuilding the
+    // rotated extent (including absolute-value work) for all 192 rays.
+    let exhaustive_objects: Vec<_> = scene
+        .objects
+        .iter()
+        .copied()
+        .filter(|item| item.kind != Kind::GlassPane)
+        .map(|item| {
+            let extent = item.extent();
+            let (sin, cos) = (item.rotation.x.abs(), item.rotation.y.abs());
+            let extent = vec3(cos * extent.x + sin * extent.y, sin * extent.x + cos * extent.y, extent.z);
+            (item, extent)
+        })
+        .collect();
     for origin in [vec3(0.0, 0.0, 4.0), vec3(-4.0, 0.0, 1.5), vec3(4.0, 0.0, 1.5)] {
         for ray in 0..64 {
             let z = 1.0 - 2.0 * (ray as f32 + 0.5) / 64.0;
@@ -51,13 +66,7 @@ fn acceleration_agrees_with_exhaustive_intersection_and_normals_stay_finite() {
             let accelerated = cast::<false, false>(origin, direction, &scene.nodes, &scene.objects, 0.0, FAR);
             let bounds = trace::Ray::new(origin, direction);
             let mut exhaustive = FAR;
-            for item in &scene.objects {
-                if item.kind == Kind::GlassPane {
-                    continue;
-                }
-                let extent = item.extent();
-                let (sin, cos) = (item.rotation.x.abs(), item.rotation.y.abs());
-                let extent = vec3(cos * extent.x + sin * extent.y, sin * extent.x + cos * extent.y, extent.z);
+            for (item, extent) in &exhaustive_objects {
                 let (enter, exit) = bounds.bounds(item.pos - extent, item.pos + extent);
                 if enter > exit || enter >= exhaustive {
                     continue;

@@ -32,6 +32,8 @@ pub struct Config {
     pub ratings_enabled: bool = false,
     /// Whether to show synchronized lyrics.
     pub lyrics_enabled: bool = true,
+    /// Whether fallback lyrics are submitted to LRCLIB when they improve on its result.
+    pub lyrics_publish_enabled: bool = true,
 
     /// Whether to show the weather and calendar module.
     pub weathertime_enabled: bool = true,
