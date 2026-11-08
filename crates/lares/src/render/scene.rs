@@ -689,18 +689,7 @@ pub(super) fn shade_visibility<const GROUP: u32>(
     material: Vec4,
 ) -> Vec4 {
     let hit = visible_surface(globals, objects, pixel, size, pixel_size, record, mirror);
-    let VisibleSurface {
-        object,
-        flags: word,
-        normal,
-        contact,
-        origin,
-        direction,
-        nearest,
-        surface_height,
-        reflected_distance,
-    } = hit;
-    if object == VISIBILITY_OBJECTS {
+    if hit.object == VISIBILITY_OBJECTS {
         if GROUP > 1 {
             kill();
         }
@@ -711,11 +700,11 @@ pub(super) fn shade_visibility<const GROUP: u32>(
     if GROUP != 0 && GROUP != family {
         kill();
     }
-    let glass_axis = (word >> 15) & 3;
+    let glass_axis = (hit.flags >> 15) & 3;
     let facing = match glass_axis {
-        1 => direction.x.abs(),
-        2 => direction.y.abs(),
-        _ => direction.z.abs(),
+        1 => hit.direction.x.abs(),
+        2 => hit.direction.y.abs(),
+        _ => hit.direction.z.abs(),
     };
     let fresnel = if glass_axis != 0 { 0.078 + 0.922 * (1.0 - facing).powf(5.0) } else { 0.0 };
     let transmission =
@@ -730,21 +719,21 @@ pub(super) fn shade_visibility<const GROUP: u32>(
         contacts,
         grid,
         probes,
-        origin,
-        direction,
-        nearest,
-        object,
-        surface_height,
-        reflected_distance,
+        hit.origin,
+        hit.direction,
+        hit.nearest,
+        hit.object,
+        hit.surface_height,
+        hit.reflected_distance,
         glass_light,
         transmission,
         time,
         globals.sample_index,
         atlas,
         info,
-        decode_sun(word),
-        normal,
-        contact,
+        decode_sun(hit.flags),
+        hit.normal,
+        hit.contact,
         material,
         indirect,
     )

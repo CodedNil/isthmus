@@ -477,7 +477,6 @@ impl LauncherState {
     }
 
     fn show_search(&mut self, context: &mut UiContext, rect: Rect) {
-        let origin = rect.min;
         let (left, right) = (PADDING + 34.0, rect.size().x - PADDING);
         let empty = self.field.text.is_empty();
         let query = if empty { "Search anything…" } else { &self.field.text };
@@ -514,7 +513,7 @@ impl LauncherState {
         context.paint_text(
             rect,
             CORNER_RADIUS,
-            line.translated(origin),
+            line.translated(rect.min),
             (if empty { MUTED_COLOR } else { TEXT_COLOR }).extend(1.0),
         );
     }

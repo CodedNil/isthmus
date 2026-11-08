@@ -21,10 +21,6 @@ pub struct App {
 }
 
 impl App {
-    pub fn template() -> Self {
-        Self::with_sun(render::SunSettings::default())
-    }
-
     pub fn with_sun(settings: render::SunSettings) -> Self {
         Self::from_scene(Scene::new_at(&home::rooms(), render::sun::utc_now(), settings))
     }

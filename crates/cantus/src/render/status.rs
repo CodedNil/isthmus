@@ -26,6 +26,8 @@ const AUDIO_WIDTH: f32 = 20.0;
 const ACTION_WIDTH: f32 = 24.0;
 /// Width of the displayed range below each band's peak, in the meter's normalised decibels (about 21 dB).
 const AUDIO_SPAN: f32 = 0.22;
+/// Lowest the scaling window can sit, so silence or noise-floor input stays flat rather than being magnified.
+const AUDIO_SILENCE_MARGIN: f32 = 0.08;
 /// Share of the visualiser height over which the volume level fades.
 const VOLUME_FADE: f32 = 0.24;
 /// Fraction of the panel height at each end where releasing the power icon triggers an action.
@@ -133,13 +135,15 @@ impl StatusPanel {
 
     pub fn show(&mut self, context: &mut UiContext, sky: StatusSky) {
         let mut volume = f32::from_bits(self.audio_monitor.volume.load(Ordering::Relaxed));
-        let height = context.config.height;
         let width = self.width();
         let x = context.frame.screen_size.x - width - GAP;
-        let panel = Rect::new(vec2(x, PANEL_START), vec2(x + width, PANEL_START + height));
+        let panel = Rect::new(vec2(x, PANEL_START), vec2(x + width, PANEL_START + context.config.height));
         let mut cursor = STATUS_INSET;
         let section = |center: f32, section_width: f32| {
-            Rect::from_center_size(vec2(x + center, PANEL_START + height * 0.5), vec2(section_width, height))
+            Rect::from_center_size(
+                vec2(x + center, PANEL_START + context.config.height * 0.5),
+                vec2(section_width, context.config.height),
+            )
         };
 
         let conditions: WeatherCondition = sky.conditions;
@@ -171,7 +175,7 @@ impl StatusPanel {
             let center = cursor + GRAPH_WIDTH * 0.5;
             let graph_pill = Rect::new(
                 vec2(x + cursor, PANEL_START + GAP),
-                vec2(x + cursor + GRAPH_WIDTH, PANEL_START + height - GAP),
+                vec2(x + cursor + GRAPH_WIDTH, PANEL_START + context.config.height - GAP),
             );
             let mut label = ArrayString::<16>::new();
             let latest = processor.history[HISTORY_END].to_vec2() * 100.0;
@@ -287,7 +291,7 @@ impl StatusPanel {
             let target = f32::from_bits(level.load(Ordering::Relaxed));
             let response = if target > *damped { 20.0 } else { 6.0 };
             *damped += (target - *damped) * (1.0 - (-response * context.frame.delta_time).exp());
-            *peak = (*peak - context.frame.delta_time * 0.1).max(*damped).max(0.1);
+            *peak = (*peak - context.frame.delta_time * 0.1).max(*damped).max(AUDIO_SPAN + AUDIO_SILENCE_MARGIN);
             *scaled = ((*damped - (*peak - AUDIO_SPAN)) / AUDIO_SPAN).saturate().powf(1.4);
         }
         let audio_center = cursor + AUDIO_WIDTH * 0.5;
@@ -301,7 +305,8 @@ impl StatusPanel {
 
         // The ribbon may use the whole section width, so its widest extent sits a gap from its neighbours. The
         // lens layer is padded so antialiasing and the shadow are never clipped.
-        let visualizer_rect = Rect::from_center_size(audio_rect.center(), vec2(AUDIO_WIDTH, height - GAP * 2.0));
+        let visualizer_rect =
+            Rect::from_center_size(audio_rect.center(), vec2(AUDIO_WIDTH, context.config.height - GAP * 2.0));
         let audio_rect = Rect::from_center_size(audio_rect.center(), audio_rect.size() + vec2(8.0, 0.0));
         shader!(
             context.frame,
@@ -315,14 +320,14 @@ impl StatusPanel {
                 let size = visualizer_rect.size();
                 let half_height = size.y * 0.5;
                 let local = visualizer_rect.local(surface.refracted);
-                let time = frame.time;
 
                 // Spectrum ribbon with fully rounded ends. Levels are stretched so typical music spans the whole
                 // range, and loud bands make the ribbon snake sideways as well as swell.
                 let level = spectrum_level(audio_spectrum, local.y, half_height);
-                let ripple = (local.y * 0.72 + time * 1.8).sin() * 0.16 + (local.y * 1.13 - time * 1.2).sin() * 0.08;
+                let ripple =
+                    (local.y * 0.72 + frame.time * 1.8).sin() * 0.16 + (local.y * 1.13 - frame.time * 1.2).sin() * 0.08;
                 let max_half_width = size.x * 0.5 - 1.0;
-                let sway = (local.y * 0.45 - time * 3.2).sin() * level * 2.2;
+                let sway = (local.y * 0.45 - frame.time * 3.2).sin() * level * 2.2;
                 let width = (2.0 + level * 6.5 + ripple * (1.0 + level * 5.0)).min(max_half_width - sway.abs());
                 let ribbon = {
                     // Its tips always reach the full height, however thin the ribbon is.
@@ -369,7 +374,11 @@ impl StatusPanel {
         if !response.held {
             self.action_origin = None;
         }
-        let pull = if dragging { ((pointer_y - panel.center().y) / (height * 0.5)).clamp_num(-1.0, 1.0) } else { 0.0 };
+        let pull = if dragging {
+            ((pointer_y - panel.center().y) / (context.config.height * 0.5)).clamp_num(-1.0, 1.0)
+        } else {
+            0.0
+        };
         let icon_y = if dragging {
             pointer_y.clamp_num(panel.min.y + ICON_RADIUS, panel.max.y - ICON_RADIUS)
         } else {
@@ -377,7 +386,8 @@ impl StatusPanel {
         };
         let snap_progress = ((pull.abs() - ARMED_PULL) / (1.0 - ARMED_PULL)).smoothstep(0.0, 1.0);
         let icon_scale = 1.0 + snap_progress * 0.35;
-        let action_rect = Rect::from_center_size(icon_home, vec2(ACTION_WIDTH, height) + Vec2::splat(GAP * 2.0));
+        let action_rect =
+            Rect::from_center_size(icon_home, vec2(ACTION_WIDTH, context.config.height) + Vec2::splat(GAP * 2.0));
         shader!(
             context.frame,
             |_, panel: Rect, action_rect: Rect, icon_home: Vec2, icon_y: f32, pull: f32, icon_scale: f32| action_rect,
