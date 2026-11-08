@@ -36,16 +36,17 @@ pub fn refract(
     })
 }
 
-/// Applies the parent's edge lensing and bulge to an independently bounded layer.
+/// Applies the parent's refraction to an independently bounded layer. The layer is not inflated by the parent's
+/// bulge, so neighbouring layers keep their spacing while the panel swells beneath them.
 pub fn lens(
     parent: impl Sdf,
     frame: ShaderFrame<Program>,
     shape: impl Sdf,
 ) -> impl Primitive<Program, Sample = DeformedSample> {
-    let (bulge_reach, refraction_reach) = reach(parent, frame);
-    surface(shape.bounds(refraction_reach + bulge_reach + LENS_REACH), move |point| {
+    let (_, refraction_reach) = reach(parent, frame);
+    surface(shape.bounds(refraction_reach + LENS_REACH), move |point| {
         let mut parent = sample_deformation(parent, frame, point);
-        parent.sdf = shape.sample_distance(shape.distance_at(parent.refracted) - parent.bulge * 0.5);
+        parent.sdf = shape.sample_at(parent.refracted);
         (parent, parent.sdf.coverage)
     })
 }

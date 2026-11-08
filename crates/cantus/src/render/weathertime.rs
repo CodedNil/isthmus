@@ -1,3 +1,4 @@
+use super::WeatherReadout;
 use crate::{
     app::Background,
     config::MAX_WORLD_CLOCKS,
@@ -624,6 +625,13 @@ impl WeatherLayout {
 }
 
 impl WeatherPanel {
+    pub(super) fn collapsed_readout(&self, context: &mut UiContext) -> WeatherReadout {
+        let (label, hour) = self.collapsed_label();
+        let pill_width =
+            context.frame.resources.shape(&label, TEXT_DISPLAY, 600.0).text.width + (TIMER_PADDING + UNIT) * 2.0;
+        WeatherReadout { label, hour, pill_width }
+    }
+
     pub(crate) fn new(timezones: &[String], background: &Background) -> Self {
         let mut forecast_timezones = Vec::with_capacity(timezones.len());
         let timezones: ArrayVec<_, MAX_WORLD_CLOCKS> = timezones
@@ -640,26 +648,29 @@ impl WeatherPanel {
         Self { timezones, details: "Weather unavailable".into(), ..Default::default() }
     }
 
-    pub fn show(&mut self, context: &mut UiContext, status_width: f32, timer: &Timer) -> StatusSky {
-        let height = context.config.height;
-        let x = context.frame.screen_size.x - WIDTH - GAP - status_width;
-        let pill = Rect::new(vec2(x, PANEL_START), vec2(x + WIDTH, PANEL_START + height));
-        let readout = timer.readout();
-        let expired = timer.expired();
+    pub(super) fn show(
+        &mut self,
+        context: &mut UiContext,
+        status_width: f32,
+        timer: &Timer,
+        readout: &WeatherReadout,
+    ) -> StatusSky {
+        let x = context.frame.screen_size.x - readout.pill_width - GAP - status_width;
+        let pill = Rect::new(vec2(x, PANEL_START), vec2(x + readout.pill_width, PANEL_START + context.config.height));
+        let (timer_readout, expired) = timer.readout();
         self.timer_presence = self
             .timer_presence
-            .move_towards(f32::from(readout.is_some()), context.frame.delta_time.min(1.0 / 30.0) * 6.0);
+            .move_towards(f32::from(timer_readout.is_some()), context.frame.delta_time.min(1.0 / 30.0) * 6.0);
         let presence = self.timer_presence.smoothstep(0.0, 1.0);
-        let text = readout.as_deref().unwrap_or_default();
+        let text = timer_readout.as_deref().unwrap_or_default();
         let width = context.frame.resources.shape(text, TEXT_SMALL, 900.0).text.width;
         let timer_support = vec2((width + TIMER_PADDING * 2.0) * presence, TIMER_DEPTH * presence);
         let hovered =
             context.interaction.pointer_in(weather_panel(pill, self.expansion.smoothstep(0.0, 1.0), timer_support));
         self.expansion =
             self.expansion.move_towards(f32::from(hovered), context.frame.delta_time.min(1.0 / 30.0) * 3.0);
-        let (weather_label, hour) = self.collapsed_label();
         let current = self.hourly[0].conditions;
-        let sun = Vec2::from(sun_position(hour, self.sun_hours));
+        let sun = Vec2::from(sun_position(readout.hour, self.sun_hours));
         let expansion = self.expansion.smoothstep(0.0, 1.0);
         let layout = WeatherLayout { pill, expansion, timer_support };
         let panel = weather_panel(pill, expansion, timer_support);
@@ -697,8 +708,8 @@ impl WeatherPanel {
         let line = context
             .frame
             .resources
-            .line(&weather_label, TEXT_DISPLAY, 600.0)
-            .centered(vec2(x + WIDTH * 0.5, PANEL_START + height * 0.46));
+            .line(&readout.label, TEXT_DISPLAY, 600.0)
+            .centered(vec2(pill.center().x, PANEL_START + context.config.height * 0.46));
         layout.paint_text(context, line, TEXT_COLOR.extend(1.0), false);
         if presence > 0.0 {
             // Quantized so the shaped run is reused rather than rebuilt every frame.

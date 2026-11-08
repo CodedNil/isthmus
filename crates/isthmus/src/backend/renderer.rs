@@ -429,11 +429,11 @@ struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: v
 
     #[test]
     fn foreign_images_fail_without_poisoning_later_passes_or_recovery() {
-        let mut owner = pollster::block_on(Renderer::<ImageProgram>::headless((), wgpu::TextureFormat::Rgba8Unorm))
-            .unwrap();
+        let mut owner =
+            pollster::block_on(Renderer::<ImageProgram>::headless((), wgpu::TextureFormat::Rgba8Unorm)).unwrap();
         let (_, foreign) = owner.add_image([1, 1]);
-        let mut renderer = pollster::block_on(Renderer::<ImageProgram>::headless((), wgpu::TextureFormat::Rgba8Unorm))
-            .unwrap();
+        let mut renderer =
+            pollster::block_on(Renderer::<ImageProgram>::headless((), wgpu::TextureFormat::Rgba8Unorm)).unwrap();
         let (first, first_image) = renderer.add_image([1, 1]);
         let (second, second_image) = renderer.add_image([1, 1]);
         let source = crate::Image::rgba8([1, 1], vec![255, 128, 0, 255]);

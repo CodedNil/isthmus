@@ -3,7 +3,7 @@ use crate::{
         Music, TRACK_SPACING_MS,
         lyrics::{LyricSegment, Lyrics},
     },
-    render::{BarLayout, PANEL_START, Program, TEXT_SHADOW, TEXT_SMALL, UiContext},
+    render::{BarLayout, PANEL_START, Program, TEXT_SHADOW, UiContext},
 };
 use isthmus::prelude::*;
 use isthmus_2d::{
@@ -15,7 +15,7 @@ use std::{collections::BTreeMap, ops::Range};
 const LYRIC_SIZE: f32 = 14.0;
 const LYRIC_WEIGHT: f32 = 800.0;
 const SHADOW_REACH: f32 = 2.0;
-/// Multiplier deepening the shared text shadow behind lyrics and section labels.
+/// Multiplier deepening the shared text shadow behind lyrics.
 const SHADOW_STRENGTH: f32 = 4.0;
 const BACKDROP_REACH: f32 = 12.0;
 const BACKDROP_OPACITY: f32 = 0.24;
@@ -28,7 +28,6 @@ const ROW_SPACING: f32 = 16.0;
 /// Distance from the panel's bottom edge to the first lyric row.
 const LYRIC_INSET: f32 = 12.0;
 /// Space reserved below the panel for one lyric row and the label beneath it.
-#[cfg(target_os = "linux")]
 pub const EXTENSION: f32 = LYRIC_INSET + ROW_SPACING;
 
 const GROUP_COLOR: Vec3 = vec3(1.00, 0.72, 0.79);
@@ -55,7 +54,7 @@ struct Run {
     width: f32,
     line: ShapedLine,
     scale: f32,
-    /// Rows raised by earlier voices overlapping this section.
+    /// Rows raised by earlier overlapping voices.
     lane: u32,
 }
 
@@ -183,26 +182,19 @@ impl PreparedLyrics {
             let after = speeds[i.min(speeds.len() - 1)];
             point.z = if before + after > 0.0 { 2.0 * before * after / (before + after) } else { 0.0 };
         }
-        // A whole section of a voice shares one lane, so a single word never drifts off it.
-        let mut section_starts: Vec<f32> = self.source.sections.iter().map(|section| section.time.start).collect();
-        section_starts.sort_by(f32::total_cmp);
+        // Keep each phrase on one lane so a single word never drifts off it.
         let mut occupied: Vec<Vec<(f32, f32)>> = Vec::new();
         for channel in &mut channels {
             for run in &mut channel.runs {
                 run.x = self.position(run.time.start, duration);
             }
-            let section = |time: f32| section_starts.partition_point(|start| *start <= time);
             let mut phrases = Vec::new();
             let mut first = 0;
             for index in 0..channel.runs.len() {
-                let boundary = channel.runs.get(index + 1).is_none_or(|next| {
-                    if section_starts.is_empty() {
-                        // Without section labels, split only at pauses long enough to be a gap.
-                        next.x - (channel.runs[index].x + channel.runs[index].width) > LANE_GAP
-                    } else {
-                        section(next.time.start) != section(channel.runs[index].time.start)
-                    }
-                });
+                let boundary = channel
+                    .runs
+                    .get(index + 1)
+                    .is_none_or(|next| next.x - (channel.runs[index].x + channel.runs[index].width) > LANE_GAP);
                 if !boundary {
                     continue;
                 }
@@ -228,16 +220,6 @@ impl PreparedLyrics {
             run.line = run.line.clone().cached_distance();
         }
         self.channels = channels;
-    }
-
-    /// Lowest lyric row drawn at a track-local x, so a label can sit beneath it.
-    fn rows_at(&self, x: f32) -> f32 {
-        self.channels
-            .iter()
-            .flat_map(|channel| &channel.runs)
-            .filter(|run| run.x <= x && x <= run.x + run.width)
-            .map(|run| run.lane as f32 + 1.0)
-            .fold(1.0, f32::max)
     }
 
     pub fn position(&self, time: f32, duration: f32) -> f32 {
@@ -299,6 +281,7 @@ pub fn height(music: &Music) -> f32 {
 
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     let Some((index, time)) = music.queue.span_at_playhead() else { return };
+    let playlist_middle_y = PANEL_START + f32::midpoint(context.config.height, super::music::playlist_extension(music));
     let tracks = music.queue.tracks.as_slice();
     let resources = &mut music.resources;
     let silence = PreparedLyrics::default();
@@ -306,16 +289,6 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     let current = &tracks[index];
     let lyrics = resources.lyrics(current, context.frame.resources).unwrap_or(&silence);
     let contributed = lyrics.contributed_to_lrclib;
-    let row_center = if contributed {
-        let row = lyrics
-            .channels
-            .iter()
-            .find_map(|channel| channel.runs.first())
-            .map_or_else(|| context.frame.resources.shape("M", LYRIC_SIZE, LYRIC_WEIGHT).text, |run| run.line.text);
-        f32::midpoint(row.min.y, row.max.y)
-    } else {
-        0.0
-    };
     let mut x = layout.playhead_x - lyrics.position(time, current.duration_ms as f32);
     let mut first = index;
     while first > 0 && x >= screen.start {
@@ -325,13 +298,12 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         x -= lyrics.position(track.queue_span_ms(), track.duration_ms as f32);
     }
     if contributed {
-        let baseline = PANEL_START + context.config.height + LYRIC_INSET;
-        let center = vec2(10.0, baseline + row_center);
+        let center = vec2(10.0, playlist_middle_y);
         let bounds = Rect::from_center_size(center, Vec2::splat(10.0)).expanded(BACKDROP_REACH);
         shader!(context.frame, |_, bounds: Rect, center: Vec2| raster(bounds), |_, fragment| {
             let sample = lyric_sample(Shape::star(4.0, 2.56).offset(0.8).sample_at(fragment.pixel - center));
             let color = sample.paint(vec4(1.0, 0.82, 0.24, 1.0), lyric_shadow(sample.distance));
-            color.with_w(color.w / sample.coverage.max(f32::MIN_POSITIVE))
+            color.with_w(color.w * 0.5 / sample.coverage.max(f32::MIN_POSITIVE))
         },);
     }
     for track in &tracks[first..] {
@@ -340,20 +312,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         }
         let lyrics = resources.lyrics(track, context.frame.resources).unwrap_or(&silence);
         let baseline = PANEL_START + context.config.height + LYRIC_INSET;
-        for section in &lyrics.source.sections {
-            let local = lyrics.position(section.time.start, track.duration_ms as f32);
-            let label = context.frame.resources.shape(&section.text, TEXT_SMALL, f32::MAX);
-            let origin = vec2(x + local, baseline + lyrics.rows_at(local) * ROW_SPACING);
 
-            let playhead_x = layout.playhead_x;
-            let line = context.frame.resources.place(&label, origin).outlined(BACKDROP_REACH);
-            shader!(context.frame, |_, playhead_x: f32, line: Text| line, |_, surface| {
-                let sample = lyric_sample(surface.sample);
-                let color = sample.paint(Vec4::ONE, lyric_shadow(sample.distance));
-                color.with_w(color.w / surface.coverage.max(f32::MIN_POSITIVE))
-                    * vec4(1.0, 1.0, 1.0, history_opacity(surface.pixel.x, playhead_x))
-            },);
-        }
         for channel in &lyrics.channels {
             let color = channel.singer.map_or(GROUP_COLOR, |singer| CHANNEL_COLORS[singer % CHANNEL_COLORS.len()]);
             for run in channel
@@ -458,16 +417,12 @@ mod tests {
     }
 
     #[test]
-    fn lyric_edges_have_the_same_width_at_different_angles() {
+    fn lyric_edges_and_moving_stems_preserve_coverage() {
         for gradient in [Vec2::X, Vec2::Y, Vec2::ONE.normalize()] {
             let sample = lyric_sample(Sample { distance: -0.2, gradient, coverage: 1.0 });
             assert!((sample.gradient.abs().element_sum() - EDGE_WIDTH).abs() < 0.0001);
             assert!((sample.fill() - (0.5 + 0.2 / EDGE_WIDTH)).abs() < 0.0001);
         }
-    }
-
-    #[test]
-    fn moving_stems_preserve_coverage_across_pixel_phases() {
         for width in [1.5, 2.3, 3.7] {
             for phase in 0..16 {
                 let offset = phase as f32 / 16.0;
@@ -487,16 +442,13 @@ mod tests {
     }
 
     #[test]
-    fn backdrop_follows_text_and_disappears_outside_its_reach() {
+    fn lyric_shadows_and_history_fade_at_expected_boundaries() {
         assert!(lyric_shadow(SHADOW_REACH + 1.0).w > 0.0);
         assert!(lyric_shadow(0.0).w > lyric_shadow(SHADOW_REACH + 1.0).w);
         assert!(lyric_shadow(0.0).w < 1.0);
         assert_eq!(lyric_shadow(BACKDROP_REACH).w, 0.0);
         assert_eq!(lyric_shadow(BACKDROP_REACH + 10.0).w, 0.0);
-    }
 
-    #[test]
-    fn fades_only_to_the_left_of_the_playhead() {
         for playhead in [0.0, 0.5, 380.0] {
             for offset in [0.0, 0.25, 100.0, 2000.0] {
                 assert_eq!(history_opacity(playhead + offset, playhead), 1.0);
@@ -523,7 +475,6 @@ mod tests {
                 },
             ],
             timing: Timing::Line,
-            ..Default::default()
         };
         let mut lyrics = PreparedLyrics::new(source, false);
         lyrics.prepare(1000.0, &mut text);
@@ -564,7 +515,6 @@ mod tests {
                 },
             ],
             timing: Timing::Syllable,
-            ..Default::default()
         };
         let space = text.shape(" ", LYRIC_SIZE, LYRIC_WEIGHT).text.width.max(6.0);
         let mut lyrics = PreparedLyrics::new(source, false);
@@ -591,7 +541,6 @@ mod tests {
                 singer: Some(0),
             }],
             timing: Timing::Word,
-            ..Default::default()
         };
         let normal_width = text.shape("sing", LYRIC_SIZE, LYRIC_WEIGHT).text.width;
         let mut lyrics = PreparedLyrics::new(source, false);

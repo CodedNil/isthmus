@@ -147,8 +147,7 @@ fn parse_lyricsfile(source: &str) -> MusicResult<Lyrics> {
             singer: Some(0),
         });
     }
-    let mut lyrics =
-        Lyrics { lines: canonical, timing: if has_words { Timing::Word } else { Timing::Line }, ..Default::default() };
+    let mut lyrics = Lyrics { lines: canonical, timing: if has_words { Timing::Word } else { Timing::Line } };
     if has_words {
         lyrics.timing = fragment_timing(&lyrics.lines);
     }

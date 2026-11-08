@@ -135,6 +135,9 @@ impl Drop for NativeSurface {
 const PANEL_OVERFLOW: f32 = 12.0;
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const AUDIO_WINDOW_SIZE: usize = 1024;
+/// Decibel range mapped onto 0..1; wide so a quiet stream is still measurable, with the display rescaling it.
+const AUDIO_FLOOR_DB: f32 = -100.0;
+const AUDIO_RANGE_DB: f32 = 94.0;
 const AUDIO_BAND_EDGES: [f32; AUDIO_SPECTRUM_BANDS + 1] =
     [60.0, 120.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 12_000.0];
 const LAUNCHER_SOCKET_NAME: &str = "cantus-launcher.sock";
@@ -596,10 +599,10 @@ fn capture_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) -> io::Result<()
                     };
                     let bins = &spectrum[bin(AUDIO_BAND_EDGES[band])..bin(AUDIO_BAND_EDGES[band + 1])];
                     let rms = (bins.iter().map(microfft::Complex32::norm_sqr).sum::<f32>()
-                        / bins.len() as f32
-                        / AUDIO_WINDOW_SIZE as f32)
+                        / (AUDIO_WINDOW_SIZE * AUDIO_WINDOW_SIZE) as f32)
                         .sqrt();
-                    let value = ((20.0 * rms.log10() + 30.0) / 30.0).saturate();
+                    // A wide range so a quiet stream is still measurable; the display rescales it per band.
+                    let value = ((20.0 * rms.log10() - AUDIO_FLOOR_DB) / AUDIO_RANGE_DB).saturate();
                     level.store(value.to_bits(), Ordering::Relaxed);
                 }
             }

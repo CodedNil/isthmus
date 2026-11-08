@@ -1,6 +1,5 @@
 use super::{
-    LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, items, matches_track, normalize, prefer_lyrics,
-    section_label, separate,
+    LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, items, matches_track, normalize, prefer_lyrics, separate,
 };
 use crate::{
     app::fetch_json,
@@ -80,7 +79,7 @@ impl Session {
                 ("subtitle_format", "mxm"),
                 ("optional_calls", "track.richsync"),
                 ("richsync_compact_type", "words"),
-                ("part", "track_structure,track_performer_tagging"),
+                ("part", "track_performer_tagging"),
             ])
             .await?;
         let mut calls = response["macro_calls"].take();
@@ -107,17 +106,7 @@ impl Session {
             }
             let lines: Vec<RichsyncLine> =
                 serde_json::from_str(richsync["richsync_body"].as_str().ok_or("Musixmatch richsync body missing")?)?;
-            let mut lyrics = parse_richsync(&lines, &matched, track.duration_ms as f32)?;
-            // Structure is optional: an unavailable annotation must not discard valid word timing.
-            if !lyrics.is_empty()
-                && flag(&matched["has_track_structure"])
-                && let Some(id) = matched["commontrack_id"].as_u64()
-                && let Ok(metadata) =
-                    self.request(http, "crowd.track.metadata.get", &[("commontrack_id", &id.to_string())]).await
-            {
-                lyrics.sections = sections(&lines, &metadata);
-            }
-            Ok(lyrics)
+            parse_richsync(&lines, &matched, track.duration_ms as f32)
         }
         .await;
         prefer_lyrics(subtitles, words)
@@ -219,29 +208,6 @@ struct RichsyncChunk {
 struct Voice {
     singer: Option<usize> = Some(0),
     backing: bool,
-}
-
-// Section snippets must match in sequence, so repeated choruses cannot shift their labels.
-fn sections(lines: &[RichsyncLine], metadata: &Value) -> Vec<LyricSegment> {
-    let mut index = 0;
-    let mut sections = Vec::new();
-    for part in items(&metadata["metadata"]["track_structure"]) {
-        let Some(description) = part["description"].as_str() else { return Vec::new() };
-        let first = index;
-        for text in snippet_lines(&part["snippet"]) {
-            if lines.get(index).is_none_or(|line| normalize(&line.text) != text) {
-                return Vec::new();
-            }
-            index += 1;
-        }
-        if index > first {
-            sections.push(LyricSegment {
-                time: lines[first].start * 1000.0..lines[index - 1].end * 1000.0,
-                text: section_label(description),
-            });
-        }
-    }
-    if index == lines.len() { sections } else { Vec::new() }
 }
 
 fn performers(lines: &[RichsyncLine], matched: &Value) -> Vec<Voice> {
@@ -352,7 +318,7 @@ fn parse_richsync(lines: &[RichsyncLine], matched: &Value, duration: f32) -> Mus
             singer: voice.singer,
         });
     }
-    let mut lyrics = Lyrics { lines: output, timing: Timing::Word, ..Default::default() };
+    let mut lyrics = Lyrics { lines: output, timing: Timing::Word };
     lyrics.timing = fragment_timing(&lyrics.lines);
     Ok(lyrics)
 }

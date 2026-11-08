@@ -40,21 +40,6 @@ pub(super) fn separate(segments: &mut [LyricSegment]) {
     }
 }
 
-pub(super) fn section_label(name: &str) -> String {
-    let mut label = String::new();
-    for ch in name.chars() {
-        if ch.is_uppercase() && label.ends_with(char::is_lowercase) {
-            label.push(' ');
-        }
-        if label.is_empty() {
-            label.extend(ch.to_uppercase());
-        } else {
-            label.push(ch);
-        }
-    }
-    label
-}
-
 #[derive(Clone)]
 pub struct LyricSegment {
     /// Playback position in milliseconds.
@@ -77,7 +62,6 @@ pub struct LyricLine {
 pub struct Lyrics {
     /// Canonical synchronized content, shaped like Lyricsfile's `lines`.
     pub lines: Vec<LyricLine>,
-    pub sections: Vec<LyricSegment>,
     pub timing: Timing,
 }
 
@@ -102,7 +86,7 @@ impl Lyrics {
                 singer: Some(0),
             })
             .collect();
-        Self { lines, timing, ..Default::default() }
+        Self { lines, timing }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -133,11 +117,10 @@ fn describe_result(result: &MusicResult<Lyrics>) -> String {
         Ok(lyrics) if !lyrics.is_empty() => {
             let lanes = lyrics.lines.iter().map(|line| line.lane).max().unwrap_or(0) + 1;
             format!(
-                "{} sync  ·  {} lines  ·  {} words  ·  {lanes} lanes  ·  {} sections",
+                "{} sync  ·  {} lines  ·  {} words  ·  {lanes} lanes",
                 lyrics.timing,
                 lyrics.lines.len(),
-                lyrics.word_count(),
-                lyrics.sections.len()
+                lyrics.word_count()
             )
         }
         Ok(_) => "no lyrics".to_owned(),
@@ -230,11 +213,6 @@ pub(super) async fn fetch(
         if !already_uploaded {
             // Contribution is best-effort; playback must not fail because of publishing.
             let words = lyrics.word_count();
-            info!(
-                "LRCLIB upload started: {title:.28} — {artist:.20} · {} · {} lines · {words} words",
-                lyrics.timing,
-                lyrics.lines.len()
-            );
             let source = selected_source.map_or_else(|| "unknown".to_owned(), |source| source.to_string());
             match lrclib::publish_lrclib(track, lyrics, http, &source).await {
                 Ok(status) => info!(

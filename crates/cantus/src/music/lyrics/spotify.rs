@@ -61,7 +61,7 @@ pub(super) fn parse_spotify(response: &Value, duration: u32) -> MusicResult<Lyri
         }
         output.push(LyricLine { text: format!("{text} "), time: start..end, words, lane: 0, singer: Some(0) });
     }
-    let mut lyrics = Lyrics { lines: output, timing: Timing::Line, ..Default::default() };
+    let mut lyrics = Lyrics { lines: output, timing: Timing::Line };
     if all_word_synced && lyrics.lines.iter().any(|line| line.words.is_some()) {
         lyrics.timing = fragment_timing(&lyrics.lines);
     } else {

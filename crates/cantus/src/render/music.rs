@@ -23,6 +23,7 @@ pub const PALETTE_COLORS: usize = 4;
 const ICON_WIDTH: f32 = 24.0;
 /// Center-to-center icon spacing for rating stars and playlist artwork.
 const ICON_SPACING: f32 = 20.0;
+const HEXAGON_WIDTH_RATIO: f32 = 0.866_025_4;
 /// Height added below the pill for ratings and saved playlists.
 const PRIMARY_SUPPORT_DEPTH: f32 = 8.0;
 /// Height added below the first icon row for other playlists.
@@ -210,6 +211,45 @@ impl Droplets {
     }
 }
 
+pub(super) fn playlist_extension(music: &Music) -> f32 {
+    (super::lyrics::height(music) - 10.0).max(0.0)
+}
+
+const fn playlist_row_counts(count: usize) -> [usize; 3] {
+    let base = count / 3;
+    match count % 3 {
+        0 => [base; 3],
+        1 => [base, base + 1, base],
+        _ => [base + 1, base, base + 1],
+    }
+}
+
+fn playlist_grid_width(count: usize, tile_width: f32) -> f32 {
+    count.div_ceil(3) as f32 * tile_width
+}
+
+fn playlist_button_center(index: usize, count: usize, size: Vec2) -> Vec2 {
+    let rows = playlist_row_counts(count);
+    let (row, item) = if index < rows[0] {
+        (0, index)
+    } else if index < rows[0] + rows[1] {
+        (1, index - rows[0])
+    } else {
+        (2, index - rows[0] - rows[1])
+    };
+    let columns = rows[0].max(rows[1]).max(rows[2]);
+    let offset = (columns - rows[row]) as f32 * 0.5;
+    vec2(GAP + size.x * (offset + item as f32 + 0.5), PANEL_START + size.y * (0.5 + row as f32 * 0.75))
+}
+
+fn playlist_hex(rect: Rect) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+    let radius = rect.size().y * 0.5;
+    Shape::from_fn(rect, move |point| {
+        let point = (point - rect.center()).abs();
+        point.x.max(point.x * 0.5 + point.y * HEXAGON_WIDTH_RATIO) - radius * HEXAGON_WIDTH_RATIO
+    })
+}
+
 /// Squircle corners on complete edges blend into circular ends as they are clipped.
 fn track_shape(rect: Rect, rounding: Vec2) -> impl Sdf {
     // Narrow incoming cards keep the curved ends and full height as they grow.
@@ -324,21 +364,20 @@ impl MusicView {
         let playlists = music.playlists.iter().filter(|playlist| playlist.rating_index.is_none());
         let count = playlists.clone().count();
         let show_playlists = context.config.ratings_enabled || count > 0;
-        let button_size = (context.config.height + PRIMARY_SUPPORT_DEPTH) / 3.0;
-        let tracks_left = if show_playlists { (count + 1).div_ceil(3) as f32 * button_size + GAP * 2.0 } else { 0.0 };
+        let extension = if context.config.lyrics_enabled { playlist_extension(music) } else { 0.0 };
+        let tile_height = (context.config.height + extension) / 2.5;
+        let tile_size = vec2(tile_height * HEXAGON_WIDTH_RATIO, tile_height);
+        let item_count = count + 1;
+        let tracks_left = if show_playlists { playlist_grid_width(item_count, tile_size.x) + GAP * 2.0 } else { 0.0 };
         if show_playlists {
             self.playlist_hover.resize(count + 1, 0.0);
             let mut icons = SmallVec::<[_; 8]>::new();
             for (index, playlist) in iter::once(None).chain(playlists.map(Some)).enumerate() {
-                let rows = (count + 1 - index / 3 * 3).min(3);
-                let center = vec2(
-                    GAP + (index / 3) as f32 * button_size + button_size * 0.5,
-                    PANEL_START + ((index % 3) as f32 + 0.5 + (3 - rows) as f32 * 0.5) * button_size,
-                );
-                let rect = Rect::from_center_size(center, Vec2::splat(button_size - 2.0));
+                let center = playlist_button_center(index, item_count, tile_size);
+                let rect = Rect::from_center_size(center, tile_size);
                 let response = context
                     .interaction
-                    .interact(("play-playlist", playlist.map(|playlist| playlist.id)), Shape::rectangle(rect));
+                    .interact(("play-playlist", playlist.map(|playlist| playlist.id)), playlist_hex(rect));
                 context.interaction.input_region(rect);
                 if response.clicked {
                     music.play_playlist(playlist.map(|playlist| playlist.id));
@@ -346,11 +385,11 @@ impl MusicView {
                 }
                 let hover = &mut self.playlist_hover[index];
                 *hover = hover.move_towards(f32::from(response.hovered), context.frame.delta_time.min(0.1) / 0.18);
-                icons.push((playlist, rect, hover.smoothstep(0.0, 1.0)));
+                icons.push((playlist, center, hover.smoothstep(0.0, 1.0)));
             }
             icons.sort_by(|a, b| a.2.total_cmp(&b.2));
-            for (playlist, rect, hover) in icons {
-                let rect = rect.expanded((button_size - 2.0) * hover * 0.3);
+            for (playlist, center, hover) in icons {
+                let rect = Rect::from_center_size(center, tile_size * (1.0 - 2.0 * (1.0 - hover) / tile_size.y));
 
                 let liked = playlist.is_none();
                 let image = playlist
@@ -358,7 +397,7 @@ impl MusicView {
                     .map_or(&*EMPTY_ART, |art| &art.image);
                 shader!(
                     context.frame,
-                    |_, rect: Rect, liked: bool, hover: f32, image: &Image| Shape::rounded_rect(rect, 3.0),
+                    |_, rect: Rect, liked: bool, hover: f32, image: &Image| playlist_hex(rect).outlined(8.0),
                     |_, surface| {
                         let uv = rect.uv(surface.pixel);
                         let texture = image.sample(uv);
@@ -372,7 +411,7 @@ impl MusicView {
                         } else {
                             background.lerp(texture.truncate(), texture.w)
                         };
-                        (color * (1.0 + hover * 0.2)).extend(1.0)
+                        shade_icon(color * (1.0 + hover * 0.2), playlist_hex(rect), surface.pixel)
                     },
                 );
             }
@@ -629,7 +668,7 @@ impl MusicView {
                 if is_star && response.hovered {
                     rating = Some(slot as i32 * 2 + 1 + i32::from(mouse_pos.x >= center.x));
                 }
-                icons.push((slot, playlist, secondary, is_star, alpha, center, response));
+                icons.push((slot, playlist, is_star, alpha, center, response));
             }
         }
         let pointer_active = f32::from(hovered);
@@ -785,16 +824,17 @@ impl MusicView {
         }
 
         if let Some(track_id) = track.id {
-            for (slot, playlist, secondary, is_star, alpha, center, response) in icons {
+            for (slot, playlist, is_star, alpha, center, response) in icons {
                 let alpha = alpha * opacity;
                 let proximity = center.distance(mouse_pos).smoothstep(ICON_WIDTH * 2.5, ICON_WIDTH * 0.25)
                     * mouse_pressure.clamp_num(0.0, 1.0)
                     * pointer_active;
                 let x_push = (center.x - mouse_pos.x) * proximity * 0.5;
                 let radius = ICON_WIDTH * 0.5 * (1.05 + 0.63 * proximity);
+                let hover_scale = 1.0 + f32::from(playlist.is_some() && response.hovered) * 0.1;
                 let quad = Quad::new(
                     center + vec2(x_push, 0.0),
-                    Vec2::splat(radius * 2.0 + 14.0),
+                    Vec2::splat((radius * 2.0 + 14.0) * hover_scale),
                     Vec2::from_angle(x_push * 0.01),
                 );
 
@@ -811,7 +851,7 @@ impl MusicView {
                     .and_then(|playlist| music.resources.art(playlist.image_url.as_deref()))
                     .map_or(&*EMPTY_ART, |art| &art.image);
                 let fill = (rating.unwrap_or(0) as f32 * 0.5 - slot as f32).saturate();
-                let desaturation = 0.2 * f32::from(secondary && !response.hovered);
+                let desaturation = 0.2 * f32::from(!response.hovered);
                 shader!(
                     context.frame,
                     |_,
@@ -977,6 +1017,34 @@ mod tests {
     }
 
     #[test]
+    fn playlist_hex_grid_balances_rows_and_uses_available_vertical_space() {
+        for (count, rows) in [(5, [2, 1, 2]), (4, [1, 2, 1]), (6, [2, 2, 2]), (7, [2, 3, 2])] {
+            assert_eq!(playlist_row_counts(count), rows);
+        }
+        let extension = (super::super::lyrics::EXTENSION * 2.0 - 10.0).max(0.0);
+        let tile_height = (100.0 + extension) / 2.5;
+        let size = vec2(tile_height * HEXAGON_WIDTH_RATIO, tile_height);
+        let centers = (0..5).map(|i| playlist_button_center(i, 5, size)).collect::<Vec<_>>();
+
+        assert!((size.y * 2.5 - 100.0 - extension).abs() < 0.0001);
+        assert_eq!([centers[0].y, centers[3].y], [centers[1].y, centers[4].y]);
+        assert_eq!([centers[0].x, centers[1].x], [centers[3].x, centers[4].x]);
+        let four = (0..4).map(|i| playlist_button_center(i, 4, size)).collect::<Vec<_>>();
+        assert!((four[0].x - f32::midpoint(four[1].x, four[2].x)).abs() < 0.0001);
+        assert!((centers[2].y - centers[0].y - size.y * 0.75).abs() < 0.0001);
+        assert!((centers[2].y - PANEL_START - f32::midpoint(100.0, extension)).abs() < 0.0001);
+        for count in 1..=12 {
+            let centers = (0..count).map(|i| playlist_button_center(i, count, size)).collect::<Vec<_>>();
+            let bounds = centers.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), center| {
+                (min.min(center.x - size.x * 0.5), max.max(center.x + size.x * 0.5))
+            });
+            assert!((bounds.1 - bounds.0 - playlist_grid_width(count, size.x)).abs() < 0.0001);
+        }
+        let tile = Rect::from_center_size(Vec2::ZERO, size);
+        assert!(playlist_hex(tile).outlined(8.0).bounds(0.0).min.x < tile.min.x - 7.9);
+    }
+
+    #[test]
     fn artwork_crop_shares_cornering_on_both_sides() {
         let crop = Rect::from_center_size(Vec2::ZERO, Vec2::splat(20.0));
         let left_corner = vec2(-9.0, -9.0);
@@ -990,13 +1058,22 @@ mod tests {
     }
 
     #[test]
-    fn track_shadows_fade_only_at_playlist_edge() {
+    fn history_visuals_and_hit_regions_stop_at_playlist_boundary() {
         let viewport = Rect::new(vec2(100.0, 0.0), vec2(500.0, 120.0));
         for (x, alpha) in [(100.0 - GAP, 0.0), (100.0 - GAP * 0.5, 0.5), (100.0, 1.0)] {
             for y in [0.0, 60.0, 120.0] {
                 assert_eq!(shadow_fade(vec2(x, y), viewport), alpha);
             }
         }
+        assert_eq!(history_visibility(100.0, 100.0, 50.0), 0.0);
+        assert_eq!(history_visibility(150.0, 100.0, 50.0), 1.0);
+        assert!((history_visibility(125.0, 100.0, 50.0) - 0.5).abs() < 0.001);
+
+        let pill = Rect::new(vec2(30.0, 0.0), vec2(90.0, 60.0));
+        let visible = Shape::rectangle(Rect::new(vec2(70.0, 0.0), vec2(400.0, 200.0)));
+        let hit = music_shape(pill, Vec2::ONE, [Vec2::ZERO; 2]).offset(12.0).intersection(visible);
+        assert!(!hit.contains(vec2(60.0, 30.0)));
+        assert!(hit.contains(vec2(80.0, 30.0)));
     }
 
     #[test]
@@ -1109,18 +1186,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_incoming_tracks_keep_full_height_and_curved_corners() {
-        for width in [2.0, 8.0, 25.0, 50.0] {
-            let pill = Rect::from_center_size(vec2(200.0, 100.0), vec2(width, 50.0));
-            let shape = track_shape(pill, Vec2::ONE);
-            assert!(shape.contains(pill.center() + vec2(0.0, 24.0)));
-            assert!(shape.contains(pill.center() + vec2(width * 0.45, 0.0)));
-            assert!(!shape.contains(pill.center() + vec2(width * 0.45, 24.0)));
-        }
-    }
-
-    #[test]
-    fn track_shapes_remain_finite_at_different_bar_heights() {
+    fn track_shapes_handle_narrow_widths_and_varying_heights() {
         for height in [20.0, 32.0, 40.0, 50.0, 80.0] {
             let pill = Rect::from_center_size(vec2(200.0, 100.0), vec2(240.0, height));
             for amount in [0.0, 0.5, 1.0] {
@@ -1134,26 +1200,17 @@ mod tests {
                     }
                 }
                 let artwork =
-                    track_shape(Rect::from_center_size(pill.center(), Vec2::splat(height)), vec2(1.0, rounding.y));
+                    track_shape(Rect::from_center_size(pill.center(), Vec2::splat(height)), Vec2::splat(rounding.y));
                 assert!(artwork.distance_at(pill.center()).is_finite());
             }
         }
-    }
-
-    #[test]
-    fn history_fades_only_at_playlist_boundary() {
-        assert_eq!(history_visibility(100.0, 100.0, 50.0), 0.0);
-        assert_eq!(history_visibility(150.0, 100.0, 50.0), 1.0);
-        assert!((history_visibility(125.0, 100.0, 50.0) - 0.5).abs() < 0.001);
-    }
-
-    #[test]
-    fn history_hit_regions_stop_at_playlist_boundary() {
-        let pill = Rect::new(vec2(30.0, 0.0), vec2(90.0, 60.0));
-        let visible = Shape::rectangle(Rect::new(vec2(70.0, 0.0), vec2(400.0, 200.0)));
-        let hit = music_shape(pill, Vec2::ONE, [Vec2::ZERO; 2]).offset(12.0).intersection(visible);
-        assert!(!hit.contains(vec2(60.0, 30.0)));
-        assert!(hit.contains(vec2(80.0, 30.0)));
+        for width in [2.0, 8.0, 25.0, 50.0] {
+            let pill = Rect::from_center_size(vec2(200.0, 100.0), vec2(width, 50.0));
+            let shape = track_shape(pill, Vec2::ONE);
+            assert!(shape.contains(pill.center() + vec2(0.0, 24.0)));
+            assert!(shape.contains(pill.center() + vec2(width * 0.45, 0.0)));
+            assert!(!shape.contains(pill.center() + vec2(width * 0.45, 24.0)));
+        }
     }
 
     #[test]

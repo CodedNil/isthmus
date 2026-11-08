@@ -47,8 +47,6 @@ pub struct Interaction {
     hot: Option<Active>,
     active: Option<Active>,
     scroll: i32,
-    held_seconds: f32,
-    previous_held_seconds: f32,
     widgets: Vec<Widget>,
     pub input_regions: Vec<Rect>,
 }
@@ -59,8 +57,6 @@ pub struct Response {
     pub clicked: bool,
     pub held: bool,
     pub scroll: i32,
-    pub held_seconds: f32,
-    previous_held_seconds: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -74,24 +70,11 @@ pub enum InputEvent {
     Scroll(i32),
 }
 
-impl Response {
-    pub fn held_for(&self, seconds: f32) -> bool {
-        self.held && self.previous_held_seconds < seconds && self.held_seconds >= seconds
-    }
-}
-
 impl Interaction {
     pub fn begin_frame(&mut self, delta_time: f32, time: f32) {
         self.input_regions.clear();
         self.hot = self.pointer().and_then(|pointer| self.hover_target(pointer));
         self.widgets.clear();
-        self.previous_held_seconds = self.held_seconds;
-        if self.down() {
-            self.held_seconds += delta_time;
-        } else {
-            self.held_seconds = 0.0;
-            self.previous_held_seconds = 0.0;
-        }
         let target_pressure = match self.pointer {
             Pointer::Outside(_) => 0.0,
             Pointer::Hovering(_) => 1.0,
@@ -149,19 +132,19 @@ impl Interaction {
         matches!(self.pointer, Pointer::Held { dragging: true, .. })
     }
 
-    /// Captured drag displacement and release state, even when its widget is no longer drawn.
-    pub fn drag_motion(&self) -> Option<(Vec2, bool)> {
+    /// Captured drag key, displacement, and release state, even outside its widget.
+    pub fn drag_motion(&self) -> Option<(u64, Vec2, bool)> {
         if !self.enabled {
             return None;
         }
-        if matches!(self.active, Some(Active::Drag(_)))
+        if let Some(Active::Drag(id)) = self.active
             && self.dragging()
             && let Pointer::Held { position, origin, .. } = self.pointer
         {
-            return Some((position - origin, false));
+            return Some((id, position - origin, false));
         }
         self.events.iter().rev().find_map(|event| match event {
-            ButtonEvent::Release { id: Active::Drag(_), drag_offset: Some(offset) } => Some((*offset, true)),
+            ButtonEvent::Release { id: Active::Drag(id), drag_offset: Some(offset) } => Some((*id, *offset, true)),
             _ => None,
         })
     }
@@ -205,8 +188,6 @@ impl Interaction {
                 if self.active.is_some() {
                     self.events.push(ButtonEvent::Press(position));
                 }
-                self.held_seconds = 0.0;
-                self.previous_held_seconds = 0.0;
             }
             InputEvent::Release => {
                 if let Pointer::Held { origin, dragging, position } = self.pointer
@@ -222,8 +203,6 @@ impl Interaction {
             InputEvent::Cancel => {
                 self.pointer = Pointer::Hovering(self.mouse_pos());
                 self.active = None;
-                self.held_seconds = 0.0;
-                self.previous_held_seconds = 0.0;
             }
             InputEvent::Scroll(direction) => self.scroll = self.scroll.saturating_add(direction),
         }
@@ -258,8 +237,6 @@ impl Interaction {
                 .any(|event| matches!(event, ButtonEvent::Release { id: target, drag_offset: None } if *target == id)),
             held: active && self.down(),
             scroll: if hovered { mem::take(&mut self.scroll) } else { 0 },
-            held_seconds: self.held_seconds,
-            previous_held_seconds: self.previous_held_seconds,
         }
     }
 
@@ -295,7 +272,7 @@ mod tests {
             interaction.apply(InputEvent::Motion(Vec2::new(5.0 + offset, 5.0)));
             interaction.apply(InputEvent::Release);
 
-            assert_eq!(interaction.drag_motion(), dragged.then_some((Vec2::new(offset, 0.0), true)));
+            assert_eq!(interaction.drag_motion(), dragged.then_some((7, Vec2::new(offset, 0.0), true)));
             interaction.begin_frame(0.0, 0.0);
             assert_eq!(interaction.drag(7, shape).clicked, !dragged);
             interaction.end_frame();
