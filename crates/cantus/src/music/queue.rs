@@ -128,7 +128,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn high_refresh_steps_keep_precision_after_a_long_queue() {
+    fn timeline_keeps_precision_without_paused_or_dragged_drift() {
         let mut timeline = Timeline { rate: 1.0, start_ms: -100_000_000.0, observed_at: Instant::now(), .. };
         let delta = 1.0 / 165.0;
         let step = f64::from(delta) * 1000.0;
@@ -137,17 +137,14 @@ mod tests {
             timeline.update(previous - step, false, delta);
             assert!(((previous - timeline.start_ms) - step).abs() < 0.000_001);
         }
-    }
 
-    #[test]
-    fn dragging_and_paused_clock_do_not_drift() {
-        let mut timeline = Timeline { observed_at: Instant::now(), start_ms: -100_000_000.0, .. };
+        timeline.rate = 0.0;
         let target = timeline.start_ms;
         for _ in 0..165 {
-            timeline.update(target, false, 1.0 / 165.0);
+            timeline.update(target, false, delta);
         }
         assert!((timeline.start_ms - target).abs() < f64::EPSILON);
-        timeline.update(-1234.567, true, 1.0 / 165.0);
+        timeline.update(-1234.567, true, delta);
         assert!((timeline.start_ms + 1234.567).abs() < 0.000_001);
     }
 }

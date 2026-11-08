@@ -48,20 +48,21 @@ impl Timer {
         }
     }
 
-    /// Readout for the weather pill, reporting completion once the deadline passes.
-    pub fn readout(&self) -> Option<String> {
-        let (start, clock_start) = self.start.as_ref()?;
-        let end = start.checked_add(self.duration).ok()?;
+    /// Readout and completion state for the weather pill, based on one elapsed-time sample.
+    pub fn readout(&self) -> (Option<String>, bool) {
+        let Some((start, clock_start)) = self.start.as_ref() else {
+            return (None, false);
+        };
         let elapsed = clock_start.elapsed();
-        Some(if elapsed >= self.duration {
-            format!("{} Timer Complete at {}", describe(self.duration), clock(&end))
-        } else {
-            format!("{} · ends {}", countdown(self.duration.saturating_sub(elapsed)), clock(&end))
-        })
-    }
-
-    pub fn expired(&self) -> bool {
-        self.start.as_ref().is_some_and(|(_, start)| start.elapsed() >= self.duration)
+        let expired = elapsed >= self.duration;
+        let text = start.checked_add(self.duration).ok().map(|end| {
+            if expired {
+                format!("{} Timer Complete at {}", describe(self.duration), clock(&end))
+            } else {
+                format!("{} · ends {}", countdown(self.duration.saturating_sub(elapsed)), clock(&end))
+            }
+        });
+        (text, expired)
     }
 }
 
@@ -138,6 +139,16 @@ fn describe(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readout_reports_text_and_expiration_from_one_timer_snapshot() {
+        let mut timer = Timer::default();
+        assert_eq!(timer.readout(), (None, false));
+        timer.apply(Request::Start(Duration::ZERO));
+        let (text, expired) = timer.readout();
+        assert!(expired);
+        assert!(text.unwrap().contains("Timer Complete"));
+    }
 
     #[test]
     fn parses_commands() {

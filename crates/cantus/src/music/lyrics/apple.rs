@@ -1,6 +1,4 @@
-use super::{
-    LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, matches_track, prefer_lyrics, section_label, separate,
-};
+use super::{LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, matches_track, prefer_lyrics, separate};
 use crate::music::{MusicResult, Track};
 use reqwest::{Client, StatusCode};
 use roxmltree::{Document, Node};
@@ -89,17 +87,6 @@ pub(super) fn parse_ttml(source: &str) -> Lyrics {
         .collect();
     let mut lane_ids = BTreeMap::new();
     for node in document.descendants().filter(Node::is_element) {
-        if node.tag_name().name() == "div" {
-            let name = attribute(node, "songPart").or_else(|| attribute(node, "song-part"));
-            let timing = attribute(node, "begin").and_then(time).zip(attribute(node, "end").and_then(time));
-            if let (Some(name), Some((start, end))) = (name, timing)
-                && start.is_finite()
-                && end.is_finite()
-                && end > start
-            {
-                lyrics.sections.push(LyricSegment { text: section_label(name), time: start..end });
-            }
-        }
         if node.tag_name().name() != "p" {
             continue;
         }
@@ -146,7 +133,7 @@ pub(super) fn parse_ttml(source: &str) -> Lyrics {
             lyrics.lines.push(LyricLine { text, time: start..end, words: timed_words, lane, singer });
         }
     }
-    lyrics.sections.sort_by(|a, b| a.time.start.total_cmp(&b.time.start));
+
     if lyrics.timing == Timing::Word {
         lyrics.timing = fragment_timing(&lyrics.lines);
     }

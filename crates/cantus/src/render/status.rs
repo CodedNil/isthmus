@@ -2,8 +2,8 @@ use crate::{
     app::Background,
     platform,
     render::{
-        GAP, PANEL_START, Program, TEXT_COLOR, TEXT_SMALL, UiContext,
-        sdf::{deform, glass, hash, lens, refract, sample_deformation},
+        GAP, PANEL_START, Program, TEXT_COLOR, TEXT_SHADOW, TEXT_SMALL, UiContext,
+        sdf::{deform, glass, hash, lens, sample_deformation},
         weathertime::{StatusSky, WeatherCondition, scene, sky_phase},
     },
 };
@@ -22,20 +22,48 @@ use std::{
 const STATUS_HISTORY_SAMPLES: usize = 32;
 pub const AUDIO_SPECTRUM_BANDS: usize = 7;
 const DATA_WIDTH: f32 = 32.0;
+const AUDIO_WIDTH: f32 = 20.0;
 const ACTION_WIDTH: f32 = 24.0;
-const AUDIO_BAR_SPACING: f32 = 4.0;
-const AUDIO_BAR_RADIUS: f32 = 1.25;
-const AUDIO_HALF_WIDTH: f32 = AUDIO_BAR_SPACING * (AUDIO_SPECTRUM_BANDS - 1) as f32 * 0.5 + AUDIO_BAR_RADIUS;
+/// Width of the displayed range below each band's peak, in the meter's normalised decibels (about 21 dB).
+const AUDIO_SPAN: f32 = 0.22;
+/// Share of the visualiser height over which the volume level fades.
+const VOLUME_FADE: f32 = 0.24;
+/// Fraction of the panel height at each end where releasing the power icon triggers an action.
+const SNAP_FRACTION: f32 = 0.2;
+/// Pull at which the icon is armed, i.e. the pointer has entered a snap zone.
+const ARMED_PULL: f32 = 1.0 - SNAP_FRACTION * 2.0;
+const ICON_RADIUS: f32 = 8.6;
+/// One stroke width for every part of the power icon.
+const ICON_STROKE: f32 = 2.4;
+const POWER_DRAG_ID: u64 = u64::MAX;
 /// Graph width, fixed so the battery slot does not resize it.
 const GRAPH_WIDTH: f32 = (60.0 + f32::midpoint(DATA_WIDTH, GAP)) * 0.8;
 const CHART_LINE_WIDTH: f32 = 0.85;
 const USAGE_COLOR: Vec3 = Vec3::new(0.32, 0.68, 1.0);
 const MEMORY_COLOR: Vec3 = Vec3::new(0.78, 0.3, 1.0);
-const MUTED_AUDIO_COLOR: Vec3 = Vec3::new(1.0, 0.24, 0.3);
+
 const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
 /// Padding around the contents, matching the gap above and below the graphs.
 const STATUS_INSET: f32 = GAP;
-const BASE_WIDTH: f32 = GRAPH_WIDTH * 2.0 + DATA_WIDTH + ACTION_WIDTH * 2.0 + GAP * 4.0 + STATUS_INSET * 2.0;
+const BASE_WIDTH: f32 = GRAPH_WIDTH * 2.0 + AUDIO_WIDTH + ACTION_WIDTH + GAP * 3.0 + STATUS_INSET * 2.0;
+
+fn spectrum_level(spectrum: [f32; AUDIO_SPECTRUM_BANDS], y: f32, half_height: f32) -> f32 {
+    let position = ((y / half_height * 0.5 + 0.5).saturate()) * (AUDIO_SPECTRUM_BANDS - 1) as f32;
+    let lower = position.floor() as usize;
+    let upper = (lower + 1).min(AUDIO_SPECTRUM_BANDS - 1);
+    spectrum[lower].lerp(spectrum[upper], position.fract().smoothstep(0.0, 1.0)).saturate()
+}
+
+fn power_action(pointer_y: f32, panel: Rect) -> Option<platform::PowerAction> {
+    let snap_depth = panel.size().y * SNAP_FRACTION;
+    if pointer_y <= panel.min.y + snap_depth {
+        Some(platform::PowerAction::PowerOff)
+    } else if pointer_y >= panel.max.y - snap_depth {
+        Some(platform::PowerAction::Reboot)
+    } else {
+        None
+    }
+}
 
 #[derive(Default)]
 pub struct ProcessorStatus {
@@ -56,10 +84,12 @@ pub struct StatusPanel {
     battery_level: Option<f32>,
     /// Frequency-band levels from the system audio monitor.
     audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS],
+    /// Slowly decaying per-band peak, used to auto-scale each band to the full visual range.
+    audio_peak: [f32; AUDIO_SPECTRUM_BANDS],
     /// Fractional scroll between the two newest history samples.
     history_scroll: f32,
     processors: [ProcessorStatus; 2],
-    action_hover: [f32; 2],
+    action_origin: Option<Vec2>,
     audio_monitor: Arc<AudioMonitor>,
 }
 
@@ -245,115 +275,174 @@ impl StatusPanel {
             cursor += DATA_WIDTH + GAP;
         }
 
-        for (damped, level) in self.audio_spectrum.iter_mut().zip(&self.audio_monitor.spectrum) {
+        // Each band spans a fixed range below its own recent peak, so quiet streams still reach the full width.
+        let mut audio_spectrum = [0.0; AUDIO_SPECTRUM_BANDS];
+        for (((damped, peak), scaled), level) in self
+            .audio_spectrum
+            .iter_mut()
+            .zip(&mut self.audio_peak)
+            .zip(&mut audio_spectrum)
+            .zip(&self.audio_monitor.spectrum)
+        {
             let target = f32::from_bits(level.load(Ordering::Relaxed));
-            let response = if target > *damped { 18.0 } else { 6.0 };
+            let response = if target > *damped { 20.0 } else { 6.0 };
             *damped += (target - *damped) * (1.0 - (-response * context.frame.delta_time).exp());
+            *peak = (*peak - context.frame.delta_time * 0.1).max(*damped).max(0.1);
+            *scaled = ((*damped - (*peak - AUDIO_SPAN)) / AUDIO_SPAN).saturate().powf(1.4);
         }
-        let center = cursor + DATA_WIDTH * 0.5;
-        let scroll = context.interaction.interact("volume", Shape::rectangle(section(center, DATA_WIDTH))).scroll;
+        let audio_center = cursor + AUDIO_WIDTH * 0.5;
+        let audio_rect = section(audio_center, AUDIO_WIDTH);
+        let scroll = context.interaction.interact("volume", Shape::rectangle(audio_rect)).scroll;
         if scroll != 0 {
             volume = (volume.abs() - scroll as f32 * 0.05).saturate() * volume.signum();
             self.audio_monitor.volume.store(volume.to_bits(), Ordering::Relaxed);
             platform::set_volume(volume.abs());
         }
 
-        let audio_spectrum = self.audio_spectrum;
-        let audio_rect = section(center, DATA_WIDTH);
+        // The ribbon may use the whole section width, so its widest extent sits a gap from its neighbours. The
+        // lens layer is padded so antialiasing and the shadow are never clipped.
+        let visualizer_rect = Rect::from_center_size(audio_rect.center(), vec2(AUDIO_WIDTH, height - GAP * 2.0));
+        let audio_rect = Rect::from_center_size(audio_rect.center(), audio_rect.size() + vec2(8.0, 0.0));
         shader!(
             context.frame,
-            |frame, panel: Rect, audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS], volume: f32, audio_rect: Rect| lens(
-                Shape::pill(panel),
-                frame,
-                Shape::rectangle(audio_rect)
-            ),
-            |_, surface| {
-                let point = audio_rect.local(surface.refracted);
-                let muted = if volume < 0.0 { 1.0 } else { 0.0 };
-                let volume = volume.abs();
-                let middle = (AUDIO_SPECTRUM_BANDS - 1) as f32 * 0.5;
-                let bar =
-                    (point.x / AUDIO_BAR_SPACING + middle).round().clamp_num(0.0, AUDIO_SPECTRUM_BANDS as f32 - 1.0);
-                let height = 1.2 + 7.7 * audio_spectrum[bar as usize] * (1.0 - muted);
-                let bars = Shape::pill(vec2(AUDIO_BAR_RADIUS, height) * 2.0)
-                    .fill_at(point - vec2((bar - middle) * AUDIO_BAR_SPACING, -1.5));
-                let rail_point = point - vec2(0.0, 11.5);
-                let rail = Shape::pill(vec2(AUDIO_HALF_WIDTH, AUDIO_BAR_RADIUS) * 2.0).fill_at(rail_point);
-                let level_x = AUDIO_HALF_WIDTH * (volume.saturate() * 2.0 - 1.0);
-                let level = rail * rail_point.x.smoothstep(level_x + 0.8, level_x - 0.8);
-                let color = vec3(0.18, 0.96, 1.0);
-                source_over(color.extend(bars), color.lerp(MUTED_AUDIO_COLOR, muted).extend(level))
+            |frame,
+             panel: Rect,
+             audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS],
+             volume: f32,
+             audio_rect: Rect,
+             visualizer_rect: Rect| lens(Shape::pill(panel), frame, Shape::rectangle(audio_rect)),
+            |frame, surface| {
+                let size = visualizer_rect.size();
+                let half_height = size.y * 0.5;
+                let local = visualizer_rect.local(surface.refracted);
+                let time = frame.time;
+
+                // Spectrum ribbon with fully rounded ends. Levels are stretched so typical music spans the whole
+                // range, and loud bands make the ribbon snake sideways as well as swell.
+                let level = spectrum_level(audio_spectrum, local.y, half_height);
+                let ripple = (local.y * 0.72 + time * 1.8).sin() * 0.16 + (local.y * 1.13 - time * 1.2).sin() * 0.08;
+                let max_half_width = size.x * 0.5 - 1.0;
+                let sway = (local.y * 0.45 - time * 3.2).sin() * level * 2.2;
+                let width = (2.0 + level * 6.5 + ripple * (1.0 + level * 5.0)).min(max_half_width - sway.abs());
+                let ribbon = {
+                    // Its tips always reach the full height, however thin the ribbon is.
+                    let radius = width.max(1.0);
+                    Shape::pill(Rect::from_center_size(Vec2::ZERO, vec2(radius * 2.0, size.y)))
+                        .distance_at(vec2(local.x - sway, local.y))
+                };
+                let alpha = Sample::new(ribbon, 0.0).fill() * 0.92 + (1.0 - ribbon.abs() / 1.6).saturate() * 0.08;
+
+                // Volume fills from the bottom; the boundary eases over a soft gradient.
+                let from_top = 0.5 + local.y / size.y;
+                let edge = (1.0 + VOLUME_FADE) * (1.0 - volume.abs().saturate()) - VOLUME_FADE * 0.5;
+                let lit = from_top.smoothstep(edge - VOLUME_FADE * 0.5, edge + VOLUME_FADE * 0.5);
+                // Brightest right at the level, easing back towards the base of the fill.
+                let sheen = lit * (1.0 - (from_top - edge).max(0.0) * 0.8).saturate();
+                let color = vec3(0.18, 0.52, 0.72)
+                    .lerp(vec3(0.18, 0.88, 1.0), lit)
+                    .lerp(vec3(0.7, 0.97, 1.0), sheen * 0.2 + level * 0.25 * lit);
+                // A soft dark halo so the ribbon stands out against bright backgrounds.
+                let shadow = (-ribbon.max(0.0) * 0.7).exp() * 0.28;
+                let total = alpha + shadow * (1.0 - alpha);
+                (color * alpha / total.max(0.0001)).extend(total)
             },
         );
-        cursor += DATA_WIDTH + GAP;
+        cursor += AUDIO_WIDTH + GAP;
 
-        for action in [1usize, 0] {
-            let center = cursor + ACTION_WIDTH * 0.5;
-            let shape = Shape::circle(vec2(x + center, PANEL_START + height * 0.5), ACTION_WIDTH.min(height) * 0.5);
-            let response = context.interaction.interact(("power", action), shape);
-            self.action_hover[action] =
-                self.action_hover[action].move_towards(f32::from(response.hovered), context.frame.delta_time / 0.12);
-            if response.hovered && response.held_for(1.5) {
-                platform::run_power_action(if action == 0 {
-                    platform::PowerAction::PowerOff
-                } else {
-                    platform::PowerAction::Reboot
-                });
-            }
-
-            let reboot = action == 1;
-            let hover = self.action_hover[action];
-            let selected = f32::from(response.held && response.hovered);
-            let charge = (response.held_seconds / 1.5).saturate() * selected;
-            let progress = 1.0 - selected + charge;
-            let direction = Vec2::from_angle(TAU * (0.08 + 0.82 * progress));
-            let button_center = vec2(x + center, PANEL_START + height * 0.5);
-            let button_radius = ACTION_WIDTH.min(height) * 0.5;
-            shader!(
-                context.frame,
-                |frame,
-                 panel: Rect,
-                 reboot: bool,
-                 hover: f32,
-                 selected: f32,
-                 charge: f32,
-                 progress: f32,
-                 direction: Vec2,
-                 button_center: Vec2,
-                 button_radius: f32| refract(
-                    Shape::pill(panel),
-                    frame,
-                    Shape::rectangle(Rect::from_center_size(button_center, Vec2::splat(button_radius * 2.0)))
-                ),
-                |frame, surface| {
-                    let point = (surface.refracted - button_center) / (1.0 + hover * 0.07);
-                    let (icon, expanded) = if reboot {
-                        let ring = Shape::arc(Vec2::ZERO, 7.1, TAU * 0.08, TAU * (progress * 0.82 - 0.045).max(0.0))
-                            .sample_at(point);
-                        let offset = point - direction * 7.1;
-                        let arrow = Shape::chevron(vec2(-3.2, 2.1))
-                            .sample_at(vec2(offset.dot(direction.perp()), offset.dot(direction)));
-                        let glyph = |expansion: f32| {
-                            (ring.band(-1.05 - expansion..1.05 + expansion) * progress.smoothstep(0.0, 0.02))
-                                .max(arrow.band(-f32::MAX..1.0 + expansion))
-                        };
-                        (glyph(0.0), glyph(0.8))
-                    } else {
-                        let ease = charge.smoothstep(0.0, 1.0);
-                        let radius = 7.5 - charge * 4.6 + (frame.time * 8.0).sin() * charge * (1.0 - charge) * 0.16;
-                        let ring = Shape::circle(Vec2::ZERO, radius).stroke(2.1 + ease * 1.4);
-                        let gap = Shape::rounded_rect(vec2(6.0 * (1.0 - charge), 6.0), 0.5).translated(vec2(0.0, -7.0));
-                        let stem = Shape::rounded_rect(vec2(2.1 + ease * 0.9, 9.2 - charge * 6.0), 0.7)
-                            .translated(vec2(0.0, -5.0 + charge * 3.5));
-                        let sample = ring.difference(gap).union(stem).sample_at(point);
-                        (sample.fill(), sample.band(-f32::MAX..0.8))
-                    };
-                    let color = TEXT_COLOR.lerp(vec3(0.95, 0.42, 0.4), hover.max(selected * (0.5 + charge * 0.5)));
-                    source_over((color * (1.0 + charge * 0.45)).extend(icon), Vec3::ZERO.extend(expanded * 0.18))
-                },
-            );
-            cursor += ACTION_WIDTH + GAP;
+        let icon_home = vec2(x + cursor + ACTION_WIDTH * 0.5, panel.center().y);
+        let response = context.interaction.drag(POWER_DRAG_ID, Shape::circle(icon_home, 13.0));
+        let drag = context.interaction.drag_motion().filter(|(id, ..)| *id == POWER_DRAG_ID);
+        let pointer = context.interaction.mouse_pos();
+        if response.held && self.action_origin.is_none() {
+            self.action_origin = Some(drag.map_or(pointer, |(_, offset, _)| pointer - offset));
         }
+        let pointer_y = match (drag, self.action_origin) {
+            (Some((_, offset, _)), Some(origin)) => origin.y + offset.y,
+            _ => pointer.y,
+        };
+        if drag.is_some_and(|(_, _, released)| released)
+            && let Some(action) = power_action(pointer_y, panel)
+        {
+            platform::run_power_action(action);
+        }
+        let dragging = response.held || drag.is_some();
+        if !response.held {
+            self.action_origin = None;
+        }
+        let pull = if dragging { ((pointer_y - panel.center().y) / (height * 0.5)).clamp_num(-1.0, 1.0) } else { 0.0 };
+        let icon_y = if dragging {
+            pointer_y.clamp_num(panel.min.y + ICON_RADIUS, panel.max.y - ICON_RADIUS)
+        } else {
+            icon_home.y
+        };
+        let snap_progress = ((pull.abs() - ARMED_PULL) / (1.0 - ARMED_PULL)).smoothstep(0.0, 1.0);
+        let icon_scale = 1.0 + snap_progress * 0.35;
+        let action_rect = Rect::from_center_size(icon_home, vec2(ACTION_WIDTH, height) + Vec2::splat(GAP * 2.0));
+        shader!(
+            context.frame,
+            |_, panel: Rect, action_rect: Rect, icon_home: Vec2, icon_y: f32, pull: f32, icon_scale: f32| action_rect,
+            |frame, surface| {
+                let surface = sample_deformation(Shape::pill(panel), frame, surface.pixel);
+                let icon_center = panel.local(vec2(icon_home.x, icon_y));
+                let point = panel.local(surface.content);
+                let icon_point = (point - icon_center) / icon_scale;
+                // One arc throughout: closed at rest, opening at the top (shutdown stem grows) when pulled up, or at
+                // the side (reboot arrowhead grows) when pulled down.
+                let up = (-pull).saturate();
+                let down = pull.saturate();
+                let half_gap = (up * 0.62 + down * TAU * 0.12).max(0.02);
+                let gap_center = -TAU * 0.25 * (1.0 - down);
+                let ring = Shape::arc(Vec2::ZERO, ICON_RADIUS, gap_center + half_gap, TAU - half_gap * 2.0);
+
+                let stem_end = vec2(0.0, -1.0 - up * (ICON_RADIUS - 1.0));
+                let stem = Shape::segment(vec2(0.0, -1.0), stem_end, ICON_STROKE);
+                // Shrink the stem to nothing at rest rather than leaving a dot in the middle.
+                let stem_distance = stem.distance_at(icon_point) + (1.0 - (up * 8.0).saturate()) * ICON_STROKE;
+
+                let direction = Vec2::from_angle(gap_center - half_gap);
+                let tip = direction * ICON_RADIUS;
+                // The small floor keeps the segment from degenerating to a point at rest.
+                let barb = |side: f32| {
+                    Shape::segment(tip, tip - (direction.perp() - direction * side) * (0.05 + 3.0 * down), ICON_STROKE)
+                };
+                let distance = ring
+                    .stroke(ICON_STROKE)
+                    .distance_at(icon_point)
+                    .min(stem_distance)
+                    .min(barb(1.0).distance_at(icon_point))
+                    .min(barb(-1.0).distance_at(icon_point));
+                let icon = Sample::new(distance, 1.6);
+                let armed = ((pull.abs() - ARMED_PULL) / 0.08).saturate();
+                let color = TEXT_COLOR.lerp(vec3(1.0, 0.24, 0.2), armed);
+                icon.paint(color.extend(1.0), TEXT_SHADOW.with_w(TEXT_SHADOW.w * 1.7))
+            },
+        );
         context.interaction.input_region(panel);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spectrum_interpolates_smoothly_between_vertical_samples() {
+        let levels = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+        assert_eq!(spectrum_level(levels, -6.0, 6.0), 0.0);
+        assert!((spectrum_level(levels, -5.0, 6.0) - 0.5).abs() < 0.001);
+        assert_eq!(spectrum_level(levels, 0.0, 6.0), 1.0);
+        assert_eq!(spectrum_level(levels, 6.0, 6.0), 0.0);
+    }
+
+    #[test]
+    fn power_gesture_uses_the_status_pill_snap_zones() {
+        let panel = Rect::new(vec2(0.0, 10.0), vec2(24.0, 110.0));
+        assert!(matches!(power_action(10.0, panel), Some(platform::PowerAction::PowerOff)));
+        assert!(matches!(power_action(29.9, panel), Some(platform::PowerAction::PowerOff)));
+        assert!(power_action(30.1, panel).is_none());
+        assert!(power_action(panel.center().y, panel).is_none());
+        assert!(power_action(89.9, panel).is_none());
+        assert!(matches!(power_action(90.1, panel), Some(platform::PowerAction::Reboot)));
+        assert!(matches!(power_action(110.0, panel), Some(platform::PowerAction::Reboot)));
     }
 }

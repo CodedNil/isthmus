@@ -1,4 +1,5 @@
 use crate::{app::Background, config::Config, interaction::Interaction, music::Music, timer::Timer};
+use arrayvec::ArrayString;
 use isthmus::prelude::*;
 use isthmus_2d::{layout::TextCache, prelude::*};
 use sdf::refract;
@@ -86,6 +87,12 @@ pub struct BarLayout {
     pub px_per_ms: f32,
 }
 
+struct WeatherReadout {
+    label: ArrayString<64>,
+    hour: f32,
+    pill_width: f32,
+}
+
 pub struct Bar {
     pub(crate) weather: Option<weathertime::WeatherPanel>,
     pub(crate) status: Option<status::StatusPanel>,
@@ -103,26 +110,28 @@ impl Bar {
 
     pub fn show(&mut self, context: &mut UiContext, music: &mut Music, timer: &Timer) {
         let status_width = self.status.as_ref().map_or(0.0, |status| status.width() + GAP);
-        let reserved = HISTORY_WIDTH
-            + GAP
-            + f32::from(context.config.weathertime_enabled) * (weathertime::WIDTH + GAP)
-            + status_width;
+        let weather_readout = self.weather.as_ref().map(|weather| weather.collapsed_readout(context));
+        let weather_reserved = weather_readout.as_ref().map_or(0.0, |readout| readout.pill_width + GAP);
+        let reserved = HISTORY_WIDTH + GAP + weather_reserved + status_width;
         let px_per_ms =
             (context.frame.screen_size.x - reserved).max(84.0) / (context.config.timeline_future_minutes * 60_000.0);
         let layout = BarLayout {
             playhead_x: HISTORY_WIDTH + context.config.timeline_past_minutes * 60_000.0 * px_per_ms,
             px_per_ms,
         };
-        let drag = context.interaction.drag_motion();
-        let drag = drag.map(|(offset, released)| (offset.x / px_per_ms, released));
+        let drag = context
+            .interaction
+            .drag_motion()
+            .filter(|(id, ..)| music.queue.tracks.iter().any(|track| track.interaction_id == *id))
+            .map(|(_, offset, released)| (offset.x / px_per_ms, released));
         music.update_playback(drag, context.frame.delta_time);
         if context.config.lyrics_enabled {
             lyrics::show(context, music, layout);
         }
-        let sky = self
-            .weather
-            .as_mut()
-            .map_or_else(weathertime::StatusSky::default, |weather| weather.show(context, status_width, timer));
+        let sky = match (self.weather.as_mut(), weather_readout.as_ref()) {
+            (Some(weather), Some(readout)) => weather.show(context, status_width, timer, readout),
+            _ => weathertime::StatusSky::default(),
+        };
         if let Some(status) = self.status.as_mut() {
             status.show(context, sky);
         }
