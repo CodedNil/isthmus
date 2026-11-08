@@ -1,6 +1,6 @@
 [package]
 name = "cantus"
-version = "0.8.0"
+version = "0.9.0"
 edition.workspace = true
 
 [lib]
@@ -20,7 +20,7 @@ image = { version = "0.25.10", default-features = false, features = [
 ] }
 isthmus.workspace = true
 isthmus_2d.workspace = true
-jiff = { version = "0.2.39", default-features = false, features = [
+jiff = { version = "0.2.40", default-features = false, features = [
     "js",
     "serde",
     "tz-system",
@@ -75,7 +75,7 @@ microfft = { version = "0.6.0", default-features = false, features = [
     "std",
 ] }
 nvml-wrapper = "0.13.0"
-notify = "8.2.1"
+notify = "8.2.2"
 pollster.workspace = true
 protobuf = "3.7.2"
 schemars = { version = "1.2.3", features = ["arrayvec07", "preserve_order"] }

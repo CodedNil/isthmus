@@ -281,7 +281,7 @@ pub fn height(music: &Music) -> f32 {
 
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     let Some((index, time)) = music.queue.span_at_playhead() else { return };
-    let playlist_middle_y = PANEL_START + f32::midpoint(context.config.height, super::music::playlist_extension(music));
+    let playlist_middle_y = PANEL_START + f32::midpoint(context.config.height, super::music::PLAYLIST_EXTENSION);
     let tracks = music.queue.tracks.as_slice();
     let resources = &mut music.resources;
     let silence = PreparedLyrics::default();

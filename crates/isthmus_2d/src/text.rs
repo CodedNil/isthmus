@@ -109,17 +109,16 @@ impl Sdf for Glyphs<'_> {
     }
 
     fn distance_at(self, point: Vec2) -> f32 {
-        let Self { line, resources } = self;
-        if line.count == 0 || line.size <= 0.0 {
+        if self.line.count == 0 || self.line.size <= 0.0 {
             return f32::MAX;
         }
 
-        let line_point = (point - line.origin) / line.size;
+        let line_point = (point - self.line.origin) / self.line.size;
         let mut low = 0;
-        let mut high = line.count;
+        let mut high = self.line.count;
         while low < high {
             let middle = low + (high - low) / 2;
-            let glyph = PlacedGlyph::read(resources, (line.first + middle) as usize * PlacedGlyph::WORDS);
+            let glyph = PlacedGlyph::read(self.resources, (self.line.first + middle) as usize * PlacedGlyph::WORDS);
             if glyph.left <= line_point.x {
                 low = middle + 1;
             } else {
@@ -128,12 +127,15 @@ impl Sdf for Glyphs<'_> {
         }
         let (mut left, mut right) = (low, low);
         let mut best = f32::MAX;
-        while left > 0 || right < line.count {
-            let before = PlacedGlyph::read(resources, (line.first + left.max(1) - 1) as usize * PlacedGlyph::WORDS);
-            let after =
-                PlacedGlyph::read(resources, (line.first + right.min(line.count - 1)) as usize * PlacedGlyph::WORDS);
+        while left > 0 || right < self.line.count {
+            let before =
+                PlacedGlyph::read(self.resources, (self.line.first + left.max(1) - 1) as usize * PlacedGlyph::WORDS);
+            let after = PlacedGlyph::read(
+                self.resources,
+                (self.line.first + right.min(self.line.count - 1)) as usize * PlacedGlyph::WORDS,
+            );
             let left_gap = if left > 0 { line_point.x - before.right } else { f32::MAX };
-            let right_gap = if right < line.count { after.left - line_point.x } else { f32::MAX };
+            let right_gap = if right < self.line.count { after.left - line_point.x } else { f32::MAX };
             if left_gap.min(right_gap) >= best {
                 break;
             }
@@ -144,18 +146,18 @@ impl Sdf for Glyphs<'_> {
                 right += 1;
                 after
             };
-            let glyph = Glyph::read(resources, placed.glyph as usize);
+            let glyph = Glyph::read(self.resources, placed.glyph as usize);
             let glyph_point = vec2(line_point.x - placed.x, placed.y - line_point.y);
             if Shape::rectangle(Rect::new(glyph.min, glyph.max)).distance_at(glyph_point) < best {
                 let distance = if glyph.field_size.x > 0 {
-                    glyph.field_distance(resources, glyph_point)
+                    glyph.field_distance(self.resources, glyph_point)
                 } else {
-                    glyph_distance(resources, glyph.start, glyph.count, glyph_point)
+                    glyph_distance(self.resources, glyph.start, glyph.count, glyph_point)
                 };
                 best = best.min(distance);
             }
         }
-        best * line.size
+        best * self.line.size
     }
 }
 

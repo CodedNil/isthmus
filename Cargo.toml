@@ -121,8 +121,8 @@ verbose_file_reads = "warn"
 
 [profile.release]
 opt-level = 3
-codegen-units = 1
-lto = "fat"
+codegen-units = 16
+lto = "thin"
 strip = true
 
 [profile.release.build-override]

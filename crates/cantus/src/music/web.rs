@@ -35,11 +35,11 @@ impl Spotify {
             });
         let mut queue = Vec::new();
         let mut responses = HashMap::new();
-        for FixtureTrack { track, audio } in tracks {
-            if let Some(id) = track.id {
-                responses.insert(super::audio_features_path(id), audio);
+        for fixture in tracks {
+            if let Some(id) = fixture.track.id {
+                responses.insert(super::audio_features_path(id), fixture.audio);
             }
-            queue.push(track);
+            queue.push(fixture.track);
         }
         fastrand::shuffle(&mut queue);
         send_update(updater, move |app| {
