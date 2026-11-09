@@ -495,6 +495,7 @@ impl LauncherState {
         };
 
         shader!(
+            "launcher search",
             context.frame,
             |frame, caret: Vec2, selection: Vec2, rect: Rect| deform(Shape::rounded_rect(rect, CORNER_RADIUS), frame),
             |_, surface| {
@@ -603,6 +604,7 @@ impl LauncherState {
 
             let icon_kind = if entry.image.is_some() { 0 } else { entry.icon_kind };
             shader!(
+                "launcher entries",
                 context.frame,
                 |frame, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2, pill: Rect| deform(
                     Shape::pill(pill),

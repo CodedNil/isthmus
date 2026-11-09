@@ -34,107 +34,113 @@ pub(super) fn reflected_point(point: Vec2, root: Vec2, time: f32) -> Vec2 {
 pub(super) fn draw(frame: &mut Frame<'_>) {
     {
         let size: Vec2 = frame.screen_size;
-        shader!(frame.blend(Blend::Replace), |_, size: Vec2| Quad::new(size * 0.5, size, Vec2::X), |frame, surface| {
-            let point = scene_point(surface.pixel, size);
-            let uv = surface.pixel / size;
-            let glow = (-((point - vec2(0.08, 0.3)) * vec2(1.5, 0.8)).length_squared() * 3.0).exp();
-            let clouds = wash(point * 3.0 + vec2(frame.time * 0.003, 0.0));
-            let mut color = vec3(0.58, 0.71, 0.83)
-                .lerp(vec3(0.97, 0.82, 0.71), uv.x.smoothstep(0.15, 0.9))
-                .lerp(vec3(0.97, 0.95, 0.78), glow * 0.65);
-            color += (clouds - 0.5) * vec3(0.1, 0.08, 0.03);
-            for ridge in 0..2 {
-                let layer = ridge as f32;
-                let slope = uv.x - 0.72 + layer * 0.085;
-                let summit = 0.025
-                    + layer * 0.1
-                    + slope.abs() * (1.1 - layer * 0.18)
-                    + slope * 0.22
-                    + (noise(vec2(uv.x * 39.0, layer * 7.0)) - 0.5) * 0.018
-                    + noise(vec2(uv.x * 12.0, layer * 3.0)) * 0.03;
-                let face = wash(vec2(uv.x * 11.0 + uv.y * 3.0, uv.y * 17.0) + layer * 19.0);
-                let folds = noise(vec2(uv.x * 32.0 + uv.y * 11.0, uv.y * 4.0));
-                let mountain = vec3(0.42, 0.48, 0.65)
-                    .lerp(vec3(0.68, 0.67, 0.76), face * 0.7 + folds * 0.2)
-                    .lerp(vec3(0.38, 0.59, 0.59), layer * 0.5)
-                    .lerp(atmosphere(uv), uv.y.smoothstep(0.2, 0.43) * 0.55);
-                color = color.lerp(mountain, (uv.y - summit).smoothstep(-0.0015, 0.002));
-            }
-            for layer in 0..4 {
-                let depth = layer as f32;
-                let crown = wash(vec2(point.x * (5.0 + depth * 2.0), depth * 13.0));
-                let clearing = (point.x - 0.11).abs().smoothstep(0.03, 0.7);
-                let edge = 0.36 - clearing * (0.07 + depth * 0.055) - crown * 0.065;
-                let broken = (wash(point * (22.0 + depth * 11.0)) - 0.5) * 0.035;
-                let silhouette = (point.y - edge + broken).smoothstep(-0.003, 0.005);
-                let foliage = daylight(vec3(0.25, 0.46, 0.39).lerp(vec3(0.61, 0.7, 0.39), crown), uv);
-                color = color.lerp(foliage, silhouette * (0.14 + depth * 0.04));
-            }
-            let shore = shore_distance(point);
-            let horizon = 0.35 - (point.x - 0.125).abs() * 0.045 + (noise(vec2(point.x * 18.0, 7.0)) - 0.5) * 0.012;
-            let ground = (point.y - horizon).smoothstep(-0.001, 0.002);
-            if ground > 0.0 || point.y >= 0.35 {
-                let perspective = (point.y - 0.29).max(0.06);
-                let terrain = vec2(point.x / perspective, 0.24 / perspective);
-                let footprint = (26.0 / perspective + 6.3 / perspective.powi(2)) / size.y;
-                let brush = wash(terrain * vec2(4.0, 7.0));
-                let moss = wash(terrain * 2.0 + 11.0).smoothstep(0.36, 0.68);
-                let granules = noise(terrain * 83.0);
-                let visible_detail = (1.0 - footprint * 3.0).saturate();
-                let mut earth = vec3(0.14, 0.24, 0.22)
-                    .lerp(vec3(0.52, 0.43, 0.32), brush)
-                    .lerp(vec3(0.31, 0.47, 0.28).lerp(vec3(0.57, 0.65, 0.38), granules), moss * 0.7);
-                earth *= 0.94 + (granules - 0.35) * 0.27 * visible_detail;
-                for layer in 0..2 {
-                    let layer = layer as f32;
-                    let litter = terrain * vec2(17.0, 24.0) * (1.0 + layer * 0.41) + layer * vec2(13.7, 8.3);
-                    let cell = litter.floor();
-                    let random = noise(cell + 91.0);
-                    let axis = Vec2::from_angle(noise(cell + 17.0) * 6.283_185_5);
-                    let offset = litter - cell - 0.5 - vec2(random - 0.5, noise(cell + 33.0) - 0.5) * 0.22;
-                    let leaf = vec2(offset.dot(axis), offset.dot(axis.perp()));
-                    let length = 0.16 + random * 0.17;
-                    let curve = leaf.y - leaf.x * leaf.x * (random - 0.5);
-                    let distance =
-                        (curve.abs() - (1.0 - (leaf.x / length).powi(2)).max(0.0) * 0.055).max(leaf.x.abs() - length);
-                    let aa = footprint * (1.0 + layer * 0.41);
-                    let mask = distance.smoothstep(aa, -aa) * random.smoothstep(0.17, 0.4) * visible_detail;
-                    let vein = curve.abs().smoothstep(0.008 + aa, 0.0);
-                    let dry_leaf = vec3(0.3, 0.31, 0.22).lerp(vec3(0.75, 0.63, 0.4), random)
-                        * (0.86 + vein * 0.14 + curve.smoothstep(-0.03, 0.03) * 0.15);
-                    earth = earth.lerp(dry_leaf, mask * 0.9);
+        shader!(
+            "landscape",
+            frame.blend(Blend::Replace),
+            |_, size: Vec2| Quad::new(size * 0.5, size, Vec2::X),
+            |frame, surface| {
+                let point = scene_point(surface.pixel, size);
+                let uv = surface.pixel / size;
+                let glow = (-((point - vec2(0.08, 0.3)) * vec2(1.5, 0.8)).length_squared() * 3.0).exp();
+                let clouds = wash(point * 3.0 + vec2(frame.time * 0.003, 0.0));
+                let mut color = vec3(0.58, 0.71, 0.83)
+                    .lerp(vec3(0.97, 0.82, 0.71), uv.x.smoothstep(0.15, 0.9))
+                    .lerp(vec3(0.97, 0.95, 0.78), glow * 0.65);
+                color += (clouds - 0.5) * vec3(0.1, 0.08, 0.03);
+                for ridge in 0..2 {
+                    let layer = ridge as f32;
+                    let slope = uv.x - 0.72 + layer * 0.085;
+                    let summit = 0.025
+                        + layer * 0.1
+                        + slope.abs() * (1.1 - layer * 0.18)
+                        + slope * 0.22
+                        + (noise(vec2(uv.x * 39.0, layer * 7.0)) - 0.5) * 0.018
+                        + noise(vec2(uv.x * 12.0, layer * 3.0)) * 0.03;
+                    let face = wash(vec2(uv.x * 11.0 + uv.y * 3.0, uv.y * 17.0) + layer * 19.0);
+                    let folds = noise(vec2(uv.x * 32.0 + uv.y * 11.0, uv.y * 4.0));
+                    let mountain = vec3(0.42, 0.48, 0.65)
+                        .lerp(vec3(0.68, 0.67, 0.76), face * 0.7 + folds * 0.2)
+                        .lerp(vec3(0.38, 0.59, 0.59), layer * 0.5)
+                        .lerp(atmosphere(uv), uv.y.smoothstep(0.2, 0.43) * 0.55);
+                    color = color.lerp(mountain, (uv.y - summit).smoothstep(-0.0015, 0.002));
                 }
-                let gravel = terrain * 29.0;
-                let cell = gravel.floor();
-                let random = noise(cell + 71.0);
-                let chip = gravel - cell - 0.5 - vec2(random - 0.5, noise(cell + 21.0) - 0.5) * 0.3;
-                let edge = (chip.x.abs() + chip.y.abs() * 0.7 - 0.2).max(chip.y.abs() - 0.12 - random * 0.06);
-                let stone = edge.smoothstep(footprint, -footprint) * random.smoothstep(0.55, 0.8) * visible_detail;
-                earth = earth
-                    .lerp(vec3(0.32, 0.4, 0.4).lerp(vec3(0.7, 0.65, 0.5), (-chip.y).smoothstep(-0.04, 0.1)), stone);
-                let dapple = wash(terrain * 3.0 + vec2(frame.time * 0.014, frame.time * -0.008));
-                earth = earth.lerp(vec3(0.72, 0.73, 0.42), dapple.smoothstep(0.48, 0.76) * 0.19);
-                earth = daylight(earth, uv).lerp(vec3(0.53, 0.67, 0.59), (-perspective * 6.0).exp() * 0.42);
-                color = color.lerp(earth, ground * shore.smoothstep(-0.001, 0.001));
-                let channel = flow_coordinates(point, 0.0).x.abs().saturate();
-                let bed = wash(terrain * 7.0);
-                let sand = vec3(0.33, 0.43, 0.36).lerp(vec3(0.7, 0.65, 0.45), bed);
-                let water =
-                    vec3(0.13, 0.39, 0.4).lerp(vec3(0.47, 0.69, 0.61), glow * 0.5).lerp(sand, channel.powi(3) * 0.62);
-                color = color.lerp(water, water_mask(point, 1.0 / size.y));
-                let wet_edge = shore.abs().smoothstep(0.011, 0.001) * ground;
-                color = color.lerp(vec3(0.12, 0.25, 0.22), wet_edge * 0.45);
-            }
-            color = pigment(color, point, 1.0 / size.y);
-            color.extend(1.0)
-        },);
+                for layer in 0..4 {
+                    let depth = layer as f32;
+                    let crown = wash(vec2(point.x * (5.0 + depth * 2.0), depth * 13.0));
+                    let clearing = (point.x - 0.11).abs().smoothstep(0.03, 0.7);
+                    let edge = 0.36 - clearing * (0.07 + depth * 0.055) - crown * 0.065;
+                    let broken = (wash(point * (22.0 + depth * 11.0)) - 0.5) * 0.035;
+                    let silhouette = (point.y - edge + broken).smoothstep(-0.003, 0.005);
+                    let foliage = daylight(vec3(0.25, 0.46, 0.39).lerp(vec3(0.61, 0.7, 0.39), crown), uv);
+                    color = color.lerp(foliage, silhouette * (0.14 + depth * 0.04));
+                }
+                let shore = shore_distance(point);
+                let horizon = 0.35 - (point.x - 0.125).abs() * 0.045 + (noise(vec2(point.x * 18.0, 7.0)) - 0.5) * 0.012;
+                let ground = (point.y - horizon).smoothstep(-0.001, 0.002);
+                if ground > 0.0 || point.y >= 0.35 {
+                    let perspective = (point.y - 0.29).max(0.06);
+                    let terrain = vec2(point.x / perspective, 0.24 / perspective);
+                    let footprint = (26.0 / perspective + 6.3 / perspective.powi(2)) / size.y;
+                    let brush = wash(terrain * vec2(4.0, 7.0));
+                    let moss = wash(terrain * 2.0 + 11.0).smoothstep(0.36, 0.68);
+                    let granules = noise(terrain * 83.0);
+                    let visible_detail = (1.0 - footprint * 3.0).saturate();
+                    let mut earth = vec3(0.14, 0.24, 0.22)
+                        .lerp(vec3(0.52, 0.43, 0.32), brush)
+                        .lerp(vec3(0.31, 0.47, 0.28).lerp(vec3(0.57, 0.65, 0.38), granules), moss * 0.7);
+                    earth *= 0.94 + (granules - 0.35) * 0.27 * visible_detail;
+                    for layer in 0..2 {
+                        let layer = layer as f32;
+                        let litter = terrain * vec2(17.0, 24.0) * (1.0 + layer * 0.41) + layer * vec2(13.7, 8.3);
+                        let cell = litter.floor();
+                        let random = noise(cell + 91.0);
+                        let axis = Vec2::from_angle(noise(cell + 17.0) * 6.283_185_5);
+                        let offset = litter - cell - 0.5 - vec2(random - 0.5, noise(cell + 33.0) - 0.5) * 0.22;
+                        let leaf = vec2(offset.dot(axis), offset.dot(axis.perp()));
+                        let length = 0.16 + random * 0.17;
+                        let curve = leaf.y - leaf.x * leaf.x * (random - 0.5);
+                        let distance = (curve.abs() - (1.0 - (leaf.x / length).powi(2)).max(0.0) * 0.055)
+                            .max(leaf.x.abs() - length);
+                        let aa = footprint * (1.0 + layer * 0.41);
+                        let mask = distance.smoothstep(aa, -aa) * random.smoothstep(0.17, 0.4) * visible_detail;
+                        let vein = curve.abs().smoothstep(0.008 + aa, 0.0);
+                        let dry_leaf = vec3(0.3, 0.31, 0.22).lerp(vec3(0.75, 0.63, 0.4), random)
+                            * (0.86 + vein * 0.14 + curve.smoothstep(-0.03, 0.03) * 0.15);
+                        earth = earth.lerp(dry_leaf, mask * 0.9);
+                    }
+                    let gravel = terrain * 29.0;
+                    let cell = gravel.floor();
+                    let random = noise(cell + 71.0);
+                    let chip = gravel - cell - 0.5 - vec2(random - 0.5, noise(cell + 21.0) - 0.5) * 0.3;
+                    let edge = (chip.x.abs() + chip.y.abs() * 0.7 - 0.2).max(chip.y.abs() - 0.12 - random * 0.06);
+                    let stone = edge.smoothstep(footprint, -footprint) * random.smoothstep(0.55, 0.8) * visible_detail;
+                    earth = earth
+                        .lerp(vec3(0.32, 0.4, 0.4).lerp(vec3(0.7, 0.65, 0.5), (-chip.y).smoothstep(-0.04, 0.1)), stone);
+                    let dapple = wash(terrain * 3.0 + vec2(frame.time * 0.014, frame.time * -0.008));
+                    earth = earth.lerp(vec3(0.72, 0.73, 0.42), dapple.smoothstep(0.48, 0.76) * 0.19);
+                    earth = daylight(earth, uv).lerp(vec3(0.53, 0.67, 0.59), (-perspective * 6.0).exp() * 0.42);
+                    color = color.lerp(earth, ground * shore.smoothstep(-0.001, 0.001));
+                    let channel = flow_coordinates(point, 0.0).x.abs().saturate();
+                    let bed = wash(terrain * 7.0);
+                    let sand = vec3(0.33, 0.43, 0.36).lerp(vec3(0.7, 0.65, 0.45), bed);
+                    let water = vec3(0.13, 0.39, 0.4)
+                        .lerp(vec3(0.47, 0.69, 0.61), glow * 0.5)
+                        .lerp(sand, channel.powi(3) * 0.62);
+                    color = color.lerp(water, water_mask(point, 1.0 / size.y));
+                    let wet_edge = shore.abs().smoothstep(0.011, 0.001) * ground;
+                    color = color.lerp(vec3(0.12, 0.25, 0.22), wet_edge * 0.45);
+                }
+                color = pigment(color, point, 1.0 / size.y);
+                color.extend(1.0)
+            },
+        );
     }
 }
 
 pub(super) fn water(frame: &mut Frame<'_>) {
     {
         let size: Vec2 = frame.screen_size;
-        shader!(frame, |_, size: Vec2| Rect::new(vec2(0.0, size.y * 0.35), size), |frame, surface| {
+        shader!("water", frame, |_, size: Vec2| Rect::new(vec2(0.0, size.y * 0.35), size), |frame, surface| {
             let point = scene_point(surface.pixel, size);
             let mask = water_mask(point, 1.0 / size.y);
             if mask == 0.0 {
@@ -165,7 +171,7 @@ pub(super) fn water(frame: &mut Frame<'_>) {
 pub(super) fn haze(frame: &mut Frame<'_>, layer: f32) {
     {
         let size: Vec2 = frame.screen_size;
-        shader!(frame, |_, size: Vec2, layer: f32| Quad::new(size * 0.5, size, Vec2::X), |frame, surface| {
+        shader!("haze", frame, |_, size: Vec2, layer: f32| Quad::new(size * 0.5, size, Vec2::X), |frame, surface| {
             let point = scene_point(surface.pixel, size);
             let fog = noise(point * vec2(3.0, 8.0) + vec2(frame.time * 0.018 + layer * 13.0, layer * 3.0));
             let height = (-(point.y - 0.52 - layer * 0.12).powi(2) * 35.0).exp();
@@ -199,7 +205,7 @@ pub(super) fn falling_leaves(frame: &mut Frame<'_>) {
                     * frame.screen_size.y,
                 Vec2::from_angle(frame.time * 0.3 + seed + (frame.time * 0.7 + seed).sin() * 0.6),
             );
-            shader!(frame, |_, alpha: f32, tint: f32, quad: Quad| quad, |_, surface| {
+            shader!("falling leaves", frame, |_, alpha: f32, tint: f32, quad: Quad| quad, |_, surface| {
                 let point = surface.uv * 2.0 - 1.0;
                 let mask = (point.y.abs() - (1.0 - point.x * point.x).max(0.0)).smoothstep(0.2, -0.2);
                 vec3(0.23, 0.3, 0.075).lerp(vec3(0.65, 0.49, 0.14), tint).extend(mask * alpha)
@@ -221,7 +227,7 @@ pub(super) fn butterflies(frame: &mut Frame<'_>) {
                 vec2(0.022, 0.018) * frame.screen_size.y,
                 Vec2::from_angle((phase * 1.3).sin() * 0.5),
             );
-            shader!(frame, |_, seed: f32, quad: Quad| quad, |frame, surface| {
+            shader!("butterflies", frame, |_, seed: f32, quad: Quad| quad, |frame, surface| {
                 let point = surface.uv * 2.0 - 1.0;
                 let spread = 0.15 + (frame.time * (7.0 + hash(seed) * 2.0) + seed).sin().abs() * 0.85;
                 let wing = vec2(point.x.abs() / spread, point.y);

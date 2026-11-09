@@ -3,7 +3,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::{collections::BTreeSet, mem};
 use syn::{
-    Expr, Ident, Pat, Token, Type,
+    Expr, Ident, Lit, Pat, Token, Type,
     parse::Parser,
     parse_quote,
     punctuated::Punctuated,
@@ -57,6 +57,9 @@ pub struct Shader {
     stage: Expr,
     fragment: syn::ExprClosure,
     captures: Vec<Binding>,
+    /// The name given in the `shader!` call, which labels the shader on the GPU and in logs.
+    pub name: syn::LitStr,
+    /// The unique identifier of its fragment entry point, derived from the name.
     pub entry: syn::LitStr,
     blend: syn::Path,
     format: Option<syn::Path>,
@@ -93,21 +96,19 @@ fn closure(expr: &mut Expr, parameters: usize) -> syn::Result<&mut syn::ExprClos
 }
 
 impl Shader {
-    pub fn parse(
-        tokens: TokenStream,
-        file: &str,
-        line: usize,
-        column: usize,
-        isthmus: &TokenStream,
-    ) -> syn::Result<Self> {
+    pub fn parse(tokens: TokenStream, isthmus: &TokenStream) -> syn::Result<Self> {
         let arguments = Punctuated::<Expr, Token![,]>::parse_terminated.parse2(tokens)?;
-        if arguments.len() != 3 {
+        if arguments.len() != 4 {
             return Err(syn::Error::new_spanned(
                 arguments,
-                "expected shader!(frame, |frame, name: Type| primitive, |frame, fragment| color)",
+                "expected shader!(\"name\", frame, |frame, name: Type| primitive, |frame, fragment| color)",
             ));
         }
         let mut arguments = arguments.into_iter();
+        let name = match arguments.next().unwrap() {
+            Expr::Lit(syn::ExprLit { lit: Lit::Str(name), .. }) if !name.value().trim().is_empty() => name,
+            other => return Err(syn::Error::new_spanned(other, "expected a shader name string first")),
+        };
         let mut frame = arguments.next().unwrap();
         let mut stage = arguments.next().unwrap();
         let mut fragment = arguments.next().unwrap();
@@ -141,19 +142,18 @@ impl Shader {
             #stage;
             #fragment;
         });
-        let file = file.replace('\\', "/");
-        let file =
-            file.rsplit_once("/src/").map_or_else(|| file.strip_prefix("src/").unwrap_or(&file), |(_, suffix)| suffix);
-        let hash = file
-            .bytes()
-            .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3));
-        let entry =
-            syn::LitStr::new(&format!("isthmus_{hash:x}_{line}_{column}_fragment"), proc_macro2::Span::call_site());
-        Ok(Self { declaration, frame, stage, fragment, captures, entry, blend: blend.path, format })
+        // Entry points are identifiers, so the name is reduced to letters and digits.
+        let identifier: String = name
+            .value()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .collect();
+        let entry = syn::LitStr::new(&format!("isthmus_{identifier}_fragment"), name.span());
+        Ok(Self { declaration, frame, stage, fragment, captures, name, entry, blend: blend.path, format })
     }
 
     pub fn vertex_entry(&self) -> String {
-        self.entry.value().replace("_fragment", "_vertex")
+        self.entry.value().strip_suffix("_fragment").map_or_else(String::new, |stem| format!("{stem}_vertex"))
     }
 
     fn images(&self) -> impl Iterator<Item = &Ident> {
@@ -161,7 +161,7 @@ impl Shader {
     }
 
     pub fn metadata(&self, isthmus: &TokenStream) -> TokenStream {
-        let (name, vertex) = (&self.entry, self.vertex_entry());
+        let (name, entry, vertex) = (&self.name, &self.entry, self.vertex_entry());
         let blend = &self.blend.segments.last().unwrap().ident;
         let images = self.images().count();
         let format = self.format.as_ref().map_or_else(
@@ -175,7 +175,7 @@ impl Shader {
             name: #name, blend: Blend::#blend, images: #images, format: #format,
             code: [
                 include_str!(concat!(env!("OUT_DIR"), "/", #vertex, ".wgsl")),
-                include_str!(concat!(env!("OUT_DIR"), "/", #name, ".wgsl")),
+                include_str!(concat!(env!("OUT_DIR"), "/", #entry, ".wgsl")),
             ],
         })
     }
@@ -202,7 +202,7 @@ impl Shader {
     }
 
     pub fn host(&self, isthmus: &TokenStream) -> TokenStream {
-        let (frame, fragment, blend, entry) = (&self.frame, &self.fragment, &self.blend, &self.entry);
+        let (frame, fragment, blend, name) = (&self.frame, &self.fragment, &self.blend, &self.name);
         let variant = &blend.segments.last().unwrap().ident;
         let bindings = self.captures.iter().map(|Binding { name, ty, .. }| quote!(let #name: #ty = #name;));
         let views = self.captures.iter().filter(|capture| capture.kind == CaptureKind::Data).map(|capture| {
@@ -232,7 +232,7 @@ impl Shader {
                 __isthmus_frame.prepare(#stage, #fragment)
             };
             #payload
-            const __SHADER: usize = #isthmus::__private::shader_index(<Program as #isthmus::Program>::SHADERS, #entry);
+            const __SHADER: usize = #isthmus::__private::shader_index(<Program as #isthmus::Program>::SHADERS, #name);
             if __vertices >= 3 {
                 let __payload = __IsthmusPayload { #(#fields),* };
                 let __images: &[&#isthmus::Image] = &[#(&#images),*];
@@ -363,14 +363,19 @@ mod tests {
     #[test]
     fn mutable_captures_are_rejected_at_the_shader_boundary() {
         for ty in [quote!(&mut Image), quote!(&mut [u32]), quote!(&mut Vec4)] {
-            let shader = Shader::parse(
-                quote!(frame, |_, value: #ty| rect, |_, _| color),
-                "src/render.rs",
-                1,
-                0,
-                &quote!(::isthmus),
-            );
+            let shader = Shader::parse(quote!("test", frame, |_, value: #ty| rect, |_, _| color), &quote!(::isthmus));
             assert!(shader.is_err_and(|error| error.to_string() == "shader captures must be immutable"));
         }
+    }
+
+    #[test]
+    fn names_are_required_and_become_entry_identifiers() {
+        let parse = |tokens| Shader::parse(tokens, &quote!(::isthmus));
+        assert!(parse(quote!(frame, |_, rect: Rect| rect, |_, _| color)).is_err());
+        assert!(parse(quote!("  ", frame, |_, rect: Rect| rect, |_, _| color)).is_err());
+        let shader = parse(quote!("Track text", frame, |_, rect: Rect| rect, |_, _| color)).unwrap();
+        assert_eq!(shader.entry.value(), "isthmus_track_text_fragment");
+        assert_eq!(shader.vertex_entry(), "isthmus_track_text_vertex");
+        assert_eq!(shader.name.value(), "Track text");
     }
 }

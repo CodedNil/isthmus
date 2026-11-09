@@ -398,6 +398,7 @@ impl MusicView {
                     .and_then(|playlist| music.resources.art(playlist.image_url.as_deref()))
                     .map_or(&*EMPTY_ART, |art| &art.image);
                 shader!(
+                    "playlist tile",
                     context.frame,
                     |_, rect: Rect, liked: bool, hover: f32, image: &Image| playlist_hex(rect).outlined(8.0),
                     |_, surface| {
@@ -688,6 +689,7 @@ impl MusicView {
         let turbulence = audio.energy * 0.65 + audio.danceability * 0.35;
         let frequency = (pill.size().x / pill.size().y * (0.5 + seed.fract() * 0.12 + turbulence * 0.18)).max(1.7);
         shader!(
+            "track body",
             context.frame,
             |mut frame,
              viewport: Rect,
@@ -775,6 +777,7 @@ impl MusicView {
                 let compact = context.frame.resources.place(&compact, origin);
                 let full = context.frame.resources.place(&full, origin);
                 shader!(
+                    "track text",
                     context.frame,
                     |mut frame,
                      pill: Rect,
@@ -843,6 +846,7 @@ impl MusicView {
                 let fill = (rating.unwrap_or(0) as f32 * 0.5 - slot as f32).saturate();
                 let desaturation = 0.2 * f32::from(!response.hovered);
                 shader!(
+                    "track icon",
                     context.frame,
                     |_,
                      image: &Image,
@@ -922,7 +926,7 @@ impl MusicView {
                 particle.velocity,
             );
             let color = particle.color.extend((1.0 - age) * elapsed.smoothstep(0.0, 0.15));
-            shader!(context.frame.blend(Blend::Add), |_, quad: Quad, color: Vec4| quad, |_, surface| {
+            shader!("spark", context.frame.blend(Blend::Add), |_, quad: Quad, color: Vec4| quad, |_, surface| {
                 // Lighten and brighten the source colour for additive sparks.
                 (color.truncate().lerp(Vec3::ONE, 0.2) * 2.0)
                     .extend(color.w * (1.0 - (surface.uv * 2.0 - 1.0).length_squared()).max(0.0).powi(3))
@@ -965,6 +969,7 @@ impl MusicView {
             vec2(x + half_width, PANEL_START + context.config.height + 5.0),
         );
         shader!(
+            "playhead",
             context.frame,
             |_, bar_split: f32, icon_presence: f32, icon_morph: f32, rect: Rect| rect,
             |frame, surface| {

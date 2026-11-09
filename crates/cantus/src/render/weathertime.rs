@@ -596,6 +596,7 @@ impl WeatherLayout {
         let timer_support = self.timer_support;
         let line = line.outlined(TEXT_SHADOW_REACH);
         shader!(
+            "weather text",
             context.frame,
             |frame, pill: Rect, expansion: f32, timer_support: Vec2, line: Text, color: Vec4, clip: bool| refract(
                 weather_panel(pill, expansion, timer_support),
@@ -687,6 +688,7 @@ impl WeatherPanel {
             .lerp(vec3(0.98, 0.74, 0.66), sun.y.smoothstep(0.55, 0.02))
             .extend(sun.y.smoothstep(-0.02, 0.04) * (1.0 - current.cloud * 0.95) * (1.0 - current.fog * 0.85));
         shader!(
+            "weather pill",
             context.frame,
             |frame,
              current: WeatherCondition,
@@ -805,6 +807,7 @@ impl WeatherPanel {
             let sun_hours = self.sun_hours;
             let timer_support = layout.timer_support;
             shader!(
+                "weather forecast",
                 context.frame,
                 |frame,
                  conditions: [WeatherCondition; HOURLY_FORECASTS],

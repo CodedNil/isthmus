@@ -37,7 +37,7 @@ pub enum Blend {
 pub struct ShaderEntry {
     /// Vertex and fragment WGSL, each containing only its stage's dependencies.
     pub code: [&'static str; 2],
-    /// Fragment entry point name.
+    /// The name given to `shader!`, which labels the shader's GPU objects and appears in logs.
     pub name: &'static str,
     /// Color blending mode.
     pub blend: Blend,

@@ -64,6 +64,7 @@ pub fn visibility_geometry(frame: &mut Frame<'_>, scene: &Scene) {
         let nodes: &[Node] = &scene.nodes;
         let objects: &[Object] = &scene.objects;
         shader!(
+            "visibility geometry",
             frame.format(isthmus::wgpu::TextureFormat::Rgba16Float).blend(Blend::Raw),
             |frame, nodes: &[Node], objects: &[Object]| {
                 let half = (frame.screen_size.x * 0.5).ceil();
@@ -98,6 +99,7 @@ pub fn visibility(frame: &mut Frame<'_>, scene: &Scene, geometry: &Image) {
         let nodes: &[Node] = &scene.nodes;
         let objects: &[Object] = &scene.objects;
         shader!(
+            "visibility",
             frame.format(isthmus::wgpu::TextureFormat::Rgba16Float).blend(Blend::Raw),
             |frame, geometry: &Image, mirror: u32, contacts: &[u32], nodes: &[Node], objects: &[Object]| {
                 let half = (frame.screen_size.x * 0.5).ceil();
@@ -141,6 +143,7 @@ pub fn materials(frame: &mut Frame<'_>, scene: &Scene, visibility: &Image) {
         let probes: &[scene::irradiance::Probe] = &scene.probes;
         let mirror: u32 = scene.objects.iter().position(|item| item.kind == Kind::Mirror).unwrap_or(0) as u32;
         shader!(
+            "materials",
             frame.format(isthmus::wgpu::TextureFormat::Rgba16Float).blend(Blend::Raw),
             |frame,
              objects: &[Object],
@@ -203,6 +206,7 @@ pub fn draw(
         let atlas: &Image = &shadows.image;
         let info: shadows::AtlasInfo = shadows.info;
         shader!(
+            "shade 1 sample",
             frame.blend(Blend::Raw),
             |frame,
              visibility: &Image,
@@ -271,6 +275,7 @@ pub fn draw(
         let atlas: &Image = &shadows.image;
         let info: shadows::AtlasInfo = shadows.info;
         shader!(
+            "shade 2 samples",
             frame.blend(Blend::Raw),
             |frame,
              visibility: &Image,
@@ -339,6 +344,7 @@ pub fn draw(
         let atlas: &Image = &shadows.image;
         let info: shadows::AtlasInfo = shadows.info;
         shader!(
+            "shade 3 samples",
             frame.blend(Blend::Raw),
             |frame,
              visibility: &Image,
@@ -407,6 +413,7 @@ pub fn draw(
         let atlas: &Image = &shadows.image;
         let info: shadows::AtlasInfo = shadows.info;
         shader!(
+            "shade 4 samples",
             frame.blend(Blend::Raw),
             |frame,
              visibility: &Image,
@@ -473,6 +480,7 @@ pub fn resolve(frame: &mut Frame<'_>, images: &[Image; 4], mask: u32, interleave
         let fourth: &Image = &images[3];
         let sample_size = Vec2::from_array(images[0].size().map(|value| value as f32));
         shader!(
+            "resolve",
             frame.blend(Blend::Replace),
             |frame,
              first: &Image,
