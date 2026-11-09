@@ -12,7 +12,7 @@ use core::{
     f64,
 };
 use isthmus::{prelude::*, spirv_std::arch::kill};
-use isthmus_2d::prelude::*;
+use isthmus_2d::{prelude::*, text::Glyphs};
 use serde::Deserialize;
 use smallvec::SmallVec;
 use std::{iter, sync::LazyLock};
@@ -256,6 +256,21 @@ fn playlist_hex(rect: Rect) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
     let radius = rect.size().y * 0.5;
     let rounding = radius * HEXAGON_ROUNDING;
     Shape::hexagon(rect.center(), radius - rounding / HEXAGON_WIDTH_RATIO).offset(rounding)
+}
+
+/// Both strings as one field. Looping over them keeps a single copy of the glyph code in the shader, where
+/// `compact.union(full)` would inline one per string.
+fn either_text(compact: Glyphs<'_>, full: Glyphs<'_>) -> impl Sdf {
+    // Methods are called through the trait path so the shader build knows to carry `Sdf` over.
+    let bounds = Sdf::geometry_bounds(compact).union(Sdf::geometry_bounds(full));
+    Shape::from_fn(bounds, move |point| {
+        let mut distance = f32::MAX;
+        for index in 0..2 {
+            distance = distance.min(Sdf::distance_at(compact.either(full, index == 1), point));
+        }
+        distance
+    })
+    .outlined(Sdf::outline_width(compact).max(Sdf::outline_width(full)))
 }
 
 /// Squircle corners on complete edges blend into circular ends as they are clipped.
@@ -789,7 +804,7 @@ impl MusicView {
                      compact: Text,
                      full: Text| {
                         frame.globals.pressure *= pointer_active;
-                        refract(track_shape(pill, rounding), frame, compact.union(full))
+                        refract(track_shape(pill, rounding), frame, either_text(compact, full))
                     },
                     |_, surface| {
                         if !Shape::rectangle(viewport).contains(surface.pixel) {
@@ -803,13 +818,13 @@ impl MusicView {
                             - f32::midpoint(pill.size().y, surface.bulge))
                         .smoothstep(2.0, 18.0);
                         // Shared glyphs stay opaque while the additional text fades in.
-                        let ink = if expansion <= 0.0 {
-                            compact.fill_at(surface.content)
-                        } else if expansion >= 1.0 {
-                            full.fill_at(surface.content)
-                        } else {
-                            compact.fill_at(surface.content).lerp(full.fill_at(surface.content), expansion)
-                        };
+                        let mut ink = 0.0;
+                        for index in 0..2 {
+                            let weight = if index == 0 { 1.0 - expansion } else { expansion };
+                            if weight > 0.0 {
+                                ink += weight * compact.either(full, index == 1).fill_at(surface.content);
+                            }
+                        }
                         TEXT_COLOR.extend(alpha * opacity * ink / surface.coverage.max(f32::MIN_POSITIVE))
                     },
                 );
