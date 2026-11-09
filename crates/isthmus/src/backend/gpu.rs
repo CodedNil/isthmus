@@ -5,6 +5,7 @@ use std::{
     ops::Range,
     sync::{Arc, OnceLock},
 };
+use web_time::Instant;
 
 pub struct Gpu {
     pub instance: wgpu::Instance,
@@ -69,7 +70,7 @@ impl Gpu {
         let labels: [&str; bindings::BUFFER_COUNT] = ["isthmus frame", "isthmus resources"];
         let buffers = from_fn(|index| UploadBuffer::new(&device, labels[index]));
         let device_name = adapter.get_info().name;
-        Self {
+        let gpu = Self {
             instance,
             adapter,
             device,
@@ -85,11 +86,39 @@ impl Gpu {
             errors,
             words: Vec::new(),
             binding: None,
-        }
+        };
+        // Browsers have no threads, so there pipelines stay lazy.
+        #[cfg(not(target_arch = "wasm32"))]
+        gpu.compile_pipelines::<P>();
+        gpu
+    }
+
+    /// Compiles every pipeline now, a few at a time. Each takes tens to hundreds of milliseconds, so leaving them
+    /// to the first draw that needs one hitches that frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn compile_pipelines<P: Program>(&self) {
+        use std::{
+            sync::atomic::{AtomicUsize, Ordering},
+            thread,
+        };
+        let threads = thread::available_parallelism().map_or(1, |threads| threads.get().min(4));
+        let next = AtomicUsize::new(0);
+        thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    while let shader = next.fetch_add(1, Ordering::Relaxed)
+                        && shader < P::SHADERS.len()
+                    {
+                        self.pipeline::<P>(shader);
+                    }
+                });
+            }
+        });
     }
 
     fn pipeline<P: Program>(&self, shader: usize) -> &wgpu::RenderPipeline {
         self.pipelines[shader].get_or_init(|| {
+            let started = Instant::now();
             let entry = &P::SHADERS[shader];
             let [vertex, fragment] = entry.code.map(|code| {
                 self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -109,7 +138,7 @@ impl Gpu {
                     alpha: wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING.alpha,
                 }),
             };
-            self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry.name),
                 layout: Some(&self.layouts[entry.images]),
                 vertex: wgpu::VertexState {
@@ -136,7 +165,9 @@ impl Gpu {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            })
+            });
+            tracing::debug!(shader = entry.name, elapsed = ?started.elapsed(), "Compiled pipeline");
+            pipeline
         })
     }
 

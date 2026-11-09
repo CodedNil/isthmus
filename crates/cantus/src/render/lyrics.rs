@@ -116,17 +116,16 @@ impl PreparedLyrics {
                 let next = segments.get(index + 1);
                 let value = segment.text.replace('🎵', "♪").replace('🎶', "♫");
                 let line = text.shape(value.trim(), LYRIC_SIZE, LYRIC_WEIGHT);
-                let bounds = line.text;
                 let start = segment.time.start.clamp(0.0, duration);
                 let end =
                     segment.time.end.clamp(start, next.map_or(duration, |s| s.time.start.min(duration)).max(start));
-                if bounds.count == 0 || end <= start {
+                if line.text.count == 0 || end <= start {
                     continue;
                 }
                 // Time the separator with the word so adjacent runs meet without a scrolling jump.
                 let separated = value.ends_with(char::is_whitespace)
                     || next.is_some_and(|s| s.text.starts_with(char::is_whitespace));
-                let width = ink_width(bounds) + space * f32::from(separated);
+                let width = ink_width(line.text) + space * f32::from(separated);
                 channel.runs.push(Run { time: start..end, x: 0.0, width, line, scale: 1.0, lane: 0 });
                 run_text.push(value);
             }

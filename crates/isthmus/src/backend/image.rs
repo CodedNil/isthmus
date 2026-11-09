@@ -5,6 +5,7 @@ use std::{
     iter,
     sync::{Arc, Weak},
 };
+use web_time::Instant;
 use wgpu::util::{DeviceExt, TextureDataOrder};
 
 struct CachedImage {
@@ -109,7 +110,8 @@ impl ImageCache {
 }
 
 fn upload(device: &wgpu::Device, queue: &wgpu::Queue, size: [u32; 2], pixels: &[u8]) -> wgpu::TextureView {
-    device
+    let started = Instant::now();
+    let view = device
         .create_texture_with_data(
             queue,
             &wgpu::TextureDescriptor {
@@ -125,5 +127,7 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, size: [u32; 2], pixels: &[
             TextureDataOrder::LayerMajor,
             pixels,
         )
-        .create_view(&wgpu::TextureViewDescriptor::default())
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    tracing::debug!(width = size[0], height = size[1], elapsed = ?started.elapsed(), "Uploaded image");
+    view
 }

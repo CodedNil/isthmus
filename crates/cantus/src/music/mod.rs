@@ -5,6 +5,7 @@ use crate::{
 };
 use arrayvec::ArrayString;
 use enrichment::TrackCache;
+use isthmus_2d::Ramp;
 use queue::{Queue, Timeline};
 use serde::Deserialize;
 use std::{
@@ -52,8 +53,8 @@ impl Music {
         }
     }
 
-    pub fn update_playback(&mut self, drag: Option<(f32, bool)>, delta_time: f32) {
-        self.queue.update(drag.map(|(offset, _)| offset), delta_time);
+    pub fn update_playback(&mut self, drag: Option<(f32, bool)>) {
+        self.queue.update(drag.map(|(offset, _)| offset));
         if drag.is_some_and(|(_, released)| released)
             && let Some((index, position)) = self.queue.span_at_playhead()
         {
@@ -137,9 +138,9 @@ pub struct Track {
 
 #[derive(Clone, Default)]
 pub struct TrackRuntime {
-    pub(crate) track_expansion: f32,
+    pub(crate) track_expansion: Ramp,
     /// Animated visibility of rating stars and primary playlist icons, respectively.
-    pub(crate) icon_visibility: [f32; 2],
+    pub(crate) icon_visibility: [Ramp; 2],
     pub(crate) droplet_motion: DropletMotion,
 }
 

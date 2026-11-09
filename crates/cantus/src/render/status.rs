@@ -89,7 +89,8 @@ pub struct StatusPanel {
     /// Slowly decaying per-band peak, used to auto-scale each band to the full visual range.
     audio_peak: [f32; AUDIO_SPECTRUM_BANDS],
     /// Fractional scroll between the two newest history samples.
-    history_scroll: f32,
+    /// Progress from one history sample to the next, advancing at a constant rate.
+    history_scroll: Ramp,
     processors: [ProcessorStatus; 2],
     action_origin: Option<Vec2>,
     audio_monitor: Arc<AudioMonitor>,
@@ -130,7 +131,7 @@ impl StatusPanel {
             }
         }
         self.battery_level = update.battery_level;
-        self.history_scroll = 0.0;
+        self.history_scroll = Ramp::default();
     }
 
     pub fn show(&mut self, context: &mut UiContext, sky: StatusSky) {
@@ -167,9 +168,7 @@ impl StatusPanel {
         );
 
         let temperature_blend = 1.0 - (-5.0 * context.frame.delta_time).exp();
-        self.history_scroll = (self.history_scroll
-            + context.frame.delta_time / platform::STATUS_SAMPLE_INTERVAL.as_secs_f32())
-        .saturate();
+        self.history_scroll.approach_over(context.frame.time, 1.0, platform::STATUS_SAMPLE_INTERVAL.as_secs_f32());
         for processor in &mut self.processors {
             processor.temperature += (processor.target_temperature - processor.temperature) * temperature_blend;
             let center = cursor + GRAPH_WIDTH * 0.5;
@@ -183,7 +182,7 @@ impl StatusPanel {
             let half_width = GRAPH_WIDTH * 0.5 - GAP * 0.5;
 
             let history = &processor.history;
-            let history_scroll = self.history_scroll;
+            let history_scroll = self.history_scroll.at(context.frame.time);
             let frame_color = {
                 let heat = vec3(0.22, 0.62, 1.0)
                     .lerp(vec3(1.0, 0.38, 0.08), processor.temperature.smoothstep(60.0, 72.0))

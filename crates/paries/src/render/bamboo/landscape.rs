@@ -187,13 +187,16 @@ pub(super) fn falling_leaves(frame: &mut Frame<'_>) {
     for index in 0..18 {
         let seed = index as f32 * 13.7;
         let age = (frame.time * (0.012 + hash(seed) * 0.008) + hash(seed + 1.0)).fract();
-        let scale = frame.screen_size.y;
         {
             let alpha: f32 = age.smoothstep(0.0, 0.12) * age.smoothstep(1.0, 0.8) * 0.75;
             let tint = hash(seed + 3.0);
             let quad = Quad::oriented(
-                vec2(frame.screen_size.x * hash(seed + 2.0) + (age * 9.0 + seed).sin() * scale * 0.035, age * scale),
-                vec2(0.008 + hash(seed + 4.0) * 0.008, 0.004 * (0.3 + (frame.time * 1.7 + seed).sin().abs())) * scale,
+                vec2(
+                    frame.screen_size.x * hash(seed + 2.0) + (age * 9.0 + seed).sin() * frame.screen_size.y * 0.035,
+                    age * frame.screen_size.y,
+                ),
+                vec2(0.008 + hash(seed + 4.0) * 0.008, 0.004 * (0.3 + (frame.time * 1.7 + seed).sin().abs()))
+                    * frame.screen_size.y,
                 Vec2::from_angle(frame.time * 0.3 + seed + (frame.time * 0.7 + seed).sin() * 0.6),
             );
             shader!(frame, |_, alpha: f32, tint: f32, quad: Quad| quad, |_, surface| {

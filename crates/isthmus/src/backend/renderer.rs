@@ -7,7 +7,10 @@ use crate::{Frame, Program, Resources, ShaderData, ShaderFrame, SurfaceHandle, g
 use slotmap::SlotMap;
 use smallvec::SmallVec;
 use std::collections::HashSet;
-use web_time::Instant;
+use web_time::{Duration, Instant};
+
+/// CPU time to build and upload a frame beyond which it is logged. Presenting is excluded because it waits for vsync.
+const SLOW_FRAME: Duration = Duration::from_millis(8);
 
 /// GPU resources and presentation surfaces for one shader program.
 pub struct Renderer<P: Program> {
@@ -114,10 +117,17 @@ impl<P: Program> Renderer<P> {
         let elapsed = self.started.elapsed().as_secs_f64();
         let delta = (elapsed - self.last_frame).min(0.1) as f32;
         self.last_frame = elapsed;
+        let started = Instant::now();
         draw(&mut Render { renderer: self, time: elapsed as f32, delta_time: delta });
+        let built = started.elapsed();
         self.gpu.check()?;
+        let uploading = Instant::now();
         self.gpu.prepare(self.resources.data())?;
         self.gpu.check()?;
+        let uploaded = uploading.elapsed();
+        if built + uploaded > SLOW_FRAME {
+            tracing::debug!(?built, ?uploaded, words = self.gpu.words.len(), "Slow frame");
+        }
         let mut outputs = SmallVec::<[wgpu::SurfaceTexture; 2]>::new();
         let mut encoder =
             self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("isthmus frame") });

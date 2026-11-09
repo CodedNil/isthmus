@@ -2,6 +2,8 @@ use super::{LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, normalize}
 #[cfg(not(target_arch = "wasm32"))]
 use crate::config::directory;
 use crate::music::{MusicResult, Track};
+#[cfg(target_arch = "wasm32")]
+use gloo_timers::future::TimeoutFuture;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,6 +15,7 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     sync::{Mutex, MutexGuard, OnceLock},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::task;
 
 #[derive(Deserialize)]
@@ -195,7 +198,7 @@ pub(super) async fn publish_lrclib(
             #[cfg(not(target_arch = "wasm32"))]
             task::yield_now().await;
             #[cfg(target_arch = "wasm32")]
-            gloo_timers::future::TimeoutFuture::new(0).await;
+            TimeoutFuture::new(0).await;
         }
     }
     let lines: Vec<_> = lyrics
@@ -239,6 +242,7 @@ pub(super) async fn publish_lrclib(
         http.post("https://lrclib.net/api/publish").header("X-Publish-Token", token).json(&body).send().await?;
     let status = response.status();
     response.error_for_status()?;
+    tracing::debug!(source, %status, "Published lyrics to LRCLIB");
     #[cfg(not(target_arch = "wasm32"))]
     if let Err(error) = append_upload_log(track, lyrics, source, status) {
         tracing::warn!("LRCLIB upload succeeded, but its local history could not be written: {error}");
@@ -252,6 +256,7 @@ pub(super) fn was_uploaded(track: &Track, lyrics: &Lyrics) -> MusicResult<bool> 
 }
 
 #[cfg(target_arch = "wasm32")]
+#[expect(clippy::unnecessary_wraps, reason = "mirrors the native signature")]
 pub(super) fn was_uploaded(_: &Track, _: &Lyrics) -> MusicResult<bool> {
     Ok(false)
 }

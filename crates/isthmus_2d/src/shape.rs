@@ -1,7 +1,7 @@
 use core::{f32::consts::TAU, ops::Range};
 use isthmus::{
-    Fragment, MinMax, Paint, Primitive, Program, Quad, Rect, Vertex, VertexInput,
-    glam::{FloatExt, Vec2, Vec4, vec2},
+    Float, Fragment, MinMax, Paint, Primitive, Program, Quad, Rect, Vertex, VertexInput,
+    glam::{Vec2, Vec4, vec2},
     raster,
     spirv_std::arch::Derivative,
 };
@@ -25,16 +25,28 @@ impl Shape {
         Self::side_rounded_rect(quad, radius, radius)
     }
 
-    /// Creates a rounded rectangle whose left and right corners use separate radii.
-    pub fn side_rounded_rect(quad: impl Into<Quad>, left: f32, right: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+    /// Creates a rounded rectangle whose left and right corners are shaped separately.
+    pub fn side_rounded_rect(
+        quad: impl Into<Quad>,
+        left: impl Into<Corner>,
+        right: impl Into<Corner>,
+    ) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         let quad = quad.into();
         let limit = (quad.size.min_element() * 0.5).max(0.0);
-        let (left, right) = (left.clamp_num(0.0, limit), right.clamp_num(0.0, limit));
+        let (left, right) = (left.into(), right.into());
+        let (left, right) = (left.clamped(limit), right.clamped(limit));
         Self::from_fn(quad, move |point| {
             let local = quad.local(point);
-            let radius = if local.x < 0.0 { left } else { right };
+            let Corner { radius, roundness } = if local.x < 0.0 { left } else { right };
             let corner = local.abs() - quad.size * 0.5 + radius;
-            corner.max(Vec2::ZERO).length() + corner.max_element().min(0.0) - radius
+            let outside = corner.max(Vec2::ZERO);
+            // Squircle corners measure the overshoot with the 4-norm, circular ones with the 2-norm.
+            let reach = if roundness >= 1.0 {
+                outside.length()
+            } else {
+                (outside * outside).length().sqrt().lerp(outside.length(), roundness)
+            };
+            reach + corner.max_element().min(0.0) - radius
         })
     }
 
@@ -49,6 +61,21 @@ impl Shape {
         Self::rounded_rect(quad, quad.size.min_element() * 0.5)
     }
 
+    /// Creates a regular pointy-top hexagon whose vertices lie `radius` from its centre. Round the corners
+    /// by shrinking `radius` and calling `offset`, which keeps the exact distance.
+    pub fn hexagon(center: Vec2, radius: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+        let apothem = radius.max(0.0) * 0.866_025_4;
+        Self::from_fn(Rect::from_center_size(center, vec2(apothem * 2.0, radius.max(0.0) * 2.0)), move |point| {
+            // The usual flat-top hexagon distance, with the axes swapped to point it upwards.
+            let k = vec2(-0.866_025_4, 0.5);
+            let offset = (point - center).abs();
+            let mut point = vec2(offset.y, offset.x);
+            point -= 2.0 * k.dot(point).min(0.0) * k;
+            point -= vec2(point.x.clamp_num(-0.577_350_26 * apothem, 0.577_350_26 * apothem), apothem);
+            point.length() * if point.y > 0.0 { 1.0 } else { -1.0 }
+        })
+    }
+
     /// Creates a disk with a nonnegative radius.
     pub fn circle(center: Vec2, radius: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         let radius = radius.max(0.0);
@@ -59,8 +86,13 @@ impl Shape {
 
     /// Creates a round-ended segment with the given full width.
     pub fn segment(start: Vec2, end: Vec2, width: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-        let width = width.max(0.0);
-        Self::pill(Quad::oriented(start.midpoint(end), vec2(start.distance(end) + width, width), end - start))
+        let radius = width.max(0.0) * 0.5;
+        let axis = end - start;
+        let inverse_length_squared = axis.length_squared().max(f32::MIN_POSITIVE).recip();
+        Self::from_fn(Rect::new(start.min(end), start.max(end)).expanded(radius), move |point| {
+            let along = (point - start).dot(axis) * inverse_length_squared;
+            (point - start - axis * along.saturate()).length() - radius
+        })
     }
 
     /// Creates an unsigned circular arc centerline.
@@ -91,7 +123,9 @@ impl Shape {
     pub fn star(radius: f32, inner_radius: f32) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         let radius = radius.max(0.0);
         let inner_radius = inner_radius.clamp_num(0.0, radius);
-        Self::from_fn(Vec2::splat(radius * 2.0), move |point| {
+        // Tips reach sin(72°) of the radius sideways, and the lowest sit cos(36°) below the centre.
+        let bounds = Rect::new(vec2(-0.951_056_5, -1.0) * radius, vec2(0.951_056_5, 0.809_017) * radius);
+        Self::from_fn(bounds, move |point| {
             if radius == 0.0 {
                 return point.length();
             }
@@ -128,6 +162,28 @@ impl Shape {
     /// Creates an open chevron with its tip at the origin.
     pub fn chevron(extent: Vec2) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         Self::segment(Vec2::ZERO, extent, 0.0).union(Self::segment(Vec2::ZERO, vec2(extent.x, -extent.y), 0.0))
+    }
+}
+
+/// One end of a rounded rectangle.
+#[derive(Clone, Copy)]
+pub struct Corner {
+    /// Size of the rounding, in the same units as the rectangle.
+    pub radius: f32,
+    /// 0 gives squircle corners that hug the rectangle, 1 gives circular ones.
+    pub roundness: f32,
+}
+
+impl Corner {
+    fn clamped(self, limit: f32) -> Self {
+        Self { radius: self.radius.clamp_num(0.0, limit), roundness: self.roundness.saturate() }
+    }
+}
+
+impl From<f32> for Corner {
+    /// A circular corner of the given radius.
+    fn from(radius: f32) -> Self {
+        Self { radius, roundness: 1.0 }
     }
 }
 
@@ -172,7 +228,7 @@ pub trait Sdf: Copy {
     fn union(self, other: impl Sdf) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         Shape {
             bounds: self.geometry_bounds().union(other.geometry_bounds()),
-            outline: self.outline_width(),
+            outline: self.outline_width().max(other.outline_width()),
             distance: move |point| self.distance_at(point).min(other.distance_at(point)),
         }
     }
@@ -180,7 +236,7 @@ pub trait Sdf: Copy {
     fn intersection(self, other: impl Sdf) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
         Shape {
             bounds: self.geometry_bounds().intersection(other.geometry_bounds()),
-            outline: self.outline_width(),
+            outline: self.outline_width().max(other.outline_width()),
             distance: move |point| self.distance_at(point).max(other.distance_at(point)),
         }
     }
@@ -203,7 +259,7 @@ pub trait Sdf: Copy {
         };
         Shape {
             bounds,
-            outline: self.outline_width(),
+            outline: self.outline_width().max(other.outline_width()),
             distance: move |point| {
                 let a = self.distance_at(point);
                 if amount == 0.0 {
@@ -231,6 +287,18 @@ pub trait Sdf: Copy {
             bounds: self.geometry_bounds().expanded(width),
             outline: self.outline_width(),
             distance: move |point| self.distance_at(point).abs() - width,
+        }
+    }
+    /// Scales about the origin by positive per-axis factors. Exact for equal factors; otherwise the
+    /// field stays a conservative distance (never larger than the true one) rather than an exact one.
+    fn scaled(self, factor: Vec2) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
+        let factor = factor.max(Vec2::splat(f32::MIN_POSITIVE));
+        let (inverse, shrink) = (factor.recip(), factor.min_element());
+        let bounds = self.geometry_bounds();
+        Shape {
+            bounds: Rect::new(bounds.min * factor, bounds.max * factor),
+            outline: self.outline_width() * factor.max_element(),
+            distance: move |point| self.distance_at(point * inverse) * shrink,
         }
     }
     /// Moves geometry and bounds together.
@@ -315,5 +383,71 @@ impl Sample {
     /// Antialiased coverage of an interval in the original distance field.
     pub fn band(self, range: Range<f32>) -> f32 {
         (self.below(range.end) - self.below(range.start)).max(0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Declared bounds minus the true extent of the interior, per side: (min, max).
+    fn slack(shape: impl Sdf) -> (Vec2, Vec2) {
+        let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+        for x in 0..800 {
+            for y in 0..800 {
+                let point = vec2(x as f32, y as f32) * 0.25 - 100.0;
+                if shape.contains(point) {
+                    (min, max) = (min.min(point), max.max(point));
+                }
+            }
+        }
+        let bounds = shape.geometry_bounds();
+        (min - bounds.min, bounds.max - max)
+    }
+
+    /// Bounds must never cut the shape off; exact ones must also hug it (to within the sampling grid and thin tips).
+    fn assert_bounds(name: &str, shape: impl Sdf, exact: bool) {
+        let (min, max) = slack(shape);
+        let (low, high) = (min.min(max).min_element(), min.max(max).max_element());
+        assert!(low >= -0.3, "{name} bounds cut off the shape by {}", -low);
+        assert!(!exact || high <= 0.5, "{name} bounds overshoot by {high}");
+    }
+
+    #[test]
+    fn primitive_bounds_hug_their_shapes_and_combinators_enclose_them() {
+        let rect = Rect::new(vec2(-40.0, -20.0), vec2(60.0, 30.0));
+        let (a, b) = (Shape::rounded_rect(rect, 12.0), Shape::circle(vec2(30.0, 10.0), 25.0));
+        assert_bounds("rounded_rect", a, true);
+        assert_bounds("pill", Shape::pill(rect), true);
+        assert_bounds("squircle", Shape::side_rounded_rect(rect, Corner { radius: 18.0, roundness: 0.0 }, 9.0), true);
+        assert_bounds("circle", b, true);
+        assert_bounds("segment", Shape::segment(vec2(-30.0, -10.0), vec2(50.0, 40.0), 10.0), true);
+        assert_bounds("arc", Shape::arc(Vec2::ZERO, 40.0, 0.5, 2.0).offset(3.0), false);
+        assert_bounds("star", Shape::star(40.0, 16.0), true);
+        assert_bounds("hexagon", Shape::hexagon(vec2(5.0, -3.0), 50.0), true);
+        assert_bounds("rounded hexagon", Shape::hexagon(vec2(5.0, -3.0), 30.0).offset(15.0), true);
+        assert_bounds("offset", a.offset(6.0), true);
+        assert_bounds("stroke", a.stroke(8.0), true);
+        assert_bounds("scaled", a.scaled(vec2(1.5, 0.7)), true);
+        assert_bounds("union", a.union(b), true);
+        assert_bounds("intersection", a.intersection(b), true);
+        assert_bounds("difference", a.difference(b), false);
+        assert_bounds("smooth_union", a.smooth_union(b, 20.0, 1.0), false);
+    }
+
+    #[test]
+    fn scaling_keeps_the_field_a_distance_and_unions_keep_the_larger_outline() {
+        let shape = Shape::rounded_rect(Rect::new(vec2(10.0, -20.0), vec2(90.0, 30.0)), 12.0);
+        let uniform = shape.scaled(Vec2::splat(2.0)).distance_at(vec2(200.0, 0.0));
+        assert!((uniform - 2.0 * shape.distance_at(vec2(100.0, 0.0))).abs() < 1e-3);
+        // Unequal factors may only underestimate, so antialiasing and shadows never overshoot.
+        let stretched = shape.scaled(vec2(1.0, 3.0));
+        assert!(stretched.distance_at(vec2(150.0, 0.0)) <= shape.distance_at(vec2(150.0, 0.0)) + 1e-3);
+
+        let (small, large) = (Shape::circle(Vec2::ZERO, 5.0), Shape::circle(vec2(20.0, 0.0), 5.0).outlined(12.0));
+        for combined in [small.union(large).outline_width(), small.smooth_union(large, 4.0, 1.0).outline_width()] {
+            assert_eq!(combined, 12.0);
+        }
+        assert_eq!(large.intersection(small).outline_width(), 12.0);
     }
 }

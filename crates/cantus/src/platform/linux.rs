@@ -787,14 +787,13 @@ impl LayerShellApp {
     }
 
     fn sync_launcher_surface(&mut self, qhandle: &QueueHandle<Self>) {
-        let open = self.cantus.launcher.open;
-        if open == self.surfaces[1].is_some() {
+        if self.cantus.launcher.open == self.surfaces[1].is_some() {
             return;
         }
         self.cantus.interaction = Interaction::default();
         self.repeat = None;
         self.frame_callback = None;
-        if open {
+        if self.cantus.launcher.open {
             self.surfaces[1] = Some(self.create_surface(SurfaceKind::Launcher, qhandle));
         } else if let Some(surface) = self.surfaces[1].take()
             && let (Some(gpu), Some(handle)) = (&mut self.gpu, surface.gpu)

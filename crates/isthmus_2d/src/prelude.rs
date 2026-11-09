@@ -1,1 +1,1 @@
-pub use crate::{Sample, Sdf, Shape, Text};
+pub use crate::{Corner, Ramp, Sample, Sdf, Shape, Text};
