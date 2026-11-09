@@ -13,6 +13,7 @@ half = "2.7.1"
 slotmap = "1.1.1"
 smallvec.workspace = true
 thiserror = "2.0.21"
+tracing.workspace = true
 web-time.workspace = true
 wgpu = { workspace = true, features = ["std", "vulkan", "webgpu", "wgsl"] }
 

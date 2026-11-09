@@ -10,12 +10,19 @@ struct Growth<'a> {
 }
 impl Growth<'_> {
     fn add(&mut self, kind: Kind, center: Vec3, size: Vec3, turn: f32) {
-        let r = self.plant.rotation;
         let (sin, cos) = turn.sin_cos();
         self.objects.push(Object {
-            pos: self.plant.pos + vec3(center.x * r.y - center.y * r.x, center.x * r.x + center.y * r.y, center.z),
+            pos: self.plant.pos
+                + vec3(
+                    center.x * self.plant.rotation.y - center.y * self.plant.rotation.x,
+                    center.x * self.plant.rotation.x + center.y * self.plant.rotation.y,
+                    center.z,
+                ),
             size,
-            rotation: vec2(sin * r.y + cos * r.x, cos * r.y - sin * r.x),
+            rotation: vec2(
+                sin * self.plant.rotation.y + cos * self.plant.rotation.x,
+                cos * self.plant.rotation.y - sin * self.plant.rotation.x,
+            ),
             kind,
             surface_cache: u32::MAX,
             surface_origin: Vec3::ZERO,
@@ -41,8 +48,12 @@ impl Growth<'_> {
     // uses the side occupied by the pot, so even a tip beyond the wall is brought
     // back indoors. Finite wall extents preserve doorways and corners.
     fn repel(&self, local: Vec3, margin: f32) -> Vec3 {
-        let r = self.plant.rotation;
-        let world = self.plant.pos + vec3(local.x * r.y - local.y * r.x, local.x * r.x + local.y * r.y, local.z);
+        let world = self.plant.pos
+            + vec3(
+                local.x * self.plant.rotation.y - local.y * self.plant.rotation.x,
+                local.x * self.plant.rotation.x + local.y * self.plant.rotation.y,
+                local.z,
+            );
         let mut point = world;
         for _ in 0..3 {
             for wall in self.walls {
@@ -62,7 +73,11 @@ impl Growth<'_> {
             }
         }
         let q = point - self.plant.pos;
-        vec3(q.x * r.y + q.y * r.x, -q.x * r.x + q.y * r.y, q.z)
+        vec3(
+            q.x * self.plant.rotation.y + q.y * self.plant.rotation.x,
+            -q.x * self.plant.rotation.x + q.y * self.plant.rotation.y,
+            q.z,
+        )
     }
 
     fn stem(&mut self, a: Vec3, b: Vec3) {
@@ -111,29 +126,29 @@ impl Growth<'_> {
     }
 
     fn tree(&mut self) {
-        let s = self.plant.size;
         // Asymmetric woody scaffolding; secondary shoots carry alternating leaves.
         for i in 0..14 {
             let f = i as f32;
             let angle = f * 2.399_963;
             let dir = vec3(angle.cos(), angle.sin(), 0.0);
-            let start = vec3(0.012, -0.012, s.z * (-0.24 + f * 0.038));
-            let reach = s.x * (0.30 + 0.09 * (f * 3.7).sin()) * (1.0 - f * 0.008);
-            let elbow = start + dir * reach * 0.55 + Vec3::Z * s.z * 0.11;
-            let tip = start + dir * reach + Vec3::Z * s.z * (0.16 + 0.035 * f.sin());
+            let start = vec3(0.012, -0.012, self.plant.size.z * (-0.24 + f * 0.038));
+            let reach = self.plant.size.x * (0.30 + 0.09 * (f * 3.7).sin()) * (1.0 - f * 0.008);
+            let elbow = start + dir * reach * 0.55 + Vec3::Z * self.plant.size.z * 0.11;
+            let tip = start + dir * reach + Vec3::Z * self.plant.size.z * (0.16 + 0.035 * f.sin());
             self.stem(start, elbow);
             self.stem(elbow, tip);
             for j in 0..4 {
                 let g = j as f32;
                 let root = start.lerp(tip, (g + 1.0) / 5.0);
                 let turn = angle + if j % 2 == 0 { -0.80 } else { 0.95 };
-                let shoot = root + vec3(turn.cos(), turn.sin(), 0.55) * s.x * (0.13 + 0.025 * (f + g).sin());
+                let shoot =
+                    root + vec3(turn.cos(), turn.sin(), 0.55) * self.plant.size.x * (0.13 + 0.025 * (f + g).sin());
                 self.stem(root, shoot);
                 for k in 0..6 {
                     let h = k as f32;
                     let attachment = root.lerp(shoot, (h + 1.0) / 6.0);
                     let turn = turn + if k % 2 == 0 { -0.9 } else { 0.9 } + 0.18 * (f + h).sin();
-                    let length = s.x * (0.09 + 0.020 * (h * 3.1 + f).sin());
+                    let length = self.plant.size.x * (0.09 + 0.020 * (h * 3.1 + f).sin());
                     self.leaf(attachment, turn, length, length * 0.56, 0.20 + 0.40 * (f + h).sin().abs());
                 }
             }
@@ -367,10 +382,13 @@ mod tests {
                     ];
                     let parts = compile(vec![walls[0], walls[1], plant]);
                     for part in &parts[3..] {
-                        let rotation = part.rotation;
                         let world = |p: Vec3| {
                             part.pos
-                                + vec3(p.x * rotation.y - p.y * rotation.x, p.x * rotation.x + p.y * rotation.y, p.z)
+                                + vec3(
+                                    p.x * part.rotation.y - p.y * part.rotation.x,
+                                    p.x * part.rotation.x + p.y * part.rotation.y,
+                                    p.z,
+                                )
                         };
                         if part.kind == Kind::Stem {
                             for endpoint in [-0.5, 0.5] {

@@ -447,9 +447,15 @@ impl SpotifyWorker {
             // Spotify timestamps use its server clock, not this machine's wall clock.
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
                 + self.session.time_delta() * 1000;
-            let speed = player.playback_speed;
-            let rate =
-                if playing && !player.is_buffering && speed.is_finite() && speed > 0.0 { speed as f32 } else { 0.0 };
+            let rate = if playing
+                && !player.is_buffering
+                && player.playback_speed.is_finite()
+                && player.playback_speed > 0.0
+            {
+                player.playback_speed as f32
+            } else {
+                0.0
+            };
             // A missing timestamp supplies no elapsed time.
             let age_ms = if player.timestamp > 0 { now.saturating_sub(player.timestamp).max(0) } else { 0 };
             let position = (player.position_as_of_timestamp.max(0) as f64 + age_ms as f64 * f64::from(rate)) as f32;
@@ -767,6 +773,7 @@ mod tests {
     use super::*;
     use crate::music::queue::{Queue, Timeline};
     use calloop::channel;
+    use isthmus_2d::Ramp;
     use std::collections::HashSet;
 
     const REQUESTED: &str = "spotify:track:6vWfZZyIlODYPMEbsrOK3G";
@@ -787,7 +794,7 @@ mod tests {
                 ..Default::default()
             };
             let mut known = track_from_provided(&provided, None, Some(180_000));
-            known.runtime.track_expansion = 0.75;
+            known.runtime.track_expansion = Ramp::new(0.75);
             let interaction_id = known.interaction_id;
             let mut queue = Queue { tracks: vec![known], timeline: Timeline { observed_at: Instant::now(), .. }, .. };
             let sparse = ProvidedTrack { uri: REQUESTED.into(), uid: uid.into(), ..Default::default() };
@@ -799,7 +806,7 @@ mod tests {
             assert_eq!(track.duration_ms, 180_000);
             assert_eq!(track.image.as_deref(), Some("https://example.com/art"));
             assert_eq!(track.interaction_id == interaction_id, uid == "original");
-            assert_eq!(track.runtime.track_expansion, if uid == "original" { 0.75 } else { 0.0 });
+            assert!(track.runtime.track_expansion == Ramp::new(if uid == "original" { 0.75 } else { 0.0 }));
             let mut updated = sparse;
             updated.metadata.insert("title".into(), "Updated title".into());
             queue.replace(vec![track_from_provided(&updated, None, Some(200_000))], 0, 5000.0);
@@ -851,7 +858,7 @@ mod tests {
         };
         let mut queued = track_from_provided(&provided, None, Some(160_342));
         queued.image = Some("https://i.scdn.co/image/already-loaded".into());
-        queued.runtime.track_expansion = 0.75;
+        queued.runtime.track_expansion = Ramp::new(0.75);
         let interaction_id = queued.interaction_id;
         let rating_playlist = HashSet::from([queued.id.expect("requested track id")]);
         let image = queued.image.clone();
@@ -867,7 +874,7 @@ mod tests {
         assert_eq!(playing.uri, REQUESTED);
         assert_eq!(playing.image, image);
         assert_eq!(playing.interaction_id, interaction_id);
-        assert_eq!(playing.runtime.track_expansion, 0.75);
+        assert!(playing.runtime.track_expansion == Ramp::new(0.75));
         assert_eq!(provided.uri, PLAYBACK);
     }
 

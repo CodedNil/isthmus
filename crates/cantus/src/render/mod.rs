@@ -124,7 +124,7 @@ impl Bar {
             .drag_motion()
             .filter(|(id, ..)| music.queue.tracks.iter().any(|track| track.interaction_id == *id))
             .map(|(_, offset, released)| (offset.x / px_per_ms, released));
-        music.update_playback(drag, context.frame.delta_time);
+        music.update_playback(drag);
         if context.config.lyrics_enabled {
             lyrics::show(context, music, layout);
         }

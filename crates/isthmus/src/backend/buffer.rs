@@ -33,7 +33,10 @@ impl UploadBuffer {
             return Ok(());
         }
         if grew {
-            self.buffer = Self::allocate(device, size.next_power_of_two().min(limit), self.label);
+            let capacity = size.next_power_of_two().min(limit);
+            // A bigger buffer is a new allocation and a new bind group, which can hitch the frame that needs it.
+            tracing::debug!(buffer = self.label, bytes = capacity, "Grew storage buffer");
+            self.buffer = Self::allocate(device, capacity, self.label);
         }
         let start = if grew { 0 } else { self.submitted.iter().zip(words).take_while(|(a, b)| a == b).count() };
         if start < words.len() {

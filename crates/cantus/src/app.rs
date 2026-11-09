@@ -14,7 +14,7 @@ use reqwest::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
 #[cfg(target_arch = "wasm32")]
 use std::sync::mpsc::Sender;
-use std::{fmt::Result as FmtResult, io, time::Duration};
+use std::{env, fmt::Result as FmtResult, io, time::Duration};
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{
     Layer,
@@ -49,7 +49,11 @@ fn log_time(writer: &mut Writer<'_>) -> FmtResult {
 }
 
 pub fn run() {
-    let filter = Targets::new().with_default(LevelFilter::WARN).with_target("cantus", Level::INFO);
+    // `RUST_LOG=isthmus=debug` turns on renderer diagnostics such as pipeline compiles and slow frames.
+    let filter = env::var("RUST_LOG")
+        .ok()
+        .and_then(|spec| spec.parse::<Targets>().ok())
+        .unwrap_or_else(|| Targets::new().with_default(LevelFilter::WARN).with_target("cantus", Level::INFO));
     tracing_subscriber::registry()
         .with(
             fmt::layer()
@@ -129,7 +133,7 @@ impl CantusApp {
         let owns_input = if self.launcher.open { view.launcher } else { view.bar };
         self.interaction.enabled = owns_input;
         if owns_input {
-            self.interaction.begin_frame(render.delta_time, render.time);
+            self.interaction.begin_frame(render.time);
         }
         let globals = Globals {
             pointer: self.interaction.mouse_pos(),

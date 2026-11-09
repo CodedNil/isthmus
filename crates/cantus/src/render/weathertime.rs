@@ -279,7 +279,7 @@ struct WorldClock {
 
 #[derive(Default)]
 pub struct WeatherPanel {
-    expansion: f32,
+    expansion: Ramp,
     sun_hours: [f32; 2] = [6.0, 18.0],
     temperature: String,
     utc_offset: Option<Offset>,
@@ -288,10 +288,10 @@ pub struct WeatherPanel {
     daily: [ForecastItem; 5],
     timezones: ArrayVec<WorldClock, MAX_WORLD_CLOCKS>,
     month_offset: i32,
-    month_hover: f32,
-    arrow_hover: [f32; 2],
+    month_hover: Ramp,
+    arrow_hover: [Ramp; 2],
     /// Animated presence of the timer readout.
-    timer_presence: f32,
+    timer_presence: Ramp,
 }
 
 /// Geometry shared by the panel and its text during one draw.
@@ -658,20 +658,22 @@ impl WeatherPanel {
         let x = context.frame.screen_size.x - readout.pill_width - GAP - status_width;
         let pill = Rect::new(vec2(x, PANEL_START), vec2(x + readout.pill_width, PANEL_START + context.config.height));
         let (timer_readout, expired) = timer.readout();
-        self.timer_presence = self
+        let presence = self
             .timer_presence
-            .move_towards(f32::from(timer_readout.is_some()), context.frame.delta_time.min(1.0 / 30.0) * 6.0);
-        let presence = self.timer_presence.smoothstep(0.0, 1.0);
+            .approach(context.frame.time, f32::from(timer_readout.is_some()), 6.0)
+            .smoothstep(0.0, 1.0);
         let text = timer_readout.as_deref().unwrap_or_default();
         let width = context.frame.resources.shape(text, TEXT_SMALL, 900.0).text.width;
         let timer_support = vec2((width + TIMER_PADDING * 2.0) * presence, TIMER_DEPTH * presence);
-        let hovered =
-            context.interaction.pointer_in(weather_panel(pill, self.expansion.smoothstep(0.0, 1.0), timer_support));
-        self.expansion =
-            self.expansion.move_towards(f32::from(hovered), context.frame.delta_time.min(1.0 / 30.0) * 3.0);
+        let hovered = context.interaction.pointer_in(weather_panel(
+            pill,
+            self.expansion.at(context.frame.time).smoothstep(0.0, 1.0),
+            timer_support,
+        ));
+        self.expansion.approach(context.frame.time, f32::from(hovered), 3.0);
         let current = self.hourly[0].conditions;
         let sun = Vec2::from(sun_position(readout.hour, self.sun_hours));
-        let expansion = self.expansion.smoothstep(0.0, 1.0);
+        let expansion = self.expansion.at(context.frame.time).smoothstep(0.0, 1.0);
         let layout = WeatherLayout { pill, expansion, timer_support };
         let panel = weather_panel(pill, expansion, timer_support);
         context.interaction.input_region(pill);
@@ -740,7 +742,7 @@ impl WeatherPanel {
 
     fn show_calendar(&mut self, context: &mut UiContext, layout: &WeatherLayout) {
         let pill = layout.pill;
-        if self.expansion <= 0.0 {
+        if self.expansion.at(context.frame.time) <= 0.0 {
             return;
         }
         let origin = vec2(pill.min.x - FORECAST_X * 0.5, pill.max.y);
@@ -755,11 +757,11 @@ impl WeatherPanel {
         if title.clicked {
             self.month_offset = 0;
         }
-        self.month_hover = self.month_hover.move_towards(f32::from(title.hovered), context.frame.delta_time / 0.12);
+        let month_hover = self.month_hover.approach_over(context.frame.time, f32::from(title.hovered), 0.12);
 
         let today = Zoned::now().date();
         let month = today.first_of_month().saturating_add(Span::new().months(self.month_offset));
-        let (size, weight) = (TEXT_HEADING * (1.0 + self.month_hover * 0.2), 750.0 + self.month_hover * 150.0);
+        let (size, weight) = (TEXT_HEADING * (1.0 + month_hover * 0.2), 750.0 + month_hover * 150.0);
         let title = month.strftime("%B %Y").to_string();
         layout.label(context, &title, size, weight, origin + TITLE, TEXT_COLOR.extend(reveal));
 
@@ -773,9 +775,8 @@ impl WeatherPanel {
             if response.clicked {
                 self.month_offset = (self.month_offset + side as i32).clamp(-1200, 1200);
             }
-            let hover = &mut self.arrow_hover[index];
-            *hover = hover.move_towards(f32::from(response.hovered), context.frame.delta_time / 0.12);
-            let (size, weight) = (TEXT_HEADING * (1.0 + *hover * 0.35), 750.0 + *hover * 150.0);
+            let hover = self.arrow_hover[index].approach_over(context.frame.time, f32::from(response.hovered), 0.12);
+            let (size, weight) = (TEXT_HEADING * (1.0 + hover * 0.35), 750.0 + hover * 150.0);
             let color = TEXT_COLOR.extend(reveal_progress(expansion, position.y));
             layout.label(context, glyph, size, weight, origin + position, color);
         }

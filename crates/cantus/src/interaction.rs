@@ -1,6 +1,6 @@
 use crate::render::{HELD_PRESSURE, RIPPLE_COUNT, RipplePulse};
 use isthmus::{Rect, glam::Vec2};
-use isthmus_2d::Sdf;
+use isthmus_2d::{Ramp, Sdf};
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     mem,
@@ -41,7 +41,9 @@ pub struct Interaction {
     /// Set once per surface draw: inactive surfaces render without registering or receiving input.
     pub enabled: bool = true,
     pointer: Pointer = Pointer::Outside(Vec2::ZERO),
-    pressure: f32,
+    pressure: Ramp,
+    /// Frame time of the latest `begin_frame`, at which the pressure is read.
+    time: f32,
     pub ripples: [RipplePulse; RIPPLE_COUNT],
     events: Vec<ButtonEvent>,
     hot: Option<Active>,
@@ -71,7 +73,8 @@ pub enum InputEvent {
 }
 
 impl Interaction {
-    pub fn begin_frame(&mut self, delta_time: f32, time: f32) {
+    pub fn begin_frame(&mut self, time: f32) {
+        self.time = time;
         self.input_regions.clear();
         self.hot = self.pointer().and_then(|pointer| self.hover_target(pointer));
         self.widgets.clear();
@@ -80,7 +83,7 @@ impl Interaction {
             Pointer::Hovering(_) => 1.0,
             Pointer::Held { .. } => HELD_PRESSURE,
         };
-        self.pressure += (target_pressure - self.pressure).clamp(-5.0 * delta_time, 5.0 * delta_time);
+        self.pressure.approach(time, target_pressure, 5.0);
         for event in &self.events {
             let ButtonEvent::Press(origin) = event else {
                 continue;
@@ -118,8 +121,8 @@ impl Interaction {
         }
     }
 
-    pub const fn pressure(&self) -> f32 {
-        if self.enabled { self.pressure } else { 0.0 }
+    pub fn pressure(&self) -> f32 {
+        if self.enabled { self.pressure.at(self.time) } else { 0.0 }
     }
 
     pub const fn mouse_pos(&self) -> Vec2 {
@@ -265,7 +268,7 @@ mod tests {
         for (offset, dragged) in [(1.0, false), (20.0, true)] {
             let mut interaction = Interaction::default();
             let shape = Shape::rectangle(Rect::new(Vec2::ZERO, Vec2::splat(10.0)));
-            interaction.begin_frame(0.0, 0.0);
+            interaction.begin_frame(0.0);
             interaction.drag(7, shape);
             interaction.apply(InputEvent::Enter(Vec2::splat(5.0)));
             interaction.apply(InputEvent::Press);
@@ -273,7 +276,7 @@ mod tests {
             interaction.apply(InputEvent::Release);
 
             assert_eq!(interaction.drag_motion(), dragged.then_some((7, Vec2::new(offset, 0.0), true)));
-            interaction.begin_frame(0.0, 0.0);
+            interaction.begin_frame(0.0);
             assert_eq!(interaction.drag(7, shape).clicked, !dragged);
             interaction.end_frame();
             assert!(interaction.drag_motion().is_none());

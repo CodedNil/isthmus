@@ -70,7 +70,10 @@ impl Queue {
         self.timeline.start_ms = -progress - self.offset_ms(origin);
     }
 
-    pub fn update(&mut self, drag_offset_ms: Option<f32>, delta_time: f32) {
+    /// Advances the rendered position to now, however long ago it last moved.
+    pub fn update(&mut self, drag_offset_ms: Option<f32>) {
+        let now = Instant::now();
+        let delta_time = self.timeline.updated_at.replace(now).map_or(0.0, |at| (now - at).as_secs_f32());
         if self.tracks.is_empty() {
             self.timeline.start_ms = 0.0;
             self.timeline.movement = 0.0;
@@ -102,6 +105,8 @@ pub struct Timeline {
     // Queue-relative time can span hours; f32 would quantize individual 165 Hz steps.
     pub start_ms: f64 = 0.0,
     pub movement: f32 = 0.0,
+    /// When `start_ms` was last advanced; steps are exact for any elapsed time, so stalls leave no backlog.
+    pub(crate) updated_at: Option<Instant> = None,
 }
 
 impl Timeline {

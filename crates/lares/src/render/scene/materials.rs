@@ -502,16 +502,15 @@ pub(super) fn sample_group<const GROUP: u32>(
         result.coat += surface.coat * weight;
         result.coat_roughness += surface.coat_roughness * weight;
         // Plane gradients are tangent to their projection, so z is always zero.
-        let g = surface.gradient;
         let projected_tangent = match axis {
             0 => surface.tangent.zxy(),
             1 => surface.tangent.xzy(),
             _ => surface.tangent,
         } * weight;
         let projected_gradient = match axis {
-            0 => g.zxy(),
-            1 => g.xzy(),
-            _ => g,
+            0 => surface.gradient.zxy(),
+            1 => surface.gradient.xzy(),
+            _ => surface.gradient,
         } * weight;
         result.tangent += projected_tangent;
         result.gradient += projected_gradient;

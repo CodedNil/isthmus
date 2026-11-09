@@ -765,8 +765,11 @@ fn decode_material(record: Vec4) -> (Hit, Vec3) {
 fn visible_material(item: Object, local: Vec3) -> Hit {
     let mut surface = surface_at(item, local);
     if item.kind == Kind::PosterBlue {
-        let tint = surface.tint;
-        surface.tint = vec3(tint.z * 0.72, tint.x * 0.72 + tint.y * 0.28, tint.x * 0.55 + tint.z * 0.60);
+        surface.tint = vec3(
+            surface.tint.z * 0.72,
+            surface.tint.x * 0.72 + surface.tint.y * 0.28,
+            surface.tint.x * 0.55 + surface.tint.z * 0.60,
+        );
     }
     if item.kind == Kind::Stem && item.material == Material::Foliage {
         (surface.material, surface.tint) = (Material::Foliage, vec3(0.25, 0.38, 0.12));

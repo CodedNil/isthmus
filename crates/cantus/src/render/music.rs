@@ -24,8 +24,8 @@ const ICON_WIDTH: f32 = 24.0;
 /// Center-to-center icon spacing for rating stars and playlist artwork.
 const ICON_SPACING: f32 = 20.0;
 const HEXAGON_WIDTH_RATIO: f32 = 0.866_025_4;
-/// Corner softness of the playlist hexagons, as a fraction of their circumradius.
-const HEXAGON_SOFTNESS: f32 = 0.1;
+/// Corner radius of the playlist hexagons, as a fraction of their circumradius.
+const HEXAGON_ROUNDING: f32 = 0.55;
 /// Height added below the pill for ratings and saved playlists.
 const PRIMARY_SUPPORT_DEPTH: f32 = 8.0;
 /// Height added below the first icon row for other playlists.
@@ -252,30 +252,19 @@ fn playlist_button_center(index: usize, count: usize, size: Vec2) -> Vec2 {
 }
 
 fn playlist_hex(rect: Rect) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-    let softness = rect.size().y * 0.5 * HEXAGON_SOFTNESS;
-    let apothem = rect.size().y * 0.5 * HEXAGON_WIDTH_RATIO;
-    Shape::from_fn(rect, move |point| {
-        // A smooth maximum of the edge planes (slanted ones mirrored in y) rounds the corners.
-        let p = point - rect.center();
-        let slant = p.y.abs() * HEXAGON_WIDTH_RATIO;
-        let weight = |plane: f32| ((plane - apothem) / softness).exp();
-        softness * (weight(p.x) + weight(-p.x) + weight(p.x * 0.5 + slant) + weight(p.x * -0.5 + slant)).ln()
-    })
+    // Rounding by `offset` grows the shape, so the sharp hexagon shrinks to keep the flats where they were.
+    let radius = rect.size().y * 0.5;
+    let rounding = radius * HEXAGON_ROUNDING;
+    Shape::hexagon(rect.center(), radius - rounding / HEXAGON_WIDTH_RATIO).offset(rounding)
 }
 
 /// Squircle corners on complete edges blend into circular ends as they are clipped.
 fn track_shape(rect: Rect, rounding: Vec2) -> impl Sdf {
     // Narrow incoming cards keep the curved ends and full height as they grow.
     let scale = vec2((rect.size().y / rect.size().x.max(0.001)).max(1.0), 1.0);
-    Shape::from_fn(rect, move |point| {
-        let local = (point - rect.center()) * scale;
-        let amount = if local.x < 0.0 { rounding.x } else { rounding.y };
-        let radius = rect.size().y * TRACK_RADIUS.lerp(0.5, amount);
-        let corner = local.abs() - rect.size() * scale * 0.5 + radius;
-        let outside = corner.max(Vec2::ZERO);
-        ((outside * outside).length().sqrt().lerp(outside.length(), amount) + corner.max_element().min(0.0) - radius)
-            / scale.x
-    })
+    let size = rect.size() * scale;
+    let end = |amount: f32| Corner { radius: size.y * TRACK_RADIUS.lerp(0.5, amount), roundness: amount };
+    Shape::side_rounded_rect(size, end(rounding.x), end(rounding.y)).scaled(scale.recip()).translated(rect.center())
 }
 
 fn music_shape(pill: Rect, rounding: Vec2, icon_supports: [Vec2; 2]) -> impl Sdf {
@@ -309,10 +298,10 @@ pub struct AudioFeatures {
 pub struct MusicView {
     particles: [Particle; 64] = [Particle { .. }; 64],
     particles_debt: f32,
-    bar_split: f32,
-    icon_presence: f32,
-    icon_morph: f32,
-    playlist_hover: Vec<f32>,
+    bar_split: Ramp,
+    icon_presence: Ramp,
+    icon_morph: Ramp,
+    playlist_hover: Vec<Ramp>,
 }
 
 #[derive(Clone, Copy)]
@@ -383,7 +372,7 @@ impl MusicView {
         let item_count = count + 1;
         let tracks_left = if show_playlists { playlist_grid_width(item_count, tile_size.x) + GAP * 2.0 } else { 0.0 };
         if show_playlists {
-            self.playlist_hover.resize(count + 1, 0.0);
+            self.playlist_hover.resize(count + 1, Ramp::new(0.0));
             let mut icons = SmallVec::<[_; 8]>::new();
             for (index, playlist) in iter::once(None).chain(playlists.map(Some)).enumerate() {
                 let center = playlist_button_center(index, item_count, tile_size);
@@ -397,7 +386,7 @@ impl MusicView {
                     burst = true;
                 }
                 let hover = &mut self.playlist_hover[index];
-                *hover = hover.move_towards(f32::from(response.hovered), context.frame.delta_time.min(0.1) / 0.18);
+                let hover = hover.approach_over(context.frame.time, f32::from(response.hovered), 0.18);
                 icons.push((playlist, center, hover.smoothstep(0.0, 1.0)));
             }
             icons.sort_by(|a, b| a.2.total_cmp(&b.2));
@@ -455,7 +444,7 @@ impl MusicView {
                 || track.image.is_some() && music.resources.art(track.image.as_deref()).is_none()
                 || bar.playhead_x + start_ms as f32 * bar.px_per_ms >= future_end
             {
-                track.runtime.track_expansion = 0.0;
+                track.runtime.track_expansion.set(0.0);
                 continue;
             }
             let gap = if layout.right <= HISTORY_WIDTH { gap } else { gap.min(track.queue_span_ms() * bar.px_per_ms) };
@@ -470,7 +459,9 @@ impl MusicView {
         let mouse_pos = context.interaction.mouse_pos();
         let shared = TrackFrame { bar, tracks_left, future_end };
         let mut actions = Actions { burst, ..Default::default() };
-        visible.sort_by_key(|layout| music.queue.tracks[layout.queue_index].runtime.track_expansion.to_bits());
+        visible.sort_by_key(|layout| {
+            music.queue.tracks[layout.queue_index].runtime.track_expansion.at(context.frame.time).to_bits()
+        });
         for layout in visible {
             Self::show_track(context, music, &shared, &layout, &mut actions);
         }
@@ -521,14 +512,14 @@ impl MusicView {
         let hidden = layout.right <= shared.tracks_left || opacity * history_alpha <= 1.0 / 1024.0;
         let can_expand = layout.width > context.config.height;
         if hidden || !can_expand {
-            track.runtime.track_expansion = 0.0;
+            track.runtime.track_expansion.set(0.0);
         }
         if hidden {
             return;
         }
         let mut width = if opacity < 1.0 { layout.width } else { layout.width.max(context.config.height) };
         let mut x = layout.right - width;
-        let expansion = track.runtime.track_expansion.smoothstep(0.0, 1.0);
+        let expansion = track.runtime.track_expansion.at(context.frame.time).smoothstep(0.0, 1.0);
 
         let track_text = (width > context.config.height + 26.0 || expansion > 0.0).then(|| {
             let artists = track.artists.iter().take(3).map(String::as_str).collect::<Vec<_>>().join(", ");
@@ -581,9 +572,10 @@ impl MusicView {
             primary_count > 0 && width >= row_width((stars + primary_count) as f32).max(context.config.height + 8.0),
         ];
         for (visibility, target) in track.runtime.icon_visibility.iter_mut().zip(targets) {
-            *visibility = visibility.move_towards(f32::from(target), context.frame.delta_time / 0.15);
+            visibility.approach_over(context.frame.time, f32::from(target), 0.15);
         }
-        let [star_alpha, playlist_alpha] = track.runtime.icon_visibility.map(|value| value.smoothstep(0.0, 1.0));
+        let [star_alpha, playlist_alpha] =
+            track.runtime.icon_visibility.map(|value| value.at(context.frame.time).smoothstep(0.0, 1.0));
         let primary_icons = stars as f32 * star_alpha + primary_count as f32 * playlist_alpha;
         let primary_alpha = star_alpha.max(playlist_alpha);
         let secondary_alpha = expansion * secondary_count.min(1) as f32;
@@ -885,10 +877,7 @@ impl MusicView {
                 );
             }
         }
-        track.runtime.track_expansion = track
-            .runtime
-            .track_expansion
-            .move_towards(f32::from(hovered && can_expand), context.frame.delta_time.min(0.1) / 0.16);
+        track.runtime.track_expansion.approach_over(context.frame.time, f32::from(hovered && can_expand), 0.16);
     }
 
     fn show_particles(&mut self, context: &mut UiContext, music: &Music, bar: BarLayout, track: Option<&Track>) {
@@ -947,25 +936,30 @@ impl MusicView {
             Rect::from_center_size(vec2(x, PANEL_START + context.config.height * 0.5), Vec2::splat(half_width * 2.0));
         context.interaction.input_region(playhead);
         let response = context.interaction.interact("playhead", Shape::rectangle(playhead));
-        let speed = context.frame.delta_time * 5.5;
+        let speed = 5.5;
         let last_toggle = music.last_toggle.elapsed().as_secs_f32() / 0.7;
         if !response.hovered && music.playing && last_toggle < 1.0 {
-            self.bar_split = 1.0 - last_toggle;
-            self.icon_presence = 1.0 - last_toggle;
-            self.icon_morph = self.icon_morph.move_towards(1.0, speed * 1.5);
+            self.bar_split.set(1.0 - last_toggle);
+            self.icon_presence.set(1.0 - last_toggle);
+            self.icon_morph.approach(context.frame.time, 1.0, speed * 1.5);
         } else {
             let show_icon = f32::from(response.hovered || !music.playing);
-            self.bar_split = self.bar_split.move_towards(show_icon, speed);
-            self.icon_presence = self.icon_presence.max(show_icon).move_towards(show_icon, speed);
-            self.icon_morph = self.icon_morph.move_towards(f32::from(response.hovered && !music.playing), speed);
+            self.bar_split.approach(context.frame.time, show_icon, speed);
+            if show_icon > 0.0 {
+                self.icon_presence.set(1.0);
+            }
+            self.icon_presence.approach(context.frame.time, show_icon, speed);
+            self.icon_morph.approach(context.frame.time, f32::from(response.hovered && !music.playing), speed);
         }
         if response.clicked {
             music.toggle_playing();
         }
 
-        let bar_split = self.bar_split;
-        let icon_presence = self.icon_presence;
-        let icon_morph = self.icon_morph;
+        let (bar_split, icon_presence, icon_morph) = (
+            self.bar_split.at(context.frame.time),
+            self.icon_presence.at(context.frame.time),
+            self.icon_morph.at(context.frame.time),
+        );
         let rect = Rect::new(
             vec2(x - half_width, PANEL_START - 5.0),
             vec2(x + half_width, PANEL_START + context.config.height + 5.0),

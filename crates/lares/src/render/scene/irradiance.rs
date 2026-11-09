@@ -131,8 +131,9 @@ impl Grid {
             let spatial = w.x * w.y * w.z * visibility;
             coverage += spatial;
             let weight = spatial * probe.receiver_weight(delta, normal);
-            let light = probe.light;
-            color += (light.constant + light.x * normal.x + light.y * normal.y + light.z * normal.z) * weight;
+            color +=
+                (probe.light.constant + probe.light.x * normal.x + probe.light.y * normal.y + probe.light.z * normal.z)
+                    * weight;
             total += weight;
         }
         if total <= 1.0e-20 {
@@ -175,8 +176,9 @@ impl Grid {
             };
             let spatial = cubic(lattice_delta.x) * cubic(lattice_delta.y) * cubic(lattice_delta.z);
             let weight = spatial * visibility * probe.receiver_weight(delta, normal);
-            let light = probe.light;
-            color += (light.constant + light.x * normal.x + light.y * normal.y + light.z * normal.z) * weight;
+            color +=
+                (probe.light.constant + probe.light.x * normal.x + probe.light.y * normal.y + probe.light.z * normal.z)
+                    * weight;
             total += weight;
         }
         let fallback = color.max_num(Vec3::ZERO) / total.max_num(1.0e-20);
