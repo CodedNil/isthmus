@@ -28,6 +28,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
         let seed: f32 = plant.seed;
         let depth: f32 = plant.depth;
         shader!(
+            "bamboo stalk",
             frame,
             |_,
              size: Vec2,
@@ -106,6 +107,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
         {
             let depth: f32 = plant.depth;
             shader!(
+                "bamboo branch",
                 frame,
                 |_,
                  size: Vec2,

@@ -23,7 +23,7 @@ pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                     * frame.screen_size.y,
                 Vec2::from_angle((hash(seed + index as f32 * 11.0) - 0.5) * 0.3),
             );
-            shader!(frame, |_, size: Vec2, depth: f32, seed: f32, quad: Quad| quad, |_, surface| {
+            shader!("rocks", frame, |_, size: Vec2, depth: f32, seed: f32, quad: Quad| quad, |_, surface| {
                 let point = surface.uv * 2.0 - 1.0;
                 let aa = 2.0 / quad.size.y;
                 let mut distance: f32 = -2.0;
@@ -63,7 +63,7 @@ pub(super) fn deadwood(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32)
             vec2(0.2 + depth * 0.32, 0.06 + depth * 0.06) * frame.screen_size.y,
             Vec2::from_angle(-0.18 + hash(seed) * 0.35),
         );
-        shader!(frame, |_, size: Vec2, seed: f32, depth: f32, quad: Quad| quad, |_, surface| {
+        shader!("deadwood", frame, |_, size: Vec2, seed: f32, depth: f32, quad: Quad| quad, |_, surface| {
             let mut point = surface.uv * 2.0 - 1.0;
             point.y += (point.x * 3.0).sin() * 0.09;
             let aa = 2.0 / quad.size.y;
@@ -114,7 +114,7 @@ pub(super) fn fish(frame: &mut Frame<'_>) {
                 vec2(0.055 + hash(seed + 2.0) * 0.018, 0.027) * frame.screen_size.y,
                 velocity,
             );
-            shader!(frame, |_, size: Vec2, seed: f32, beat: f32, quad: Quad| quad, |_, surface| {
+            shader!("fish", frame, |_, size: Vec2, seed: f32, beat: f32, quad: Quad| quad, |_, surface| {
                 let mut point = surface.uv * 2.0 - 1.0;
                 let aa = 2.0 / quad.size.y;
                 point.y -= (beat + point.x * 4.0).sin() * 0.075 * (1.0 - point.x).powi(2);

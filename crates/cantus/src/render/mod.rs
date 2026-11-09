@@ -141,11 +141,13 @@ impl Bar {
 
 impl UiContext<'_> {
     fn paint_image(&mut self, image: &Image, rect: Rect) {
-        shader!(self.frame, |_, image: &Image, rect: Rect| rect, |_, fragment| image.sample(fragment.uv));
+        shader!("glass image", self.frame, |_, image: &Image, rect: Rect| rect, |_, fragment| image
+            .sample(fragment.uv));
     }
 
     fn paint_text(&mut self, rect: Rect, radius: f32, line: Text, color: Vec4) {
         shader!(
+            "glass text",
             self.frame,
             |frame, rect: Rect, radius: f32, line: Text, color: Vec4| refract(
                 Shape::rounded_rect(rect, radius),

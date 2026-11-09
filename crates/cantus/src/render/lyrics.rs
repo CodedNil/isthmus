@@ -299,7 +299,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     if contributed {
         let center = vec2(10.0, playlist_middle_y);
         let bounds = Rect::from_center_size(center, Vec2::splat(10.0)).expanded(BACKDROP_REACH);
-        shader!(context.frame, |_, bounds: Rect, center: Vec2| raster(bounds), |_, fragment| {
+        shader!("lyric badge", context.frame, |_, bounds: Rect, center: Vec2| raster(bounds), |_, fragment| {
             let sample = lyric_sample(Shape::star(4.0, 2.56).offset(0.8).sample_at(fragment.pixel - center));
             let color = sample.paint(vec4(1.0, 0.82, 0.24, 1.0), lyric_shadow(sample.distance));
             color.with_w(color.w * 0.5 / sample.coverage.max(f32::MIN_POSITIVE))
@@ -336,6 +336,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                 let color = color.extend(1.0);
                 let line = context.frame.resources.place(&run.line, origin).outlined(BACKDROP_REACH);
                 shader!(
+                    "lyric line",
                     context.frame,
                     |_,
                      playhead_x: f32,

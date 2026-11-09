@@ -50,13 +50,12 @@ pub fn program(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Draws inline Rust: `shader!(frame, |frame, name: Type| primitive, |frame, fragment| color)`.
+/// Draws inline Rust: `shader!("name", frame, |frame, name: Type| primitive, |frame, fragment| color)`.
+///
+/// The name must be unique within the crate. It labels the shader's GPU objects and appears in logs.
 #[proc_macro]
 pub fn shader(input: TokenStream) -> TokenStream {
-    let span = proc_macro2::Span::call_site();
-    let location = span.start();
-    let file = proc_macro::Span::call_site().file();
-    syntax::shader::Shader::parse(input.into(), &file, location.line, location.column, &isthmus_path())
+    syntax::shader::Shader::parse(input.into(), &isthmus_path())
         .map_or_else(|error| error.to_compile_error(), |shader| shader.host(&isthmus_path()))
         .into()
 }

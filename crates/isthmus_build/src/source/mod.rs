@@ -27,7 +27,7 @@ pub struct Generated {
 }
 
 pub fn generate(path: &Path, root: Vec<String>, isthmus: &TokenStream) -> Result<Generated, String> {
-    let mut entries = Vec::new();
+    let mut entries: Vec<Shader> = Vec::new();
     let mut graph = Graph { root, isthmus: isthmus.clone(), ..Graph::default() };
     graph.load(path, &module_directory(path), None, None)?;
     for scope in 0..graph.modules.len() {
@@ -36,14 +36,16 @@ pub fn generate(path: &Path, root: Vec<String>, isthmus: &TokenStream) -> Result
             shaders.visit_item(item);
         }
         for (declaration, location, outer_locals) in shaders.declarations {
-            let shader = Shader::parse(
-                declaration.tokens.clone(),
-                &graph.modules[scope].file.to_string_lossy(),
-                location.line,
-                location.column,
-                isthmus,
-            )
-            .map_err(|error| format!("{}:{}: {error}", graph.modules[scope].file.display(), location.line))?;
+            let shader = Shader::parse(declaration.tokens.clone(), isthmus)
+                .map_err(|error| format!("{}:{}: {error}", graph.modules[scope].file.display(), location.line))?;
+            if entries.iter().any(|other| other.entry.value() == shader.entry.value()) {
+                return Err(format!(
+                    "{}:{}: shader name {} is already used; names must be unique within a crate",
+                    graph.modules[scope].file.display(),
+                    location.line,
+                    shader.name.value()
+                ));
+            }
             let mut refs = References::default();
             refs.visit_expr_closure(&shader.declaration);
             if let Some(path) = refs

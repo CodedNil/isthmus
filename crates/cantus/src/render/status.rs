@@ -150,6 +150,7 @@ impl StatusPanel {
         let conditions: WeatherCondition = sky.conditions;
         let phase = sky_phase(sky.sun_height);
         shader!(
+            "status sky",
             context.frame,
             |frame, conditions: WeatherCondition, panel: Rect, phase: Vec3| deform(Shape::pill(panel), frame),
             |frame, surface| {
@@ -192,6 +193,7 @@ impl StatusPanel {
                     .lerp(heat, processor.temperature.smoothstep(60.0, 86.0) * 0.9)
             };
             shader!(
+                "status graph",
                 context.frame,
                 |frame,
                  panel: Rect,
@@ -250,6 +252,7 @@ impl StatusPanel {
                 .lerp(vec3(1.0, 0.72, 0.12), level.smoothstep(0.08, 0.28))
                 .lerp(vec3(0.22, 0.95, 0.55), level.smoothstep(0.18, 0.72));
             shader!(
+                "status battery",
                 context.frame,
                 |_, panel: Rect, rect: Rect, charging: f32, level: f32, liquid_color: Vec3| rect,
                 |frame, surface| {
@@ -308,6 +311,7 @@ impl StatusPanel {
             Rect::from_center_size(audio_rect.center(), vec2(AUDIO_WIDTH, context.config.height - GAP * 2.0));
         let audio_rect = Rect::from_center_size(audio_rect.center(), audio_rect.size() + vec2(8.0, 0.0));
         shader!(
+            "status audio",
             context.frame,
             |frame,
              panel: Rect,
@@ -388,6 +392,7 @@ impl StatusPanel {
         let action_rect =
             Rect::from_center_size(icon_home, vec2(ACTION_WIDTH, context.config.height) + Vec2::splat(GAP * 2.0));
         shader!(
+            "status power",
             context.frame,
             |_, panel: Rect, action_rect: Rect, icon_home: Vec2, icon_y: f32, pull: f32, icon_scale: f32| action_rect,
             |frame, surface| {
