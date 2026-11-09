@@ -93,6 +93,13 @@ impl Deref for Glyphs<'_> {
 }
 
 impl<'a> Glyphs<'a> {
+    /// Chooses this run, or `other` when `second` is set. Both must come from the same frame. Only the plain
+    /// run data is selected, since a shader cannot select between buffer references, so this is what lets
+    /// a shader loop over several runs and keep one copy of the glyph code.
+    pub const fn either(self, other: Self, second: bool) -> Self {
+        Self { line: if second { other.line } else { self.line }, resources: self.resources }
+    }
+
     /// Resolves a text handle against its frame resources on either CPU or GPU.
     pub const fn new(line: Text, resources: ResourceData<'a>) -> Self {
         Self { line, resources }
@@ -326,4 +333,19 @@ pub(crate) fn glyph_distance(curves: &[u32], start: u32, count: u32, point: Vec2
         winding += edge_winding;
     }
     distance_squared.sqrt() * if winding == 0 { 1.0 } else { -1.0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn either_selects_a_run_and_keeps_the_shared_resources() {
+        let resources = [1, 2, 3];
+        let (first, second) = (Text { count: 1, ..Text::default() }, Text { count: 2, ..Text::default() });
+        let (first, second) = (Glyphs::new(first, &resources), Glyphs::new(second, &resources));
+        assert_eq!(first.either(second, false).line.count, 1);
+        assert_eq!(first.either(second, true).line.count, 2);
+        assert_eq!(first.either(second, true).resources, &resources);
+    }
 }
