@@ -141,7 +141,10 @@ struct Drop {
     skew: f32,
 }
 
-#[derive(Clone, Copy, Default, ShaderData)]
+/// The droplets of a track as the host builds them. The shader receives only the live ones, as a slice it reads
+/// in place: carrying the whole array by value through every distance evaluation made one draw cost most of the
+/// bar's GPU time.
+#[derive(Clone, Copy, Default)]
 struct Droplets {
     balls: [Drop; 24],
     count: u32,
@@ -189,34 +192,53 @@ impl Droplets {
         result
     }
 
-    /// The same field defines both the contour and its material transparency.
-    fn field(self, base: f32, point: Vec2, height: f32) -> Vec2 {
-        let blend = height * 0.22;
-        let mut distance = base;
-        let mut alpha = 1.0 - base.smoothstep(0.0, blend * 0.25);
-        for index in 0..self.count as usize {
-            let ball = self.balls[index];
-            if ball.opacity == 0.0 {
-                continue;
-            }
-            let offset = point - ball.center;
-            let local = vec2(offset.dot(ball.axis), offset.dot(ball.axis.perp())) / ball.radii;
-            let droplet = (local.length() - 1.0 - ball.skew * local.x.clamp_num(-1.0, 1.0)) * ball.radii.min_element();
-            let neck = (1.0 - (base - droplet).abs() / blend).saturate();
-            let merged = base.min(droplet) - neck * neck * blend * 0.25;
-            distance = distance.min(base.lerp(merged, ball.opacity.smoothstep(0.0, 0.2)));
-            alpha = alpha.max(ball.opacity * (1.0 - (droplet - distance).abs() / blend).saturate());
-        }
-        let edge_margin = (point.y - self.vertical_limits.x).min(self.vertical_limits.y - point.y);
-        distance = base.lerp(distance, edge_margin.smoothstep(0.0, height * 0.15));
-        let fade = 1.0 - base.smoothstep(0.0, height * 0.32);
-        vec2(distance, 1.0f32.lerp(alpha * fade, (base - distance).smoothstep(0.0, 0.5)))
+    /// The droplets that are live, which is all the shader needs of them.
+    fn live(&self) -> &[Drop] {
+        &self.balls[..self.count as usize]
     }
 
-    fn shape(self, body: impl Sdf, height: f32) -> impl Sdf {
-        let reach = if self.count == 0 { 0.0 } else { height * 0.4 };
-        Shape::from_fn(body.bounds(reach), move |point| self.field(body.distance_at(point), point, height).x)
+    #[cfg(test)]
+    fn field(self, base: f32, point: Vec2, height: f32) -> Vec2 {
+        droplet_field(self.live(), self.vertical_limits, base, point, height)
     }
+
+    #[cfg(test)]
+    fn shape<'droplets>(&'droplets self, body: impl Sdf + 'droplets, height: f32) -> impl Sdf + 'droplets {
+        droplet_shape(self.live(), self.vertical_limits, body, height)
+    }
+}
+
+/// The same field defines both the contour and its material transparency.
+#[expect(clippy::needless_range_loop, reason = "Rust-GPU cannot lower a slice iterator")]
+fn droplet_field(balls: &[Drop], vertical_limits: Vec2, base: f32, point: Vec2, height: f32) -> Vec2 {
+    let blend = height * 0.22;
+    let mut distance = base;
+    let mut alpha = 1.0 - base.smoothstep(0.0, blend * 0.25);
+    for index in 0..balls.len() {
+        let ball = balls[index];
+        if ball.opacity == 0.0 {
+            continue;
+        }
+        let offset = point - ball.center;
+        let local = vec2(offset.dot(ball.axis), offset.dot(ball.axis.perp())) / ball.radii;
+        let droplet = (local.length() - 1.0 - ball.skew * local.x.clamp_num(-1.0, 1.0)) * ball.radii.min_element();
+        let neck = (1.0 - (base - droplet).abs() / blend).saturate();
+        let merged = base.min(droplet) - neck * neck * blend * 0.25;
+        distance = distance.min(base.lerp(merged, ball.opacity.smoothstep(0.0, 0.2)));
+        alpha = alpha.max(ball.opacity * (1.0 - (droplet - distance).abs() / blend).saturate());
+    }
+    let edge_margin = (point.y - vertical_limits.x).min(vertical_limits.y - point.y);
+    distance = base.lerp(distance, edge_margin.smoothstep(0.0, height * 0.15));
+    let fade = 1.0 - base.smoothstep(0.0, height * 0.32);
+    vec2(distance, 1.0f32.lerp(alpha * fade, (base - distance).smoothstep(0.0, 0.5)))
+}
+
+#[expect(clippy::len_zero, reason = "ShaderSlice has no is_empty")]
+fn droplet_shape(balls: &[Drop], vertical_limits: Vec2, body: impl Sdf, height: f32) -> impl Sdf {
+    let reach = if balls.len() == 0 { 0.0 } else { height * 0.4 };
+    Shape::from_fn(body.bounds(reach), move |point| {
+        droplet_field(balls, vertical_limits, body.distance_at(point), point, height).x
+    })
 }
 
 /// Height the playlist tiles gain below the panel when lyrics are enabled: down to the bottom of the first lyric row,
@@ -690,6 +712,8 @@ impl MusicView {
         let colors = music.resources.palette(track.image.as_deref());
         let audio = music.resources.audio(track.id);
         let droplets = Droplets::new(pill, rounding, droplet_strength, seed, droplet_progress);
+        let drops: &[Drop] = droplets.live();
+        let limits = droplets.vertical_limits;
         let flow_time = {
             let pace = ((audio.tempo - 0.2) * 2.5).saturate();
             context.frame.time * 0.2 + seed + (context.frame.time * 0.17).sin() * (audio.energy + pace)
@@ -716,14 +740,15 @@ impl MusicView {
              audio: AudioFeatures,
              pill: Rect,
              rounding: Vec2,
-             droplets: Droplets,
+             drops: &[Drop],
+             limits: Vec2,
              icon_supports: [Vec2; 2],
              flow_time: f32,
              beat: f32,
              turbulence: f32,
              frequency: f32| {
                 frame.globals.pressure *= pointer_active;
-                deform(droplets.shape(music_shape(pill, rounding, icon_supports), pill.size().y), frame)
+                deform(droplet_shape(drops, limits, music_shape(pill, rounding, icon_supports), pill.size().y), frame)
             },
             |frame, surface| {
                 let shadow = shadow_fade(surface.pixel, viewport);
@@ -774,7 +799,7 @@ impl MusicView {
                 let art_uv = (surface.refracted - center) / (radius * 2.0) + 0.5;
                 let art_alpha = edge.smoothstep(0.0, -1.0) * art_uv.x.smoothstep(0.0, 0.08) * face;
                 let base = music_shape(pill, rounding, icon_supports).distance_at(surface.pixel);
-                let alpha = opacity * droplets.field(base, surface.pixel, pill.size().y).y;
+                let alpha = opacity * droplet_field(drops, limits, base, surface.pixel, pill.size().y).y;
                 source_over(
                     image.sample(art_uv) * vec4(1.0, 1.0, 1.0, art_alpha),
                     glass_masked(surface, color, vec2(face, shadow)),

@@ -1,5 +1,6 @@
 use super::{Frame, Program, atmosphere, daylight, hash, noise, pigment, scene_point, wash, wind};
 use isthmus::{prelude::*, spirv_std::arch::kill};
+use isthmus_2d::prelude::*;
 
 pub(super) fn river(y: f32) -> Vec2 {
     let depth = ((y - 0.42) / 0.58).max(0.0);

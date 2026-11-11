@@ -1,138 +1,61 @@
-use anyhow::{Context, Result, bail};
-use cargo_metadata::{CargoOpt, DependencyKind, MetadataCommand};
-use naga::{
-    back::wgsl::{WriterFlags, write_string},
-    compact::{KeepUnused, compact},
-    front::{spv, wgsl},
-    valid::{Capabilities, ValidationFlags, Validator},
-};
+//! Build-script support: extracts `shader!` declarations from a crate's source, compiles them
+//! with Rust-GPU and emits WGSL plus the manifest the `program!` macro includes.
+#![expect(clippy::wildcard_enum_match_arm, reason = "syn's syntax enums are non-exhaustive")]
+use anyhow::{Context as _, Result, bail};
+use cargo::{Consumer, directive, write_if_changed};
 use quote::{format_ident, quote};
 use spirv_builder::{ModuleResult, SpirvBuilder, SpirvMetadata};
-use std::{collections::BTreeMap, env, fs, path::Path};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
-mod source;
-mod syntax;
+mod cargo;
+mod generate;
+mod manifest;
+mod wgsl;
 
 /// Extracts shaders from a Rust source module.
 pub fn build(source: &str) -> Result<()> {
-    let manifest = env::var("CARGO_MANIFEST_DIR")?;
-    let mut command = MetadataCommand::new();
-    command.manifest_path(Path::new(&manifest).join("Cargo.toml"));
-    let metadata = command.clone().no_deps().exec()?;
-    let package = metadata
-        .packages
-        .iter()
-        .find(|package| package.manifest_path.parent() == Some(manifest.as_str().into()))
-        .context("shader consumer is absent from Cargo metadata")?;
-    let dependency = package
-        .dependencies
-        .iter()
-        .find(|dep| dep.name == "isthmus" && dep.kind == DependencyKind::Normal)
-        .context("shader consumer must depend on isthmus")?;
-    let isthmus = format_ident!("{}", dependency.rename.as_deref().unwrap_or("isthmus").replace('-', "_"));
-    let source = Path::new(&manifest).join(source);
-    let module = source.strip_prefix(Path::new(&manifest).join("src"))?.with_extension("");
-    let mut modules: Vec<_> = module.iter().map(|part| part.to_string_lossy().into_owned()).collect();
-    if modules.last().is_some_and(|name| matches!(name.as_str(), "mod" | "lib" | "main")) {
-        modules.pop();
+    let consumer = Consumer::discover()?;
+    let name = format_ident!("{}", consumer.isthmus_name()?);
+    let isthmus = quote!(::#name);
+    let source = consumer.directory.join(source);
+    let generated =
+        generate::generate(&source, consumer.module_path(&source)?, &isthmus).map_err(anyhow::Error::msg)?;
+
+    let cache = consumer.cache();
+    let shader_crate = cache.join("source");
+    fs::create_dir_all(&shader_crate)?;
+    write_if_changed(&shader_crate.join("Cargo.toml"), &manifest::render(&consumer, &generated.identifiers)?)?;
+    generate::split::write(&shader_crate.join("lib.rs"), &generated.source)?;
+    let workspace = &consumer.metadata.workspace_root;
+    let lock = workspace.join("Cargo.lock");
+    write_if_changed(&shader_crate.join("Cargo.lock"), &fs::read_to_string(&lock)?)?;
+    for watched in [workspace.join("Cargo.toml"), lock, consumer.package.manifest_path.clone()] {
+        directive(format_args!("rerun-if-changed={watched}"));
     }
-    let generated = source::generate(&source, modules, &quote!(::#isthmus)).map_err(anyhow::Error::msg)?;
-    let features: Vec<_> = package
-        .features
-        .keys()
-        .filter(|feature| {
-            env::var_os(format!("CARGO_FEATURE_{}", feature.as_str().replace('-', "_").to_uppercase())).is_some()
+
+    let spirv = compile(&shader_crate, &cache)?;
+    let output = env::var("OUT_DIR")?;
+    let output = Path::new(&output);
+    let entries: Vec<_> =
+        generated.shaders.iter().flat_map(|shader| [shader.vertex_entry(), shader.entry.value()]).collect();
+    wgsl::write_stages(&spirv, &entries, output)?;
+    let metadata = generated.shaders.iter().map(|shader| shader.metadata(&isthmus));
+    write_if_changed(
+        &output.join("isthmus.manifest.rs"),
+        &quote!({
+            use #isthmus::{Blend, __private::ShaderEntry};
+            &[#(#metadata),*]
         })
-        .map(ToString::to_string)
-        .collect();
-    let resolved =
-        command.features(CargoOpt::NoDefaultFeatures).features(CargoOpt::SomeFeatures(features.clone())).exec()?;
-    let nodes = &resolved.resolve.as_ref().context("Cargo did not resolve shader dependencies")?.nodes;
-    let consumer = nodes.iter().find(|node| node.id == package.id).context("shader consumer was not resolved")?;
-    let cache = metadata.target_directory.join("isthmus").join(package.name.as_str());
-    let source_crate = cache.join("source");
-    fs::create_dir_all(&source_crate)?;
-    let mut shader_manifest: toml::Table = format!(
-        "[package]\nname = {:?}\nversion = \"0.0.0\"\nedition = \"2024\"\n[lib]\npath = \"lib.rs\"\n[workspace]\n",
-        format!("{}-shader", package.name),
+        .to_string(),
     )
-    .parse()?;
-    let mut dependencies = toml::Table::new();
-    let mut targets = BTreeMap::<String, BTreeMap<&str, toml::Table>>::new();
-    for dep in consumer.deps.iter().filter(|dep| {
-        generated.identifiers.contains(&dep.name)
-            && dep.dep_kinds.iter().any(|kind| kind.kind == DependencyKind::Normal)
-    }) {
-        let requested = package
-            .dependencies
-            .iter()
-            .find(|direct| {
-                direct.kind == DependencyKind::Normal && direct.rename.as_deref().unwrap_or(&direct.name) == dep.name
-            })
-            .context("shader dependency is absent from the consumer manifest")?;
-        let package = &resolved[&dep.pkg];
-        let mut value = toml::toml! {
-            package = (package.name.as_str())
-            default-features = false
-            features = (requested.features.clone())
-        };
-        match package.source.as_ref().map(|source| source.repr.as_str()) {
-            None => {
-                value.insert("path".into(), package.manifest_path.parent().unwrap().as_str().into());
-            }
-            Some(source) if source.starts_with("registry+") => {
-                value.insert("registry-index".into(), source[9..].into());
-                value.insert("version".into(), format!("={}", package.version).into());
-            }
-            Some(source) if source.starts_with("git+") => {
-                let git = source[4..].split('#').next().unwrap();
-                let (url, reference) = git.split_once('?').unwrap_or((git, ""));
-                value.insert("git".into(), url.into());
-                value.extend(
-                    form_urlencoded::parse(reference.as_bytes())
-                        .map(|(key, value)| (key.into_owned(), value.into_owned().into())),
-                );
-            }
-            Some(source) => bail!("unsupported shader dependency source: {source}"),
-        }
-        for kind in dep.dep_kinds.iter().filter(|kind| kind.kind == DependencyKind::Normal) {
-            let table = kind.target.as_ref().map_or(&mut dependencies, |target| {
-                targets.entry(target.to_string()).or_default().entry("dependencies").or_default()
-            });
-            table.insert(dep.name.clone(), value.clone().into());
-        }
-    }
-    shader_manifest.insert("dependencies".into(), dependencies.into());
-    shader_manifest.insert("target".into(), toml::Value::try_from(targets)?);
-    let mut shader_features =
-        package.features.keys().map(|name| (name.clone(), toml::Value::Array(Vec::new()))).collect::<toml::Table>();
-    shader_features
-        .insert("default".into(), features.into_iter().filter(|name| name != "default").collect::<Vec<_>>().into());
-    shader_manifest.insert("features".into(), shader_features.into());
-    let workspace = metadata.workspace_root.join("Cargo.toml");
-    let mut workspace_manifest: toml::Table = fs::read_to_string(&workspace)?.parse()?;
-    if let Some(mut patch) = workspace_manifest.remove("patch") {
-        for (_, deps) in patch.as_table_mut().context("patch must be a table")? {
-            for (_, dep) in deps.as_table_mut().context("patch source must be a table")? {
-                if let Some(path) = dep.get_mut("path") {
-                    *path = metadata
-                        .workspace_root
-                        .join(path.as_str().context("patch path must be a string")?)
-                        .as_str()
-                        .into();
-                }
-            }
-        }
-        shader_manifest.insert("patch".into(), patch);
-    }
-    println!("cargo:rerun-if-changed={workspace}");
-    write_if_changed(source_crate.join("Cargo.toml").as_std_path(), &toml::to_string(&shader_manifest)?)?;
-    write_if_changed(source_crate.join("lib.rs").as_std_path(), &generated.source)?;
-    let lock = metadata.workspace_root.join("Cargo.lock");
-    println!("cargo:rerun-if-changed={lock}");
-    println!("cargo:rerun-if-changed={}", package.manifest_path);
-    write_if_changed(source_crate.join("Cargo.lock").as_std_path(), &fs::read_to_string(lock)?)?;
-    let mut builder = SpirvBuilder::new(&source_crate, "spirv-unknown-vulkan1.4")
+}
+
+/// Builds the shader crate with Rust-GPU into a single SPIR-V module.
+fn compile(shader_crate: &Path, cache: &Path) -> Result<PathBuf> {
+    let mut builder = SpirvBuilder::new(shader_crate, "spirv-unknown-vulkan1.4")
         .deny_warnings(true)
         .target_dir_path(cache.join("target"))
         .spirv_metadata(SpirvMetadata::None);
@@ -141,50 +64,5 @@ pub fn build(source: &str) -> Result<()> {
     let ModuleResult::SingleModule(module) = build.module else {
         bail!("Rust-GPU unexpectedly produced multiple shader modules");
     };
-    let options =
-        spv::Options { adjust_coordinate_space: false, strict_capabilities: true, block_ctx_dump_prefix: None };
-    let reflected = spv::parse_u8_slice(&fs::read(module)?, &options)?;
-    // Packed half floats use core WGSL operations without requiring the f16 extension.
-    let mut validator =
-        Validator::new(ValidationFlags::all(), Capabilities::default() | Capabilities::SHADER_FLOAT16_IN_FLOAT32);
-    validator.validate(&reflected)?;
-    let output = env::var("OUT_DIR")?;
-    let output = Path::new(&output);
-    // A single entry point lets wgpu skip runtime pruning and revalidation for each stage.
-    for name in generated.shaders.iter().flat_map(|shader| [shader.vertex_entry(), shader.entry.value()]) {
-        let mut module = reflected.clone();
-        module.entry_points.retain(|entry| entry.name == name);
-        if module.entry_points.is_empty() {
-            bail!("shader entry {name} was not exported");
-        }
-        // Each stage owns a separate module. Keep its GPU entry name stable
-        // when unrelated Rust edits move shader! declarations to new lines.
-        module.entry_points[0].name = "main".into();
-        compact(&mut module, KeepUnused::No);
-        let info = validator.validate(&module)?;
-        // Tint rejects Naga's rounded decimal spelling of the largest finite float.
-        let code =
-            write_string(&module, &info, WriterFlags::empty())?.replace(&format!("{}f", f32::MAX), "0x1.fffffep+127f");
-        // Preserve SPIR-V derivatives when WGSL cannot prove control-flow uniformity.
-        let code = code.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n");
-        let code = format!("diagnostic(warning, derivative_uniformity);\n{code}");
-        validator.validate(&wgsl::parse_str(&code)?)?;
-        write_if_changed(&output.join(format!("{name}.wgsl")), &code)?;
-    }
-    let entries = generated.shaders.iter().map(|shader| shader.metadata(&quote!(::#isthmus)));
-    write_if_changed(
-        &output.join("isthmus.manifest.rs"),
-        &quote!({
-            use ::#isthmus::{Blend, __private::ShaderEntry};
-            &[#(#entries),*]
-        })
-        .to_string(),
-    )
-}
-
-fn write_if_changed(path: &Path, contents: &str) -> Result<()> {
-    if !fs::read_to_string(path).is_ok_and(|current| current == contents) {
-        fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
-    }
-    Ok(())
+    Ok(module)
 }

@@ -17,3 +17,8 @@ lares:
     wasm-bindgen --target web --out-dir crates/lares/assets/web target/wasm32-unknown-unknown/release/lares.wasm
     gzip -kf crates/lares/assets/web/lares_bg.wasm crates/lares/assets/web/lares.js
     cargo run -p lares
+
+# Lints clippy cannot express, then clippy itself.
+check:
+    ! grep -rnE '#\[(cfg_attr\(.*)?path ?=' crates --include=*.rs --exclude-dir=target
+    cargo clippy --workspace --all-targets

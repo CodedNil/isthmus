@@ -12,7 +12,7 @@ use crate::{
     timer::Timer,
 };
 use arrayvec::{ArrayString, ArrayVec};
-use core::f32::consts::PI;
+use core::{array::from_fn, f32::consts::PI, fmt::Write};
 use isthmus::prelude::*;
 use isthmus_2d::prelude::*;
 use jiff::{
@@ -20,7 +20,6 @@ use jiff::{
     civil::{DateTime, Time},
     tz::{Offset, TimeZone},
 };
-use std::{array::from_fn, fmt::Write};
 use tracing::warn;
 
 /// Number of conditions shown in the hourly forecast row.
@@ -307,6 +306,7 @@ mod monitor {
         app::{Background, fetch_json, send_update},
         platform,
     };
+    use core::{array::from_fn, iter::once, time::Duration};
     use futures_util::future::join_all;
     use jiff::{
         civil::DateTime,
@@ -314,7 +314,6 @@ mod monitor {
     };
     use reqwest::Client;
     use serde::Deserialize;
-    use std::{array::from_fn, iter::once, time::Duration};
     use tracing::warn;
 
     const WEATHER_FIELDS: &str = "temperature_2m,weather_code";

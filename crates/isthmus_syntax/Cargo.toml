@@ -1,0 +1,13 @@
+[package]
+name = "isthmus_syntax"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+isthmus_abi.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+syn = { workspace = true, features = ["visit-mut"] }
+
+[lints]
+workspace = true

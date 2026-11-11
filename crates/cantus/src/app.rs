@@ -17,11 +17,11 @@ use std::sync::mpsc::Sender;
 use std::{env, fmt::Result as FmtResult, io, time::Duration};
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{
-    Layer,
+    Layer as _,
     filter::Targets,
     fmt::{self, format::Writer},
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
+    layer::SubscriberExt as _,
+    util::SubscriberInitExt as _,
 };
 use web_time::Instant;
 
@@ -72,7 +72,7 @@ impl Background {
         let updater = self.updater.clone();
         platform::spawn_task(async move {
             if let Some(event) = task.await {
-                let _ = updater.send(Box::new(event));
+                drop(updater.send(Box::new(event)));
             }
         });
     }

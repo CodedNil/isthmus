@@ -148,57 +148,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "axum"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
-dependencies = [
- "axum-core",
- "base64 0.22.1",
- "bytes",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "itoa",
- "matchit",
- "memchr",
- "mime",
- "percent-encoding",
- "pin-project-lite",
- "serde_core",
- "serde_json",
- "serde_path_to_error",
- "sha1",
- "sync_wrapper",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tower",
- "tower-layer",
- "tower-service",
-]
-
-[[package]]
-name = "axum-core"
-version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
-dependencies = [
- "bytes",
- "futures-core",
- "http",
- "http-body",
- "http-body-util",
- "mime",
- "pin-project-lite",
- "sync_wrapper",
- "tower-layer",
- "tower-service",
-]
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -374,8 +323,8 @@ dependencies = [
  "hex",
  "image",
  "isthmus",
- "isthmus-build",
  "isthmus_2d",
+ "isthmus_build",
  "jiff",
  "librespot-core",
  "librespot-metadata",
@@ -1431,12 +1380,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "http-range-header"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
-
-[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1471,7 +1414,6 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
- "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -1704,7 +1646,6 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
- "image-webp",
  "moxcms",
  "num-traits",
  "png",
@@ -1813,6 +1754,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "half",
+ "isthmus_abi",
  "isthmus_macros",
  "pollster",
  "slotmap",
@@ -1822,22 +1764,6 @@ dependencies = [
  "tracing",
  "web-time",
  "wgpu",
-]
-
-[[package]]
-name = "isthmus-build"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cargo_metadata 0.23.1",
- "form_urlencoded",
- "naga",
- "prettyplease",
- "proc-macro2",
- "quote",
- "spirv-builder",
- "syn 3.0.10",
- "toml 1.2.1+spec-1.1.0",
 ]
 
 [[package]]
@@ -1851,10 +1777,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "isthmus_abi"
+version = "0.1.0"
+
+[[package]]
+name = "isthmus_build"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cargo_metadata 0.23.1",
+ "form_urlencoded",
+ "isthmus_syntax",
+ "naga",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "spirv-builder",
+ "syn 3.0.10",
+ "toml 1.2.1+spec-1.1.0",
+]
+
+[[package]]
 name = "isthmus_macros"
 version = "0.1.0"
 dependencies = [
+ "isthmus_syntax",
  "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
+name = "isthmus_syntax"
+version = "0.1.0"
+dependencies = [
+ "isthmus_abi",
  "proc-macro2",
  "quote",
  "syn 3.0.10",
@@ -1983,32 +1941,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lares"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bitflags",
- "flate2",
- "futures-util",
- "gloo-events",
- "gloo-render",
- "image",
- "isthmus",
- "isthmus-build",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tower-http 0.7.1",
- "tracing",
- "tracing-subscriber",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2098,7 +2030,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-stream",
- "tokio-tungstenite 0.28.0",
+ "tokio-tungstenite",
  "tokio-util",
  "url",
  "uuid",
@@ -2208,12 +2140,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "matchit"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
-
-[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2253,16 +2179,6 @@ name = "mime"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5848f5a9e8117cf94f2f90faac24a87ff81600ff8628c1e3deaab572e76bfa1"
-
-[[package]]
-name = "mime_guess"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
-dependencies = [
- "mime",
- "unicase",
-]
 
 [[package]]
 name = "miniz_oxide"
@@ -2728,7 +2644,8 @@ name = "paries"
 version = "0.1.0"
 dependencies = [
  "isthmus",
- "isthmus-build",
+ "isthmus_2d",
+ "isthmus_build",
  "pollster",
  "wayland-backend",
  "wayland-client",
@@ -3387,7 +3304,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.6",
  "tower",
- "tower-http 0.6.11",
+ "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -4632,20 +4549,8 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.6",
- "tungstenite 0.28.0",
+ "tungstenite",
  "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite 0.29.0",
 ]
 
 [[package]]
@@ -4788,31 +4693,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tower-http"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
-dependencies = [
- "bitflags",
- "bytes",
- "futures-core",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "http-range-header",
- "httpdate",
- "mime",
- "mime_guess",
- "percent-encoding",
- "pin-project-lite",
- "tokio",
- "tokio-util",
- "tower-layer",
- "tower-service",
-]
-
-[[package]]
 name = "tower-layer"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4934,22 +4814,6 @@ dependencies = [
  "sha1",
  "thiserror 2.0.21",
  "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.5",
- "sha1",
- "thiserror 2.0.21",
 ]
 
 [[package]]

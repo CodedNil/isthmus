@@ -7,8 +7,8 @@ use crate::{
 };
 use isthmus::prelude::*;
 use isthmus_2d::{
-    layout::{ShapedLine, TextCache},
     prelude::*,
+    text::{ShapedLine, TextCache},
 };
 use std::{collections::BTreeMap, ops::Range};
 

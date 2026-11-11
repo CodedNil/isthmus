@@ -7,7 +7,7 @@ use crate::{
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
 use futures_util::{
-    StreamExt,
+    StreamExt as _,
     future::{BoxFuture, try_join_all},
     stream::FuturesUnordered,
 };
@@ -31,7 +31,7 @@ use librespot_protocol::{
         Add, Delta, Item, ListAttributes, ListChanges, Op, PictureSize, Rem, SelectedListContent, op,
     },
 };
-use protobuf::{EnumOrUnknown, Message, MessageField};
+use protobuf::{EnumOrUnknown, Message as _, MessageField};
 use reqwest::{
     Method,
     header::{self, HeaderMap},
@@ -564,6 +564,7 @@ impl SpotifyWorker {
         self.load_playlists().await
     }
 
+    #[expect(clippy::wildcard_enum_match_arm, reason = "Only a few variants need handling; the rest take the default")]
     async fn load_playlists(&mut self) -> MusicResult<()> {
         let root =
             SelectedListContent::parse_from_bytes(&self.session.spclient().get_rootlist(0, Some(10_000)).await?)?;

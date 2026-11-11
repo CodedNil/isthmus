@@ -8,7 +8,7 @@ use crate::{
 };
 use freedesktop_desktop_entry::{Iter, default_paths, get_languages_from_env};
 use isthmus::Image;
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fs, mem,
@@ -106,7 +106,8 @@ fn watch(roots: &[PathBuf], sender: &mpsc::SyncSender<()>) -> Option<Recommended
             Err(_) => true,
         };
         if changed {
-            let _ = sender.try_send(());
+            // A full channel already has a refresh pending.
+            sender.try_send(()).unwrap_or_default();
         }
     })
     .map_err(|error| warn!(%error, "Cannot watch applications; using periodic refresh"))
@@ -195,7 +196,7 @@ mod tests {
 
     impl Drop for Directory {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            drop(fs::remove_dir_all(&self.0));
         }
     }
 

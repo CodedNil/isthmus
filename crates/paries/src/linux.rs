@@ -1,3 +1,4 @@
+#![expect(clippy::print_stderr, reason = "The wallpaper daemon logs to stderr")]
 use crate::render::{Renderer, bamboo::Bamboo};
 use isthmus::{
     SurfaceHandle,
@@ -14,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 use wayland_client::{
-    Connection, Proxy, QueueHandle,
+    Connection, Proxy as _, QueueHandle,
     backend::Backend,
     delegate_noop,
     globals::{Global, GlobalListContents, registry_queue_init},
@@ -199,7 +200,7 @@ impl OutputSurface {
 }
 
 /// Runs one layer-shell background surface for every Wayland output.
-pub fn run() {
+pub fn run() -> ! {
     let connection = Connection::connect_to_env().expect("failed to connect to Wayland");
     let (globals, mut events) = registry_queue_init::<Wallpaper>(&connection).expect("failed to read Wayland globals");
     let qhandle = events.handle();

@@ -1,7 +1,7 @@
 use super::{LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, items, separate};
 use crate::music::MusicResult;
+use core::ops::Range;
 use serde_json::Value;
-use std::ops::Range;
 
 fn milliseconds(value: &Value) -> Option<f32> {
     value.as_str()?.parse().ok()
@@ -14,7 +14,7 @@ fn spotify_fragments(line: &Value, time: &Range<f32>) -> Option<Vec<LyricSegment
         let Some(text) = part["text"].as_str().map(str::trim).filter(|text| !text.is_empty()) else { continue };
         let prefix = remaining.len() - remaining.trim_start().len();
         if let Some(previous) = parts.last_mut() {
-            previous.text.push_str(&remaining[..prefix]);
+            previous.text.push_str(remaining.get(..prefix).unwrap_or_default());
         }
         remaining = remaining.trim_start().strip_prefix(text)?;
         let start = milliseconds(&part["startTimeMs"])?;
