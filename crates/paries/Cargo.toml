@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 isthmus.workspace = true
+isthmus_2d.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pollster.workspace = true
@@ -14,7 +15,7 @@ wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 
 [build-dependencies]
-isthmus-build.workspace = true
+isthmus_build.workspace = true
 
 [lints]
 workspace = true

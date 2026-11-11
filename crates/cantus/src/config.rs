@@ -116,9 +116,9 @@ pub fn load() -> Config {
 #[cfg(target_os = "linux")]
 /// Writes `generated-options.nix` from the configuration schema and defaults.
 pub fn generate_nix_options() -> io::Result<()> {
+    use core::fmt::Write as _;
     use schemars::generate::SchemaSettings;
     use serde_json::Value;
-    use std::fmt::Write;
 
     fn nix_string(value: &str) -> String {
         serde_json::to_string(value).unwrap().replace("${", "\\${")

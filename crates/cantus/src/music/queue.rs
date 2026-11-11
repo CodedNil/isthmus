@@ -1,5 +1,5 @@
 use super::Track;
-use std::mem;
+use core::mem;
 use web_time::Instant;
 
 /// Queue contents, their observed playback position, and their rendered position.

@@ -4,6 +4,7 @@ use super::{
     noise, over, pigment, recede, scene_point, screen_point, undergrowth, wash, wind,
 };
 use isthmus::{prelude::*, spirv_std::arch::kill};
+use isthmus_2d::prelude::*;
 
 pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
     let size = frame.screen_size;

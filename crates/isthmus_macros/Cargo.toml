@@ -7,6 +7,7 @@ edition.workspace = true
 proc-macro = true
 
 [dependencies]
+isthmus_syntax.workspace = true
 proc-macro-crate = "3"
 proc-macro2.workspace = true
 quote.workspace = true

@@ -12,9 +12,11 @@ form_urlencoded = "1.2.2"
 gloo-events = "0.3.0"
 gloo-render = "0.3.0"
 isthmus = { path = "crates/isthmus" }
-isthmus-build = { path = "crates/isthmus_build" }
-isthmus_macros = { path = "crates/isthmus_macros" }
 isthmus_2d = { path = "crates/isthmus_2d" }
+isthmus_abi = { path = "crates/isthmus_abi" }
+isthmus_build = { path = "crates/isthmus_build" }
+isthmus_macros = { path = "crates/isthmus_macros" }
+isthmus_syntax = { path = "crates/isthmus_syntax" }
 pollster = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
@@ -62,8 +64,19 @@ cast_precision_loss = "allow"
 cast_sign_loss = "allow"
 cast_possible_wrap = "allow"
 suboptimal_flops = "allow"
+many_single_char_names = "allow"
+similar_names = "allow"
 
 absolute_paths = "warn"
+allow_attributes = "warn"
+infinite_loop = "warn"
+let_underscore_must_use = "warn"
+string_slice = "warn"
+single_char_lifetime_names = "warn"
+wildcard_enum_match_arm = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+self_named_module_files = "warn"
 arbitrary_source_item_ordering = "warn"
 allow_attributes_without_reason = "warn"
 assertions_on_result_states = "warn"

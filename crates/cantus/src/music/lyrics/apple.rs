@@ -61,11 +61,11 @@ fn time(value: &str) -> Option<f32> {
     value.split(':').try_fold(0.0, |ms, part| Some(ms * 60.0 + part.parse::<f32>().ok()? * 1000.0))
 }
 
-fn attribute<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
+fn attribute<'doc>(node: Node<'doc, '_>, name: &str) -> Option<&'doc str> {
     node.attributes().find(|attribute| attribute.name() == name).map(|attribute| attribute.value())
 }
 
-fn inherited<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
+fn inherited<'doc>(node: Node<'doc, '_>, name: &str) -> Option<&'doc str> {
     node.ancestors().find_map(|node| attribute(node, name))
 }
 

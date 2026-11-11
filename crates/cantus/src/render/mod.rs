@@ -1,7 +1,7 @@
 use crate::{app::Background, config::Config, interaction::Interaction, music::Music, timer::Timer};
 use arrayvec::ArrayString;
 use isthmus::prelude::*;
-use isthmus_2d::{layout::TextCache, prelude::*};
+use isthmus_2d::{prelude::*, text::TextCache};
 use sdf::refract;
 
 pub mod launcher;
@@ -75,10 +75,10 @@ pub struct RipplePulse {
     pub start_time: f32,
 }
 
-pub struct UiContext<'a> {
-    pub frame: Frame<'a>,
-    pub config: &'a Config,
-    pub interaction: &'a mut Interaction,
+pub struct UiContext<'frame> {
+    pub frame: Frame<'frame>,
+    pub config: &'frame Config,
+    pub interaction: &'frame mut Interaction,
 }
 
 #[derive(Clone, Copy)]

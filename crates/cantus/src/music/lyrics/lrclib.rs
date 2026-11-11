@@ -7,12 +7,12 @@ use gloo_timers::future::TimeoutFuture;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead as _, BufReader, Write as _},
     sync::{Mutex, MutexGuard, OnceLock},
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -158,13 +158,13 @@ fn parse_lyricsfile(source: &str) -> MusicResult<Lyrics> {
 }
 
 #[derive(Serialize)]
-struct PublishBody<'a> {
+struct PublishBody<'track> {
     #[serde(rename = "trackName")]
-    track_name: &'a str,
+    track_name: &'track str,
     #[serde(rename = "artistName")]
-    artist_name: &'a str,
+    artist_name: &'track str,
     #[serde(rename = "albumName")]
-    album_name: &'a str,
+    album_name: &'track str,
     duration: u32,
     lyricsfile: String,
 }

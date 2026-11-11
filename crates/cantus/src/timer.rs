@@ -1,8 +1,8 @@
 //! A single in-memory countdown timer, started from the launcher.
 
 use crate::catalog::similarity;
+use core::time::Duration;
 use jiff::Zoned;
-use std::time::Duration;
 use strum_macros::IntoStaticStr;
 use web_time::Instant;
 

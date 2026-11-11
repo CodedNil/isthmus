@@ -4,6 +4,7 @@ use super::{
     noise, over, pigment, recede, scene_point, screen_point, undergrowth, wash,
 };
 use isthmus::{prelude::*, spirv_std::arch::kill};
+use isthmus_2d::prelude::*;
 
 pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
     for index in 0..3 {

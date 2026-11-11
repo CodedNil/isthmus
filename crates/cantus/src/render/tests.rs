@@ -1,3 +1,4 @@
+#![expect(clippy::print_stderr, reason = "Timing measurements are printed for humans")]
 use super::*;
 use isthmus::{Resources, wgpu};
 use std::{

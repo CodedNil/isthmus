@@ -19,8 +19,12 @@ use web_time::Instant;
 pub mod enrichment;
 pub mod lyrics;
 pub mod queue;
-#[cfg_attr(target_arch = "wasm32", path = "web.rs")]
+#[cfg(not(target_arch = "wasm32"))]
 mod spotify;
+#[cfg(target_arch = "wasm32")]
+mod web;
+#[cfg(target_arch = "wasm32")]
+use web as spotify;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;

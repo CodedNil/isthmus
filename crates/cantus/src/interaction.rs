@@ -1,8 +1,8 @@
 use crate::render::{HELD_PRESSURE, RIPPLE_COUNT, RipplePulse};
-use isthmus::{Rect, glam::Vec2};
-use isthmus_2d::{Ramp, Sdf};
+use isthmus::glam::Vec2;
+use isthmus_2d::{Ramp, Rect, Sdf};
 use std::{
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::{DefaultHasher, Hash, Hasher as _},
     mem,
 };
 
@@ -136,6 +136,7 @@ impl Interaction {
     }
 
     /// Captured drag key, displacement, and release state, even outside its widget.
+    #[expect(clippy::wildcard_enum_match_arm, reason = "Only a few variants need handling; the rest take the default")]
     pub fn drag_motion(&self) -> Option<(u64, Vec2, bool)> {
         if !self.enabled {
             return None;

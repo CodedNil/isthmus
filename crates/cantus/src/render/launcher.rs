@@ -18,6 +18,7 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     ops::Range,
+    slice::SliceIndex,
     sync::OnceLock,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -45,6 +46,11 @@ const ANSWER_CONFIDENCE: f32 = 0.9;
 static EXCHANGE_RATES: OnceLock<HashMap<String, f64>> = OnceLock::new();
 
 /// Coverage of a magnifying glass centered on the origin.
+/// Text-field offsets sit on character boundaries; a stale one yields nothing instead of panicking.
+fn slice(text: &str, range: impl SliceIndex<str, Output = str>) -> &str {
+    text.get(range).unwrap_or_default()
+}
+
 fn magnifier_icon(point: Vec2) -> f32 {
     Shape::circle(Vec2::ZERO, 6.2).stroke(2.1).union(Shape::segment(vec2(4.6, 4.6), vec2(8.8, 8.8), 2.1)).fill_at(point)
 }
@@ -125,16 +131,18 @@ impl TextField {
     /// Where the caret lands moving one character in `forward`'s direction.
     fn step(&self, forward: bool) -> usize {
         if forward {
-            self.cursor + self.text[self.cursor..].graphemes(true).next().map_or(0, str::len)
+            self.cursor + slice(&self.text, self.cursor..).graphemes(true).next().map_or(0, str::len)
         } else {
-            self.cursor - self.text[..self.cursor].graphemes(true).next_back().map_or(0, str::len)
+            self.cursor - slice(&self.text, ..self.cursor).graphemes(true).next_back().map_or(0, str::len)
         }
     }
 
     pub fn insert(&mut self, insertion: &str) {
         let range = self.selection();
-        let remaining = 64usize.saturating_sub(self.text.chars().count() - self.text[range.clone()].chars().count());
-        let insertion = &insertion[..insertion.char_indices().nth(remaining).map_or(insertion.len(), |(end, _)| end)];
+        let remaining =
+            64usize.saturating_sub(self.text.chars().count() - slice(&self.text, range.clone()).chars().count());
+        let insertion =
+            slice(insertion, ..insertion.char_indices().nth(remaining).map_or(insertion.len(), |(end, _)| end));
         self.text.replace_range(range.clone(), insertion);
         self.set_cursor(range.start + insertion.len(), false);
     }
@@ -196,13 +204,13 @@ enum Entry {
 }
 
 #[derive(Default)]
-struct EntryView<'a> {
-    image: Option<&'a Image>,
+struct EntryView<'entry> {
+    image: Option<&'entry Image>,
     icon_kind: u32 = SEARCH_ICON,
-    name: &'a str,
-    detail: &'a str,
+    name: &'entry str,
+    detail: &'entry str,
     action: &'static str = "Open",
-    alternate: Option<&'a str>,
+    alternate: Option<&'entry str>,
 }
 
 impl LauncherState {
@@ -217,7 +225,7 @@ impl LauncherState {
                 rates: HashMap<String, f64>,
             }
             if let Ok(rates) = fetch_json::<Rates>(rates_http.get("https://open.er-api.com/v6/latest/USD")).await {
-                let _ = EXCHANGE_RATES.set(rates.rates);
+                drop(EXCHANGE_RATES.set(rates.rates));
             }
         });
         calc.set_exchange_rate_handler_v2(ExchangeRates);
@@ -247,6 +255,7 @@ impl LauncherState {
     }
 
     /// Publish metadata atomically, preserving the user's highlighted application.
+    #[expect(clippy::wildcard_enum_match_arm, reason = "Only a few variants need handling; the rest take the default")]
     pub(crate) fn set_catalog(&mut self, catalog: AppCatalog) {
         let selected = self.entries.get(self.selected).and_then(|entry| match entry {
             Entry::App(index) => Some(self.catalog.apps[*index].id.clone()),
@@ -268,6 +277,7 @@ impl LauncherState {
         }
     }
 
+    #[expect(clippy::wildcard_enum_match_arm, reason = "Only a few variants need handling; the rest take the default")]
     fn request_visible_icons(&mut self) {
         let Some(background) = self.background.as_ref().filter(|_| self.open) else {
             return;
@@ -330,7 +340,7 @@ impl LauncherState {
                 self.field.set_cursor(self.field.text.len(), true);
             }
             "c" | "C" | "x" | "X" if control => {
-                self.pending_copy = Some(self.field.text[self.field.selection()].to_owned());
+                self.pending_copy = Some(slice(&self.field.text, self.field.selection()).to_owned());
                 if key.eq_ignore_ascii_case("x") {
                     self.edit(|field| field.insert(""));
                 }
@@ -424,7 +434,9 @@ impl LauncherState {
                         .strip_prefix(provider.config.alias.as_str())
                         .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
             })
-            .map_or((None, query), |index| (Some(index), query[self.providers[index].config.alias.len()..].trim()))
+            .map_or((None, query), |index| {
+                (Some(index), slice(query, self.providers[index].config.alias.len()..).trim())
+            })
     }
 
     pub(crate) fn bounds(&self, screen_size: Vec2) -> (Vec2, Vec2) {
@@ -486,7 +498,7 @@ impl LauncherState {
         let (caret, selection): (Vec2, Vec2) = {
             let text = &mut *context.frame.resources;
             let mut at = |offset: usize| {
-                (left + text.shape(&self.field.text[..offset], TEXT_HEADING, 600.0).text.width).min(right)
+                (left + text.shape(slice(&self.field.text, ..offset), TEXT_HEADING, 600.0).text.width).min(right)
             };
             let caret = vec2(at(self.field.cursor), blink.smoothstep(0.62, 0.5));
             let anchor = at(self.field.anchor);

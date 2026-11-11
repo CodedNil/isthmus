@@ -112,7 +112,7 @@ web-sys = { workspace = true, features = [
 ] }
 
 [build-dependencies]
-isthmus-build.workspace = true
+isthmus_build.workspace = true
 # librespot-core 0.8's vergen-gitcl build dependency is incompatible with vergen 9.1.
 vergen = "=9.0.6"
 

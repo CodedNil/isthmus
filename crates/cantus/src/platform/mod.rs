@@ -2,19 +2,24 @@ pub use backend::{
     Task, current_location, load_desktop_icons, open_url, run, run_power_action, set_volume, sleep, spawn, spawn_task,
     start_app_catalog, start_launcher_listener, start_status_monitor, trigger_launcher,
 };
+use core::time::Duration;
 use image::imageops::FilterType;
 use isthmus::Image;
+#[cfg(target_os = "linux")]
+use linux as backend;
 use resvg::{
     render,
     tiny_skia::{Pixmap, Transform},
     usvg::{self, Tree},
 };
-use std::time::Duration;
 use strum_macros::IntoStaticStr;
+#[cfg(target_arch = "wasm32")]
+use web as backend;
 
-#[cfg_attr(target_os = "linux", path = "linux.rs")]
-#[cfg_attr(target_arch = "wasm32", path = "web.rs")]
-mod backend;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 #[derive(Clone, Copy, IntoStaticStr)]
 pub enum PowerAction {
