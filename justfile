@@ -4,21 +4,17 @@ cantus:
     cargo run -p cantus -- --generate-nix-options
     cargo run -p cantus
 
-cantusweb:
-    cargo build --release -Zbuild-std=std,panic_abort --lib -p cantus --target wasm32-unknown-unknown
-    wasm-bindgen --target web --out-dir crates/cantus/assets/web target/wasm32-unknown-unknown/release/cantus.wasm
+cantusweb: (bindgen "cantus")
     python3 -m http.server 8000 --directory crates/cantus/assets
 
 paries:
     cargo run -p paries
 
-lares:
-    cargo build --release -Zbuild-std=std,panic_abort --lib -p lares --target wasm32-unknown-unknown
-    wasm-bindgen --target web --out-dir crates/lares/assets/web target/wasm32-unknown-unknown/release/lares.wasm
+lares: (bindgen "lares")
     gzip -kf crates/lares/assets/web/lares_bg.wasm crates/lares/assets/web/lares.js
     cargo run -p lares
 
-# Lints clippy cannot express, then clippy itself.
-check:
-    ! grep -rnE '#\[(cfg_attr\(.*)?path ?=' crates --include=*.rs --exclude-dir=target
-    cargo clippy --workspace --all-targets
+[private]
+bindgen crate:
+    cargo build --release -Zbuild-std=std,panic_abort --lib --target wasm32-unknown-unknown -p {{ crate }}
+    wasm-bindgen --target web --out-dir crates/{{ crate }}/assets/web target/wasm32-unknown-unknown/release/{{ crate }}.wasm

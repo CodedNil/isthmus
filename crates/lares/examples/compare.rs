@@ -1,7 +1,10 @@
 //! Compare reference and candidate captures, optionally saving a 4× error heatmap.
 use core::array::from_fn;
 use std::{env, error::Error};
+use tracing::info;
+
 fn main() -> Result<(), Box<dyn Error>> {
+    lares::init_logging();
     let mut args = env::args().skip(1);
     let reference = image::open(args.next().ok_or("reference path required")?)?.to_rgb8();
     let candidate = image::open(args.next().ok_or("candidate path required")?)?.to_rgb8();
@@ -28,7 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let count = f64::from(reference.width()) * f64::from(reference.height());
     let mse = squared as f64 / (count * 3.0);
-    println!(
+    info!(
         "MAE {:.3}/255; PSNR {:.2} dB; pixels >4: {:.2}%; >16: {:.2}%; max {}",
         error as f64 / (count * 3.0),
         10.0 * (255.0 * 255.0 / mse).log10(),
