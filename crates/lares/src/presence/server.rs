@@ -1,5 +1,5 @@
 //! One local Shelly RPC stream, shared by all Lares browser connections.
-use super::{Snapshot, Track};
+use crate::presence::{Snapshot, Track};
 use axum::{
     Router,
     extract::{
@@ -14,7 +14,6 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
     error::Error,
-    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
@@ -22,61 +21,54 @@ use tokio::{
     time::{interval, sleep, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::debug;
 
 const SENSOR: &str = "ws://192.168.0.133/rpc";
 const STALE: Duration = Duration::from_secs(5);
 
-struct Hub {
-    latest: watch::Sender<Snapshot>,
-}
-impl Hub {
-    fn new() -> Arc<Self> {
-        let (latest, _) = watch::channel(Snapshot::empty(false));
-        let hub = Arc::new(Self { latest });
-        tokio::spawn(Arc::clone(&hub).run());
-        hub
-    }
-
-    async fn run(self: Arc<Self>) {
-        loop {
-            let _ = self.stream().await;
-            self.latest.send_replace(Snapshot::empty(false));
-            sleep(Duration::from_secs(3)).await;
+/// Keeps one sensor connection alive, publishing every update to `latest`.
+#[expect(clippy::infinite_loop, reason = "the sensor is reconnected for as long as the server runs")]
+async fn run(latest: watch::Sender<Snapshot>) {
+    loop {
+        if let Err(error) = stream(&latest).await {
+            debug!(%error, "presence sensor stream ended");
         }
+        latest.send_replace(Snapshot::empty(false));
+        sleep(Duration::from_secs(3)).await;
     }
+}
 
-    async fn stream(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let (mut sensor, _) = timeout(Duration::from_secs(4), connect_async(SENSOR)).await??;
-        self.latest.send_replace(Snapshot::empty(true));
-        let mut renew = interval(Duration::from_secs(40));
-        let mut watchdog = interval(Duration::from_secs(1));
-        let mut received = Instant::now();
-        loop {
-            tokio::select! {
-                _ = renew.tick() => {
-                    // LiveTrack is a temporary subscription, not sensor reconfiguration.
-                    sensor.send(Message::Text(json!({"id":1,"src":"lares","method":"Presence.LiveTrack"}).to_string().into())).await?;
+async fn stream(latest: &watch::Sender<Snapshot>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (mut sensor, _) = timeout(Duration::from_secs(4), connect_async(SENSOR)).await??;
+    latest.send_replace(Snapshot::empty(true));
+    let mut renew = interval(Duration::from_secs(40));
+    let mut watchdog = interval(Duration::from_secs(1));
+    let mut received = Instant::now();
+    loop {
+        tokio::select! {
+            _ = renew.tick() => {
+                // LiveTrack is a temporary subscription, so it is renewed.
+                sensor.send(Message::Text(json!({"id":1,"src":"lares","method":"Presence.LiveTrack"}).to_string().into())).await?;
+            }
+            _ = watchdog.tick() => {
+                if received.elapsed() >= Duration::from_secs(15) {
+                    return Err("Shelly tracking stream timed out".into());
                 }
-                _ = watchdog.tick() => {
-                    if received.elapsed() >= Duration::from_secs(15) {
-                        return Err("Shelly tracking stream timed out".into());
-                    }
-                    if received.elapsed() >= STALE && !self.latest.borrow().stale {
-                        self.latest.send_replace(Snapshot::empty(true));
+                if received.elapsed() >= STALE && !latest.borrow().stale {
+                    latest.send_replace(Snapshot::empty(true));
+                }
+            }
+            message = sensor.next() => match message {
+                Some(Ok(Message::Text(text))) => {
+                    if let Some(tracks) = parse_tracks(text.as_ref()) {
+                        received = Instant::now();
+                        latest.send_replace(Snapshot { connected: true, stale: false, tracks });
                     }
                 }
-                message = sensor.next() => match message {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Some(tracks) = parse_tracks(text.as_ref()) {
-                            received = Instant::now();
-                            self.latest.send_replace(Snapshot { connected: true, stale: false, tracks });
-                        }
-                    }
-                    Some(Ok(Message::Ping(bytes))) => sensor.send(Message::Pong(bytes)).await?,
-                    Some(Ok(Message::Close(_))) | None => return Err("Shelly connection closed".into()),
-                    Some(Err(error)) => return Err(error.into()),
-                    _ => {}
-                }
+                Some(Ok(Message::Ping(bytes))) => sensor.send(Message::Pong(bytes)).await?,
+                Some(Ok(Message::Close(_))) | None => return Err("Shelly connection closed".into()),
+                Some(Err(error)) => return Err(error.into()),
+                _ => {}
             }
         }
     }
@@ -109,11 +101,13 @@ fn parse_tracks(text: &str) -> Option<Vec<Track>> {
 }
 
 pub fn router() -> Router {
-    Router::new().route("/api/presence", get(upgrade)).with_state(Hub::new())
+    let (latest, updates) = watch::channel(Snapshot::empty(false));
+    tokio::spawn(run(latest));
+    Router::new().route("/api/presence", get(upgrade)).with_state(updates)
 }
 
 async fn upgrade(
-    State(hub): State<Arc<Hub>>,
+    State(updates): State<watch::Receiver<Snapshot>>,
     headers: HeaderMap,
     socket: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
@@ -124,11 +118,10 @@ async fn upgrade(
             return Err(StatusCode::FORBIDDEN);
         }
     }
-    Ok(socket.on_upgrade(move |socket| forward(hub, socket)))
+    Ok(socket.on_upgrade(move |socket| forward(updates, socket)))
 }
 
-async fn forward(hub: Arc<Hub>, socket: WebSocket) {
-    let mut updates = hub.latest.subscribe();
+async fn forward(mut updates: watch::Receiver<Snapshot>, socket: WebSocket) {
     let (mut output, mut input) = socket.split();
     loop {
         let message = serde_json::to_string(&*updates.borrow_and_update()).expect("finite presence values");
@@ -146,12 +139,12 @@ async fn forward(hub: Arc<Hub>, socket: WebSocket) {
             }
         }
     }
-    let _ = output.close().await;
+    drop(output.close().await);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::presence::server::*;
     #[test]
     fn live_events_clear_absent_people_and_ignore_other_notifications() {
         let message = r#"{"method":"NotifyEvent","params":{"events":[{"component":"presence","event":"track","object":[{"id":3,"x":0.27,"y":5.04,"z":-0.09,"minz":0.70,"maxz":0.82}]}]}}"#;

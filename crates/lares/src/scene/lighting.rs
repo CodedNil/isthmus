@@ -1,0 +1,249 @@
+//! Shared ceiling fittings and the woven lounge table lamp, in metres.
+//! Linear-light GGX / Smith / Schlick shading driven by the shared local transport field.
+use crate::{
+    home::DEFAULT_LIGHT_COLOR,
+    render::light::{
+        photometry::{GU10_BEAM_MIX, GU10_PEAK_CANDELA, LIGHT_RANGE, UNITS},
+        sun::Sun,
+    },
+    scene::{Kind, Material, Object, Sample, cylinder, decor, materials::Surface},
+};
+use core::f32::consts::PI;
+use isthmus::prelude::*;
+
+pub(super) const WARM: Vec3 = DEFAULT_LIGHT_COLOR;
+
+pub(super) fn downlight<S: Sample>(p: Vec3, size: Vec3) -> S {
+    let rim = cylinder(p, size.x * 0.5, size.z);
+    let recess = cylinder(p + Vec3::Z * 0.010, size.x * 0.26, size.z);
+    let lens = cylinder(p + Vec3::Z * 0.008, size.x * 0.225, 0.009);
+    S::new(rim.max_num(-recess), || (Material::Paint, vec3(0.94, 0.93, 0.90)))
+        .union(S::new(lens, || (Material::Emissive, WARM)))
+}
+
+pub(super) fn lamp<S: Sample>(p: Vec3, size: Vec3) -> S {
+    decor::table_lamp(p + Vec3::Z * size.z * 0.5)
+}
+
+/// Shared source geometry for direct shading, visibility and baked transport.
+pub fn source(light: Object) -> Vec3 {
+    light.pos + Vec3::Z * if light.kind == Kind::Downlight { -0.025 } else { 0.005 }
+}
+
+pub fn radius(light: Object) -> f32 {
+    if light.kind == Kind::Downlight { light.size.x * 0.225 } else { 0.035 }
+}
+
+/// Direction, incident radiance and distance of a finite emitter; visibility is separate.
+pub fn incident(light: Object, point: Vec3, emitter: Vec2) -> (Vec3, Vec3, f32) {
+    let downlight = light.kind == Kind::Downlight;
+    let source = source(light) + emitter.extend(0.0);
+    let delta = source - point;
+    let distance = delta.length();
+    if distance < 0.001 || distance >= LIGHT_RANGE {
+        return (Vec3::Z, Vec3::ZERO, distance);
+    }
+    let direction = delta / distance;
+    // A normalized polynomial lobe preserves rated lumens and 40° FWHM.
+    let intensity = if downlight {
+        let c = direction.z.max_num(0.0);
+        let c2 = c * c;
+        let c4 = c2 * c2;
+        let c8 = c4 * c4;
+        let beam = c8 * c2 * c * (1.0 + GU10_BEAM_MIX * (c - 1.0));
+        beam * (GU10_PEAK_CANDELA / UNITS)
+    } else {
+        // The woven lamp's bulb is unknown; assumed 470 lm isotropic.
+        470.0 / (4.0 * PI * UNITS)
+    };
+    let fade = (LIGHT_RANGE - distance).clamp_num(0.0, 1.0);
+    let radiance = light.emission_color * (light.emission * intensity * fade / (distance * distance).max_num(0.0025));
+    (direction, radiance, distance)
+}
+
+fn fresnel(f0: Vec3, cosine: f32) -> Vec3 {
+    let x = 1.0 - cosine;
+    let x5 = x * x * x * x * x;
+    f0 + (Vec3::ONE - f0) * x5
+}
+
+fn ggx(roughness: f32, no_h: f32, no_v: f32, no_l: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let d = no_h * no_h * (a2 - 1.0) + 1.0;
+    let distribution = a2 / (PI * d * d).max_num(0.00001);
+    let lambda_v = no_l * (no_v * no_v * (1.0 - a2) + a2).sqrt();
+    let lambda_l = no_v * (no_l * no_l * (1.0 - a2) + a2).sqrt();
+    distribution * 0.5 / (lambda_v + lambda_l).max_num(0.0001)
+}
+
+/// Anisotropic GGX for brushed metal and the longitudinal oak finish.
+fn microfacet(s: Surface, n: Vec3, view: Vec3, light: Vec3, half: Vec3) -> f32 {
+    let no_v = n.dot(view).max_num(0.001);
+    let no_l = n.dot(light).max_num(0.0);
+    let no_h = n.dot(half).max_num(0.0);
+    if s.anisotropy <= 0.0 {
+        return ggx(s.roughness, no_h, no_v, no_l);
+    }
+    let projected_tangent = s.tangent - n * s.tangent.dot(n);
+    let tangent = if projected_tangent.length_squared() > 1e-6 {
+        projected_tangent.normalize()
+    } else if n.z.abs() < 0.9 {
+        n.cross(Vec3::Z).normalize()
+    } else {
+        n.cross(Vec3::Y).normalize()
+    };
+    let bitangent = n.cross(tangent);
+    let alpha = s.roughness * s.roughness;
+    let aspect = (1.0 - s.anisotropy * 0.9).sqrt();
+    let ax = alpha / aspect;
+    let ay = alpha * aspect;
+    let projected = vec3(tangent.dot(half) / ax, bitangent.dot(half) / ay, no_h);
+    let denominator = projected.length_squared();
+    let distribution = 1.0 / (PI * ax * ay * denominator * denominator).max_num(1e-6);
+    let v = vec3(ax * tangent.dot(view), ay * bitangent.dot(view), no_v).length();
+    let l = vec3(ax * tangent.dot(light), ay * bitangent.dot(light), no_l).length();
+    distribution * 0.5 / (no_l * v + no_v * l).max_num(0.0001)
+}
+
+#[inline(never)]
+pub(super) fn direct(s: Surface, n: Vec3, view: Vec3, light: Vec3, radiance: Vec3) -> Vec3 {
+    let no_v = n.dot(view).max_num(0.001);
+    let f0 = Vec3::splat(0.04).lerp(s.albedo, s.metallic);
+    let half = (view + light).normalize();
+    let no_l = n.dot(light).max_num(0.0);
+    let no_h = n.dot(half).max_num(0.0);
+    let lo_h = light.dot(half).max_num(0.0);
+    let f = fresnel(f0, lo_h) * s.specular;
+    let diffuse = (Vec3::ONE - f) * (1.0 - s.metallic) * s.albedo / PI;
+    let specular = f * microfacet(s, n, view, light, half);
+    let sheen = s.albedo * s.sheen * ((1.0 - lo_h) * (1.0 - lo_h) * (1.0 - lo_h) * (1.0 - lo_h) * (1.0 - lo_h)) / PI;
+    let coat_f = fresnel(Vec3::splat(0.04), lo_h) * s.coat;
+    let coat = if s.coat > 0.0 { coat_f * ggx(s.coat_roughness, no_h, no_v, no_l) } else { Vec3::ZERO };
+    // Horizon masking for sub-texel fibres; large clumps still cast SDF shadows.
+    let fiber_visibility = if s.fiber_depth > 0.0 {
+        let elevation = |direction: Vec3| {
+            let cosine = s.tangent.dot(direction).abs().max_num(0.001);
+            cosine / (cosine + s.fiber_depth * (1.0 - cosine) * 0.30)
+        };
+        elevation(light) * elevation(view)
+    } else {
+        1.0
+    };
+    ((diffuse + specular + sheen) * (Vec3::ONE - coat_f) + coat) * radiance * (no_l * fiber_visibility)
+}
+
+#[inline(never)]
+pub(super) fn shade(
+    s: Surface,
+    n: Vec3,
+    view: Vec3,
+    visibility: f32,
+    indirect: Vec3,
+    sun: Sun,
+    reflection: Vec4,
+) -> Vec3 {
+    let no_v = n.dot(view).max_num(0.001);
+    let f0 = Vec3::splat(0.04).lerp(s.albedo, s.metallic);
+    let mut color =
+        if visibility > 0.0 { direct(s, n, view, sun.direction, sun.radiance) * visibility } else { Vec3::ZERO };
+    let f = fresnel(f0, no_v) * s.specular;
+    let diffuse_env = indirect * s.albedo * (1.0 - s.metallic) * (Vec3::ONE - f);
+    // Analytic prefiltered environment and integrated specular approximation.
+    let r = vec4(-1.0, -0.0275, -0.572, 0.022) * s.roughness + vec4(1.0, 0.0425, 1.04, -0.04);
+    let a004 = (r.x * r.x).min_num((-9.28 * no_v).exp2()) * r.x + r.y;
+    let ab = vec2(-1.04, 1.04) * a004 + vec2(r.z, r.w);
+    // Uses the occluded diffuse radiance as the environment, since an invented window would ignore real apertures.
+    let filtered_environment =
+        |roughness: f32| indirect.lerp(reflection.truncate(), reflection.w * (1.0 - roughness).powi(2));
+    let specular_env =
+        filtered_environment(s.roughness) * (f0 * ab.x + Vec3::splat(ab.y)).max_num(Vec3::ZERO) * s.specular;
+    let edge = 1.0 - no_v;
+    let sheen_env = indirect * s.albedo * (s.sheen * (edge * edge * edge) * 0.35);
+    let coat_env = fresnel(Vec3::splat(0.04), no_v) * s.coat;
+    let coat = if s.coat > 0.0 { filtered_environment(s.coat_roughness) * coat_env } else { Vec3::ZERO };
+    color += ((diffuse_env + sheen_env + specular_env) * (Vec3::ONE - coat_env) + coat) * s.occlusion;
+    color
+}
+
+#[inline(never)]
+pub(super) fn display(color: Vec3, exposure: f32) -> Vec3 {
+    let x = color * exposure;
+    let mapped = ((x * (x * 2.51 + 0.03)) / (x * (x * 2.43 + 0.59) + 0.14)).clamp_num(Vec3::ZERO, Vec3::ONE);
+    // Output is display-referred; the canvas uses an unorm target.
+    mapped.powf(1.0 / 2.2)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::scene::lighting::*;
+
+    #[test]
+    fn occluded_indoor_reflections_do_not_receive_unfiltered_global_sky() {
+        let material =
+            Surface { albedo: Vec3::splat(0.05), metallic: 1.0, roughness: 0.45, occlusion: 1.0, ..Surface::default() };
+        let sun = Sun { direction: Vec3::Z, radiance: Vec3::ZERO, sky: Vec3::ONE };
+        let local = Vec3::splat(0.2);
+        let first = shade(material, Vec3::X, Vec3::X, 0.0, local, sun, Vec4::ZERO);
+        let bright_sky = Sun { sky: Vec3::splat(1000.0), ..sun };
+        let second = shade(material, Vec3::X, Vec3::X, 0.0, local, bright_sky, Vec4::ZERO);
+        assert!(
+            (first - second).abs().max_element() < 0.00001,
+            "the roof's cached occlusion must also apply to reflections"
+        );
+    }
+
+    #[test]
+    fn indirect_finishes_scale_linearly_with_the_shared_transport() {
+        let sun = Sun { direction: Vec3::Z, radiance: Vec3::ZERO, sky: Vec3::ZERO };
+        for metallic in [0.0, 1.0] {
+            for coat in [0.0, 0.5] {
+                let material = Surface {
+                    albedo: Vec3::splat(0.4),
+                    metallic,
+                    coat,
+                    roughness: 0.3,
+                    occlusion: 1.0,
+                    ..Surface::default()
+                };
+                let light = vec3(0.02, 0.06, 0.1);
+                let first = shade(material, Vec3::Z, Vec3::Z, 0.0, light, sun, Vec4::ZERO);
+                let second = shade(material, Vec3::Z, Vec3::Z, 0.0, light * 4.0, sun, Vec4::ZERO);
+                assert!((second - first * 4.0).abs().max_element() < 0.00001);
+                assert_eq!(shade(material, Vec3::Z, Vec3::Z, 0.0, Vec3::ZERO, sun, Vec4::ZERO), Vec3::ZERO);
+            }
+        }
+    }
+
+    #[test]
+    fn microfacet_reflection_is_finite_and_reciprocal_across_finishes_and_tangent_frames() {
+        for normal in [Vec3::Z, Vec3::X, vec3(1.0, 1.0, 0.0).normalize()] {
+            let axis = if normal.z.abs() < 0.9 { Vec3::Z } else { Vec3::X };
+            for tangent in [normal, axis, normal.cross(axis)] {
+                for roughness in [0.15, 0.4, 0.7, 1.0] {
+                    for anisotropy in [0.0, 0.38, 0.7] {
+                        for fiber_depth in [0.0, 0.3, 0.8] {
+                            let material = Surface {
+                                albedo: Vec3::splat(0.4),
+                                roughness,
+                                anisotropy,
+                                tangent,
+                                fiber_depth,
+                                coat: 0.2,
+                                coat_roughness: 0.45,
+                                occlusion: 1.0,
+                                ..Surface::default()
+                            };
+                            let view = (normal + axis * 0.4).normalize();
+                            let light = (normal - axis * 0.25).normalize();
+                            let first = direct(material, normal, view, light, Vec3::ONE) / normal.dot(light);
+                            let reversed = direct(material, normal, light, view, Vec3::ONE) / normal.dot(view);
+                            assert!(first.is_finite() && first.min_element() >= 0.0);
+                            assert!((first - reversed).abs().max_element() < 0.0001);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

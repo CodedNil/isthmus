@@ -1,5 +1,5 @@
 use crate::render::{
-    DOOR_HEIGHT, EXTERIOR_WALL_THICKNESS, WALL_HEIGHT, WINDOW_HEAD, WINDOW_SILL, photometry::warm_white,
+    DOOR_HEIGHT, EXTERIOR_WALL_THICKNESS, WALL_HEIGHT, WINDOW_HEAD, WINDOW_SILL, light::photometry::warm_white,
 };
 use isthmus::{
     ShaderData,
@@ -124,7 +124,7 @@ pub struct Object {
     pub material: Material,
     /// Base of automatically projected surface irradiance samples, or MAX.
     pub surface_cache: u32,
-    /// Baked chart layout. Sampling must not recompute integer bounds with GPU floats.
+    /// Baked chart layout, so the GPU never recomputes integer bounds.
     pub surface_origin: Vec3,
     pub surface_grid: UVec3,
     /// Preview light output; zero for objects that do not emit light.
@@ -134,6 +134,7 @@ pub struct Object {
     /// Outward normal for exterior architecture; zero for interior objects.
     pub exterior: Vec3,
 }
+
 impl Object {
     /// An unrotated, non-emissive object centred at `pos`.
     pub const fn new(kind: Kind, pos: Vec3, size: Vec3, material: Material) -> Self {
@@ -200,7 +201,7 @@ bitflags::bitflags! {
     pub struct Walls: u32 { const LEFT=1; const TOP=2; const RIGHT=4; const BOTTOM=8; }
 }
 
-/// A fixture and its future Home Assistant binding. Shared IDs control a group.
+/// A fixture and its Home Assistant entity; fixtures sharing an ID are controlled together.
 pub struct Light {
     pub entity_id: &'static str,
     pub fixture: Object,
@@ -215,6 +216,7 @@ pub struct Room {
     pub openings: Vec<Opening>,
     pub lights: Vec<Light>,
 }
+
 impl Room {
     pub fn new(position: Vec2, size: Vec2, floor: Material) -> Self {
         let h = size * 0.5;
@@ -280,8 +282,7 @@ impl Room {
         self
     }
 
-    /// Room-local ceiling fixtures, all driven by the same entity. Positions are
-    /// explicit so the same helper works for rectangular and irregular rooms.
+    /// Room-local ceiling fixtures driven by one entity.
     pub fn downlights(self, entity_id: &'static str, positions: &[(f32, f32)]) -> Self {
         positions.iter().fold(self, |room, &(x, y)| {
             let pos = Vec3::new(x, y, WALL_HEIGHT - 0.032);

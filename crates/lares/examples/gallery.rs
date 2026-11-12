@@ -3,13 +3,12 @@ use image::{
     Rgb, RgbImage,
     imageops::{FilterType, overlay, resize},
 };
+use lares::views;
 use std::{error::Error, path::Path};
-
-#[path = "support/views.rs"]
-#[allow(dead_code, reason = "The gallery reads camera names without rendering")]
-mod views;
+use tracing::info;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    lares::init_logging();
     let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
     let views: Vec<_> = views::all(0.0)
         .into_iter()
@@ -28,6 +27,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let output = assets.join("references/comparison.webp");
     sheet.save(&output)?;
-    println!("{}: photograph left; evening lights on above daytime lights off at right", output.display());
+    info!("{}: photograph left; evening lights on above daytime lights off at right", output.display());
     Ok(())
 }

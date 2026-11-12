@@ -5,7 +5,10 @@ fn hash_sources(path: &Path, hash: &mut u64) {
         fs::read_dir(path).expect("source directory").map(|entry| entry.expect("source entry").path()).collect();
     paths.sort();
     for path in paths {
-        if path.file_name().is_some_and(|name| name == "tests" || name.to_string_lossy().ends_with("_tests.rs")) {
+        if path
+            .file_name()
+            .is_some_and(|name| name == "tests" || name == "bake.rs" || name.to_string_lossy().ends_with("_tests.rs"))
+        {
             continue;
         }
         if path.is_dir() {
@@ -23,19 +26,19 @@ fn main() {
     // Camera, UI and server edits must not invalidate baked transport.
     for path in [
         "src/home.rs",
-        "src/render/layout.rs",
-        "src/render/acceleration.rs",
-        "src/render/plants.rs",
-        "src/render/photometry.rs",
-        "src/render/shadows.rs",
-        "src/render/scene.rs",
+        "src/render/geometry/layout.rs",
+        "src/render/geometry/acceleration.rs",
+        "src/render/geometry/plants.rs",
+        "src/render/light/photometry.rs",
+        "src/render/light/shadows.rs",
         "../isthmus/src/math.rs",
     ] {
         for byte in fs::read(path).expect("geometry source") {
             hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
         }
     }
-    hash_sources(Path::new("src/render/scene"), &mut hash);
+    hash_sources(Path::new("src/scene"), &mut hash);
+    hash_sources(Path::new("src/irradiance"), &mut hash);
     println!("cargo:rustc-env=LARES_SCENE_VERSION={hash}");
     isthmus_build::build("src/lib.rs").expect("failed to build shaders");
 }

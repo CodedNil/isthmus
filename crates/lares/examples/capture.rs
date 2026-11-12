@@ -6,7 +6,8 @@ use isthmus::glam::{Vec3, vec2, vec3};
 use lares::{
     camera::Camera,
     home::{self, Kind, Material},
-    render::{Globals, Scene, SunSettings, pixel, pixel_cached, shadows::ShadowAtlas, sun::utc_now},
+    render::{Globals, Scene, SunSettings, pixel, pixel_with, shadows::ShadowAtlas, sun::utc_now},
+    views,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -17,11 +18,10 @@ use std::{
     thread,
     time::Instant,
 };
-
-#[path = "support/views.rs"]
-mod views;
+use tracing::info;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    lares::init_logging();
     let mut args = env::args().skip(1);
     let destination = args.next().unwrap_or_else(|| format!("{}/assets/references", env!("CARGO_MANIFEST_DIR")));
     let width: usize = args.next().map_or(Ok(1200), |v| v.parse())?;
@@ -46,14 +46,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Evening fixtures and midday daylight are separate photographic setups.
     let evening = (timestamp / 86_400.0).floor() * 86_400.0 + 21.0 * 3600.0;
     let mut scene = Scene::new_at(&rooms, evening, SunSettings::default());
-    println!("Scene: {:?}", started.elapsed());
-    println!(
+    info!("Scene: {:?}", started.elapsed());
+    info!(
         "Captures: evening (21:00 UTC) above daytime; daytime fixtures {}; meter {}",
         if env::var("LARES_CAPTURE_LIGHTS").as_deref() == Ok("on") { "on" } else { "off" },
         if env::var("LARES_CAPTURE_METER").as_deref() == Ok("plan") { "full plan" } else { "per view" }
     );
     let luminance = vec3(0.2126, 0.7152, 0.0722);
-    println!(
+    info!(
         "Evening daylight: {:.0} lx direct normal, {:.0} lx diffuse horizontal; clear sky, view-metered camera",
         scene.sun.radiance.dot(luminance) * 100.0,
         scene.sun.sky.dot(luminance) * 100.0 * PI * 0.85
@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let shadows = env::var("LARES_SHADOW_RESOLUTION").ok().map(|resolution| {
         let started = Instant::now();
         let atlas = ShadowAtlas::bake_cpu(&scene, resolution.parse().expect("shadow resolution must be an integer"));
-        println!("Shadow atlas: {:?}", started.elapsed());
+        info!("Shadow atlas: {:?}", started.elapsed());
         atlas
     });
     let mut evening_images = BTreeMap::new();
@@ -88,8 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }) {
                 continue;
             }
-            // Reject invalid captures before tracing millions of rays at the
-            // inside of a wall. This applies to every camera, including new ones.
+            // Rejects cameras inside a wall before tracing.
             if scene.objects.iter().any(|object| {
                 if !matches!(object.kind, Kind::Box | Kind::Ceiling) || object.material != Material::Paint {
                     return false;
@@ -115,13 +114,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 evening_images.insert(name, image);
             }
-            println!("{name}: {:?}", started.elapsed());
+            info!("{name}: {:?}", started.elapsed());
         }
     }
     Ok(())
 }
 
-#[allow(clippy::option_if_let_else, reason = "Keep reference and cached shader calls readable side by side")]
+#[expect(clippy::option_if_let_else, reason = "Keep reference and cached shader calls readable side by side")]
 fn pixels(scene: &Scene, view: views::View, width: usize, height: usize, shadows: Option<&ShadowAtlas>) -> Vec<u8> {
     let eye = view.eye;
     let (forward, right, up) = view.rays(width as f32 / height as f32);
@@ -132,7 +131,7 @@ fn pixels(scene: &Scene, view: views::View, width: usize, height: usize, shadows
     } else {
         scene.camera_settings(eye, forward, right, up)
     };
-    println!("Camera EV100: {:.2}", (100.0 / (1.2 * exposure)).log2());
+    info!("Camera EV100: {:.2}", (100.0 / (1.2 * exposure)).log2());
     let globals = Globals {
         eye,
         exposure,
@@ -147,8 +146,7 @@ fn pixels(scene: &Scene, view: views::View, width: usize, height: usize, shadows
         parity: 0,
         normal_samples: 4,
     };
-    // Keep the original exposure when isolating direct lighting, so a
-    // diagnostic difference measures transport rather than camera adaptation.
+    // Exposure is kept when isolating direct light, so differences measure transport.
     let direct_only = env::var("LARES_CAPTURE_GI").is_ok_and(|value| value == "off").then(|| {
         scene
             .probes
@@ -174,7 +172,7 @@ fn pixels(scene: &Scene, view: views::View, width: usize, height: usize, shadows
                     let x = index % width;
                     let y = chunk * rows + index / width;
                     let color = if let Some(shadows) = shadows {
-                        pixel_cached(
+                        pixel_with::<true>(
                             globals,
                             &scene.nodes,
                             &scene.objects,
