@@ -62,6 +62,21 @@ in
         Type = "simple";
         ExecStart = "${cfg.package}/bin/${pname}";
         Restart = "on-failure";
+
+        # Hardening
+        NoNewPrivileges = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        ProtectClock = true;
+        ProtectHostname = true;
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        SystemCallArchitectures = "native";
+        CapabilityBoundingSet = "";
       };
 
       Install.WantedBy = [ config.wayland.systemd.target ];
