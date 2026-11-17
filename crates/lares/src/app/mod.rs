@@ -20,12 +20,21 @@ pub mod server;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod views;
 
+/// How far a moving object is between its authored pose (0) and its moved one (1).
+#[derive(Clone, Copy, Default)]
+struct Progress {
+    amount: f32,
+    dwell: f32,
+}
+
 pub struct App {
     pub presence: Presence,
     pub scene: Scene,
     pub camera: Camera,
     dragging: Option<(Vec2, Camera)>,
     pointer: Vec2,
+    /// One per object in `scene.movers()`.
+    motion: Vec<Progress>,
     /// Exposure and white balance, metered once so panning and light changes never shift the display.
     display: (f32, Vec3),
 }
@@ -40,7 +49,8 @@ impl App {
             Camera { target: Vec2::ZERO, distance: (scene.radius * 2.0).clamp(6.0, 40.0), ..Camera::default() };
         let (eye, forward, right, up) = camera.rays(1.0);
         let display = scene.camera_settings(eye, forward, right, up);
-        Self { presence: Presence::default(), scene, camera, dragging: None, pointer: Vec2::ZERO, display }
+        let motion = vec![Progress::default(); scene.movers().len()];
+        Self { presence: Presence::default(), scene, camera, dragging: None, pointer: Vec2::ZERO, motion, display }
     }
 
     pub fn pointer_moved(&mut self, position: Vec2, viewport: Vec2) {
@@ -49,6 +59,26 @@ impl App {
             camera.pan(position - origin, viewport);
             self.camera.target = camera.target;
         }
+    }
+
+    /// Moves each moving object to its destination while its trigger holds, and back when it stops.
+    /// Returns whether any is still moving.
+    pub fn advance_motion(&mut self, dt: f32) -> bool {
+        let dt = dt.clamp(0.0, 0.1);
+        let mut moving = false;
+        for (mover, progress) in self.scene.movers().iter().zip(&mut self.motion) {
+            let wanted = mover.wanted(&self.presence);
+            progress.dwell = if wanted { progress.dwell + dt } else { 0.0 };
+            let target = if wanted && progress.dwell >= mover.delay() { 1.0 } else { 0.0 };
+            let step = dt / mover.duration();
+            progress.amount += (target - progress.amount).clamp(-step, step);
+            moving |= (progress.amount - target).abs() > f32::EPSILON;
+        }
+        for (index, progress) in self.motion.iter().enumerate() {
+            let entity_id = self.scene.movers()[index].entity_id;
+            self.scene.set_motion(entity_id, progress.amount);
+        }
+        moving
     }
 
     pub const fn is_dragging(&self) -> bool {
@@ -86,6 +116,7 @@ impl App {
             interleaved: false,
             parity: 0,
             normal_samples: 4,
+            dynamic: self.scene.dynamic_objects(),
         }
     }
 }
@@ -137,6 +168,7 @@ mod tests {
             camera: Camera::default(),
             dragging: None,
             pointer: Vec2::ZERO,
+            motion: Vec::new(),
             display: (1.3, Vec3::ONE),
         };
         for step in 0..20 {

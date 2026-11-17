@@ -1,10 +1,12 @@
 use crate::render::{
-    DOOR_HEIGHT, EXTERIOR_WALL_THICKNESS, WALL_HEIGHT, WINDOW_HEAD, WINDOW_SILL, light::photometry::warm_white,
+    DOOR_HEIGHT, EXTERIOR_WALL_THICKNESS, WALL_HEIGHT, WINDOW_HEAD, WINDOW_SILL, geometry::motion::Inputs,
+    light::photometry::warm_white,
 };
 use isthmus::{
     ShaderData,
     glam::{UVec3, Vec2, Vec3, vec2},
 };
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, ShaderData)]
 #[repr(u32)]
@@ -133,6 +135,8 @@ pub struct Object {
     pub emission_color: Vec3,
     /// Outward normal for exterior architecture; zero for interior objects.
     pub exterior: Vec3,
+    /// How far, in metres, this object may move from its authored pose. Zero for anything fixed.
+    pub reach: f32,
 }
 
 impl Object {
@@ -150,7 +154,13 @@ impl Object {
             emission: 0.0,
             emission_color: DEFAULT_LIGHT_COLOR,
             exterior: Vec3::ZERO,
+            reach: 0.0,
         }
+    }
+
+    /// Objects that move at runtime: absent from baked shadows, and shadowed by a ray instead.
+    pub fn is_dynamic(self) -> bool {
+        self.reach > 0.0
     }
 
     /// Ceiling downlights and table lamps, bound to Home Assistant entities.
@@ -158,7 +168,13 @@ impl Object {
         matches!(self.kind, Kind::Downlight | Kind::Lamp)
     }
 
+    /// Half-size of the bounds the BVH is built from: the object's own box, grown to cover everywhere it can move.
     pub fn extent(self) -> Vec3 {
+        self.local_extent() + Vec3::splat(self.reach)
+    }
+
+    /// Half-size of the box around the object in its own frame.
+    pub fn local_extent(self) -> Vec3 {
         match self.kind {
             Kind::Box | Kind::Ceiling | Kind::Downlight | Kind::Lamp | Kind::GlassPane => self.size * 0.5,
             Kind::KitchenSink => self.size * 0.5 + Vec3::new(0.06, 0.06, 0.32),
@@ -215,6 +231,26 @@ pub struct Room {
     pub furniture: Vec<Object>,
     pub openings: Vec<Opening>,
     pub lights: Vec<Light>,
+    pub motions: Vec<Motion>,
+}
+
+/// Tells a moving object whether to be at its destination; see `Room::moves`.
+pub type Trigger = Arc<dyn Fn(&Inputs) -> bool + Send + Sync>;
+
+/// A piece of furniture that slides to a second pose whenever a condition holds; see `Room::moves`.
+pub struct Motion {
+    /// A name for the object, for code that moves it directly.
+    pub entity_id: &'static str,
+    /// Where it ends up, relative to where it is authored, in room axes.
+    pub offset: Vec3,
+    /// The rotation it ends up with, in degrees.
+    pub rotation: f32,
+    /// Decides, every frame, whether the object should be at its destination.
+    pub trigger: Trigger,
+    /// Seconds the trigger must hold before the object moves.
+    pub delay: f32,
+    /// Seconds the slide takes.
+    pub duration: f32,
 }
 
 impl Room {
@@ -228,7 +264,49 @@ impl Room {
             furniture: vec![],
             openings: vec![],
             lights: vec![],
+            motions: vec![],
         }
+    }
+
+    /// Makes the furniture just placed slide by `offset` and turn to `rotation` degrees while `trigger` holds,
+    /// and slide back when it stops. The trigger sees whatever `Inputs` offers, so it need not involve people:
+    ///
+    /// ```ignore
+    /// .furniture(Kind::Chair, (1.83, -0.43, 0.0), (0.72, 0.72, 1.3), 115.0)
+    /// .moves("desk_chair", (0.40, 0.0, 0.0), -90.0, |at| at.occupied(0.45))
+    /// .after(1.5)
+    /// ```
+    pub fn moves(
+        mut self,
+        entity_id: &'static str,
+        offset: impl Into<Vec3>,
+        rotation: f32,
+        trigger: impl Fn(&Inputs) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        let offset = offset.into();
+        let item = self.furniture.last_mut().expect("moves follows a piece of furniture");
+        item.reach = offset.length();
+        self.motions.push(Motion {
+            entity_id,
+            offset,
+            rotation,
+            trigger: Arc::new(trigger),
+            delay: 0.0,
+            duration: 1.2,
+        });
+        self
+    }
+
+    /// Holds the last `moves` back until its trigger has held for `seconds`, so a passer-by does not set it off.
+    pub fn after(mut self, seconds: f32) -> Self {
+        self.motions.last_mut().expect("after follows moves").delay = seconds;
+        self
+    }
+
+    /// Sets how long the last `moves` takes to slide, in seconds.
+    pub fn over(mut self, seconds: f32) -> Self {
+        self.motions.last_mut().expect("over follows moves").duration = seconds.max(0.01);
+        self
     }
 
     pub const fn walls(mut self, walls: Walls) -> Self {
@@ -409,8 +487,8 @@ fn lounge() -> Room {
         .window_width(vec2(-1.15, -1.35), 0.0, 1.4)
         .window_width(vec2(1.75, -1.35), 0.0, 0.70)
         .furniture(Kind::Radiator, (-1.15, -1.25, 0.0), (1.4, 0.1, 0.6), 0.0)
-        .furniture(Kind::Curtain, (-1.15, -1.25, 0.67), (1.80, 0.38, 1.63), 0.0)
-        .furniture(Kind::Curtain, (1.75, -1.25, 0.67), (1.10, 0.38, 1.63), 0.0)
+        .furniture(Kind::Curtain, (-1.15, -1.35, 0.67), (1.80, 0.12, 1.63), 0.0)
+        .furniture(Kind::Curtain, (1.75, -1.35, 0.67), (1.10, 0.12, 1.63), 0.0)
         .furniture(Kind::SillArrangement, (-1.40, -1.33, 0.945), (0.24, 0.20, 0.64), 0.0)
         .furniture(Kind::Sofa, (-2.56, 0.20, 0.0), (2.28, 0.95, 0.83), -90.0)
         .furniture_material(Kind::Pillow, (-2.65, -0.47, 0.45), (0.39, 0.17, 0.39), -98.0, Material::Satin)
@@ -432,7 +510,10 @@ fn lounge() -> Room {
         .furniture(Kind::PosterNight, (3.00, 1.00, 1.35), (0.32, 0.02, 0.46), 90.0)
         .furniture(Kind::Palm, (2.61, 0.50, 0.0), (1.30, 1.30, 1.15), 0.0)
         .furniture(Kind::SillPlant, (1.78, -1.33, 0.945), (0.24, 0.24, 0.42), 0.0)
+        // Pulled up to the desk, square on, while someone sits there.
         .furniture(Kind::Chair, (1.83, -0.43, 0.0), (0.72, 0.72, 1.3), 115.0)
+        .moves("desk_chair", (0.40, 0.0, 0.0), -90.0, |at| at.occupied(0.45))
+        .after(1.5)
 
         // Display wall on the storage side of the kitchen/hall junction.
         .furniture(Kind::DisplayShelf, (0.85, 2.04, 0.0), (0.64, 0.32, 1.90), 0.0)
@@ -482,8 +563,8 @@ fn kitchen() -> Room {
         .furniture(Kind::Splashback, (1.40, 1.485, 0.90), (0.80, 0.018, 0.55), 0.0)
         .furniture(Kind::Splashback, (1.735, 0.67, 0.90), (1.66, 0.018, 0.55), 90.0)
         .furniture(Kind::SillPlant, (0.35, 1.43, 1.05), (0.29, 0.29, 0.48), 0.0)
-        .furniture(Kind::TrailingPlant, (-1.23, -0.075, 1.80), (0.30, 0.30, 0.42), -90.0)
-        .furniture(Kind::TrailingPlant, (-1.23, 0.385, 1.83), (0.24, 0.24, 0.39), -90.0)
+        .furniture(Kind::TrailingPlant, (-1.23, -0.075, 1.706), (0.30, 0.30, 0.42), -90.0)
+        .furniture(Kind::TrailingPlant, (-1.23, 0.385, 1.736), (0.24, 0.24, 0.39), -90.0)
         .furniture(Kind::TrailingPlant, (1.07, 1.23, 1.608), (0.34, 0.34, 0.54), 0.0)
         .furniture(Kind::AirFryer, (-1.27, -0.75, 0.905), (0.415, 0.27, 0.325), -90.0)
 }
@@ -501,15 +582,15 @@ fn bedroom() -> Room {
         .furniture(Kind::Bed, (0.8, -0.45, 0.0), (1.4, 2.1, 1.28), 90.0)
         .furniture(Kind::Nightstand, (1.625, -1.45, 0.0), (0.4, 0.55, 0.5), 90.0)
         .furniture(Kind::Wardrobe, (1.225, 1.45, 0.0), (1.35, 0.6, 2.0), 0.0)
-        .furniture(Kind::Dresser, (-1.5, 0.08, 0.0), (1.54, 0.48, 0.8), -90.0)
+        .furniture(Kind::Dresser, (-1.69, 0.08, 0.0), (1.54, 0.48, 0.8), -90.0)
         .furniture(Kind::Radiator, (0.0, -1.7, 0.0), (1.4, 0.1, 0.6), 0.0)
-        .furniture(Kind::Curtain, (0.0, -1.56, 0.04), (1.65, 0.13, 2.20), 0.0)
-        .furniture(Kind::SillPlant, (-1.45, 0.42, 0.80), (0.30, 0.30, 0.36), 0.0)
-        .furniture(Kind::SillPlant, (-1.45, -0.35, 0.80), (0.23, 0.23, 0.29), 0.0)
+        .furniture(Kind::Curtain, (0.0, -1.80, 0.66), (1.65, 0.12, 1.58), 0.0)
+        .furniture(Kind::SillPlant, (-1.64, 0.42, 0.80), (0.30, 0.30, 0.36), 0.0)
+        .furniture(Kind::SillPlant, (-1.64, -0.35, 0.80), (0.23, 0.23, 0.29), 0.0)
         .furniture(Kind::PosterBlue, (-1.87, 0.08, 1.13), (0.58, 0.025, 0.77), 90.0)
         .furniture_material(Kind::Blossom, (1.625, -1.45, 0.50), (0.34, 0.34, 0.40), 0.0, Material::Ceramic)
         .furniture(Kind::TowerFan, (1.60, 0.52, 0.0), (0.18, 0.18, 0.98), 90.0)
-        .furniture(Kind::RoundSpeaker, (-1.47, 0.03, 0.80), (0.27, 0.12, 0.31), -90.0)
+        .furniture(Kind::RoundSpeaker, (-1.66, 0.03, 0.80), (0.27, 0.12, 0.31), -90.0)
 }
 
 fn ensuite() -> Room {
@@ -525,7 +606,7 @@ fn ensuite() -> Room {
         .furniture(Kind::TowelRail, (0.40, -1.22, 0.16), (0.60, 0.08, 0.65), 0.0)
         .furniture(Kind::GlassPane, (-0.4, 0.025, 0.14), (0.65, 0.006, 1.79), 0.0)
         .furniture(Kind::GlassPane, (-0.075, 0.65, 0.14), (0.006, 1.24, 1.79), 0.0)
-        .furniture(Kind::BathMat, (0.18, -0.60, 0.005), (0.48, 0.75, 0.020), 0.0)
+        .furniture(Kind::BathMat, (0.18, -0.60, 0.0), (0.48, 0.75, 0.020), 0.0)
         .furniture(Kind::Mirror, (0.35, 0.30, 1.02), (0.45, 0.035, 0.65), 0.0)
         .furniture(Kind::SillPlant, (-0.22, -1.35, 1.0), (0.22, 0.22, 0.29), 0.0)
         // Right jamb hinge; the leaf opens into the bedroom and clears the opening.
@@ -557,7 +638,8 @@ fn bathroom() -> Room {
         .downlights("light.bathroom_shower_downlight", &[(0.85, 0.55)])
         .door(vec2(0.7, -1.0), 180.0)
         .furniture(Kind::Shower, (0.85, 0.525, 0.0), (0.6, 0.85, 2.0), 0.0)
-        .furniture(Kind::Bath, (-0.75, 0.0, 0.0), (0.8, 1.9, 0.55), 0.0)
+        // The bath ends at the face of the wall nib, 24 cm out from the end wall.
+        .furniture(Kind::Bath, (-0.75, -0.095, 0.0), (0.8, 1.71, 0.55), 0.0)
         .furniture(Kind::Toilet, (0.075, 0.625, 0.0), (0.40, 0.65, 0.80), 0.0)
         .furniture(Kind::Sink, (0.0, -0.725, 0.0), (0.45, 0.45, 0.85), -180.0)
         .furniture(Kind::Vanity, (0.0, -0.725, 0.0), (0.49, 0.46, 0.65), -180.0)
@@ -566,9 +648,13 @@ fn bathroom() -> Room {
         .furniture(Kind::GlassPane, (0.575, 0.525, 0.14), (0.006, 0.80, 1.79), 0.0)
         .furniture(Kind::WasteBin, (0.49, 0.78, 0.0), (0.17, 0.17, 0.29), 0.0)
         .furniture(Kind::ExtractorVent, (0.20, 0.97, 1.99), (0.16, 0.035, 0.17), 180.0)
-        .furniture(Kind::BathMat, (-0.13, -0.30, 0.005), (0.48, 0.70, 0.020), 0.0)
-        .furniture(Kind::BathMat, (0.20, 0.42, 0.005), (0.45, 0.55, 0.020), 0.0)
+        // Side by side on the floor between the bath and shower, clear of the sink and toilet.
+        .furniture(Kind::BathMat, (-0.12, -0.20, 0.0), (0.44, 0.54, 0.020), 0.0)
+        .furniture(Kind::BathMat, (0.34, -0.19, 0.0), (0.40, 0.42, 0.020), 0.0)
         .furniture(Kind::Mirror, (0.0, -0.94, 1.02), (0.50, 0.035, 0.65), 180.0)
-        .furniture_material(Kind::Box, (-1.01, 0.86, 0.0), (0.28, 0.20, 2.4), 0.0, Material::Paint)
+        // The nib spans the whole end of the bath, floor to ceiling, and is tiled like the walls.
+        .furniture_material(Kind::Box, (-0.775, 0.88, 0.0), (0.85, 0.24, 2.4), 0.0, Material::Paint)
         .bathroom_tiles()
+        .furniture_material(Kind::Box, (-0.775, 0.751, 0.0), (0.85, 0.018, 1.0), 0.0, Material::BathroomTile)
+        .furniture_material(Kind::Box, (-0.341, 0.88, 0.0), (0.018, 0.24, 1.0), 0.0, Material::BathroomTile)
 }

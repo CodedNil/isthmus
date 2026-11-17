@@ -1,5 +1,5 @@
-use crate::scene::{FAR, Kind, Material, Sample, blend, box_sdf, capsule, cylinder, rounded_box, scaled_box};
-use core::f32::consts::TAU;
+use crate::scene::{FAR, Kind, Material, Sample, blend, box_sdf, capsule, cylinder, extrude, rounded_box, scaled_box};
+use core::f32::consts::PI;
 use isthmus::prelude::*;
 
 fn radiator(p: Vec3, size: Vec3) -> f32 {
@@ -20,7 +20,8 @@ fn radiator(p: Vec3, size: Vec3) -> f32 {
 }
 
 fn window(p: Vec3, size: Vec3) -> f32 {
-    let sill = rounded_box(p - vec3(0.0, -0.015, -size.z * 0.5 + 0.012), vec3(size.x + 0.06, 0.35, 0.035), 0.008);
+    // The board stands one inch proud of the wall face (local y = 0) and runs back into the reveal.
+    let sill = rounded_box(p - vec3(0.0, 0.067, -size.z * 0.5 + 0.012), vec3(size.x + 0.06, 0.185, 0.035), 0.008);
     let frame = rounded_box(p - Vec3::Y * 0.08, vec3(size.x, 0.055, size.z), 0.008);
     let opening = box_sdf(p - Vec3::Y * 0.08, vec3(size.x - 0.08, 0.14, size.z - 0.08));
     let frame = frame.max_num(-opening);
@@ -28,28 +29,64 @@ fn window(p: Vec3, size: Vec3) -> f32 {
     sill.min_num(frame).min_num(if size.x > 0.90 { mullion } else { FAR })
 }
 
+fn smooth(t: f32) -> f32 {
+    let t = t.clamp_num(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// A pair of tied-back curtains on a rod, as in the room photos: soft vertical folds, gathered narrow at the
+/// tie-back and fuller above and below. The wall face is `y = 0` and the room is at -Y; nothing reaches further
+/// than 10 cm out. `size.x` is the rod's length and `size.z` the height from hem to rod.
 fn curtain<S: Sample>(p: Vec3, size: Vec3) -> S {
-    // Broad vertical folds gather into a narrow waist, with a hem.
-    let height = (p.z / size.z + 0.5).max_num(0.0).min_num(1.0);
-    let t = ((height - 0.18) / 0.82).max_num(0.0).min_num(1.0);
-    let spread = t * t * (3.0 - 2.0 * t);
-    let width = 0.048 + 0.087 * spread + 0.020 * (1.0 - height / 0.18).max_num(0.0);
-    let center = size.x * 0.5 - 0.095 - 0.05 * spread;
-    let across = p.x.abs() - center;
-    let depth = p.y + 0.025 - 0.035 * (1.0 - spread);
-    let pleat = (across * TAU / 0.037).cos() * (0.010 + 0.007 * spread);
-    let cloth = rounded_box(
-        vec3(across, depth - pleat, p.z),
-        vec3(width * 2.0, 0.024 + 0.028 * (1.0 - spread), size.z * 0.96),
-        0.010,
-    ) * 0.5;
-    let rod = capsule(p, vec3(-size.x * 0.5, -0.025, size.z * 0.49), vec3(size.x * 0.5, -0.025, size.z * 0.49), 0.010);
-    let tie = vec3(p.x.abs() - (size.x * 0.5 - 0.095), p.y - 0.01, p.z + size.z * 0.32);
-    let hoop = vec2(tie.xy().length() - 0.067, tie.z).length() - 0.005;
-    let mount = capsule(tie, vec3(0.0, 0.065, 0.0), vec3(0.0, 0.085, 0.0), 0.012);
-    let finial = vec3(p.x.abs() - size.x * 0.49, p.y + 0.025, p.z - size.z * 0.49).length() - 0.020;
-    S::new(cloth, || (Material::Fabric, vec3(0.68, 0.64, 0.57)))
-        .union(S::new(rod.min_num(hoop).min_num(mount).min_num(finial), || (Material::Metal, vec3(0.65, 0.63, 0.58))))
+    let span = size.x;
+    let height = size.z;
+    // Height above the hem.
+    let z = p.z + height * 0.5;
+    let tie = height * 0.45;
+    // 1 at the tie-back, falling away along the drop.
+    let waist = smooth(1.0 - (z - tie).abs() / (height * 0.5));
+    let half_width = if z > tie {
+        0.055 + 0.085 * smooth((z - tie) / (height - 0.07 - tie))
+    } else {
+        0.055 + 0.060 * smooth((tie - z) / tie)
+    };
+    // The cloth is pulled outwards to the tie-back, and hangs on the rod everywhere else.
+    let centre = span * 0.5 - 0.17 + 0.045 * waist;
+    let across = p.x.abs() - centre;
+    let thickness = 0.040 + 0.028 * waist;
+    let fold =
+        0.010 * (across / half_width * PI * 2.5).cos() * (1.0 - 0.6 * waist) + 0.003 * (z * 13.0 + across * 5.0).sin();
+    let front = -0.025 - thickness * 0.5;
+    // Fold in the section, rounded, then cut to the hem and the heading under the rod.
+    let section = vec2(across.abs() - half_width, (p.y - front - fold).abs() - thickness * 0.5);
+    let sheet = extrude(section + 0.012) - 0.012;
+    let drop = (z - (0.02 + (height - 0.09) * 0.5)).abs() - (height - 0.09) * 0.5;
+    // Distances are shortened a little, since the width and folds vary along the drop.
+    let cloth = extrude(vec2(sheet, drop)) * 0.75;
+    let rod_z = height * 0.5 - 0.04;
+    let rod = capsule(p, vec3(-span * 0.5, -0.06, rod_z), vec3(span * 0.5, -0.06, rod_z), 0.009);
+    let finial = vec3(p.x.abs() - span * 0.5, p.y + 0.06, p.z - rod_z).length() - 0.02;
+    let bracket = capsule(
+        vec3(p.x.abs(), p.y, p.z),
+        vec3(span * 0.5 - 0.04, 0.0, rod_z),
+        vec3(span * 0.5 - 0.04, -0.06, rod_z),
+        0.006,
+    );
+    // A ring round each gathered panel, on a hook in the wall.
+    let tie_z = tie - height * 0.5;
+    let waist_x = span * 0.5 - 0.17 + 0.045;
+    let ring_y = -0.025 - 0.034;
+    let ring = vec2(vec2(p.x.abs() - waist_x, p.y - ring_y).length() - 0.058, p.z - tie_z).length() - 0.005;
+    let hook = capsule(
+        vec3(p.x.abs(), p.y, p.z),
+        vec3(waist_x + 0.058, 0.0, tie_z),
+        vec3(waist_x + 0.058, ring_y, tie_z),
+        0.008,
+    );
+    S::new(cloth, || (Material::Fabric, vec3(0.74, 0.68, 0.58)))
+        .union(S::new(rod.min_num(finial).min_num(bracket).min_num(ring).min_num(hook), || {
+            (Material::Metal, vec3(0.65, 0.63, 0.58))
+        }))
 }
 
 // The cupboard contains a hot-water cylinder, not a rectangular wall boiler.

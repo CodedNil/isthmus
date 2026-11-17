@@ -193,34 +193,39 @@ pub fn side_table<S: Sample>(p: Vec3, size: Vec3) -> S {
     hit
 }
 
+/// A divan bed dressed as in the bedroom reference: blue duvet, grey throw, white pillows and a panelled headboard.
+/// The head is at -Y; `local` is centred, so `p.z` is the height above the floor.
 #[inline(never)]
 pub fn bed<S: Sample>(local: Vec3, size: Vec3) -> S {
     let p = local + Vec3::Z * size.z * 0.5;
-    let base = rounded_box(p - vec3(0.0, 0.0, 0.20), vec3(size.x, size.y, 0.36), 0.035);
-    let mattress = rounded_box(p - vec3(0.0, 0.0, 0.45), vec3(size.x * 0.98, size.y * 0.97, 0.23), 0.075);
-    // Centimetre-scale cloth folds, with a conservative distance correction.
-    let fold = 0.009 * (p.x * 21.0 + (p.y * 9.0).sin()).sin() + 0.006 * (p.y * 25.0 + p.x * 6.0).sin();
-    let duvet = rounded_box(p - vec3(0.0, 0.10, 0.50 + fold), vec3(size.x + 0.06, size.y - 0.08, 0.25), 0.095) * 0.7;
-    let throw = rounded_box(p - vec3(0.0, 0.02, 0.636 + fold), vec3(size.x + 0.07, size.y * 0.64, 0.032), 0.013) * 0.7;
-    let sheet = rounded_box(p - vec3(0.0, -size.y * 0.30, 0.627), vec3(size.x, 0.34, 0.043), 0.019);
-    let pillow_point = vec3(p.x.abs() - size.x * 0.245, p.y + size.y * 0.34, p.z - 0.704 - 0.055 * p.y);
-    let pillows = rounded_box(pillow_point, vec3(size.x * 0.47, 0.43, 0.17), 0.070);
-    let head_point = p - vec3(0.0, -size.y * 0.48, 0.69);
-    let head = rounded_box(head_point, vec3(size.x + 0.06, 0.11, 1.18), 0.035);
-    let panel_point = vec3(
-        head_point.x,
-        head_point.y - 0.045,
-        head_point.z - (head_point.z / 0.255).round().clamp_num(-1.0, 1.0) * 0.255 - 0.21,
-    );
-    let panels = rounded_box(panel_point, vec3(size.x - 0.07, 0.065, 0.249), 0.023);
-    S::new(base, || (Material::Fabric, vec3(0.66, 0.63, 0.58)))
+    let half_length = size.y * 0.5;
+    // Upholstered divan on a recessed plinth, with the mattress on top.
+    let divan = rounded_box(p - vec3(0.0, 0.03, 0.20), vec3(size.x - 0.04, size.y - 0.12, 0.32), 0.025);
+    let mattress = rounded_box(p - vec3(0.0, 0.025, 0.46), vec3(size.x - 0.07, size.y - 0.15, 0.20), 0.06);
+    // Gentle cloth wrinkles; the 0.7 keeps the distance estimate conservative.
+    let fold = 0.004 * (p.x * 17.0 + (p.y * 7.0).sin()).sin() + 0.003 * (p.y * 23.0 + p.x * 5.0).sin();
+    // The duvet runs from just below the pillows to the foot and hangs over both sides and the end.
+    let duvet = rounded_box(p - vec3(0.0, 0.32, 0.465 + fold), vec3(size.x + 0.07, 1.44, 0.25), 0.06) * 0.7;
+    // The grey throw lies across the upper duvet and drapes down the sides.
+    let throw = rounded_box(p - vec3(0.0, 0.07, 0.52 + fold), vec3(size.x + 0.11, 0.82, 0.19), 0.03) * 0.7;
+    // The sheet folds back over the top of the duvet.
+    let sheet = rounded_box(p - vec3(0.0, -0.45, 0.577), vec3(size.x - 0.04, 0.30, 0.040), 0.02);
+    let pillow_point = vec3(p.x.abs() - size.x * 0.245, p.y + 0.71, p.z - 0.69 - 0.07 * (p.y + 0.71));
+    let pillows = rounded_box(pillow_point, vec3(size.x * 0.47, 0.46, 0.15), 0.045);
+    // A freestanding upholstered headboard with a raised border and two marbled channels.
+    let head_point = p - vec3(0.0, -half_length + 0.055, 0.79);
+    let board = rounded_box(head_point, vec3(size.x + 0.10, 0.09, 0.98), 0.012);
+    let channel_point = vec3(p.x, p.y + half_length - 0.10, (p.z - 0.945).abs() - 0.135);
+    let channels = rounded_box(channel_point, vec3(size.x - 0.04, 0.04, 0.24), 0.02);
+    S::new(divan, || (Material::Fabric, vec3(0.70, 0.64, 0.56)))
         .union(S::new(mattress.min_num(sheet).min_num(pillows), || (Material::Fabric, vec3(0.96, 0.96, 0.94))))
-        .union(S::new(duvet, || (Material::Fabric, vec3(0.20, 0.29, 0.48))))
-        .union(S::new(throw, || (Material::Knit, vec3(0.65, 0.65, 0.67))))
-        .union(S::new(head.min_num(panels), || {
-            let warp = materials::noise(vec2(p.x * 9.0, p.z * 2.0));
-            let vein = (p.z * 95.0 + warp * 12.0 + materials::noise(p.xz() * 27.0) * 2.0).sin();
-            (Material::Fabric, Vec3::splat(0.57 + 0.065 * vein))
+        .union(S::new(duvet, || (Material::Fabric, vec3(0.16, 0.25, 0.50))))
+        .union(S::new(throw, || (Material::Knit, vec3(0.46, 0.46, 0.48))))
+        .union(S::new(board, || (Material::Fabric, vec3(0.66, 0.65, 0.62))))
+        .union(S::new(channels, || {
+            let warp = materials::noise(vec2(p.x * 7.0, p.z * 2.0));
+            let vein = (p.z * 70.0 + warp * 11.0 + materials::noise(p.xz() * 19.0) * 2.5).sin();
+            (Material::Fabric, Vec3::splat(0.55 + 0.07 * vein))
         }))
 }
 

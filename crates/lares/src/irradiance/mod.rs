@@ -13,6 +13,7 @@ use isthmus::prelude::*;
 pub mod bake;
 mod cache;
 mod controls;
+mod parallel;
 mod surface;
 
 const SPACING: f32 = 0.50;

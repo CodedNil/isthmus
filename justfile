@@ -10,6 +10,10 @@ cantusweb: (bindgen "cantus")
 paries:
     cargo run -p paries
 
+# Bakes lighting ahead of serving (about 15 s); `just lares` does the same on first start if it is stale.
+bake:
+    cargo run --release -p lares -- --bake
+
 lares: (bindgen "lares")
     gzip -kf crates/lares/assets/web/lares_bg.wasm crates/lares/assets/web/lares.js
     cargo run -p lares

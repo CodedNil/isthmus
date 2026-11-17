@@ -41,6 +41,13 @@ fn subtract(wall: Object, cut: &Opening) -> Vec<Object> {
     pieces
 }
 
+/// An opening is cut through its own wall, so it must not bite the skirting of a wall that meets it.
+/// Doorways sit near corners, and their cut reaches half a metre into the room.
+fn skirting_clear_of(trim: &Object, cut: &Opening) -> bool {
+    let along = usize::from(trim.size.y > trim.size.x);
+    trim.size.z < 0.2 && cut.size[along] < cut.size[1 - along]
+}
+
 pub fn compile(rooms: &[Room]) -> Vec<Object> {
     let vertices = rooms.iter().flat_map(|r| r.outline.iter().map(|p| r.position + *p));
     let min = vertices.clone().fold(Vec2::splat(f32::MAX), Vec2::min);
@@ -117,8 +124,12 @@ pub fn compile(rooms: &[Room]) -> Vec<Object> {
                 ));
             }
         });
+        walls.extend(corner_blocks(room, rooms, origin));
         for cut in &cuts {
-            walls = walls.into_iter().flat_map(|wall| subtract(wall, cut)).collect();
+            walls = walls
+                .into_iter()
+                .flat_map(|wall| if skirting_clear_of(&wall, cut) { vec![wall] } else { subtract(wall, cut) })
+                .collect();
         }
         // Low trim stays only where a surviving wall supports it, so openings leave no stray posts.
         let supported: Vec<_> = walls.iter().copied().filter(|wall| wall.size.z > 0.5).collect();
@@ -147,7 +158,79 @@ pub fn compile(rooms: &[Room]) -> Vec<Object> {
             }
         }));
     }
+    drop_duplicate_trim(&mut objects);
     objects
+}
+
+/// Skirting has a lining on both sides of every wall, so rooms that share a wall each add the same boards.
+/// Overlapping coplanar boards shade differently from each other and flicker, so each is kept once.
+fn drop_duplicate_trim(objects: &mut Vec<Object>) {
+    let is_trim =
+        |object: &Object| object.kind == Kind::Box && object.pos.z > 0.0 && object.pos.z + object.size.z * 0.5 < 0.123;
+    let covers = |outer: &Object, inner: &Object| {
+        let (lo, hi) = (outer.pos - outer.size * 0.5, outer.pos + outer.size * 0.5);
+        let (inner_lo, inner_hi) = (inner.pos - inner.size * 0.5, inner.pos + inner.size * 0.5);
+        outer.material == inner.material
+            && inner_lo.cmpge(lo - Vec3::splat(1.0e-4)).all()
+            && inner_hi.cmple(hi + Vec3::splat(1.0e-4)).all()
+    };
+    let trim: Vec<usize> = (0..objects.len()).filter(|&index| is_trim(&objects[index])).collect();
+    let mut dropped = vec![false; objects.len()];
+    for &a in &trim {
+        // A board goes if another contains it; equal boards go in favour of the earlier one.
+        dropped[a] = trim.iter().any(|&b| {
+            b != a && !dropped[b] && covers(&objects[b], &objects[a]) && (!covers(&objects[a], &objects[b]) || b < a)
+        });
+    }
+    let mut index = 0;
+    objects.retain(|_| {
+        index += 1;
+        !dropped[index - 1]
+    });
+}
+
+/// Exterior walls grow outward only, which leaves a square missing at each outside corner; this fills it.
+fn corner_blocks(room: &Room, rooms: &[Room], origin: Vec2) -> Vec<Object> {
+    let outline = &room.outline;
+    let count = outline.len();
+    let area: f32 = (0..count).map(|i| outline[i].perp_dot(outline[(i + 1) % count])).sum();
+    // The outward side of an edge, in authored axes.
+    let outward =
+        |direction: Vec2| if area > 0.0 { vec2(direction.y, -direction.x) } else { vec2(-direction.y, direction.x) };
+    let walled = |a: Vec2, b: Vec2| room.walls.contains(Walls::from_bits_retain(1 << edge_side(a, b)));
+    let open_air = |point: Vec2| !rooms.iter().any(|other| contains(other, room.position + point));
+    let mut blocks = Vec::new();
+    for index in 0..count {
+        let (before, corner, after) =
+            (outline[(index + count - 1) % count], outline[index], outline[(index + 1) % count]);
+        let (arrive, leave) = ((corner - before).normalize(), (after - corner).normalize());
+        // Only outside corners leave a notch.
+        if arrive.perp_dot(leave) * area.signum() <= 0.0 || !walled(before, corner) || !walled(corner, after) {
+            continue;
+        }
+        let (first, second) = (outward(arrive), outward(leave));
+        let reach = WALL_THICKNESS + 0.01;
+        // Probes sit just off each wall, away from the corner, so a neighbour sharing the wall is found.
+        let (back, forward) = (corner - arrive * 0.05, corner + leave * 0.05);
+        if !open_air(back + first * reach)
+            || !open_air(forward + second * reach)
+            || !open_air(corner + (first + second) * reach)
+        {
+            continue;
+        }
+        let extra = EXTERIOR_WALL_THICKNESS - WALL_THICKNESS;
+        let center = corner + (first + second) * (EXTERIOR_WALL_THICKNESS * 0.5);
+        let diagonal = first + second;
+        blocks.push(Object {
+            exterior: vec3(diagonal.x, -diagonal.y, 0.0).normalize(),
+            ..solid(
+                point(room, center.extend(0.0), origin) + Vec3::Z * WALL_HEIGHT * 0.5,
+                vec3(extra, extra, WALL_HEIGHT),
+                Material::Paint,
+            )
+        });
+    }
+    blocks
 }
 
 /// Point-in-polygon classification in authored coordinates, including notches.
@@ -162,19 +245,25 @@ fn contains(room: &Room, point: Vec2) -> bool {
     inside
 }
 
+/// Which side of its room an axis-aligned edge walls, numbered as in `Walls`.
+#[expect(clippy::float_cmp, reason = "Axis alignment is an exact authoring invariant")]
+fn edge_side(a: Vec2, b: Vec2) -> u32 {
+    if a.x == b.x {
+        if b.y > a.y { 2 } else { 0 }
+    } else if b.x > a.x {
+        3
+    } else {
+        1
+    }
+}
+
 /// Floors are horizontal strips of the polygon and walls follow its edges; outlines must be orthogonal.
 #[expect(clippy::float_cmp, reason = "Axis alignment is an exact authoring invariant")]
 fn footprint(room: &Room, mut emit: impl FnMut(Vec2, Vec2, Option<u32>)) {
     let edges: Vec<_> = room.outline.iter().copied().zip(room.outline.iter().copied().cycle().skip(1)).collect();
     for &(a, b) in &edges {
         assert!((a.x == b.x) != (a.y == b.y), "room edges must be horizontal or vertical and nonzero");
-        let side = if a.x == b.x {
-            if b.y > a.y { 2 } else { 0 }
-        } else if b.x > a.x {
-            3
-        } else {
-            1
-        };
+        let side = edge_side(a, b);
         emit(a, b, Some(side));
     }
     let mut ys: Vec<_> = room.outline.iter().map(|p| p.y).collect();
@@ -197,6 +286,27 @@ fn footprint(room: &Room, mut emit: impl FnMut(Vec2, Vec2, Option<u32>)) {
 #[cfg(test)]
 mod tests {
     use crate::render::geometry::layout::*;
+
+    #[test]
+    fn outside_corners_are_filled_but_shared_walls_and_inside_corners_are_not() {
+        // The blocks are the only objects that are exactly a wall's extra thickness square.
+        let blocks = |rooms: &[Room]| {
+            let extra = EXTERIOR_WALL_THICKNESS - WALL_THICKNESS;
+            compile(rooms)
+                .iter()
+                .filter(|object| (object.size - vec3(extra, extra, WALL_HEIGHT)).abs().max_element() < 1.0e-5)
+                .count()
+        };
+        let square = |x: f32| Room::new(vec2(x, 0.0), Vec2::splat(4.0), Material::Floorboards);
+        assert_eq!(blocks(&[square(0.0)]), 4);
+        // An L has five outside corners and one inside corner, which has nothing outside it to fill.
+        let mut l_shape = square(0.0);
+        l_shape.outline =
+            [(-2.0, -2.0), (2.0, -2.0), (2.0, 0.0), (0.0, 0.0), (0.0, 2.0), (-2.0, 2.0)].map(Vec2::from).to_vec();
+        assert_eq!(blocks(&[l_shape]), 5);
+        // Rooms side by side share a wall, so only their four outer corners are exposed.
+        assert_eq!(blocks(&[square(-2.0), square(2.0)]), 4);
+    }
 
     #[test]
     fn trim_covers_return_corners_in_every_orientation() {

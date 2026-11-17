@@ -2,7 +2,7 @@
 pub(super) use crate::irradiance::cache::daylight::Packed;
 use crate::{
     home::{Kind, Material, Object},
-    irradiance::{Controls, Grid, Irradiance, Probe, SPACING, surface},
+    irradiance::{Controls, Grid, Irradiance, Probe, SPACING, parallel, surface},
     render::{
         WALL_HEIGHT,
         geometry::acceleration::{BRANCH, Node},
@@ -258,22 +258,36 @@ impl Cache {
     }
 
     fn solve(&mut self, probes: &mut [Probe]) {
-        for &index in &self.active {
-            self.direct[index].light = self.filtered(index);
+        let count = self.active.len();
+        let filtered = parallel::map(count, |slot| self.filtered(self.active[slot]));
+        for (&index, light) in self.active.iter().zip(filtered) {
+            self.direct[index].light = light;
         }
         for pass in 0..BOUNCES - 1 {
-            for slot in 0..self.active.len() {
-                self.bounce_at(pass, self.active[slot]);
+            let previous = if pass == 0 { &self.direct } else { &self.bounces[pass - 1] };
+            let results = parallel::map(count, |slot| self.bounce(self.active[slot], previous));
+            for (&index, result) in self.active.iter().zip(results) {
+                if pass < BOUNCES - 2 {
+                    self.bounces[pass][index] = result;
+                } else {
+                    self.raw[index] = result;
+                }
             }
         }
-        for &index in &self.active {
-            probes[index] = Probe { light: self.filtered(index), ..self.raw[index] };
+        let smoothed = |cache: &Self| {
+            parallel::map(count, |slot| {
+                let index = cache.active[slot];
+                Probe { light: cache.filtered(index), ..cache.raw[index] }
+            })
+        };
+        for (&index, probe) in self.active.iter().zip(smoothed(self)) {
+            probes[index] = probe;
         }
         for &index in &self.active {
             self.raw[index].light = probes[index].light;
         }
-        for &index in &self.active {
-            probes[index] = Probe { light: self.filtered(index), ..self.raw[index] };
+        for (&index, probe) in self.active.iter().zip(smoothed(self)) {
+            probes[index] = probe;
         }
     }
 
@@ -543,17 +557,22 @@ pub fn bake_cached(
         probe.positive = vec3(clearance(Vec3::X), clearance(Vec3::Y), clearance(Vec3::Z));
         probe.negative = vec3(clearance(-Vec3::X), clearance(-Vec3::Y), clearance(-Vec3::Z));
     }
-    for index in 0..count {
+    let initial: Vec<Probe> = cache.direct.to_vec();
+    let bake_site = |index: usize| -> Site {
         let surface = index >= lattice_count;
-        if surface && cache.direct[index].normal == Vec3::ZERO {
-            continue;
+        let mut probe = initial[index];
+        let mut sky = Irradiance::default();
+        let mut ground = Irradiance::default();
+        let mut paths = Vec::new();
+        if surface && probe.normal == Vec3::ZERO {
+            return Site::skipped(probe);
         }
         let coordinate = uvec3(index as u32 % size.x, index as u32 / size.x % size.y, index as u32 / (size.x * size.y));
-        let lattice = if surface { cache.direct[index].position } else { origin + coordinate.as_vec3() * SPACING };
+        let lattice = if surface { probe.position } else { origin + coordinate.as_vec3() * SPACING };
         let mut point = lattice;
         if surface && inside(point) {
             // A texel inside a thin mirror or frame moves to free air on the wall's side; thick furniture stays disabled.
-            let normal = cache.direct[index].normal;
+            let normal = probe.normal;
             let clearance = scene::architectural_cast(point, normal, nodes, objects).0;
             for step in 1..=6 {
                 let offset = step as f32 * 0.01;
@@ -564,9 +583,8 @@ pub fn bake_cached(
                 }
             }
             if inside(point) {
-                cache.direct[index] =
-                    Probe { positive: Vec3::splat(-FAR), negative: Vec3::splat(-FAR), ..Probe::default() };
-                continue;
+                probe = Probe { positive: Vec3::splat(-FAR), negative: Vec3::splat(-FAR), ..Probe::default() };
+                return Site::skipped(probe);
             }
         }
         // Sites inside furniture or above the roof bake at the nearest free indoor point.
@@ -583,19 +601,18 @@ pub fn bake_cached(
                 }
             }
             if !nearest.is_finite() {
-                cache.direct[index].positive = Vec3::splat(-FAR);
-                cache.direct[index].negative = Vec3::splat(-FAR);
-                continue;
+                probe.positive = Vec3::splat(-FAR);
+                probe.negative = Vec3::splat(-FAR);
+                return Site::skipped(probe);
             }
         }
-        cache.path_offsets[index] = cache.paths.len();
-        cache.direct[index].position = point;
+        probe.position = point;
         let clearance = |axis: Vec3| (scene::architectural_cast(point, axis, nodes, objects).0 - 0.002).max(0.0);
         let axes = |sign: f32| vec3(clearance(Vec3::X * sign), clearance(Vec3::Y * sign), clearance(Vec3::Z * sign));
         if !surface || point != lattice {
-            (cache.direct[index].positive, cache.direct[index].negative) = (axes(1.0), axes(-1.0));
+            (probe.positive, probe.negative) = (axes(1.0), axes(-1.0));
         }
-        let receiver_normal = cache.direct[index].normal;
+        let receiver_normal = probe.normal;
         // Per-site static rotations keep a shared ray pattern from banding narrow window light.
         let spin_axis = if surface { receiver_normal } else { Vec3::Z };
         let key = (point * 10000.0).round();
@@ -635,22 +652,18 @@ pub fn bake_cached(
                 let weights = weights * weights;
                 cone_weights[side] += weights;
                 if side == 0 {
-                    cache.direct[index].mean_positive += weights * depth;
-                    cache.direct[index].square_positive += weights * (depth * depth);
+                    probe.mean_positive += weights * depth;
+                    probe.square_positive += weights * (depth * depth);
                 } else {
-                    cache.direct[index].mean_negative += weights * depth;
-                    cache.direct[index].square_negative += weights * (depth * depth);
+                    probe.mean_negative += weights * depth;
+                    probe.square_negative += weights * (depth * depth);
                 }
             }
             if distance >= FAR {
                 if direction.z >= 0.0 {
-                    cache.sky[index].project_receiver(
-                        direction,
-                        Vec3::splat(0.25 + direction.z.sqrt() * 0.75),
-                        receiver_normal,
-                    );
+                    sky.project_receiver(direction, Vec3::splat(0.25 + direction.z.sqrt() * 0.75), receiver_normal);
                 } else {
-                    cache.ground[index].project_receiver(direction, Vec3::ONE, receiver_normal);
+                    ground.project_receiver(direction, Vec3::ONE, receiver_normal);
                 }
                 continue;
             }
@@ -661,14 +674,26 @@ pub fn bake_cached(
             let normal = scene::rotate_z(scene::object_normal(object, local), object.rotation);
             let albedo = average_albedo(object, local).min(Vec3::splat(0.85));
             let point = hit + normal * 0.002;
-            cache.paths.push(Bounce { object: object_index, direction, point, normal, albedo, ..Bounce::default() });
+            paths.push(Bounce { object: object_index, direction, point, normal, albedo, ..Bounce::default() });
         }
-        cache.path_lengths[index] = cache.paths.len() - cache.path_offsets[index];
-        let probe = &mut cache.direct[index];
         probe.mean_positive /= cone_weights[0].max(Vec3::splat(1.0e-8));
         probe.square_positive /= cone_weights[0].max(Vec3::splat(1.0e-8));
         probe.mean_negative /= cone_weights[1].max(Vec3::splat(1.0e-8));
         probe.square_negative /= cone_weights[1].max(Vec3::splat(1.0e-8));
+        Site { probe, sky, ground, paths, baked: true }
+    };
+    let sites = parallel::map(count, bake_site);
+    let total: usize = sites.iter().map(|site| site.paths.len()).sum();
+    cache.paths.reserve(total);
+    for (index, site) in sites.into_iter().enumerate() {
+        cache.direct[index] = site.probe;
+        cache.sky[index] = site.sky;
+        cache.ground[index] = site.ground;
+        if site.baked {
+            cache.path_offsets[index] = cache.paths.len();
+            cache.path_lengths[index] = site.paths.len();
+            cache.paths.extend(site.paths);
+        }
     }
     // Interpolation links are fixed, so they are cached once.
     for path in &mut cache.paths {
@@ -752,11 +777,10 @@ pub fn bake_cached(
                 direct_sources[index * lights.len() + slot] = unit_incident(probe.position, probe.normal, slot);
             }
         }
-        for index in 0..count {
-            for path in
-                &mut cache.paths[cache.path_offsets[index]..cache.path_offsets[index] + cache.path_lengths[index]]
-            {
-                for slot in 0..lights.len() {
+        let projected = parallel::map(count, |index| {
+            let mut fixtures = vec![Irradiance::default(); lights.len()];
+            for path in &cache.paths[cache.path_offsets[index]..cache.path_offsets[index] + cache.path_lengths[index]] {
+                for (slot, fixture) in fixtures.iter_mut().enumerate() {
                     let incoming = if path.lookup.confidence() >= 0.95 {
                         path.lookup.taps().into_iter().fold(Vec3::ZERO, |sum, (index, weight)| {
                             sum + direct_sources[index as usize * lights.len() + slot] * weight
@@ -764,37 +788,58 @@ pub fn bake_cached(
                     } else {
                         unit_incident(path.point, path.normal, slot)
                     };
-                    cache.fixtures[index * lights.len() + slot].project_receiver(
-                        path.direction,
-                        path.albedo * incoming,
-                        cache.direct[index].normal,
-                    );
+                    fixture.project_receiver(path.direction, path.albedo * incoming, cache.direct[index].normal);
                 }
             }
+            fixtures
+        });
+        for (index, fixtures) in projected.into_iter().enumerate() {
+            cache.fixtures[index * lights.len()..(index + 1) * lights.len()].copy_from_slice(&fixtures);
         }
         drop(direct_sources);
     }
-    for path in &mut cache.paths {
-        path.volume_offset = cache.volume_weights.len() as u32;
-        if path.lookup.confidence() <= 0.01 {
-            // Diagonal connectivity around thin partitions is validated once, while baking.
-            let mut taps = grid.stencil(&cache.direct, path.point, path.normal);
-            taps.retain(|&(index, _)| {
-                scene::segment_visible(path.point, cache.direct[index as usize].position, nodes, objects)
-            });
-            let total: f32 = taps.iter().map(|&(_, weight)| weight).sum();
-            for (_, weight) in &mut taps {
-                *weight /= total.max(1.0e-20);
-            }
-            cache.volume_weights.extend(taps);
+    let stencils = parallel::map(cache.paths.len(), |index| {
+        let path = &cache.paths[index];
+        if path.lookup.confidence() > 0.01 {
+            return Vec::new();
         }
-        path.volume_length = cache.volume_weights.len() as u32 - path.volume_offset;
+        // Diagonal connectivity around thin partitions is validated once, while baking.
+        let mut taps = grid.stencil(&cache.direct, path.point, path.normal);
+        taps.retain(|&(index, _)| {
+            scene::segment_visible(path.point, cache.direct[index as usize].position, nodes, objects)
+        });
+        let total: f32 = taps.iter().map(|&(_, weight)| weight).sum();
+        for (_, weight) in &mut taps {
+            *weight /= total.max(1.0e-20);
+        }
+        taps
+    });
+    for (path, taps) in cache.paths.iter_mut().zip(stencils) {
+        path.volume_offset = cache.volume_weights.len() as u32;
+        path.volume_length = taps.len() as u32;
+        cache.volume_weights.extend(taps);
     }
-    cache.raw = cache.direct.clone();
+    cache.raw.clone_from(&cache.direct);
     cache.bounces = from_fn(|_| cache.direct.clone());
     let mut probes = cache.direct.to_vec();
     cache.relight(sun, objects, nodes, &mut probes);
     (grid, probes, cache)
+}
+
+/// What baking one receiver produces; the sites are independent, so they are baked in parallel and merged in order.
+struct Site {
+    probe: Probe,
+    sky: Irradiance,
+    ground: Irradiance,
+    paths: Vec<Bounce>,
+    /// False for receivers that bake nothing, which have no transport paths.
+    baked: bool,
+}
+
+impl Site {
+    fn skipped(probe: Probe) -> Self {
+        Self { probe, sky: Irradiance::default(), ground: Irradiance::default(), paths: Vec::new(), baked: false }
+    }
 }
 
 fn average_albedo(object: Object, local: Vec3) -> Vec3 {

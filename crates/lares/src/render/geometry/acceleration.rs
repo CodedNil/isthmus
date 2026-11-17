@@ -3,12 +3,19 @@ use crate::{
     home::{Kind, Object, Room},
     irradiance,
     render::{
-        geometry::{layout, light_culling, plants},
+        geometry::{
+            layout, light_culling,
+            motion::{MOVERS, Mover},
+            plants,
+        },
         light::sun::{Sun, SunSettings},
     },
     scene,
 };
-use isthmus::{ShaderData, glam::Vec3};
+use isthmus::{
+    ShaderData,
+    glam::{UVec4, Vec3},
+};
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::io;
@@ -34,6 +41,7 @@ pub struct Scene {
     pub mirror: u32,
     pub lighting_revision: u64,
     light_entities: Vec<(&'static str, u32)>,
+    movers: Vec<Mover>,
     pub radius: f32,
     pub sun: Sun,
     pub sun_settings: SunSettings,
@@ -70,7 +78,7 @@ impl Scene {
     /// Builds the scene for an explicit clock, so previews and tests are deterministic.
     pub fn new_at(rooms: &[Room], unix_seconds: f64, sun_settings: SunSettings) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        let controls = fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/baked/lighting.bin")).ok();
+        let controls = fs::read(irradiance::bake::baked_dir().join("lighting.bin")).ok();
         #[cfg(target_arch = "wasm32")]
         let controls: Option<Vec<u8>> = None;
         let controls = controls.and_then(|bytes| irradiance::Controls::decode(&bytes, source_signature(rooms)).ok());
@@ -104,6 +112,14 @@ impl Scene {
         let contacts = scene::contacts::build(&objects, &nodes, min, max);
         let signature = source_signature(rooms);
         let mirror = objects.iter().position(|item| item.kind == Kind::Mirror).unwrap_or(0) as u32;
+        let movers: Vec<_> = objects
+            .iter()
+            .enumerate()
+            .filter(|(_, object)| object.is_dynamic())
+            .zip(rooms.iter().flat_map(|room| &room.motions))
+            .map(|((index, object), motion)| Mover::new(index, object, motion))
+            .collect();
+        assert!(movers.len() <= MOVERS, "at most {MOVERS} objects can move");
         let (grid, mut probes, mut indirect) =
             irradiance::bake_cached(&mut objects, &nodes, &lights, min, max, sun, controls);
         indirect.bind_groups(&light_entities);
@@ -123,6 +139,7 @@ impl Scene {
             mirror,
             lighting_revision: 0,
             light_entities,
+            movers,
             radius,
             grid,
             probes,
@@ -171,6 +188,35 @@ impl Scene {
         if changed {
             self.lighting_revision = self.lighting_revision.wrapping_add(1);
             self.indirect.fixture_changes(&self.objects, &mut self.probes);
+        }
+        found
+    }
+
+    /// The objects that move at runtime, in authored order.
+    pub fn movers(&self) -> &[Mover] {
+        &self.movers
+    }
+
+    /// Where the moving objects are in `objects`, for the shaders that shadow them; unused slots hold `u32::MAX`.
+    pub fn dynamic_objects(&self) -> UVec4 {
+        let mut slots = [u32::MAX; MOVERS];
+        for (slot, mover) in slots.iter_mut().zip(&self.movers) {
+            *slot = mover.index();
+        }
+        UVec4::from_array(slots)
+    }
+
+    /// Slides a moving object between its authored pose (0) and its moved one (1), restarting sample
+    /// accumulation if it moved. Returns whether any object has that name.
+    pub fn set_motion(&mut self, entity_id: &str, progress: f32) -> bool {
+        let mut found = false;
+        for mover in &self.movers {
+            if mover.entity_id == entity_id {
+                found = true;
+                if mover.apply(&mut self.objects, progress) {
+                    self.lighting_revision = self.lighting_revision.wrapping_add(1);
+                }
+            }
         }
         found
     }

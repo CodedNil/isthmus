@@ -165,6 +165,7 @@ async fn run(visibility: Vec<u8>, lighting: Vec<u8>) -> Result<(), Box<dyn Error
     let mut next_presented = f64::NEG_INFINITY;
     let mut next_scene_refresh = f64::NEG_INFINITY;
     let mut last_presence = (usize::MAX, false);
+    let mut last_timestamp = None::<f64>;
     let mut scheduled = animation_frame();
     loop {
         let (_animation, ready) = scheduled;
@@ -175,7 +176,12 @@ async fn run(visibility: Vec<u8>, lighting: Vec<u8>) -> Result<(), Box<dyn Error
             continue;
         }
         let physical = physical_size();
-        let presence_moving = app.borrow_mut().presence.advance();
+        let elapsed = last_timestamp.replace(timestamp).map_or(0.0, |last| (timestamp - last) as f32);
+        let presence_moving = {
+            let mut app = app.borrow_mut();
+            let presence_moving = app.presence.advance();
+            app.advance_motion(elapsed) || presence_moving
+        };
         let presence_state = {
             let app = app.borrow();
             (app.presence.ghosts.len(), app.presence.connected)

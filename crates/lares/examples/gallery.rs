@@ -1,4 +1,5 @@
-//! Current renders beside their photographs; missing references remain blank.
+//! Current renders (`assets/renders`, generated and untracked) beside their photographs (`assets/references`);
+//! missing photographs remain blank.
 use image::{
     Rgb, RgbImage,
     imageops::{FilterType, overlay, resize},
@@ -22,10 +23,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             let photo = image::open(reference)?.to_rgb8();
             overlay(&mut sheet, &resize(&photo, 400, 300, FilterType::Lanczos3), 0, row as i64 * 600 + 150);
         }
-        let render = image::open(assets.join(format!("references/{view}.webp")))?.to_rgb8();
+        let render = image::open(assets.join(format!("renders/{view}.webp")))?.to_rgb8();
         overlay(&mut sheet, &resize(&render, 400, 600, FilterType::Lanczos3), 400, row as i64 * 600);
     }
-    let output = assets.join("references/comparison.webp");
+    let output = assets.join("renders/comparison.webp");
     sheet.save(&output)?;
     info!("{}: photograph left; evening lights on above daytime lights off at right", output.display());
     Ok(())

@@ -72,13 +72,23 @@ fn unpack(value: Vec2) -> f32 {
     value.dot(vec2(65280.0, 255.0)) / 65535.0
 }
 
+/// A downlight's map covers a 60° half-angle cone. The beam falls as cos^11, so at 60° it is 0.05% of peak:
+/// nothing past it is visible, and spending texels there would only blur the part that is.
+/// The diamond's L1 radius at the cone's edge, so the cone fills the square exactly.
+const CONE_RADIUS: f32 = 0.633_974_6;
+
+/// How far from the centre of the diamond a direction lies, 1 on the horizon; beyond `CONE_RADIUS` it is unmapped.
+fn cone_radius(delta: Vec3) -> f32 {
+    delta.xy().abs().element_sum() / delta.abs().element_sum().max_num(0.001)
+}
+
 fn direction(light: Object, uv: Vec2) -> Vec3 {
     if light.kind != Kind::Downlight {
         return decode(uv);
     }
-    // Expands the downward diamond into a full square, so every texel covers the hemisphere.
+    // Expands the downward diamond, trimmed to the beam's cone, into a full square.
     let q = uv * 2.0 - 1.0;
-    let p = vec2(q.x - q.y, q.x + q.y) * 0.5;
+    let p = vec2(q.x - q.y, q.x + q.y) * 0.5 * CONE_RADIUS;
     p.extend(p.abs().element_sum() - 1.0).normalize()
 }
 
@@ -86,7 +96,7 @@ fn coordinates(light: Object, delta: Vec3) -> Vec2 {
     if light.kind != Kind::Downlight {
         return encode(delta);
     }
-    let p = delta.xy() / delta.abs().element_sum().max_num(0.001);
+    let p = delta.xy() / delta.abs().element_sum().max_num(0.001) / CONE_RADIUS;
     vec2(p.x + p.y, p.y - p.x) * 0.5 + 0.5
 }
 
@@ -130,16 +140,22 @@ fn gather(atlas: &Image, info: AtlasInfo, slot: u32, light: Object, delta: Vec3,
     vec2(visibility, if occlusion > 0.0001 { blocker / occlusion } else { distance })
 }
 
-pub fn visible(atlas: &Image, info: AtlasInfo, slot: u32, light: Object, point: Vec3, normal: Vec3) -> f32 {
+/// Visibility from the baked map, plus whether a ray should confirm it.
+///
+/// The second value is 1 where the map straddles a shadow edge narrower than a texel, which it cannot draw.
+pub fn visible(atlas: &Image, info: AtlasInfo, slot: u32, light: Object, point: Vec3, normal: Vec3) -> Vec2 {
     let delta = point - scene::lighting::source(light);
     if light.kind == Kind::Downlight && delta.z >= 0.0 {
-        return 0.0;
+        return Vec2::ZERO;
+    }
+    if light.kind == Kind::Downlight && cone_radius(delta) > CONE_RADIUS {
+        return Vec2::X;
     }
     let uv = coordinates(light, delta);
     let first = gather(atlas, info, slot, light, delta, normal, uv);
     let distance = delta.length().max_num(0.001);
     let radius = scene::lighting::radius(light);
-    let scale = if light.kind == Kind::Downlight { FRAC_1_SQRT_2 } else { 0.5 };
+    let scale = if light.kind == Kind::Downlight { FRAC_1_SQRT_2 / CONE_RADIUS } else { 0.5 };
     // Searches both sides of the silhouette, so a lit centre still gets its penumbra.
     let search = (radius * info.resolution as f32 * scale / distance).clamp_num(1.0, 8.0);
     let mut blocker = first.y * (1.0 - first.x);
@@ -152,14 +168,15 @@ pub fn visible(atlas: &Image, info: AtlasInfo, slot: u32, light: Object, point: 
         occlusion += 1.0 - result.x;
     }
     if occlusion < 0.0001 || occlusion > 4.9999 {
-        return first.x;
+        return vec2(first.x, 0.0);
     }
     let depth = blocker / occlusion;
     let spread = (radius * (distance - depth).max_num(0.0) / depth.max_num(0.01) * info.resolution as f32 * scale
         / distance)
         .min_num(8.0);
-    if spread <= 0.5 {
-        return first.x;
+    // A penumbra under a texel and a half is sharper than the map can draw, so a ray decides it.
+    if spread <= 1.5 {
+        return vec2(first.x, 1.0);
     }
     // A filled disc, the same in every frame.
     let mut sum = 0.0;
@@ -169,7 +186,7 @@ pub fn visible(atlas: &Image, info: AtlasInfo, slot: u32, light: Object, point: 
         let offset = vec2(angle.cos(), angle.sin()) * (r * spread / info.resolution as f32);
         sum += gather(atlas, info, slot, light, delta, normal, uv + offset).x;
     }
-    first.x + (sum / 16.0 - first.x) * ((spread - 0.5) * 2.0).min_num(1.0)
+    vec2(first.x + (sum / 16.0 - first.x) * ((spread - 1.5) * 2.0).min_num(1.0), 0.0)
 }
 
 pub struct ShadowAtlas {
@@ -180,7 +197,7 @@ pub struct ShadowAtlas {
 impl ShadowAtlas {
     pub fn encode(&self, scene: &Scene) -> Result<Vec<u8>, io::Error> {
         let mut output = GzEncoder::new(Vec::new(), Compression::best());
-        output.write_all(b"LARESV03")?;
+        output.write_all(b"LARESV04")?;
         output.write_all(&scene.signature().to_le_bytes())?;
         output.write_all(&self.info.resolution.to_le_bytes())?;
         let size = self.image.size();
@@ -199,7 +216,7 @@ impl ShadowAtlas {
         let mut decoder = GzDecoder::new(bytes);
         let mut header = [0; 20];
         decoder.read_exact(&mut header).map_err(|_error| "invalid visibility asset")?;
-        if &header[..8] != b"LARESV03" || header[8..16] != scene.signature().to_le_bytes() {
+        if &header[..8] != b"LARESV04" || header[8..16] != scene.signature().to_le_bytes() {
             return Err("visibility asset is stale; rebuild with just lares");
         }
         let resolution = u32::from_le_bytes(header[16..20].try_into().map_err(|_error| "invalid resolution")?);
@@ -227,7 +244,7 @@ impl ShadowAtlas {
         let info = AtlasInfo::new(scene.lights.len() as u32, resolution);
         let [width, height] = info.size.to_array().map(|v| v as usize);
         let mut pixels = vec![255u8; width * height * 4];
-        let rows = height.div_ceil(thread::available_parallelism().map_or(1, usize::from).min(8));
+        let rows = height.div_ceil(thread::available_parallelism().map_or(1, usize::from));
         thread::scope(|scope| {
             for (chunk, bytes) in pixels.chunks_mut(rows * width * 4).enumerate() {
                 scope.spawn(move || {
@@ -256,6 +273,25 @@ impl ShadowAtlas {
 #[cfg(test)]
 mod tests {
     use crate::{home::Material::Paint, render::light::shadows::*};
+
+    #[test]
+    fn downlight_maps_cover_exactly_the_beam_cone_and_roundtrip() {
+        let light = Object::new(Kind::Downlight, Vec3::ZERO, Vec3::splat(0.1), Paint);
+        let edge = 60.0f32.to_radians();
+        assert!((edge.tan() / (1.0 + edge.tan()) - CONE_RADIUS).abs() < 1.0e-6);
+        // The cone's axis lands in the middle of the map.
+        assert!((coordinates(light, -Vec3::Z) - Vec2::splat(0.5)).length() < 1.0e-6);
+        for y in 1..16 {
+            for x in 1..16 {
+                let uv = vec2(x as f32, y as f32) / 16.0;
+                let ray = direction(light, uv);
+                assert!(ray.z < 0.0 && cone_radius(ray) <= CONE_RADIUS + 1.0e-5);
+                assert!((coordinates(light, ray) - uv).length() < 1.0e-4);
+            }
+        }
+        let corner = direction(light, vec2(0.0, 0.0));
+        assert!((cone_radius(corner) - CONE_RADIUS).abs() < 1.0e-5, "the map corners sit on the cone's rim");
+    }
     #[test]
     fn octahedral_mapping_roundtrips_both_hemispheres() {
         for y in 0..31 {

@@ -16,6 +16,7 @@ pub mod geometry {
     pub mod acceleration;
     pub(crate) mod layout;
     pub(crate) mod light_culling;
+    pub mod motion;
     pub(crate) mod plants;
 }
 
@@ -64,6 +65,8 @@ pub struct Globals {
     pub parity: u32,
     /// Four tetrahedral SDF samples; uniform so drivers keep one distance evaluator.
     pub normal_samples: u32,
+    /// Objects that move at runtime, `u32::MAX` for unused slots; rays shadow them, not the baked maps.
+    pub dynamic: UVec4,
 }
 
 isthmus::program!(Globals, ());

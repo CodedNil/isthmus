@@ -1,3 +1,6 @@
 /target
 /.direnv
 crates/*/assets/web/
+# Generated, never committed: baked lighting (`just bake`) and rendered views (the capture example).
+crates/lares/assets/baked/
+crates/lares/assets/renders/

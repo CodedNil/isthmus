@@ -247,6 +247,27 @@ pub fn table<S: Sample>(p: Vec3, size: Vec3) -> S {
     S::new(top.min_num(leg).min_num(apron), || (Material::Wood, OAK))
 }
 
+const MAIN_SIZE: Vec2 = vec2(0.84, 0.49);
+const SIDE_SIZE: Vec2 = vec2(0.27, 0.18);
+const SIDE_CENTRE: Vec3 = vec3(-0.49, -0.33, 0.16);
+/// The side screen turns toward the seated head and leans back so it is viewed square on.
+const SIDE_YAW: f32 = 0.51;
+const SIDE_PITCH: f32 = 0.21;
+
+/// Desk-space to the side screen's own frame, where it is centred, upright and faces +Y.
+fn side_screen_frame(p: Vec3) -> Vec3 {
+    let q = unrotate_z(p - SIDE_CENTRE, vec2(-SIDE_YAW.sin(), SIDE_YAW.cos()));
+    let (sin, cos) = (SIDE_PITCH.sin(), SIDE_PITCH.cos());
+    vec3(q.x, q.y * cos + q.z * sin, -q.y * sin + q.z * cos)
+}
+
+/// A point in the side screen's frame, back in desk space.
+fn side_screen_point(s: Vec3) -> Vec3 {
+    let (sin, cos) = (SIDE_PITCH.sin(), SIDE_PITCH.cos());
+    let q = vec3(s.x, s.y * cos - s.z * sin, s.y * sin + s.z * cos);
+    SIDE_CENTRE + unrotate_z(q, vec2(SIDE_YAW.sin(), SIDE_YAW.cos()))
+}
+
 fn screen<S: Sample>(p: Vec3, size: Vec2) -> S {
     let casing = rounded_box(p, size.extend(0.03).xzy(), 0.007);
     let face = rounded_box(p - Vec3::Y * 0.017, vec3(size.x - 0.014, 0.003, size.y - 0.014), 0.003);
@@ -258,9 +279,9 @@ fn screen<S: Sample>(p: Vec3, size: Vec2) -> S {
 pub fn wallpaper(local: Vec3, time: f32) -> Vec3 {
     let p = vec3(-local.x, local.y, local.z);
     let small = p.x < -0.33;
-    let center = if small { vec2(-0.49, 0.16) } else { vec2(0.10, 0.38) };
-    let size = if small { vec2(0.27, 0.18) } else { vec2(0.84, 0.49) };
-    let uv = (p.xz() - center) / size;
+    let (point, size) =
+        if small { (side_screen_frame(p).xz(), SIDE_SIZE) } else { (p.xz() - vec2(0.10, 0.38), MAIN_SIZE) };
+    let uv = point / size;
     let ridge = -0.25 + 0.045 * (uv.x * 19.0).sin() + 0.025 * (uv.x * 37.0 + 2.0).sin();
     let aurora = uv.y - 0.12 * (uv.x * 8.0 + time * 0.22).sin() - 0.06 * (uv.x * 19.0 - time * 0.14).sin();
     let glow = (-aurora.abs() * 10.0).exp();
@@ -286,11 +307,18 @@ pub fn workstation<S: Sample>(p: Vec3, _size: Vec3) -> S {
     let legs = taper(q, vec3(0.59, 0.24, -0.72), vec3(0.53, 0.22, -0.12), 0.025, 0.046);
     let wood =
         top.min_num(drawers.max_num(-groove)).min_num(return_top).min_num(cabinet.max_num(-door_groove)).min_num(legs);
-    let stand = rounded_box(p - vec3(0.10, -0.40, 0.043), vec3(0.29, 0.19, 0.02), 0.009).min_num(capsule(
+    // The neck rises behind the panel's casing, which spans y -0.475..-0.445.
+    let stand = rounded_box(p - vec3(0.10, -0.44, 0.043), vec3(0.29, 0.19, 0.02), 0.009).min_num(capsule(
         p,
-        vec3(0.10, -0.43, 0.05),
-        vec3(0.10, -0.43, 0.29),
+        vec3(0.10, -0.495, 0.05),
+        vec3(0.10, -0.495, 0.33),
         0.023,
+    ));
+    let side_foot = rounded_box(p - vec3(-0.49, -0.35, 0.0435), vec3(0.15, 0.11, 0.011), 0.005).min_num(capsule(
+        p,
+        vec3(-0.49, -0.35, 0.05),
+        side_screen_point(vec3(0.0, -0.03, -0.03)),
+        0.012,
     ));
     let mat = rounded_box(p - vec3(0.10, -0.14, 0.035), vec3(0.83, 0.32, 0.005), 0.012);
     let keyboard = rounded_box(p - vec3(0.08, -0.10, 0.054), vec3(0.37, 0.13, 0.029), 0.006);
@@ -299,11 +327,11 @@ pub fn workstation<S: Sample>(p: Vec3, _size: Vec3) -> S {
     let keys = rounded_box(vec3(cell.x, cell.y, p.z - 0.073), vec3(0.016, 0.016, 0.012), 0.002);
     let mouse = rounded_box(p - vec3(-0.19, -0.10, 0.059), vec3(0.06, 0.10, 0.04), 0.018);
     S::new(wood, || (Material::Wood, OAK))
-        .union(S::new(stand.min_num(keyboard).min_num(mouse), || (Material::Metal, BLACK)))
+        .union(S::new(stand.min_num(side_foot).min_num(keyboard).min_num(mouse), || (Material::Metal, BLACK)))
         .union(S::new(keys, || (Material::Paint, vec3(0.76, 0.77, 0.72))))
         .union(S::new(mat, || (Material::Fabric, vec3(0.52, 0.29, 0.22))))
-        .union(screen(p - vec3(0.10, -0.46, 0.38), vec2(0.84, 0.49)))
-        .union(screen(p - vec3(-0.49, -0.33, 0.16), vec2(0.27, 0.18)))
+        .union(screen(p - vec3(0.10, -0.46, 0.38), MAIN_SIZE))
+        .union(screen(side_screen_frame(p), SIDE_SIZE))
 }
 
 #[inline(never)]

@@ -119,8 +119,8 @@ pub fn shade(
 ) {
     let mirror = scene.mirror;
     let objects: &[Object] = &scene.objects;
-    // Cached shading reads no geometry or probes, so these are empty captures.
-    let nodes: &[Node] = &[];
+    // Cached shading reads the BVH only to confirm sub-texel shadow edges, and no probes.
+    let nodes: &[Node] = &scene.nodes;
     let contacts: &[u32] = &[];
     let probes: &[Probe] = &[];
     let lights: &[u32] = &scene.lights;

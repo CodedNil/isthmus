@@ -81,6 +81,7 @@ fn deferred_pixels_match_the_direct_reference() {
         interleaved: false,
         parity: 0,
         normal_samples: 4,
+        dynamic: scene.dynamic_objects(),
     };
     let mut error = 0.0;
     let mut maximum: f32 = 0.0;
@@ -92,7 +93,7 @@ fn deferred_pixels_match_the_direct_reference() {
                 material_visibility(globals, &scene.objects, scene.grid, &scene.probes, pixel, size, 1.0, record, 0);
             let actual = shade_visibility::<0>(
                 globals,
-                &[],
+                &scene.nodes,
                 &scene.objects,
                 &scene.lights,
                 &scene.light_masks,

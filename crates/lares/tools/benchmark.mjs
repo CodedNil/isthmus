@@ -22,7 +22,7 @@ function png(width, height, rgba) {
   header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6;
   const scanlines = Buffer.alloc(height * (width * 4 + 1));
   for (let y = 0; y < height; y++) rgba.copy(scanlines, y * (width * 4 + 1) + 1, y * width * 4, (y + 1) * width * 4);
-  return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk('IHDR', header), chunk('IDAT', deflateSync(scanlines)), chunk('IEND', Buffer.alloc(0))]);
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(scanlines)), chunk('IEND', Buffer.alloc(0))]);
 }
 
 const [prefix = '/tmp/lares-bench/result', url = 'http://localhost:8128/', width = '1280', height = '800'] = process.argv.slice(2);
@@ -152,7 +152,7 @@ const injected = await call('Page.addScriptToEvaluateOnNewDocument', {
 await call('Page.navigate', { url });
 try {
   const startupDeadline = Date.now() + Number(process.env.LARES_BENCH_STARTUP_MS || 60_000);
-  for (;;) {
+  for (; ;) {
     await new Promise(resolve => setTimeout(resolve, 500));
     const state = await evaluate(`({ ready: document.body?.dataset.ready, error: document.querySelector('#error:not([hidden])')?.textContent })`);
     if (state.error) throw Error(state.error);

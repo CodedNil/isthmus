@@ -1,7 +1,10 @@
 //! Solved diffuse responses; direct sunlight and GPU shadows remain geometric.
 use crate::{
     home::Object,
-    irradiance::cache::{Cache, Irradiance, Probe},
+    irradiance::{
+        cache::{Cache, Irradiance, Probe},
+        parallel,
+    },
     render::{geometry::acceleration::Node, light::sun::Sun},
 };
 use core::{
@@ -132,8 +135,9 @@ impl Cache {
             let azimuth = (field % AZIMUTHS) as f32 * TAU / AZIMUTHS as f32;
             let direction = vec3(elevation.cos() * azimuth.cos(), elevation.cos() * azimuth.sin(), elevation.sin());
             let sun = Sun { direction, radiance: Vec3::ONE, sky: Vec3::ZERO };
-            for &index in &self.active {
-                self.raw[index].light = self.sun_at(index, sun, objects, nodes);
+            let lit = parallel::map(self.active.len(), |slot| self.sun_at(self.active[slot], sun, objects, nodes));
+            for (&index, light) in self.active.iter().zip(lit) {
+                self.raw[index].light = light;
             }
             self.solve(&mut scratch);
             responses.extend(self.active.iter().map(|&i| Packed::new(scratch[i].light)));

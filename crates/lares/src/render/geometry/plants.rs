@@ -34,6 +34,7 @@ impl Growth<'_> {
             emission: 0.0,
             emission_color: DEFAULT_LIGHT_COLOR,
             exterior: Vec3::ZERO,
+            reach: 0.0,
             material: if kind == Kind::Petal && self.plant.material == Material::Ceramic {
                 Material::Ceramic
             } else if self.plant.kind == Kind::Alocasia && kind == Kind::Stem {

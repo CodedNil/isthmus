@@ -254,6 +254,8 @@ fn walk<const SHADOW: bool, const CUTAWAY: bool, const ANY_HIT: bool>(
         let item = objects[node.object as usize];
         if (matches!(item.kind, Kind::Ceiling | Kind::Downlight) && CUTAWAY && !SHADOW && origin.z > WALL_HEIGHT)
             || (SHADOW && item.is_light())
+            // Baked shadow depth (the only walk with no early-out) leaves out what moves; rays handle it live.
+            || (SHADOW && !CUTAWAY && !ANY_HIT && item.is_dynamic())
             || (item.kind == Kind::GlassPane && (SHADOW || !CUTAWAY))
         {
             continue;
@@ -338,6 +340,31 @@ fn solar_visibility(origin: Vec3, direction: Vec3, nodes: &[Node], objects: &[Ob
     }
     let v = visibility.clamp_num(0.0, 1.0);
     v * v * (3.0 - 2.0 * v)
+}
+
+/// Whether the moving object blocks the way from `origin` along `direction` for `limit` metres.
+#[inline(never)]
+fn dynamic_blocks(index: u32, objects: &[Object], origin: Vec3, direction: Vec3, limit: f32) -> bool {
+    if index as usize >= objects.len() {
+        return false;
+    }
+    let item = objects[index as usize];
+    let local = unrotate_z(origin - item.pos, item.rotation);
+    let ray = unrotate_z(direction, item.rotation);
+    let extent = item.local_extent();
+    let (enter, exit) = trace::Ray::new(local, ray).bounds(-extent, extent);
+    if enter > exit || exit <= 0.0 || enter >= limit {
+        return false;
+    }
+    intersect(item, origin, direction, enter.max_num(0.0), exit.min_num(limit), 0.0) < limit
+}
+
+/// Whether any moving object other than `surface` itself blocks the way along `direction` for `limit` metres.
+fn dynamic_shadow(slots: UVec4, surface: u32, objects: &[Object], origin: Vec3, direction: Vec3, limit: f32) -> bool {
+    (slots.x != surface && dynamic_blocks(slots.x, objects, origin, direction, limit))
+        || (slots.y != surface && dynamic_blocks(slots.y, objects, origin, direction, limit))
+        || (slots.z != surface && dynamic_blocks(slots.z, objects, origin, direction, limit))
+        || (slots.w != surface && dynamic_blocks(slots.w, objects, origin, direction, limit))
 }
 
 /// Nearest opaque surface from an emitter, excluding its own fittings, for baking shadow depth.
@@ -615,6 +642,30 @@ struct VisibleSurface {
     reflected_distance: f32,
 }
 
+/// The mirror a primary ray meets first: the nearest glass plane whose frame the ray crosses.
+fn reflecting_mirror(objects: &[Object], origin: Vec3, direction: Vec3, fallback: u32) -> u32 {
+    let mut best = fallback;
+    let mut best_distance = FAR;
+    let mut index = 0;
+    while index < objects.len() {
+        let item = objects[index];
+        if item.kind == Kind::Mirror {
+            let local = unrotate_z(origin - item.pos, item.rotation);
+            let ray = unrotate_z(direction, item.rotation);
+            let plane = if ray.y < 0.0 { 0.015 } else { 0.009 };
+            let distance = (plane - local.y) / ray.y;
+            let point = local + ray * distance;
+            let inside = point.x.abs() < item.size.x * 0.5 && point.z.abs() < item.size.z * 0.5;
+            if distance > 0.0 && inside && distance < best_distance {
+                best = index as u32;
+                best_distance = distance;
+            }
+        }
+        index += 1;
+    }
+    best
+}
+
 fn visible_surface(
     globals: Globals,
     objects: &[Object],
@@ -634,7 +685,7 @@ fn visible_surface(
     let mut direction = primary_direction(globals, pixel, size, pixel_size);
     let mut surface_height = (height / 3.0).clamp_num(0.0, 1.0);
     let reflected_distance = if word & REFLECTED != 0 {
-        let item = objects[mirror as usize];
+        let item = objects[reflecting_mirror(objects, origin, direction, mirror) as usize];
         let local = unrotate_z(origin - item.pos, item.rotation);
         let ray = unrotate_z(direction, item.rotation);
         let plane = if ray.y < 0.0 { 0.015 } else { 0.009 };
@@ -1339,11 +1390,23 @@ fn shade_surface<const CACHED: bool, const PRECOMPUTED: bool, const GROUP: u32>(
         if contribution.max_element() < 0.001 {
             continue;
         }
-        let visible = if CACHED {
-            shadows::visible(atlas, info, current as u32, light, point + world_normal * 0.002, world_normal)
+        let origin = point + world_normal * 0.002;
+        let mut visible = if CACHED {
+            let map = shadows::visible(atlas, info, current as u32, light, origin, world_normal);
+            // Edges the map cannot resolve are decided by a ray instead.
+            // Grazing surfaces keep the map's smooth value, since a ray there only finds numerical noise.
+            if map.y > 0.5 && world_normal.dot(to_light) > 0.2 {
+                cast::<true, false>(origin + to_light * 0.002, to_light, nodes, objects, 0.0, distance - 0.004).0
+            } else {
+                map.x
+            }
         } else {
-            cast::<true, false>(point + world_normal * 0.002, to_light, nodes, objects, 0.0, distance - 0.002).0
+            cast::<true, false>(origin, to_light, nodes, objects, 0.0, distance - 0.002).0
         };
+        // The baked maps leave out whatever moves; a ray finds its shadow, except on itself.
+        if visible > 0.0 && dynamic_shadow(globals.dynamic, object, objects, origin, to_light, distance - 0.002) {
+            visible = 0.0;
+        }
         color += contribution * visible;
     }
     lighting::display((color * transmission + glass_light) * globals.white_balance, globals.exposure)

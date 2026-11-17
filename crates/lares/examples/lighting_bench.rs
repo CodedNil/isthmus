@@ -1,6 +1,7 @@
 //! CPU cost of cached GI and the bounded daylight update; excludes GPU frame time.
 //! Pass `--startup` to measure loading baked lighting instead.
 use lares::{
+    bake::baked_dir,
     home,
     render::{Scene, SunSettings},
 };
@@ -64,7 +65,7 @@ fn main() {
 
 fn startup() {
     let start = Instant::now();
-    let bytes = fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/baked/lighting.bin")).expect("lighting asset");
+    let bytes = fs::read(baked_dir().join("lighting.bin")).expect("lighting asset");
     info!("Read {} bytes: {:?}", bytes.len(), start.elapsed());
     let rooms = home::rooms();
     for (label, time) in [("night", 1_782_000_000.0), ("noon", 1_782_043_200.0)] {
