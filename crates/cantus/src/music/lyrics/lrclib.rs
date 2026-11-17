@@ -267,7 +267,7 @@ fn append_upload_log(track: &Track, lyrics: &Lyrics, source: &str, status: Statu
     fs::create_dir_all(&directory)?;
     let mut file = OpenOptions::new().create(true).append(true).open(directory.join("lyrics-uploads.jsonl"))?;
     let entry = UploadEntry {
-        uploaded_at: jiff::Zoned::now().to_string(),
+        uploaded_at: jiff::ZonedDateTime::now().to_string(),
         title: track.compact_title().to_owned(),
         artist: track.primary_artist().to_owned(),
         album: track.album.clone(),

@@ -2,7 +2,7 @@ use super::Track;
 use core::mem;
 use web_time::Instant;
 
-/// Queue contents, their observed playback position, and their rendered position.
+/// The queue, its playback position, and the on-screen position.
 pub struct Queue {
     pub tracks: Vec<Track> = Vec::new(),
     pub index: usize = 0,
@@ -15,12 +15,12 @@ impl Queue {
         self.timeline = Timeline { position_ms, rate, observed_at, ..self.timeline };
     }
 
-    /// Timeline offset of a queue entry, including spacing after preceding tracks.
+    /// Timeline offset of an entry, including the spacing before it.
     pub fn offset_ms(&self, index: usize) -> f64 {
         self.tracks[..index].iter().map(|track| f64::from(track.queue_span_ms())).sum()
     }
 
-    /// Merge a snapshot without treating metadata arrival as a playback observation.
+    /// Merges a snapshot without resetting the playback clock.
     pub fn replace(&mut self, mut tracks: Vec<Track>, index: usize, position_ms: f32) {
         let origin = self
             .tracks
@@ -28,9 +28,7 @@ impl Queue {
             .map(|track| (track.interaction_id, -self.timeline.start_ms - self.offset_ms(self.index)));
         let mut previous = mem::take(&mut self.tracks);
         for track in &mut tracks {
-            // Connect reports can omit metadata, including after reconnecting
-            // with new queue UIDs. Recording metadata survives those reports;
-            // interaction state still belongs to a particular queue occurrence.
+            // Reports can omit metadata or renumber UIDs; keep metadata by recording and UI state by entry.
             if let Some(old) = previous.iter().find(|old| !track.uri.is_empty() && old.uri == track.uri) {
                 if track.duration_ms == 0 {
                     track.duration_ms = old.duration_ms;
@@ -70,8 +68,8 @@ impl Queue {
         self.timeline.start_ms = -progress - self.offset_ms(origin);
     }
 
-    /// Advances the rendered position to now, however long ago it last moved.
-    pub fn update(&mut self, drag_offset_ms: Option<f32>) {
+    /// Moves the rendered position to now. `drag` is pointer and scroll drag in ms; scroll eases in.
+    pub fn update(&mut self, drag: Option<(f32, f32)>) {
         let now = Instant::now();
         let delta_time = self.timeline.updated_at.replace(now).map_or(0.0, |at| (now - at).as_secs_f32());
         if self.tracks.is_empty() {
@@ -79,12 +77,20 @@ impl Queue {
             self.timeline.movement = 0.0;
             return;
         }
+        let (pointer_ms, scroll_ms) = drag.unwrap_or_default();
+        self.timeline.scroll_ms = if drag.is_some() {
+            let ease = Timeline::ease(delta_time);
+            self.timeline.scroll_ms + (f64::from(scroll_ms) - self.timeline.scroll_ms) * ease
+        } else {
+            0.0
+        };
         let target = -self.timeline.precise_position_now() - self.offset_ms(self.index)
-            + f64::from(drag_offset_ms.unwrap_or(0.0));
-        self.timeline.update(target, drag_offset_ms.is_some(), delta_time);
+            + f64::from(pointer_ms)
+            + self.timeline.scroll_ms;
+        self.timeline.update(target, drag.is_some(), delta_time);
     }
 
-    /// Queue entry covering the rendered playhead, including its trailing spacing.
+    /// The entry under the playhead.
     pub fn span_at_playhead(&self) -> Option<(usize, f32)> {
         let mut start_ms = self.timeline.start_ms;
         self.tracks.iter().enumerate().find_map(|(index, track)| {
@@ -102,18 +108,25 @@ pub struct Timeline {
     pub position_ms: f32 = 0.0,
     pub rate: f32 = 0.0,
     pub observed_at: Instant,
-    // Queue-relative time can span hours; f32 would quantize individual 165 Hz steps.
+    // f64, since f32 is too coarse over hours.
     pub start_ms: f64 = 0.0,
     pub movement: f32 = 0.0,
-    /// When `start_ms` was last advanced; steps are exact for any elapsed time, so stalls leave no backlog.
+    /// Eased scroll-wheel drag, in ms.
+    pub(super) scroll_ms: f64 = 0.0,
+    /// When `start_ms` last advanced.
     pub(crate) updated_at: Option<Instant> = None,
 }
 
 impl Timeline {
+    /// Fraction of the remaining distance the timeline covers in `delta_time` seconds.
+    fn ease(delta_time: f32) -> f64 {
+        1.0 - (-f64::from(delta_time) / 0.3).exp()
+    }
+
     pub(super) fn update(&mut self, target: f64, dragging: bool, delta_time: f32) {
+        let predicted = self.start_ms - f64::from(self.rate) * f64::from(delta_time) * 1000.0;
+        let next = if dragging { target } else { predicted + (target - predicted) * Self::ease(delta_time) };
         let delta_time = f64::from(delta_time);
-        let predicted = self.start_ms - f64::from(self.rate) * delta_time * 1000.0;
-        let next = if dragging { target } else { predicted + (target - predicted) * (1.0 - (-delta_time / 0.3).exp()) };
         self.movement +=
             (((next - self.start_ms) * delta_time) as f32 - self.movement) * (delta_time as f32 * 10.0).min(1.0);
         self.start_ms = next;

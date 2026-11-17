@@ -57,9 +57,10 @@ impl Music {
         }
     }
 
-    pub fn update_playback(&mut self, drag: Option<(f32, bool)>) {
-        self.queue.update(drag.map(|(offset, _)| offset));
-        if drag.is_some_and(|(_, released)| released)
+    /// `drag` is pointer and scroll drag in milliseconds, and whether it just ended.
+    pub fn update_playback(&mut self, drag: Option<(f32, f32, bool)>) {
+        self.queue.update(drag.map(|(pointer, scroll, _)| (pointer, scroll)));
+        if drag.is_some_and(|(.., released)| released)
             && let Some((index, position)) = self.queue.span_at_playhead()
         {
             self.seek(index, position);
@@ -118,10 +119,10 @@ impl Music {
 #[derive(Clone, Deserialize)]
 pub struct Track {
     pub id: Option<TrackId>,
-    /// The recording identifier used to disambiguate lyric-provider matches.
+    /// Recording id for matching lyrics.
     #[serde(default)]
     pub isrc: Option<String>,
-    /// Requested recording identity, preserved when Spotify substitutes a playback alternative.
+    /// The requested recording, kept when Spotify plays an alternative.
     #[serde(default)]
     pub uri: String,
     pub name: String,
@@ -131,7 +132,7 @@ pub struct Track {
     pub image: Option<String>,
     /// Zero means the duration is unknown, including live media.
     pub duration_ms: u32,
-    /// Spotify identifies individual queue occurrences, including repeated recordings.
+    /// Spotify's id for this queue entry, unique even for repeats.
     #[serde(skip)]
     pub(crate) queue_uid: String,
     #[serde(skip, default = "Track::next_interaction_id")]

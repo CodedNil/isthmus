@@ -2,7 +2,7 @@ use crate::{
     app::Background,
     platform,
     render::{
-        GAP, PANEL_START, Program, TEXT_COLOR, TEXT_SHADOW, TEXT_SMALL, UiContext,
+        GAP, PANEL_START, Program, TEXT_COLOR, TEXT_SMALL, UiContext,
         sdf::{deform, glass, hash, lens, sample_deformation},
         weathertime::{StatusSky, WeatherCondition, scene, sky_phase},
     },
@@ -24,16 +24,14 @@ pub const AUDIO_SPECTRUM_BANDS: usize = 7;
 const DATA_WIDTH: f32 = 32.0;
 const AUDIO_WIDTH: f32 = 20.0;
 const ACTION_WIDTH: f32 = 24.0;
-/// Width of the displayed range below each band's peak, in the meter's normalised decibels (about 21 dB).
+/// Displayed range below each band's peak (about 21 dB).
 const AUDIO_SPAN: f32 = 0.22;
-/// Lowest the scaling window can sit, so silence or noise-floor input stays flat rather than being magnified.
+/// Lowest scaling window, so silence stays flat.
 const AUDIO_SILENCE_MARGIN: f32 = 0.08;
-/// Share of the visualiser height over which the volume level fades.
+/// Share of the visualiser height where the volume level fades.
 const VOLUME_FADE: f32 = 0.24;
-/// Fraction of the panel height at each end where releasing the power icon triggers an action.
-const SNAP_FRACTION: f32 = 0.2;
-/// Pull at which the icon is armed, i.e. the pointer has entered a snap zone.
-const ARMED_PULL: f32 = 1.0 - SNAP_FRACTION * 2.0;
+/// Pull at which releasing the power icon runs its action.
+const ARMED_PULL: f32 = 0.6;
 const ICON_RADIUS: f32 = 8.6;
 /// One stroke width for every part of the power icon.
 const ICON_STROKE: f32 = 2.4;
@@ -45,7 +43,7 @@ const USAGE_COLOR: Vec3 = Vec3::new(0.32, 0.68, 1.0);
 const MEMORY_COLOR: Vec3 = Vec3::new(0.78, 0.3, 1.0);
 
 const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
-/// Padding around the contents, matching the gap above and below the graphs.
+/// Padding around the contents.
 const STATUS_INSET: f32 = GAP;
 const BASE_WIDTH: f32 = GRAPH_WIDTH * 2.0 + AUDIO_WIDTH + ACTION_WIDTH + GAP * 3.0 + STATUS_INSET * 2.0;
 
@@ -56,11 +54,18 @@ fn spectrum_level(spectrum: [f32; AUDIO_SPECTRUM_BANDS], y: f32, half_height: f3
     spectrum[lower].lerp(spectrum[upper], position.fract().smoothstep(0.0, 1.0)).saturate()
 }
 
-fn power_action(pointer_y: f32, panel: Rect) -> Option<platform::PowerAction> {
-    let snap_depth = panel.size().y * SNAP_FRACTION;
-    if pointer_y <= panel.min.y + snap_depth {
+/// Straight-alpha color over a dark halo for contrast.
+fn with_halo(color: Vec3, alpha: f32, distance: f32, opacity: f32) -> Vec4 {
+    let shadow = (-distance.max(0.0) * 0.7).exp() * opacity;
+    let total = alpha + shadow * (1.0 - alpha);
+    (color * alpha / total.max(0.0001)).extend(total)
+}
+
+/// Action on release; `pull` runs from -1 (up) to 1 (down).
+fn power_action(pull: f32) -> Option<platform::PowerAction> {
+    if pull >= ARMED_PULL {
         Some(platform::PowerAction::PowerOff)
-    } else if pointer_y >= panel.max.y - snap_depth {
+    } else if pull <= -ARMED_PULL {
         Some(platform::PowerAction::Reboot)
     } else {
         None
@@ -86,13 +91,11 @@ pub struct StatusPanel {
     battery_level: Option<f32>,
     /// Frequency-band levels from the system audio monitor.
     audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS],
-    /// Slowly decaying per-band peak, used to auto-scale each band to the full visual range.
+    /// Slowly decaying per-band peak, for auto-scaling.
     audio_peak: [f32; AUDIO_SPECTRUM_BANDS],
-    /// Fractional scroll between the two newest history samples.
-    /// Progress from one history sample to the next, advancing at a constant rate.
+    /// Progress from one history sample to the next.
     history_scroll: Ramp,
     processors: [ProcessorStatus; 2],
-    action_origin: Option<Vec2>,
     audio_monitor: Arc<AudioMonitor>,
 }
 
@@ -267,21 +270,31 @@ impl StatusPanel {
                         + (point.x * 0.27 - frame.time * 0.8).sin() * 0.45;
                     let liquid =
                         Sample::new(inside.distance_at(point).max(liquid_y + wave - (point.y - 1.0)), 0.0).fill();
-                    let column = (point.x / 3.0).floor();
-                    let seed = hash(vec2(column, 0.0));
-                    let cycle = (frame.time * (0.35 + seed.y * 0.5) + seed.x * 7.0).fract();
-                    let center = vec2((column + 0.2 + seed.x * 0.6) * 3.0, 13.0 - cycle * 24.0);
-                    let bubble = Shape::circle(center, 0.4 + seed.y * 0.5).stroke(0.9).intersection(inside);
-                    let fade = cycle.smoothstep(0.0, 0.25) * cycle.smoothstep(1.0, 0.7);
-                    let bubble = bubble.fill_at(point) * fade * charging;
-                    (TEXT_COLOR.lerp(liquid_color, liquid) + liquid_color.lerp(Vec3::ONE, 0.72) * bubble * 0.9)
-                        .extend(shell)
+                    // Two bubbles per 3px column, each with its own speed and phase so they trickle steadily.
+                    // Neighbouring columns are checked so none is cut at a column edge.
+                    let mut bubble = 0.0f32;
+                    for neighbour in 0..3 {
+                        for layer in 0..2 {
+                            let column = (point.x / 3.0).floor() + neighbour as f32 - 1.0;
+                            let seed = hash(vec2(column, layer as f32));
+                            let phase = hash(vec2(column, layer as f32 + 2.0)).x;
+                            let cycle = (frame.time * (0.3 + seed.y * 0.5) + phase).fract();
+                            let center = vec2((column + 0.2 + seed.x * 0.6) * 3.0, 13.0 - cycle * 24.0);
+                            // Exact-distance antialiasing; screen derivatives break where the column changes.
+                            let ring = ((point - center).length() - (0.4 + seed.y * 0.5)).abs() - 0.45;
+                            let fade = cycle.smoothstep(0.0, 0.25) * cycle.smoothstep(1.0, 0.7);
+                            bubble = bubble.max((0.5 - ring * 0.8).saturate() * fade);
+                        }
+                    }
+                    let bubble = bubble * inside.fill_at(point) * charging;
+                    // Bubbles are a darker shade of the liquid, so they show against it and the white shell.
+                    TEXT_COLOR.lerp(liquid_color, liquid).lerp(liquid_color * 0.55, bubble).extend(shell)
                 },
             );
             cursor += DATA_WIDTH + GAP;
         }
 
-        // Each band spans a fixed range below its own recent peak, so quiet streams still reach the full width.
+        // Each band spans a fixed range below its own peak, so quiet audio still fills the width.
         let mut audio_spectrum = [0.0; AUDIO_SPECTRUM_BANDS];
         for (((damped, peak), scaled), level) in self
             .audio_spectrum
@@ -305,8 +318,7 @@ impl StatusPanel {
             platform::set_volume(volume.abs());
         }
 
-        // The ribbon may use the whole section width, so its widest extent sits a gap from its neighbours. The
-        // lens layer is padded so antialiasing and the shadow are never clipped.
+        // The ribbon fills the section width; the lens layer is padded so nothing is clipped.
         let visualizer_rect =
             Rect::from_center_size(audio_rect.center(), vec2(AUDIO_WIDTH, context.config.height - GAP * 2.0));
         let audio_rect = Rect::from_center_size(audio_rect.center(), audio_rect.size() + vec2(8.0, 0.0));
@@ -324,8 +336,7 @@ impl StatusPanel {
                 let half_height = size.y * 0.5;
                 let local = visualizer_rect.local(surface.refracted);
 
-                // Spectrum ribbon with fully rounded ends. Levels are stretched so typical music spans the whole
-                // range, and loud bands make the ribbon snake sideways as well as swell.
+                // Spectrum ribbon: loud bands swell and sway it.
                 let level = spectrum_level(audio_spectrum, local.y, half_height);
                 let ripple =
                     (local.y * 0.72 + frame.time * 1.8).sin() * 0.16 + (local.y * 1.13 - frame.time * 1.2).sin() * 0.08;
@@ -333,7 +344,7 @@ impl StatusPanel {
                 let sway = (local.y * 0.45 - frame.time * 3.2).sin() * level * 2.2;
                 let width = (2.0 + level * 6.5 + ripple * (1.0 + level * 5.0)).min(max_half_width - sway.abs());
                 let ribbon = {
-                    // Its tips always reach the full height, however thin the ribbon is.
+                    // Tips always reach the full height.
                     let radius = width.max(1.0);
                     Shape::pill(Rect::from_center_size(Vec2::ZERO, vec2(radius * 2.0, size.y)))
                         .distance_at(vec2(local.x - sway, local.y))
@@ -344,49 +355,28 @@ impl StatusPanel {
                 let from_top = 0.5 + local.y / size.y;
                 let edge = (1.0 + VOLUME_FADE) * (1.0 - volume.abs().saturate()) - VOLUME_FADE * 0.5;
                 let lit = from_top.smoothstep(edge - VOLUME_FADE * 0.5, edge + VOLUME_FADE * 0.5);
-                // Brightest right at the level, easing back towards the base of the fill.
+                // Brightest at the level, fading toward the base.
                 let sheen = lit * (1.0 - (from_top - edge).max(0.0) * 0.8).saturate();
                 let color = vec3(0.18, 0.52, 0.72)
                     .lerp(vec3(0.18, 0.88, 1.0), lit)
                     .lerp(vec3(0.7, 0.97, 1.0), sheen * 0.2 + level * 0.25 * lit);
-                // A soft dark halo so the ribbon stands out against bright backgrounds.
-                let shadow = (-ribbon.max(0.0) * 0.7).exp() * 0.28;
-                let total = alpha + shadow * (1.0 - alpha);
-                (color * alpha / total.max(0.0001)).extend(total)
+                with_halo(color, alpha, ribbon, 0.28)
             },
         );
         cursor += AUDIO_WIDTH + GAP;
 
         let icon_home = vec2(x + cursor + ACTION_WIDTH * 0.5, panel.center().y);
-        let response = context.interaction.drag(POWER_DRAG_ID, Shape::circle(icon_home, 13.0));
-        let drag = context.interaction.drag_motion().filter(|(id, ..)| *id == POWER_DRAG_ID);
-        let pointer = context.interaction.mouse_pos();
-        if response.held && self.action_origin.is_none() {
-            self.action_origin = Some(drag.map_or(pointer, |(_, offset, _)| pointer - offset));
-        }
-        let pointer_y = match (drag, self.action_origin) {
-            (Some((_, offset, _)), Some(origin)) => origin.y + offset.y,
-            _ => pointer.y,
-        };
-        if drag.is_some_and(|(_, _, released)| released)
-            && let Some(action) = power_action(pointer_y, panel)
-        {
+        context.interaction.interact(POWER_DRAG_ID, Shape::circle(icon_home, 13.0));
+        let drag = context.interaction.drag_of(POWER_DRAG_ID);
+        let pointer_y = context.interaction.mouse_pos().y;
+        let pull =
+            drag.map_or(0.0, |_| ((pointer_y - icon_home.y) / (context.config.height * 0.5)).clamp_num(-1.0, 1.0));
+        if let Some(action) = power_action(pull).filter(|_| drag.is_some_and(|drag| drag.released)) {
             platform::run_power_action(action);
         }
-        let dragging = response.held || drag.is_some();
-        if !response.held {
-            self.action_origin = None;
-        }
-        let pull = if dragging {
-            ((pointer_y - panel.center().y) / (context.config.height * 0.5)).clamp_num(-1.0, 1.0)
-        } else {
-            0.0
-        };
-        let icon_y = if dragging {
-            pointer_y.clamp_num(panel.min.y + ICON_RADIUS, panel.max.y - ICON_RADIUS)
-        } else {
-            icon_home.y
-        };
+        let icon_y =
+            drag.map_or(icon_home.y, |_| pointer_y.clamp_num(panel.min.y + ICON_RADIUS, panel.max.y - ICON_RADIUS));
+        let icon_center = vec2(icon_home.x, icon_y);
         let snap_progress = ((pull.abs() - ARMED_PULL) / (1.0 - ARMED_PULL)).smoothstep(0.0, 1.0);
         let icon_scale = 1.0 + snap_progress * 0.35;
         let action_rect =
@@ -394,41 +384,38 @@ impl StatusPanel {
         shader!(
             "status power",
             context.frame,
-            |_, panel: Rect, action_rect: Rect, icon_home: Vec2, icon_y: f32, pull: f32, icon_scale: f32| action_rect,
-            |frame, surface| {
-                let surface = sample_deformation(Shape::pill(panel), frame, surface.pixel);
-                let icon_center = panel.local(vec2(icon_home.x, icon_y));
-                let point = panel.local(surface.content);
-                let icon_point = (point - icon_center) / icon_scale;
-                // One arc throughout: closed at rest, opening at the top (shutdown stem grows) when pulled up, or at
-                // the side (reboot arrowhead grows) when pulled down.
-                let up = (-pull).saturate();
-                let down = pull.saturate();
-                let half_gap = (up * 0.62 + down * TAU * 0.12).max(0.02);
-                let gap_center = -TAU * 0.25 * (1.0 - down);
+            |_, action_rect: Rect, icon_center: Vec2, pull: f32, icon_scale: f32| action_rect,
+            |_, surface| {
+                let (shutdown, reboot) = (pull.saturate(), (-pull).saturate());
+                // No pointer lens, which would warp the thin strokes.
+                let point = (surface.pixel - icon_center) / icon_scale;
+                // One arc; pulling down opens the top and grows a stem, pulling up adds an arrowhead.
+                let half_gap = (shutdown * 0.62 + reboot * TAU * 0.12).max(0.02);
+                let gap_center = -TAU * 0.25 * (1.0 - reboot);
                 let ring = Shape::arc(Vec2::ZERO, ICON_RADIUS, gap_center + half_gap, TAU - half_gap * 2.0);
-
-                let stem_end = vec2(0.0, -1.0 - up * (ICON_RADIUS - 1.0));
-                let stem = Shape::segment(vec2(0.0, -1.0), stem_end, ICON_STROKE);
-                // Shrink the stem to nothing at rest rather than leaving a dot in the middle.
-                let stem_distance = stem.distance_at(icon_point) + (1.0 - (up * 8.0).saturate()) * ICON_STROKE;
-
+                let stem = Shape::segment(vec2(0.0, -1.0), vec2(0.0, -1.0 - shutdown * (ICON_RADIUS - 1.0)), 0.0);
                 let direction = Vec2::from_angle(gap_center - half_gap);
                 let tip = direction * ICON_RADIUS;
-                // The small floor keeps the segment from degenerating to a point at rest.
                 let barb = |side: f32| {
-                    Shape::segment(tip, tip - (direction.perp() - direction * side) * (0.05 + 3.0 * down), ICON_STROKE)
+                    Shape::segment(tip, tip - (direction.perp() - direction * side) * 3.0 * reboot, 0.0)
+                        .distance_at(point)
                 };
-                let distance = ring
-                    .stroke(ICON_STROKE)
-                    .distance_at(icon_point)
-                    .min(stem_distance)
-                    .min(barb(1.0).distance_at(icon_point))
-                    .min(barb(-1.0).distance_at(icon_point));
-                let icon = Sample::new(distance, 1.6);
+
+                // Each part is a centerline; the stem and arrowhead fade in.
+                let (stem_presence, barb_presence) = ((shutdown * 8.0).saturate(), (reboot * 8.0).saturate());
+                // Screen-space distance to a part's stroke, and how much of it is drawn.
+                let stroke = |centerline: f32, presence: f32| {
+                    let distance = (centerline - ICON_STROKE * 0.5) * icon_scale;
+                    (distance + (1.0 - presence) * ICON_RADIUS, (0.5 - distance).saturate() * presence)
+                };
+                let ring = stroke(ring.distance_at(point), 1.0);
+                let stem = stroke(stem.distance_at(point), stem_presence);
+                let barb = stroke(barb(1.0).min(barb(-1.0)), barb_presence);
+                let nearest = ring.0.min(stem.0).min(barb.0);
+                let alpha = ring.1.max(stem.1).max(barb.1);
                 let armed = ((pull.abs() - ARMED_PULL) / 0.08).saturate();
                 let color = TEXT_COLOR.lerp(vec3(1.0, 0.24, 0.2), armed);
-                icon.paint(color.extend(1.0), TEXT_SHADOW.with_w(TEXT_SHADOW.w * 1.7))
+                with_halo(color, alpha, nearest, 0.3)
             },
         );
         context.interaction.input_region(panel);
@@ -449,14 +436,13 @@ mod tests {
     }
 
     #[test]
-    fn power_gesture_uses_the_status_pill_snap_zones() {
-        let panel = Rect::new(vec2(0.0, 10.0), vec2(24.0, 110.0));
-        assert!(matches!(power_action(10.0, panel), Some(platform::PowerAction::PowerOff)));
-        assert!(matches!(power_action(29.9, panel), Some(platform::PowerAction::PowerOff)));
-        assert!(power_action(30.1, panel).is_none());
-        assert!(power_action(panel.center().y, panel).is_none());
-        assert!(power_action(89.9, panel).is_none());
-        assert!(matches!(power_action(90.1, panel), Some(platform::PowerAction::Reboot)));
-        assert!(matches!(power_action(110.0, panel), Some(platform::PowerAction::Reboot)));
+    fn dragging_the_power_icon_down_shuts_down_and_up_reboots() {
+        assert!(matches!(power_action(0.61), Some(platform::PowerAction::PowerOff)));
+        assert!(matches!(power_action(1.0), Some(platform::PowerAction::PowerOff)));
+        assert!(matches!(power_action(-0.61), Some(platform::PowerAction::Reboot)));
+        assert!(matches!(power_action(-1.0), Some(platform::PowerAction::Reboot)));
+        for pull in [0.59, 0.0, -0.59] {
+            assert!(power_action(pull).is_none());
+        }
     }
 }

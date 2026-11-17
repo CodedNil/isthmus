@@ -62,8 +62,7 @@ impl AppCatalog {
                     .fold(0.0, f32::max)
             })
             .collect();
-        // Only fill remaining rows with fuzzy matches. The length difference is
-        // a lower bound on edit distance, so most metadata never needs scoring.
+        // Fuzzy matches fill leftover rows; the length gap bounds edit distance, so most skip scoring.
         if scores.iter().filter(|&&score| score >= MIN_CONFIDENCE).count() < limit {
             for (score, terms) in scores.iter_mut().zip(&self.terms).filter(|(score, _)| **score < MIN_CONFIDENCE) {
                 for term in terms {

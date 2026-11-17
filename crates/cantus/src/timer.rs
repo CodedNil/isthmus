@@ -2,11 +2,11 @@
 
 use crate::catalog::similarity;
 use core::time::Duration;
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 use strum_macros::IntoStaticStr;
 use web_time::Instant;
 
-/// Words which clear the running timer instead of starting one.
+/// Words that clear the running timer.
 const CANCEL_WORDS: [&str; 5] = ["cancel", "stop", "end", "clear", "remove"];
 /// Similarity below which a word is not treated as a timer command word.
 const TRIGGER: f32 = 0.7;
@@ -33,7 +33,7 @@ impl Request {
 /// One countdown timer; starting a new one replaces the running one.
 #[derive(Default)]
 pub struct Timer {
-    start: Option<(Zoned, Instant)>,
+    start: Option<(ZonedDateTime, Instant)>,
     duration: Duration,
 }
 
@@ -41,14 +41,14 @@ impl Timer {
     pub fn apply(&mut self, request: Request) {
         match request {
             Request::Start(duration) => {
-                self.start = Some((Zoned::now(), Instant::now()));
+                self.start = Some((ZonedDateTime::now(), Instant::now()));
                 self.duration = duration;
             }
             Request::Cancel => self.start = None,
         }
     }
 
-    /// Readout and completion state for the weather pill, based on one elapsed-time sample.
+    /// Readout and completion state for the weather pill.
     pub fn readout(&self) -> (Option<String>, bool) {
         let Some((start, clock_start)) = self.start.as_ref() else {
             return (None, false);
@@ -70,7 +70,7 @@ impl Timer {
 pub fn parse(query: &str) -> Option<(Request, f32)> {
     let words = tokens(query);
     let closest = |target: &str| words.iter().map(|word| similarity(word, target)).fold(0.0, f32::max);
-    // A misspelling such as `time` still names the timer, so match the trigger loosely.
+    // Match the trigger loosely, so `time` still counts.
     let command = closest("timer");
     if command < TRIGGER {
         return None;
@@ -88,7 +88,7 @@ pub fn parse(query: &str) -> Option<(Request, f32)> {
             seconds += number.take().unwrap_or(1.0) * unit;
         }
     }
-    // A trailing number with no unit reads as minutes, so `timer 30` works.
+    // A bare trailing number means minutes.
     seconds += number.unwrap_or(0.0) * 60.0;
     (seconds > 0.0).then(|| (Request::Start(Duration::from_secs_f64(seconds.min(MAX_SECONDS))), command))
 }
@@ -115,7 +115,7 @@ fn unit(word: &str) -> Option<f64> {
 }
 
 /// Lowercase twelve-hour clock, such as `6:15pm`.
-fn clock(time: &Zoned) -> String {
+fn clock(time: &ZonedDateTime) -> String {
     time.strftime("%I:%M%p").to_string().trim_start_matches('0').to_lowercase()
 }
 
@@ -161,12 +161,12 @@ mod tests {
             ("timer 30", Some(Request::Start(Duration::from_mins(30)))),
             ("TIMER 5 MINS", Some(Request::Start(Duration::from_mins(5)))),
             ("timer 9000 hours", Some(Request::Start(Duration::from_hours(24)))),
-            // The trigger matches loosely, so a misspelling still starts a timer.
+            // Loose match: a misspelled trigger still starts a timer.
             ("30m time", Some(Request::Start(Duration::from_mins(30)))),
             ("set a 2 hour timr", Some(Request::Start(Duration::from_hours(2)))),
             ("cancel timer", Some(Request::Cancel)),
             ("stop the timer", Some(Request::Cancel)),
-            // Without a duration, or without the trigger, this is not a timer command.
+            // No duration or no trigger: not a timer command.
             ("", None),
             ("timer", None),
             ("what time is it", None),

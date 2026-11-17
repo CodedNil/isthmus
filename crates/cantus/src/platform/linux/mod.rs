@@ -135,7 +135,7 @@ impl Drop for NativeSurface {
 const PANEL_OVERFLOW: f32 = 12.0;
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const AUDIO_WINDOW_SIZE: usize = 1024;
-/// Decibel range mapped onto 0..1; wide so a quiet stream is still measurable, with the display rescaling it.
+/// Decibel range mapped to 0..1; wide, because the display rescales it.
 const AUDIO_FLOOR_DB: f32 = -100.0;
 const AUDIO_RANGE_DB: f32 = 94.0;
 const AUDIO_BAND_EDGES: [f32; AUDIO_SPECTRUM_BANDS + 1] =
@@ -166,7 +166,7 @@ pub fn set_volume(volume: f32) {
     }
 }
 
-/// Calls logind directly, which is what `systemctl poweroff` does under the hood.
+/// Calls logind, as `systemctl poweroff` does.
 pub fn run_power_action(action: super::PowerAction) {
     let method: &str = action.into();
     spawn_task(async move {
@@ -606,7 +606,7 @@ fn capture_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) -> io::Result<()
                     let rms = (bins.iter().map(microfft::Complex32::norm_sqr).sum::<f32>()
                         / (AUDIO_WINDOW_SIZE * AUDIO_WINDOW_SIZE) as f32)
                         .sqrt();
-                    // A wide range so a quiet stream is still measurable; the display rescales it per band.
+                    // Wide range; the display rescales per band.
                     let value = ((20.0 * rms.log10() - AUDIO_FLOOR_DB) / AUDIO_RANGE_DB).saturate();
                     level.store(value.to_bits(), Ordering::Relaxed);
                 }
@@ -891,8 +891,7 @@ impl LayerShellApp {
                 // A fresh instance is the fallback if the adapter itself is gone.
                 self.gpu_retry = Some(Instant::now() + Duration::from_secs(1));
             }
-            // Still request the Wayland callback below so recovery gets a frame
-            // even when there are no pending input or background updates.
+            // Still request the frame callback so recovery gets a frame.
         }
         let input_regions: SmallVec<[[i32; 4]; 16]> = self
             .cantus

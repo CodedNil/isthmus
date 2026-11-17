@@ -180,10 +180,6 @@ fn flag(value: &Value) -> bool {
     value.as_bool().unwrap_or_else(|| value.as_u64().is_some_and(|v| v != 0))
 }
 
-fn snippet_lines(value: &Value) -> impl Iterator<Item = String> + '_ {
-    value.as_str().unwrap_or_default().lines().map(normalize).filter(|text| !text.is_empty())
-}
-
 #[derive(Deserialize)]
 struct RichsyncLine {
     #[serde(rename = "ts")]
@@ -233,7 +229,14 @@ fn performers(lines: &[RichsyncLine], matched: &Value) -> Vec<Voice> {
             },
             backing: has_role("backing_vocalist"),
         };
-        tagged.extend(snippet_lines(&entry["snippet"]).map(|text| (text, voice)));
+        tagged.extend(
+            entry["snippet"]
+                .as_str()
+                .unwrap_or_default()
+                .lines()
+                .map(|text| (normalize(text), voice))
+                .filter(|(text, _)| !text.is_empty()),
+        );
     }
     let aligned =
         tagged.len() == lines.len() && tagged.iter().zip(lines).all(|((text, _), line)| *text == normalize(&line.text));

@@ -229,8 +229,7 @@ async fn run_spotify(
                 if worker.last_update.elapsed() < PLAYBACK_REFRESH_INTERVAL && worker.refresh_failures == 0 {
                     continue;
                 }
-                // Dealer already maintains the WebSocket and its ping/pong
-                // health. A quiet playback stream alone is not a dead session.
+                // Dealer keeps the WebSocket alive, so a quiet stream is not a dead session.
                 let refresh = SpotifyWorker::register(&worker.session, PutStateReason::PULL_PLAYBACK);
                 match timeout(Duration::from_secs(8), refresh).await {
                     Ok(Ok(cluster)) => worker.update_cluster(cluster),
@@ -463,8 +462,7 @@ impl SpotifyWorker {
         });
         send_update(&self.updater, move |app| {
             let music = &mut app.music;
-            // Queue reports can change artwork sizes/URLs for the same recording.
-            // Reuse loaded art before enrichment prunes the previous URL.
+            // Queue reports can change artwork URLs; reuse loaded art before enrichment prunes the old one.
             for track in &mut tracks {
                 if let Some(previous) = music.queue.tracks.iter().find(|previous| {
                     previous.uri == track.uri && music.resources.art(previous.image.as_deref()).is_some()
@@ -691,8 +689,7 @@ async fn fetch_track_metadata(session: &Session, tracks: &[String]) -> Metadata 
         .collect()
 }
 
-/// Spotify can replace a requested recording with a playable alternative. Keep the
-/// library/queue identity stable; the player's `ProvidedTrack` retains the playback URI.
+/// Keeps the requested recording's identity when Spotify plays an alternative.
 fn requested_track_uri(track: &ProvidedTrack) -> &str {
     track
         .metadata

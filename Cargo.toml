@@ -9,8 +9,8 @@ edition = "2024"
 bitflags = "2"
 bytemuck = "1"
 form_urlencoded = "1.2.2"
-gloo-events = "0.3.0"
-gloo-render = "0.3.0"
+gloo-events = "0.3.1"
+gloo-render = "0.3.1"
 isthmus = { path = "crates/isthmus" }
 isthmus_2d = { path = "crates/isthmus_2d" }
 isthmus_abi = { path = "crates/isthmus_abi" }
@@ -41,7 +41,7 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 web-sys = "=0.3.106"
 web-time = "1.1.0"
-wgpu = { version = "30.0.1", default-features = false }
+wgpu = { version = "30.0.2", default-features = false }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = [

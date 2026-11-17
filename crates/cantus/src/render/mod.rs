@@ -50,7 +50,6 @@ pub const GAP: f32 = UNIT * 2.0;
 /// The standard inset between a container edge and its contents.
 pub const PADDING: f32 = UNIT * 3.0;
 pub const RIPPLE_COUNT: usize = 4;
-pub const HELD_PRESSURE: f32 = 2.0;
 
 #[derive(Clone, Copy, Default, ShaderData)]
 pub struct Globals {
@@ -111,19 +110,22 @@ impl Bar {
     pub fn show(&mut self, context: &mut UiContext, music: &mut Music, timer: &Timer) {
         let status_width = self.status.as_ref().map_or(0.0, |status| status.width() + GAP);
         let weather_readout = self.weather.as_ref().map(|weather| weather.collapsed_readout(context));
-        let weather_reserved = weather_readout.as_ref().map_or(0.0, |readout| readout.pill_width + GAP);
-        let reserved = HISTORY_WIDTH + GAP + weather_reserved + status_width;
+        let reserved = HISTORY_WIDTH
+            + GAP
+            + weather_readout.as_ref().map_or(0.0, |readout| readout.pill_width + GAP)
+            + status_width;
         let px_per_ms =
             (context.frame.screen_size.x - reserved).max(84.0) / (context.config.timeline_future_minutes * 60_000.0);
         let layout = BarLayout {
             playhead_x: HISTORY_WIDTH + context.config.timeline_past_minutes * 60_000.0 * px_per_ms,
             px_per_ms,
         };
-        let drag = context
-            .interaction
-            .drag_motion()
-            .filter(|(id, ..)| music.queue.tracks.iter().any(|track| track.interaction_id == *id))
-            .map(|(_, offset, released)| (offset.x / px_per_ms, released));
+        let drag = music
+            .queue
+            .tracks
+            .iter()
+            .find_map(|track| context.interaction.drag_of(track.interaction_id))
+            .map(|drag| (drag.offset.x / px_per_ms, drag.scroll / px_per_ms, drag.released));
         music.update_playback(drag);
         if context.config.lyrics_enabled {
             lyrics::show(context, music, layout);
@@ -140,11 +142,6 @@ impl Bar {
 }
 
 impl UiContext<'_> {
-    fn paint_image(&mut self, image: &Image, rect: Rect) {
-        shader!("glass image", self.frame, |_, image: &Image, rect: Rect| rect, |_, fragment| image
-            .sample(fragment.uv));
-    }
-
     fn paint_text(&mut self, rect: Rect, radius: f32, line: Text, color: Vec4) {
         shader!(
             "glass text",

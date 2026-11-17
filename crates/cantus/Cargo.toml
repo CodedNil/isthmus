@@ -1,6 +1,6 @@
 [package]
 name = "cantus"
-version = "0.9.0"
+version = "0.9.1"
 edition.workspace = true
 
 [lib]
@@ -20,7 +20,7 @@ image = { version = "0.25.10", default-features = false, features = [
 ] }
 isthmus.workspace = true
 isthmus_2d.workspace = true
-jiff = { version = "0.2.43", default-features = false, features = [
+jiff = { version = "1.0.0", default-features = false, features = [
     "js",
     "serde",
     "tz-system",
@@ -86,7 +86,7 @@ wayland-client.workspace = true
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 xkbcommon = { version = "0.9.0", default-features = false }
-zbus = { version = "6.2.1", default-features = false, features = [
+zbus = { version = "6.3.0", default-features = false, features = [
     "proxy",
     "tokio",
 ] }
@@ -94,7 +94,7 @@ zbus = { version = "6.2.1", default-features = false, features = [
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-events.workspace = true
 gloo-render.workspace = true
-gloo-timers = { version = "0.4.0", features = ["futures"] }
+gloo-timers = { version = "0.4.1", features = ["futures"] }
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 web-sys = { workspace = true, features = [

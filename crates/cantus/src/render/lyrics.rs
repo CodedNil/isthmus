@@ -15,12 +15,11 @@ use std::{collections::BTreeMap, ops::Range};
 const LYRIC_SIZE: f32 = 14.0;
 const LYRIC_WEIGHT: f32 = 800.0;
 const SHADOW_REACH: f32 = 2.0;
-/// Multiplier deepening the shared text shadow behind lyrics.
+/// Darkens the shared text shadow.
 const SHADOW_STRENGTH: f32 = 4.0;
 const BACKDROP_REACH: f32 = 12.0;
 const BACKDROP_OPACITY: f32 = 0.24;
-/// One physical pixel of coverage filtering prevents slow-moving stems from
-/// gaining/losing ink as they cross fractional pixel phases.
+/// One physical pixel of coverage filtering, so moving stems keep steady ink.
 const EDGE_WIDTH: f32 = 1.0;
 const GLOW_REACH: f32 = 6.0;
 const LANE_GAP: f32 = 96.0;
@@ -75,7 +74,7 @@ impl PreparedLyrics {
             self.scroll.clear();
             return;
         }
-        // Leave visible air between words even with their dark readability outlines.
+        // Leave a gap between words despite their outlines.
         let space = text.shape(" ", LYRIC_SIZE, LYRIC_WEIGHT).text.width.max(6.0);
         let mut channels = Vec::new();
         let mut run_text = Vec::new();
@@ -122,7 +121,7 @@ impl PreparedLyrics {
                 if line.text.count == 0 || end <= start {
                     continue;
                 }
-                // Time the separator with the word so adjacent runs meet without a scrolling jump.
+                // Time the space with its word so runs meet without a jump.
                 let separated = value.ends_with(char::is_whitespace)
                     || next.is_some_and(|s| s.text.starts_with(char::is_whitespace));
                 let width = ink_width(line.text) + space * f32::from(separated);
@@ -132,7 +131,7 @@ impl PreparedLyrics {
             channels.push(channel);
         }
         channels.retain(|channel| !channel.runs.is_empty());
-        // Compare fragments with this track's typical pace, retaining supplied syllable boundaries.
+        // Compare fragments with the track's typical pace.
         let mut pace: Vec<_> = channels
             .iter()
             .flat_map(|c| &c.runs)
@@ -144,7 +143,7 @@ impl PreparedLyrics {
             let bounds = run.line.text;
             let held = (run.time.end - run.time.start) / bounds.width.max(1.0) / typical;
             let target_scale = 1.0 + ((held - 1.0) * 0.25).clamp(0.0, 0.25);
-            // Resolve the width in the font; anything past its wdth range scales geometrically.
+            // Widen in the font; beyond its range, scale the geometry.
             if target_scale > 1.0 {
                 let separator = run.width - ink_width(bounds);
                 run.line = text.shape_width(value.trim(), bounds.size, LYRIC_WEIGHT, target_scale * 100.0);
@@ -153,7 +152,7 @@ impl PreparedLyrics {
                 run.width = ink_width(shaped) * run.scale + separator;
             }
         }
-        // A shared scroll speed reserves enough space for the fastest simultaneous voice.
+        // One scroll speed, fast enough for the busiest voice.
         let mut times = vec![0.0, duration];
         times.extend(channels.iter().flat_map(|c| &c.runs).flat_map(|run| [run.time.start, run.time.end]));
         times.sort_by(f32::total_cmp);
@@ -174,7 +173,7 @@ impl PreparedLyrics {
             x += (pair[1] - pair[0]) * speed;
             self.scroll.push(vec3(pair[1], x, 0.0));
         }
-        // Harmonic tangents make velocity continuous without overshooting timing anchors.
+        // Harmonic tangents keep speed continuous without overshoot.
         let speeds: Vec<_> = self.scroll.windows(2).map(|p| (p[1].y - p[0].y) / (p[1].x - p[0].x)).collect();
         for (i, point) in self.scroll.iter_mut().enumerate() {
             let before = speeds[i.saturating_sub(1)];
@@ -258,8 +257,7 @@ fn lyric_shadow(distance: f32) -> Vec4 {
 }
 
 fn lyric_sample(mut sample: Sample) -> Sample {
-    // The shared SDF uses |dx| + |dy|, widening diagonal edges. Use the
-    // Euclidean derivative magnitude here without changing other UI surfaces.
+    // The shared SDF widens diagonal edges; use the Euclidean gradient here.
     let sum = sample.gradient.abs().element_sum().max(f32::MIN_POSITIVE);
     sample.gradient *= sample.gradient.length() * EDGE_WIDTH / sum;
     sample
@@ -280,7 +278,7 @@ pub fn height(music: &Music) -> f32 {
 
 pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     let Some((index, time)) = music.queue.span_at_playhead() else { return };
-    let playlist_middle_y = PANEL_START + f32::midpoint(context.config.height, super::music::PLAYLIST_EXTENSION);
+    let badge = super::music::playlist_badge_center(context.config, music);
     let tracks = music.queue.tracks.as_slice();
     let resources = &mut music.resources;
     let silence = PreparedLyrics::default();
@@ -297,7 +295,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         x -= lyrics.position(track.queue_span_ms(), track.duration_ms as f32);
     }
     if contributed {
-        let center = vec2(10.0, playlist_middle_y);
+        let center = badge;
         let bounds = Rect::from_center_size(center, Vec2::splat(10.0)).expanded(BACKDROP_REACH);
         shader!("lyric badge", context.frame, |_, bounds: Rect, center: Vec2| raster(bounds), |_, fragment| {
             let sample = lyric_sample(Shape::star(4.0, 2.56).offset(0.8).sample_at(fragment.pixel - center));
@@ -327,7 +325,7 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
                     origin + run.line.text.max * stretch + vec2(0.0, run.lane as f32 * ROW_SPACING),
                 )
                 .expanded(BACKDROP_REACH * run.scale + 2.0);
-                // One continuous light field crosses every fragment and vocal lane at the playhead.
+                // One light field crosses every fragment and lane at the playhead.
 
                 let playhead_x = layout.playhead_x;
                 let row = run.lane as f32;

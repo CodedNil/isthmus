@@ -3,13 +3,14 @@ use crate::{
     interaction::Interaction,
     music::Music,
     platform::{self, Task},
-    render::{Bar, Globals, Program, UiContext, launcher::LauncherState},
+    render::{Bar, Globals, Program, RIPPLE_COUNT, RipplePulse, UiContext, launcher::LauncherState},
     timer::Timer,
 };
 #[cfg(target_os = "linux")]
 use calloop::channel::Sender;
 use isthmus::{Render, SurfaceHandle, glam::Vec2};
-use jiff::Zoned;
+use isthmus_2d::Ramp;
+use jiff::ZonedDateTime;
 use reqwest::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
 #[cfg(target_arch = "wasm32")]
@@ -45,11 +46,11 @@ pub struct Background {
 }
 
 fn log_time(writer: &mut Writer<'_>) -> FmtResult {
-    write!(writer, "{}", Zoned::now().strftime("%H:%M:%S%.3f"))
+    write!(writer, "{}", ZonedDateTime::now().strftime("%H:%M:%S%.3f"))
 }
 
 pub fn run() {
-    // `RUST_LOG=isthmus=debug` turns on renderer diagnostics such as pipeline compiles and slow frames.
+    // `RUST_LOG=isthmus=debug` shows renderer diagnostics.
     let filter = env::var("RUST_LOG")
         .ok()
         .and_then(|spec| spec.parse::<Targets>().ok())
@@ -86,6 +87,11 @@ pub struct CantusApp {
     pub(crate) config: Config,
     pub(crate) background: Background,
     pub(crate) interaction: Interaction,
+    /// How hard the pointer presses the glass, eased over time.
+    pressure: Ramp,
+    ripples: [RipplePulse; RIPPLE_COUNT],
+    /// Where the current press started a ripple.
+    pressing: Option<Vec2>,
     pub(crate) next_enrichment: Instant,
     pub(crate) timer: Timer,
 }
@@ -105,6 +111,9 @@ impl CantusApp {
             music: Music::new(&config, &background.updater),
             background,
             interaction: Interaction::default(),
+            pressure: Ramp::default(),
+            ripples: Default::default(),
+            pressing: None,
             next_enrichment: Instant::now(),
             timer: Timer::default(),
             config,
@@ -128,19 +137,28 @@ impl CantusApp {
         screen_size: Vec2,
         view: View,
     ) {
-        // Input animations belong to the app, including across cold GPU restarts.
+        // The app owns input animation time, so it survives GPU restarts.
         render.time = self.started.elapsed().as_secs_f32();
         let owns_input = if self.launcher.open { view.launcher } else { view.bar };
         self.interaction.enabled = owns_input;
-        if owns_input {
-            self.interaction.begin_frame(render.time);
-        }
-        let globals = Globals {
-            pointer: self.interaction.mouse_pos(),
-            pressure: self.interaction.pressure(),
-            bar_height: self.config.height,
-            ripples: if owns_input { self.interaction.ripples } else { Default::default() },
+        let (pressure, ripples) = if owns_input {
+            self.interaction.begin_frame();
+            // The glass dents under the pointer, more when pressed; each press sends a ripple.
+            let target = if self.interaction.pressed() { 2.0 } else { f32::from(self.interaction.hovering()) };
+            self.pressure.approach(render.time, target, 5.0);
+            let pressing = self.interaction.press_origin();
+            if let Some(origin) = pressing.filter(|_| pressing != self.pressing)
+                && let Some(ripple) = self.ripples.iter_mut().min_by(|a, b| a.start_time.total_cmp(&b.start_time))
+            {
+                *ripple = RipplePulse { origin, start_time: render.time };
+            }
+            self.pressing = pressing;
+            (self.pressure.at(render.time), self.ripples)
+        } else {
+            (0.0, Default::default())
         };
+        let globals =
+            Globals { pointer: self.interaction.mouse_pos(), pressure, bar_height: self.config.height, ripples };
         render.surface(surface, screen_size, globals, |frame| {
             let mut context = UiContext { frame, config: &self.config, interaction: &mut self.interaction };
             if view.bar {

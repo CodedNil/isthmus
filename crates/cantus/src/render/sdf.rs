@@ -36,8 +36,7 @@ pub fn refract(
     })
 }
 
-/// Applies the parent's refraction to an independently bounded layer. The layer is not inflated by the parent's
-/// bulge, so neighbouring layers keep their spacing while the panel swells beneath them.
+/// Applies the parent's refraction to a separately bounded layer, without growing it with the bulge.
 pub fn lens(
     parent: impl Sdf,
     frame: ShaderFrame<Program>,
@@ -66,7 +65,7 @@ fn pointer_pressure(shape: impl Sdf, frame: ShaderFrame<Program>) -> f32 {
     frame.globals.pressure * shape.distance_at(frame.globals.pointer).smoothstep(0.5, -0.5)
 }
 
-/// Falloff of one ripple pulse, which also bounds its displacement contribution.
+/// Falloff of one ripple pulse.
 fn ripple_falloff(frame: ShaderFrame<Program>, pulse: RipplePulse) -> f32 {
     if pulse.start_time > 0.0 { (1.0 - ((frame.time - pulse.start_time) * 1.2).saturate()).powi(2) * 0.5 } else { 0.0 }
 }
@@ -75,7 +74,7 @@ pub fn sample_deformation(shape: impl Sdf, frame: ShaderFrame<Program>, point: V
     let pressure = pointer_pressure(shape, frame);
     let mut ripple = Vec2::ZERO;
     let mut flash = 0.0;
-    // Rust-GPU cannot lower this slice iterator without a pointer-to-integer conversion.
+    // Rust-GPU cannot lower a slice iterator.
     for index in 0..frame.globals.ripples.len() {
         let pulse = frame.globals.ripples[index];
         let falloff = ripple_falloff(frame, pulse);
@@ -170,7 +169,7 @@ pub fn simplex_noise(p: Vec2) -> f32 {
     70.0 * (contribution(Vec2::ZERO, a) + contribution(corner, b) + contribution(Vec2::ONE, c))
 }
 
-/// 1.0 when positive, else 0.0; `f32::from(bool)` costs an extra conversion.
+/// 1.0 when positive, else 0.0.
 pub fn presence(value: f32) -> f32 {
     if value > 0.0 { 1.0 } else { 0.0 }
 }

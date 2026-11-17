@@ -57,8 +57,7 @@ fn monitor(updater: &AppUpdater, roots: &[PathBuf]) {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        // Rearm even when a path looks the same: a directory or profile may have
-        // been atomically replaced, leaving inotify attached to the previous inode.
+        // Rearm even if the path looks the same; a replaced directory leaves inotify on the old inode.
         let replacement = watch(roots, &sender);
         drop(mem::replace(&mut watcher, replacement));
     }
@@ -68,8 +67,7 @@ fn watch(roots: &[PathBuf], sender: &mpsc::SyncSender<()>) -> Option<Recommended
     let mut paths = BTreeMap::new();
     let mut dependencies = HashSet::new();
     let mut pending: VecDeque<_> = roots.iter().cloned().collect();
-    // Include the parents and targets of profile symlinks, so replacing a Nix
-    // generation or creating a previously missing applications folder wakes us.
+    // Watch profile symlink parents and targets, so Nix generation changes wake us.
     while let Some(path) = pending.pop_front() {
         if dependencies.len() >= 128 || !dependencies.insert(path.clone()) {
             continue;

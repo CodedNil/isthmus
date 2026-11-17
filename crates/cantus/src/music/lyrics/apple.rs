@@ -6,8 +6,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub(super) async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics> {
-    // lrc.red serves BiniLyrics search results and TTML.
-    // This endpoint requires integer seconds, unlike LyricsPlus.
+    // lrc.red serves BiniLyrics search and TTML; it needs integer seconds, unlike LyricsPlus.
     let duration = (track.duration_ms / 1000).to_string();
     let mut request = http.get("https://lyrics-api.binimum.org/").query(&[
         ("track", track.name.as_str()),

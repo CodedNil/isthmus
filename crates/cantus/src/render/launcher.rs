@@ -32,25 +32,25 @@ pub const MAX_VISIBLE: usize = 8;
 
 /// Side of the square icon tile at the left of every row.
 const ICON_SIZE: f32 = 32.0;
-/// Icons, badge outlines and the magnifier all share one grey.
+/// Grey shared by icons, badge outlines and the magnifier.
 const ICON_COLOR: Vec3 = Vec3::splat(0.58);
 const ACCENT_COLOR: Vec3 = vec3(0.44, 0.40, 0.80);
-/// Dimmer grey for action badges, placeholders and secondary detail.
+/// Dimmer grey for badges, placeholders and detail text.
 const MUTED_COLOR: Vec3 = Vec3::new(0.52, 0.55, 0.64);
 const CALCULATOR_ICON: u32 = 1;
 const SEARCH_ICON: u32 = 2;
 const TIMER_ICON: u32 = 3;
-/// Confidence given to a successful calculation; an exactly named app still wins.
+/// Confidence of a calculation result; an exact app name still wins.
 const ANSWER_CONFIDENCE: f32 = 0.9;
 /// Currency rates relative to USD, read by fend for conversions.
 static EXCHANGE_RATES: OnceLock<HashMap<String, f64>> = OnceLock::new();
 
-/// Coverage of a magnifying glass centered on the origin.
-/// Text-field offsets sit on character boundaries; a stale one yields nothing instead of panicking.
+/// Slices text safely; a stale offset gives an empty string.
 fn slice(text: &str, range: impl SliceIndex<str, Output = str>) -> &str {
     text.get(range).unwrap_or_default()
 }
 
+/// Coverage of a magnifying glass centered on the origin.
 fn magnifier_icon(point: Vec2) -> f32 {
     Shape::circle(Vec2::ZERO, 6.2).stroke(2.1).union(Shape::segment(vec2(4.6, 4.6), vec2(8.8, 8.8), 2.1)).fill_at(point)
 }
@@ -106,7 +106,7 @@ pub struct TextField {
     /// Byte offset of the caret, and of the other end of the selection.
     cursor: usize,
     anchor: usize,
-    /// Editing owns its clock independently of rendering and GPU restarts.
+    /// Time of the last edit, for the caret blink.
     edited_at: Option<Instant>,
 }
 
@@ -175,11 +175,11 @@ pub struct LauncherState {
     pub session: u64,
     pub field: TextField,
     entries: Vec<Entry>,
-    /// Index of the highlighted entry, which enter and shift+enter act on.
+    /// The highlighted entry, which enter acts on.
     pub selected: usize,
-    /// Text waiting to be put on the system clipboard by the platform layer.
+    /// Text for the platform layer to copy.
     pub pending_copy: Option<String>,
-    /// Timer request waiting to be applied to the application's timer.
+    /// Timer request for the app to apply.
     pub pending_timer: Option<Request>,
     calc: Context,
     catalog: AppCatalog,
@@ -254,7 +254,7 @@ impl LauncherState {
         self.edit(|field| *field = TextField::default());
     }
 
-    /// Publish metadata atomically, preserving the user's highlighted application.
+    /// Swaps in new app metadata, keeping the highlighted app.
     #[expect(clippy::wildcard_enum_match_arm, reason = "Only a few variants need handling; the rest take the default")]
     pub(crate) fn set_catalog(&mut self, catalog: AppCatalog) {
         let selected = self.entries.get(self.selected).and_then(|entry| match entry {
@@ -306,7 +306,7 @@ impl LauncherState {
         });
     }
 
-    /// Refresh visible icons in the background, keeping their current pixels on screen.
+    /// Reloads visible icons in the background.
     #[cfg(target_os = "linux")]
     pub(crate) fn refresh_icons(&mut self) {
         self.icon_revision = self.icon_revision.wrapping_add(1);
@@ -390,7 +390,7 @@ impl LauncherState {
         self.request_visible_icons();
     }
 
-    /// Evaluates the query as an expression, unless the answer only echoes it.
+    /// Evaluates the query, ignoring answers that just repeat it.
     fn evaluate(&mut self, query: &str) -> Option<String> {
         if query.len() < 4 {
             return None;
@@ -465,7 +465,7 @@ impl fend_core::ExchangeRateFnV2 for ExchangeRates {
 }
 
 impl LauncherState {
-    /// Draws the panel and its search field, then the rows beneath it.
+    /// Draws the panel, search field and rows.
     pub fn show(&mut self, context: &mut UiContext) {
         if !self.open {
             return;
@@ -531,7 +531,7 @@ impl LauncherState {
         );
     }
 
-    /// Draws and interacts with every row in visual order.
+    /// Draws every row and handles its input.
     fn show_entries(&mut self, context: &mut UiContext, origin: Vec2) {
         let (x, width) = (origin.x + PADDING, PANEL_WIDTH - PADDING * 2.0);
         let text_left = ROW_HEIGHT * 0.5 + ICON_SIZE * 0.5 + GAP + UNIT;
@@ -649,7 +649,8 @@ impl LauncherState {
                     pill.center() - vec2((pill.size().x - pill.size().y) * 0.5, 0.0),
                     Vec2::splat(ICON_SIZE),
                 );
-                context.paint_image(image, rect);
+                shader!("glass image", context.frame, |_, image: &Image, rect: Rect| rect, |_, fragment| image
+                    .sample(fragment.uv));
             }
 
             let origin = vec2(x, y);

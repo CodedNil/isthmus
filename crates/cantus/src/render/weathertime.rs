@@ -16,7 +16,7 @@ use core::{array::from_fn, f32::consts::PI, fmt::Write};
 use isthmus::prelude::*;
 use isthmus_2d::prelude::*;
 use jiff::{
-    Span, Timestamp, Zoned,
+    Span, Timestamp, ZonedDateTime,
     civil::{DateTime, Time},
     tz::{Offset, TimeZone},
 };
@@ -29,14 +29,14 @@ const HOURLY_STEP_HOURS: usize = 4;
 pub const WIDTH: f32 = UNIT * 77.0;
 pub const EXTENSION: f32 = UNIT * 61.0;
 const FORECAST_X: f32 = WIDTH + GAP;
-/// Depth of the timer readout, sized to hold its text with a little air.
+/// Depth of the timer readout.
 const TIMER_DEPTH: f32 = TEXT_SMALL + 2.0 * UNIT;
 /// Space around the timer text inside its support.
 const TIMER_PADDING: f32 = 12.0;
 const TIMER_COLOR: Vec3 = vec3(1.00, 0.62, 0.60);
-/// Exterior reach of the shadow painted behind weather panel text.
+/// Reach of the shadow behind panel text.
 const TEXT_SHADOW_REACH: f32 = 1.6;
-/// Multiplier deepening the shared text shadow for weather panel text.
+/// Darkens the shared text shadow.
 const TEXT_SHADOW_STRENGTH: f32 = 1.7;
 
 const WEEKDAY_COUNT: usize = 7;
@@ -124,7 +124,7 @@ fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
     }
 }
 
-/// Two depths of translucent rain, with independently moving fields of soft streaks.
+/// Rain in two depths of soft streaks.
 fn rainfall(background: Vec3, p: Vec2, time: f32, strength: f32) -> Vec3 {
     if strength <= VISIBLE_ALPHA {
         return background;
@@ -136,8 +136,7 @@ fn rainfall(background: Vec3, p: Vec2, time: f32, strength: f32) -> Vec3 {
         let velocity = vec2(16.0, 145.0) + vec2(18.0, 95.0) * depth;
         let q = p - velocity * time + vec2(41.7, 19.3) * depth;
         let base = (q / cell_size - 0.5).floor();
-        // Sample neighbouring cells so feathered tails cross cell boundaries intact.
-        // Centres stay in the middle half; each streak fits within a half-cell.
+        // Sample neighbouring cells so streaks cross cell edges; centers stay in the middle half.
         for y in 0..2 {
             for x in 0..2 {
                 let cell = base + vec2(x as f32, y as f32);
@@ -151,7 +150,7 @@ fn rainfall(background: Vec3, p: Vec2, time: f32, strength: f32) -> Vec3 {
                 let along = local.dot(direction);
                 let across = (local.x * direction.y - local.y * direction.x).abs();
                 let width = 0.45 + random.y * 0.45 + (1.0 - depth) * 0.35;
-                // A small feather around the whole drop softens both sides and ends.
+                // Feather softens the sides and ends.
                 let blur = 0.5;
                 let body = across.smoothstep(width + 0.9 + blur, 0.0);
                 let tail = along.smoothstep(-length * 0.5 - blur, length * 0.25);
@@ -160,7 +159,7 @@ fn rainfall(background: Vec3, p: Vec2, time: f32, strength: f32) -> Vec3 {
             }
         }
     }
-    // Keep the sky's palette, with enough contrast to read through the panel's glass.
+    // Keep the sky palette with enough contrast.
     background.lerp(background * 0.3 + vec3(0.06, 0.09, 0.12), coverage.saturate())
 }
 
@@ -236,7 +235,7 @@ pub fn scene(time: f32, cloud_scale: f32, p: Vec2, width: f32, phase: Vec3, weat
         let billows = cloud_noise(p / cloud_scale * 0.8 + vec2(time * 0.018, -3.7));
         let threshold = 0.68 - weather.cloud * 0.4;
         let cloud_shape = (mass + (billows - 0.5) * 0.18).smoothstep(threshold - 0.04, threshold + 0.2);
-        // Broad, low-contrast lighting keeps the billows soft instead of mottled.
+        // Broad, low-contrast light keeps the clouds soft.
         let cloud_light = (billows * 0.35 + mass * 0.65).smoothstep(0.28, 0.82);
         let cloud_color = vec3(0.20, 0.24, 0.31)
             .lerp(vec3(0.30, 0.34, 0.41), cloud_light)
@@ -377,10 +376,7 @@ mod monitor {
 };
 }
 
-    // Visual defaults inferred from the reported phenomenon, not measured cloud
-    // cover/visibility. Showers retain breaks; continuous precipitation is layered
-    // beneath stratus. Reduced visibility in heavy precipitation is a veil rather
-    // than an assertion that meteorological fog has also been observed.
+    // Looks are guessed from the weather type: showers keep gaps, rain sits under stratus, heavy rain adds haze.
     weather_codes! {
         0 => "Clear" { };
         1 => "Mainly Clear" { cloud: 0.25 };
@@ -715,7 +711,7 @@ impl WeatherPanel {
             .centered(vec2(pill.center().x, PANEL_START + context.config.height * 0.46));
         layout.paint_text(context, line, TEXT_COLOR.extend(1.0), false);
         if presence > 0.0 {
-            // Quantized so the shaped run is reused rather than rebuilt every frame.
+            // Quantized so the shaped text is reused.
             let pulse = ((context.frame.time * 5.0).sin() * 0.5 + 0.5).powi(2);
             let size = TEXT_SMALL + if expired { (pulse * 2.0).round() * 0.5 } else { 0.0 };
             let alpha = if expired { 0.4 + 0.6 * pulse } else { 1.0 };
@@ -726,7 +722,7 @@ impl WeatherPanel {
     }
 
     fn collapsed_label(&self) -> (ArrayString<64>, f32) {
-        let time = Zoned::now();
+        let time = ZonedDateTime::now();
         let hour = self.utc_offset.map_or_else(
             || Self::hour_of_day(time.datetime()),
             |offset| Self::hour_of_day(offset.to_datetime(time.timestamp())),
@@ -760,7 +756,7 @@ impl WeatherPanel {
         }
         let month_hover = self.month_hover.approach_over(context.frame.time, f32::from(title.hovered), 0.12);
 
-        let today = Zoned::now().date();
+        let today = ZonedDateTime::now().date();
         let month = today.first_of_month().saturating_add(Span::new().months(self.month_offset));
         let (size, weight) = (TEXT_HEADING * (1.0 + month_hover * 0.2), 750.0 + month_hover * 150.0);
         let title = month.strftime("%B %Y").to_string();
@@ -869,7 +865,7 @@ impl WeatherPanel {
 
         let now = Timestamp::now();
         for (index, timezone) in self.timezones.iter().enumerate() {
-            let local = now.to_zoned(timezone.timezone.clone());
+            let local = now.to_zoned_datetime(timezone.timezone.clone());
             let mut clock = ArrayString::<64>::new();
             write!(clock, "{} · {}", timezone.label, local.strftime("%H:%M")).unwrap();
             let center = vec2(
