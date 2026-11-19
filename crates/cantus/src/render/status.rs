@@ -2,7 +2,7 @@ use crate::{
     app::Background,
     platform,
     render::{
-        GAP, PANEL_START, Program, TEXT_COLOR, TEXT_SMALL, UiContext,
+        GAP, PANEL_START, TEXT_COLOR, TEXT_SMALL, UiContext,
         sdf::{deform, glass, hash, lens, sample_deformation},
         weathertime::{StatusSky, WeatherCondition, scene, sky_phase},
     },
@@ -138,10 +138,10 @@ impl StatusPanel {
     }
 
     pub fn show(&mut self, context: &mut UiContext, sky: StatusSky) {
-        let mut volume = f32::from_bits(self.audio_monitor.volume.load(Ordering::Relaxed));
+        let mut volume: f32 = f32::from_bits(self.audio_monitor.volume.load(Ordering::Relaxed));
         let width = self.width();
         let x = context.frame.screen_size.x - width - GAP;
-        let panel = Rect::new(vec2(x, PANEL_START), vec2(x + width, PANEL_START + context.config.height));
+        let panel: Rect = Rect::new(vec2(x, PANEL_START), vec2(x + width, PANEL_START + context.config.height));
         let mut cursor = STATUS_INSET;
         let section = |center: f32, section_width: f32| {
             Rect::from_center_size(
@@ -150,13 +150,14 @@ impl StatusPanel {
             )
         };
 
+        let phase: Vec3 = sky_phase(sky.sun_height);
         let conditions: WeatherCondition = sky.conditions;
-        let phase = sky_phase(sky.sun_height);
-        shader!(
-            "status sky",
-            context.frame,
-            |frame, conditions: WeatherCondition, panel: Rect, phase: Vec3| deform(Shape::pill(panel), frame),
-            |frame, surface| {
+        context
+            .frame
+            .shader("status sky")
+            .with((conditions, panel, phase))
+            .shape(|frame| deform(Shape::pill(panel), frame))
+            .paint(|frame, surface| {
                 glass(
                     surface,
                     scene(
@@ -168,15 +169,14 @@ impl StatusPanel {
                         conditions,
                     ),
                 )
-            },
-        );
+            });
 
         let temperature_blend = 1.0 - (-5.0 * context.frame.delta_time).exp();
         self.history_scroll.approach_over(context.frame.time, 1.0, platform::STATUS_SAMPLE_INTERVAL.as_secs_f32());
         for processor in &mut self.processors {
             processor.temperature += (processor.target_temperature - processor.temperature) * temperature_blend;
             let center = cursor + GRAPH_WIDTH * 0.5;
-            let graph_pill = Rect::new(
+            let graph_pill: Rect = Rect::new(
                 vec2(x + cursor, PANEL_START + GAP),
                 vec2(x + cursor + GRAPH_WIDTH, PANEL_START + context.config.height - GAP),
             );
@@ -185,9 +185,8 @@ impl StatusPanel {
             write!(label, "{:.0}% {:.0}% {:.0}\u{b0}C", latest.x, latest.y, processor.temperature).unwrap();
             let half_width = GRAPH_WIDTH * 0.5 - GAP * 0.5;
 
-            let history = &processor.history;
-            let history_scroll = self.history_scroll.at(context.frame.time);
-            let frame_color = {
+            let history: &[Unorm16x2] = &processor.history;
+            let frame_color: Vec3 = {
                 let heat = vec3(0.22, 0.62, 1.0)
                     .lerp(vec3(1.0, 0.38, 0.08), processor.temperature.smoothstep(60.0, 72.0))
                     .lerp(vec3(1.0, 0.08, 0.035), processor.temperature.smoothstep(72.0, 88.0));
@@ -195,16 +194,13 @@ impl StatusPanel {
                     .lerp(USAGE_COLOR, 0.18 + history[HISTORY_END].to_vec2().x * 0.24)
                     .lerp(heat, processor.temperature.smoothstep(60.0, 86.0) * 0.9)
             };
-            shader!(
-                "status graph",
-                context.frame,
-                |frame,
-                 panel: Rect,
-                 history: &[Unorm16x2],
-                 history_scroll: f32,
-                 graph_pill: Rect,
-                 frame_color: Vec3| lens(Shape::pill(panel), frame, Shape::pill(graph_pill)),
-                |_, surface| {
+            let history_scroll: f32 = self.history_scroll.at(context.frame.time);
+            context
+                .frame
+                .shader("status graph")
+                .with((panel, history, history_scroll, graph_pill, frame_color))
+                .shape(|frame| lens(Shape::pill(panel), frame, Shape::pill(graph_pill)))
+                .paint(|_, surface| {
                     let point = graph_pill.local(surface.refracted);
                     let half_width = graph_pill.size().x * 0.5;
                     let radius = graph_pill.size().y * 0.5;
@@ -233,32 +229,31 @@ impl StatusPanel {
                     let hardware = surface.sdf.band(-1.45..1.45);
                     let color = vec3(0.004, 0.012, 0.026).lerp(frame_color, hardware) + Vec3::splat(grid) + graphs;
                     glass(surface, color)
-                },
-            );
-            let line = context
-                .frame
-                .resources
-                .line(&label, TEXT_SMALL, 700.0)
+                });
+            let line = Line::new(&label, TEXT_SMALL, 700.0);
+            let text = line
+                .at(Vec2::ZERO)
                 .fit(GAP + 5.0, center - half_width..center + half_width)
                 .translated(vec2(x, PANEL_START));
-            context.paint_text(panel, panel.size().y * 0.5, line, TEXT_COLOR.extend(1.0));
+            context.paint_text(panel, panel.size().y * 0.5, text, TEXT_COLOR.extend(1.0));
             cursor += GRAPH_WIDTH + GAP;
         }
 
         if let Some(battery_level) = self.battery_level {
             let center = cursor + DATA_WIDTH * 0.5;
 
-            let rect = section(center, DATA_WIDTH);
-            let charging = if battery_level < 0.0 { 1.0 } else { 0.0 };
-            let level = battery_level.abs();
-            let liquid_color = vec3(1.0, 0.18, 0.10)
+            let level: f32 = battery_level.abs();
+            let liquid_color: Vec3 = vec3(1.0, 0.18, 0.10)
                 .lerp(vec3(1.0, 0.72, 0.12), level.smoothstep(0.08, 0.28))
                 .lerp(vec3(0.22, 0.95, 0.55), level.smoothstep(0.18, 0.72));
-            shader!(
-                "status battery",
-                context.frame,
-                |_, panel: Rect, rect: Rect, charging: f32, level: f32, liquid_color: Vec3| rect,
-                |frame, surface| {
+            let rect: Rect = section(center, DATA_WIDTH);
+            let charging: f32 = if battery_level < 0.0 { 1.0 } else { 0.0 };
+            context
+                .frame
+                .shader("status battery")
+                .with((panel, rect, charging, level, liquid_color))
+                .shape(|_| rect)
+                .paint(|frame, surface| {
                     let surface = sample_deformation(Shape::pill(panel), frame, surface.pixel);
                     let point = rect.local(surface.refracted) / 0.8;
                     let body = Shape::rounded_rect(vec2(23.0, 30.0), 3.2).translated(vec2(0.0, 1.0));
@@ -289,13 +284,12 @@ impl StatusPanel {
                     let bubble = bubble * inside.fill_at(point) * charging;
                     // Bubbles are a darker shade of the liquid, so they show against it and the white shell.
                     TEXT_COLOR.lerp(liquid_color, liquid).lerp(liquid_color * 0.55, bubble).extend(shell)
-                },
-            );
+                });
             cursor += DATA_WIDTH + GAP;
         }
 
         // Each band spans a fixed range below its own peak, so quiet audio still fills the width.
-        let mut audio_spectrum = [0.0; AUDIO_SPECTRUM_BANDS];
+        let mut audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS] = [0.0; AUDIO_SPECTRUM_BANDS];
         for (((damped, peak), scaled), level) in self
             .audio_spectrum
             .iter_mut()
@@ -321,17 +315,14 @@ impl StatusPanel {
         // The ribbon fills the section width; the lens layer is padded so nothing is clipped.
         let visualizer_rect =
             Rect::from_center_size(audio_rect.center(), vec2(AUDIO_WIDTH, context.config.height - GAP * 2.0));
-        let audio_rect = Rect::from_center_size(audio_rect.center(), audio_rect.size() + vec2(8.0, 0.0));
-        shader!(
-            "status audio",
-            context.frame,
-            |frame,
-             panel: Rect,
-             audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS],
-             volume: f32,
-             audio_rect: Rect,
-             visualizer_rect: Rect| lens(Shape::pill(panel), frame, Shape::rectangle(audio_rect)),
-            |frame, surface| {
+        let audio_rect: Rect = Rect::from_center_size(audio_rect.center(), audio_rect.size() + vec2(8.0, 0.0));
+        let visualizer_rect: Rect = visualizer_rect;
+        context
+            .frame
+            .shader("status audio")
+            .with((panel, audio_spectrum, volume, audio_rect, visualizer_rect))
+            .shape(|frame| lens(Shape::pill(panel), frame, Shape::rectangle(audio_rect)))
+            .paint(|frame, surface| {
                 let size = visualizer_rect.size();
                 let half_height = size.y * 0.5;
                 let local = visualizer_rect.local(surface.refracted);
@@ -361,8 +352,7 @@ impl StatusPanel {
                     .lerp(vec3(0.18, 0.88, 1.0), lit)
                     .lerp(vec3(0.7, 0.97, 1.0), sheen * 0.2 + level * 0.25 * lit);
                 with_halo(color, alpha, ribbon, 0.28)
-            },
-        );
+            });
         cursor += AUDIO_WIDTH + GAP;
 
         let icon_home = vec2(x + cursor + ACTION_WIDTH * 0.5, panel.center().y);
@@ -376,16 +366,19 @@ impl StatusPanel {
         }
         let icon_y =
             drag.map_or(icon_home.y, |_| pointer_y.clamp_num(panel.min.y + ICON_RADIUS, panel.max.y - ICON_RADIUS));
-        let icon_center = vec2(icon_home.x, icon_y);
         let snap_progress = ((pull.abs() - ARMED_PULL) / (1.0 - ARMED_PULL)).smoothstep(0.0, 1.0);
-        let icon_scale = 1.0 + snap_progress * 0.35;
         let action_rect =
             Rect::from_center_size(icon_home, vec2(ACTION_WIDTH, context.config.height) + Vec2::splat(GAP * 2.0));
-        shader!(
-            "status power",
-            context.frame,
-            |_, action_rect: Rect, icon_center: Vec2, pull: f32, icon_scale: f32| action_rect,
-            |_, surface| {
+        let action_rect: Rect = action_rect;
+        let icon_center: Vec2 = vec2(icon_home.x, icon_y);
+        let pull: f32 = pull;
+        let icon_scale: f32 = 1.0 + snap_progress * 0.35;
+        context
+            .frame
+            .shader("status power")
+            .with((action_rect, icon_center, pull, icon_scale))
+            .shape(|_| action_rect)
+            .paint(|_, surface| {
                 let (shutdown, reboot) = (pull.saturate(), (-pull).saturate());
                 // No pointer lens, which would warp the thin strokes.
                 let point = (surface.pixel - icon_center) / icon_scale;
@@ -416,8 +409,7 @@ impl StatusPanel {
                 let armed = ((pull.abs() - ARMED_PULL) / 0.08).saturate();
                 let color = TEXT_COLOR.lerp(vec3(1.0, 0.24, 0.2), armed);
                 with_halo(color, alpha, nearest, 0.3)
-            },
-        );
+            });
         context.interaction.input_region(panel);
     }
 }

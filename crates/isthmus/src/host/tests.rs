@@ -6,10 +6,7 @@ use std::{sync::mpsc, time::Duration};
 const IMAGE_VERTEX: &str = "
 struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, };
 @vertex fn vertex(@builtin(vertex_index) index: u32) -> VertexOutput {
-let points = array<vec2<f32>, 6>(
-    vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
-    vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(1.0, 1.0),
-);
+let points = array<vec2<f32>, 4>(vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
 let point = points[index];
 return VertexOutput(vec4(point, 0.0, 1.0), point * 0.5 + 0.5);
 }
@@ -27,7 +24,6 @@ struct ImageProgram;
 
 impl Program for ImageProgram {
     type Globals = ();
-    type Resources = ();
 
     const SHADERS: &'static [ShaderEntry] = &[ShaderEntry {
         name: "image",
@@ -43,13 +39,12 @@ struct EmptyProgram;
 
 impl Program for EmptyProgram {
     type Globals = ();
-    type Resources = ();
 
     const SHADERS: &'static [ShaderEntry] = &[];
 }
 
 fn headless() -> Renderer<EmptyProgram> {
-    pollster::block_on(Renderer::headless((), wgpu::TextureFormat::Rgba8Unorm)).unwrap()
+    pollster::block_on(Renderer::headless(wgpu::TextureFormat::Rgba8Unorm)).unwrap()
 }
 
 #[test]
@@ -81,7 +76,7 @@ fn storage_growth_stops_at_the_binding_limit_without_poisoning_the_device() {
     }))
     .unwrap();
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut buffer = UploadBuffer::new(&device, "bounded storage regression");
+    let mut buffer = UploadBuffer::new(&device, "bounded storage regression", true);
     buffer.upload(&device, &queue, &[1; 23]).unwrap();
     assert_eq!(buffer.buffer.size(), 96);
     assert!(matches!(buffer.upload(&device, &queue, &[2; 25]), Err(RenderError::ResourceLimit { .. })));
@@ -126,18 +121,16 @@ fn device_loss_returns_error_instead_of_recording() {
 
 #[test]
 fn foreign_images_fail_without_poisoning_later_passes_or_recovery() {
-    let mut owner =
-        pollster::block_on(Renderer::<ImageProgram>::headless((), wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let mut owner = pollster::block_on(Renderer::<ImageProgram>::headless(wgpu::TextureFormat::Rgba8Unorm)).unwrap();
     let (_, foreign) = owner.add_image([1, 1]);
-    let mut renderer =
-        pollster::block_on(Renderer::<ImageProgram>::headless((), wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let mut renderer = pollster::block_on(Renderer::<ImageProgram>::headless(wgpu::TextureFormat::Rgba8Unorm)).unwrap();
     let (first, first_image) = renderer.add_image([1, 1]);
     let (second, second_image) = renderer.add_image([1, 1]);
     let source = Image::rgba8([1, 1], vec![255, 128, 0, 255]);
     let error = renderer
         .render(|render| {
             render.surface(first, Vec2::ONE, (), |mut frame| {
-                frame.record(0, 6, (), &[&foreign]);
+                frame.record(0, &[], &[&foreign]);
             });
         })
         .unwrap_err();
@@ -161,8 +154,8 @@ fn copy_through(
     first_image: &Image,
 ) -> Result<(), RenderError> {
     renderer.render(|render| {
-        render.surface(first, Vec2::ONE, (), |mut frame| frame.record(0, 6, (), &[source]));
-        render.surface(second, Vec2::ONE, (), |mut frame| frame.record(0, 6, (), &[first_image]));
+        render.surface(first, Vec2::ONE, (), |mut frame| frame.record(0, &[], &[source]));
+        render.surface(second, Vec2::ONE, (), |mut frame| frame.record(0, &[], &[first_image]));
     })
 }
 

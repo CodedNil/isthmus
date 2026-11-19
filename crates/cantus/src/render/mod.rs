@@ -1,8 +1,9 @@
 use crate::{app::Background, config::Config, interaction::Interaction, music::Music, timer::Timer};
 use arrayvec::ArrayString;
 use isthmus::prelude::*;
-use isthmus_2d::{prelude::*, text::TextCache};
+use isthmus_2d::prelude::*;
 use sdf::refract;
+use std::sync::Once;
 
 pub mod launcher;
 pub mod lyrics;
@@ -59,13 +60,17 @@ pub struct Globals {
     pub ripples: [RipplePulse; RIPPLE_COUNT],
 }
 
-isthmus::program!(Globals, TextCache);
+isthmus::program!(Globals);
 
-pub fn text_cache() -> TextCache {
-    TextCache::new([
-        include_bytes!("../../assets/NotoSans-Variable.ttf").as_slice(),
-        include_bytes!("../../assets/NotoSansSymbols-Music.ttf").as_slice(),
-    ])
+/// Installs the fonts every line of text is shaped with, once.
+pub fn install_fonts() {
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        isthmus_2d::install_fonts([
+            include_bytes!("../../assets/NotoSans-Variable.ttf").as_slice(),
+            include_bytes!("../../assets/NotoSansSymbols-Music.ttf").as_slice(),
+        ]);
+    });
 }
 
 #[derive(Clone, Copy, Default, ShaderData)]
@@ -80,7 +85,7 @@ pub struct UiContext<'frame> {
     pub interaction: &'frame mut Interaction,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, ShaderData)]
 pub struct BarLayout {
     pub playhead_x: f32,
     pub px_per_ms: f32,
@@ -109,7 +114,7 @@ impl Bar {
 
     pub fn show(&mut self, context: &mut UiContext, music: &mut Music, timer: &Timer) {
         let status_width = self.status.as_ref().map_or(0.0, |status| status.width() + GAP);
-        let weather_readout = self.weather.as_ref().map(|weather| weather.collapsed_readout(context));
+        let weather_readout = self.weather.as_ref().map(weathertime::WeatherPanel::collapsed_readout);
         let reserved = HISTORY_WIDTH
             + GAP
             + weather_readout.as_ref().map_or(0.0, |readout| readout.pill_width + GAP)
@@ -143,15 +148,10 @@ impl Bar {
 
 impl UiContext<'_> {
     fn paint_text(&mut self, rect: Rect, radius: f32, line: Text, color: Vec4) {
-        shader!(
-            "glass text",
-            self.frame,
-            |frame, rect: Rect, radius: f32, line: Text, color: Vec4| refract(
-                Shape::rounded_rect(rect, radius),
-                frame,
-                line
-            ),
-            |_, _| color,
-        );
+        self.frame
+            .shader("glass text")
+            .with((rect, radius, line, color))
+            .shape(|frame| refract(Shape::rounded_rect(rect, radius), frame, line))
+            .paint(|_, _| color);
     }
 }

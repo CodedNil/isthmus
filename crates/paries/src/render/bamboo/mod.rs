@@ -1,4 +1,4 @@
-use super::{Frame, Program};
+use super::Frame;
 use isthmus::prelude::*;
 
 mod habitat;

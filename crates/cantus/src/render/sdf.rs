@@ -13,7 +13,7 @@ const LENS_REACH: f32 = 3.0;
 /// Smallest coverage worth shading; analytic shadows never reach exact zero.
 pub const VISIBLE_ALPHA: f32 = 1.0 / 1024.0;
 
-pub fn deform(shape: impl Sdf, frame: ShaderFrame<Program>) -> impl Primitive<Program, Sample = DeformedSample> {
+pub fn deform(shape: impl Sdf, frame: ShaderFrame<Program>) -> impl Primitive<Sample = DeformedSample> {
     let (bulge_reach, _) = reach(shape, frame);
     let shape = shape.outlined((SHADOW_OPACITY / VISIBLE_ALPHA).ln() / SHADOW_DECAY);
     surface(shape.bounds(bulge_reach), move |point| {
@@ -27,7 +27,7 @@ pub fn refract(
     parent: impl Sdf,
     frame: ShaderFrame<Program>,
     shape: impl Sdf,
-) -> impl Primitive<Program, Sample = DeformedSample> {
+) -> impl Primitive<Sample = DeformedSample> {
     let (_, refraction_reach) = reach(parent, frame);
     surface(shape.bounds(refraction_reach), move |point| {
         let mut sample = sample_deformation(parent, frame, point);
@@ -37,11 +37,7 @@ pub fn refract(
 }
 
 /// Applies the parent's refraction to a separately bounded layer, without growing it with the bulge.
-pub fn lens(
-    parent: impl Sdf,
-    frame: ShaderFrame<Program>,
-    shape: impl Sdf,
-) -> impl Primitive<Program, Sample = DeformedSample> {
+pub fn lens(parent: impl Sdf, frame: ShaderFrame<Program>, shape: impl Sdf) -> impl Primitive<Sample = DeformedSample> {
     let (_, refraction_reach) = reach(parent, frame);
     surface(shape.bounds(refraction_reach + LENS_REACH), move |point| {
         let mut parent = sample_deformation(parent, frame, point);

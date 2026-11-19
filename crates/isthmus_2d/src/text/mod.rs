@@ -1,24 +1,23 @@
-//! Text: runs placed on screen, resolved against glyph data, and sampled as signed distance fields.
+//! Text: shaped lines, placed on screen and sampled as signed distance fields on the GPU.
 use crate::{Rect, Sample, Sdf, Shape, raster};
-#[cfg(not(target_arch = "spirv"))]
-pub use cache::{ShapedLine, TextCache};
 use core::ops::{Deref, Range};
 use glyph::{Glyph, PlacedGlyph, glyph_distance};
 use isthmus::{
-    Fragment, Primitive, Program, ResourceData, ShaderData, Vertex, VertexInput,
+    Fragment, Primitive, Sent, ShaderData, SharedWords,
     glam::{Vec2, vec2},
 };
-
 #[cfg(not(target_arch = "spirv"))]
-mod cache;
+pub use line::{Line, install_fonts};
+
 mod glyph;
+#[cfg(not(target_arch = "spirv"))]
+mod line;
 #[cfg(not(target_arch = "spirv"))]
 mod outline;
 
-/// Text placed in the current frame; retain a `ShapedLine` to reuse it later.
+/// The placement of text in the current frame, which is what travels in a draw's record.
 #[derive(Clone, Copy, Default, ShaderData)]
-#[shader_data(view = Glyphs<'view>)]
-pub struct Text {
+pub struct TextRecord {
     /// Minimum rasterization corner in logical screen coordinates.
     pub min: Vec2,
     /// Maximum rasterization corner in logical screen coordinates.
@@ -34,21 +33,57 @@ pub struct Text {
     pub count: u32,
     /// First glyph in the current frame's placement buffer.
     first: u32,
-    outline: f32,
 }
 
-impl Text {
-    /// Declares an exterior outline for raster bounds and fragment coverage queries.
-    pub const fn outlined(mut self, width: f32) -> Self {
-        self.outline = width.max(0.0);
-        self
+/// Text ready to send to a shader and sample there as a signed distance field: a [`Line`] placed on screen.
+///
+/// Make one with [`Line::at`]. On the CPU it carries only its placement, and its glyphs are written to the frame
+/// when it is sent with `.with(..)`. On the GPU it is read from the frame's words.
+#[derive(Clone, Copy, Default)]
+pub struct Text<'frame> {
+    pub line: TextRecord,
+    words: &'frame [u32],
+    #[cfg(not(target_arch = "spirv"))]
+    shaped: Option<&'frame Line>,
+}
+
+impl Deref for Text<'_> {
+    type Target = TextRecord;
+
+    fn deref(&self) -> &TextRecord {
+        &self.line
+    }
+}
+
+impl<'frame> Text<'frame> {
+    /// Text read from words that hold its glyphs, as the GPU reads it, for example to sample it on the CPU.
+    pub const fn on(line: TextRecord, words: SharedWords<'frame>) -> Self {
+        Self {
+            line,
+            words,
+            #[cfg(not(target_arch = "spirv"))]
+            shaped: None,
+        }
+    }
+
+    /// Text to write to the frame from a line, once it is sent.
+    #[cfg(not(target_arch = "spirv"))]
+    pub(crate) const fn of(shaped: &'frame Line, line: TextRecord) -> Self {
+        Self { line, words: &[], shaped: Some(shaped) }
+    }
+
+    /// Chooses this run, or `other` when `second` is set. Both must come from the same frame. Only the plain
+    /// run data is selected, since a shader cannot select between buffer references, so this is what lets
+    /// a shader loop over several runs and keep one copy of the glyph code.
+    pub const fn either(self, other: Self, second: bool) -> Self {
+        Self { line: if second { other.line } else { self.line }, ..self }
     }
 
     /// Moves the baseline and rasterization bounds by a logical pixel offset.
     pub fn translated(mut self, offset: Vec2) -> Self {
-        self.min += offset;
-        self.max += offset;
-        self.origin += offset;
+        self.line.min += offset;
+        self.line.max += offset;
+        self.line.origin += offset;
         self
     }
 
@@ -73,42 +108,9 @@ impl Text {
     }
 }
 
-/// A text run resolved against the glyph and outline buffers, ready for SDF sampling.
-#[derive(Clone, Copy)]
-pub struct Glyphs<'resources> {
-    pub line: Text,
-    pub resources: &'resources [u32],
-}
-
-impl Deref for Glyphs<'_> {
-    type Target = Text;
-
-    fn deref(&self) -> &Text {
-        &self.line
-    }
-}
-
-impl<'resources> Glyphs<'resources> {
-    /// Chooses this run, or `other` when `second` is set. Both must come from the same frame. Only the plain
-    /// run data is selected, since a shader cannot select between buffer references, so this is what lets
-    /// a shader loop over several runs and keep one copy of the glyph code.
-    pub const fn either(self, other: Self, second: bool) -> Self {
-        Self { line: if second { other.line } else { self.line }, resources: self.resources }
-    }
-
-    /// Resolves a text handle against its frame resources on either CPU or GPU.
-    pub const fn new(line: Text, resources: ResourceData<'resources>) -> Self {
-        Self { line, resources }
-    }
-}
-
-impl Sdf for Glyphs<'_> {
+impl Sdf for Text<'_> {
     fn geometry_bounds(self) -> Rect {
         if self.count == 0 { Rect::EMPTY } else { Rect::new(self.min, self.max) }
-    }
-
-    fn outline_width(self) -> f32 {
-        self.line.outline
     }
 
     fn distance_at(self, point: Vec2) -> f32 {
@@ -121,7 +123,7 @@ impl Sdf for Glyphs<'_> {
         let mut high = self.line.count;
         while low < high {
             let middle = low + (high - low) / 2;
-            let glyph = PlacedGlyph::read(self.resources, (self.line.first + middle) as usize * PlacedGlyph::WORDS);
+            let glyph = PlacedGlyph::read(self.words, (self.line.first + middle) as usize * PlacedGlyph::WORDS);
             if glyph.left <= line_point.x {
                 low = middle + 1;
             } else {
@@ -132,9 +134,9 @@ impl Sdf for Glyphs<'_> {
         let mut best = f32::MAX;
         while left > 0 || right < self.line.count {
             let before =
-                PlacedGlyph::read(self.resources, (self.line.first + left.max(1) - 1) as usize * PlacedGlyph::WORDS);
+                PlacedGlyph::read(self.words, (self.line.first + left.max(1) - 1) as usize * PlacedGlyph::WORDS);
             let after = PlacedGlyph::read(
-                self.resources,
+                self.words,
                 (self.line.first + right.min(self.line.count - 1)) as usize * PlacedGlyph::WORDS,
             );
             let left_gap = if left > 0 { line_point.x - before.right } else { f32::MAX };
@@ -149,13 +151,14 @@ impl Sdf for Glyphs<'_> {
                 right += 1;
                 after
             };
-            let glyph = Glyph::read(self.resources, placed.glyph as usize);
-            let glyph_point = vec2(line_point.x - placed.x, placed.y - line_point.y);
+            let (at, glyph_point) = (placed.glyph as usize, vec2(line_point.x - placed.x, placed.y - line_point.y));
+            let glyph = Glyph::read(self.words, at);
+            let body = (at + Glyph::WORDS) as u32;
             if Shape::rectangle(Rect::new(glyph.min, glyph.max)).distance_at(glyph_point) < best {
                 let distance = if glyph.field_size.x > 0 {
-                    glyph.field_distance(self.resources, glyph_point)
+                    glyph.field_distance(self.words, body, glyph_point)
                 } else {
-                    glyph_distance(self.resources, glyph.start, glyph.count, glyph_point)
+                    glyph_distance(self.words, body, glyph.count, glyph_point)
                 };
                 best = best.min(distance);
             }
@@ -164,15 +167,21 @@ impl Sdf for Glyphs<'_> {
     }
 }
 
-impl<P: Program> Primitive<P> for Glyphs<'_> {
+/// Text is sent as its placement, and restored on the GPU against the frame's words.
+impl Sent for Text<'_> {
+    type Record = TextRecord;
+    type Restored<'words> = Text<'words>;
+
+    fn restore(record: TextRecord, words: SharedWords<'_>) -> Text<'_> {
+        Text::on(record, words)
+    }
+}
+
+impl Primitive for Text<'_> {
     type Sample = Sample;
 
-    fn vertex_count(self) -> u32 {
-        Primitive::<P>::vertex_count(raster(self.bounds(0.0)))
-    }
-
-    fn vertex(self, input: VertexInput<P>) -> Vertex {
-        raster(self.bounds(0.0)).vertex(input)
+    fn region(self, pixel_size: f32) -> Option<[Vec2; 4]> {
+        raster(self.bounds(0.0)).region(pixel_size)
     }
 
     fn sample(self, fragment: Fragment) -> (Sample, f32) {
@@ -188,10 +197,11 @@ mod tests {
     #[test]
     fn either_selects_a_run_and_keeps_the_shared_resources() {
         let resources = [1, 2, 3];
-        let (first, second) = (Text { count: 1, ..Text::default() }, Text { count: 2, ..Text::default() });
-        let (first, second) = (Glyphs::new(first, &resources), Glyphs::new(second, &resources));
+        let (first, second) =
+            (TextRecord { count: 1, ..TextRecord::default() }, TextRecord { count: 2, ..TextRecord::default() });
+        let (first, second) = (Text::on(first, &resources), Text::on(second, &resources));
         assert_eq!(first.either(second, false).line.count, 1);
         assert_eq!(first.either(second, true).line.count, 2);
-        assert_eq!(first.either(second, true).resources, &resources);
+        assert_eq!(first.either(second, true).words, &resources);
     }
 }

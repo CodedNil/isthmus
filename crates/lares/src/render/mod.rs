@@ -69,4 +69,4 @@ pub struct Globals {
     pub dynamic: UVec4,
 }
 
-isthmus::program!(Globals, ());
+isthmus::program!(Globals);

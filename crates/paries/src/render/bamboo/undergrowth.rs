@@ -1,24 +1,20 @@
-use super::{
-    Frame, Program, daylight, hash, noise, over, pigment, recede, scene_point, screen_point, segment, wash, wind,
-};
+use super::{Frame, daylight, hash, noise, over, pigment, recede, scene_point, screen_point, segment, wash, wind};
 use isthmus::{prelude::*, spirv_std::arch::kill};
 use isthmus_2d::prelude::*;
 
 pub(super) fn draw(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
     {
+        let kind = (hash(seed + 23.0) * 4.0) as u32;
         let size: Vec2 = frame.screen_size;
-        let kind: u32 = (hash(seed + 23.0) * 4.0) as u32;
         let reach: f32 = (0.012 + depth * 0.13) * (0.65 + hash(seed + 31.0) * 0.6);
-        shader!(
-            "undergrowth",
-            frame,
-            |_, size: Vec2, root: Vec2, depth: f32, seed: f32, kind: u32, reach: f32| Quad::new(
-                screen_point(root - vec2(0.0, reach * 0.4), size),
-                vec2(2.4, 1.6) * reach * size.y,
-                Vec2::X,
-            )
-            .expanded(2.0),
-            |frame, surface| {
+        frame
+            .shader("undergrowth")
+            .with((size, root, depth, seed, kind, reach))
+            .shape(|_| {
+                Quad::new(screen_point(root - vec2(0.0, reach * 0.4), size), vec2(2.4, 1.6) * reach * size.y, Vec2::X)
+                    .expanded(2.0)
+            })
+            .paint(|frame, surface| {
                 let point = scene_point(surface.pixel, size);
                 let local = (point - root) / reach;
                 let aa = 1.0 / (size.y * reach);
@@ -109,7 +105,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                 }
                 let lit = daylight(pigment(color / alpha, point + seed, 1.0 / size.y), surface.pixel / size);
                 recede(lit, vec3(0.51, 0.69, 0.61), depth).extend(alpha)
-            },
-        );
+            });
     }
 }

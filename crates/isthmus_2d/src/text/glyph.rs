@@ -17,13 +17,13 @@ impl Curve {
     }
 }
 
+/// The header of a glyph outline in the shared words, followed there by what it describes: its curves, or, when
+/// `field_size` is set, the samples of its distance field instead.
 #[derive(Clone, Copy, ShaderData)]
 pub(super) struct Glyph {
     pub(super) min: Vec2,
     pub(super) max: Vec2,
-    pub(super) start: u32,
     pub(super) count: u32,
-    pub(super) field_start: u32,
     pub(super) field_size: UVec2,
 }
 
@@ -31,7 +31,8 @@ pub(super) const FIELD_RESOLUTION: f32 = 48.0;
 pub(super) const FIELD_PADDING: f32 = 1.0;
 
 impl Glyph {
-    pub(super) fn field_distance(self, words: &[u32], point: Vec2) -> f32 {
+    /// The distance to the glyph from its field, whose samples begin at word `start`.
+    pub(super) fn field_distance(self, words: &[u32], start: u32, point: Vec2) -> f32 {
         let grid = (point - self.min + FIELD_PADDING) * FIELD_RESOLUTION;
         let limit = vec2(self.field_size.x as f32 - 1.0, self.field_size.y as f32 - 1.0);
         let bounded = grid.clamp_num(Vec2::ZERO, limit);
@@ -39,10 +40,10 @@ impl Glyph {
         let blend = bounded - base;
         let x = base.x as u32;
         let y = base.y as u32;
-        let top = field_sample(words, self.field_start, self.field_size.x, x, y) * (1.0 - blend.x)
-            + field_sample(words, self.field_start, self.field_size.x, x + 1, y) * blend.x;
-        let bottom = field_sample(words, self.field_start, self.field_size.x, x, y + 1) * (1.0 - blend.x)
-            + field_sample(words, self.field_start, self.field_size.x, x + 1, y + 1) * blend.x;
+        let top = field_sample(words, start, self.field_size.x, x, y) * (1.0 - blend.x)
+            + field_sample(words, start, self.field_size.x, x + 1, y) * blend.x;
+        let bottom = field_sample(words, start, self.field_size.x, x, y + 1) * (1.0 - blend.x)
+            + field_sample(words, start, self.field_size.x, x + 1, y + 1) * blend.x;
         top * (1.0 - blend.y) + bottom * blend.y + grid.distance(bounded) / FIELD_RESOLUTION
     }
 }
@@ -56,7 +57,9 @@ fn field_sample(words: &[u32], start: u32, width: u32, x: u32, y: u32) -> f32 {
 #[derive(Clone, Copy, PartialEq, ShaderData)]
 pub(super) struct PlacedGlyph {
     pub x: f32,
+    /// Vertical offset of the glyph from the baseline, positive downwards, as for accents.
     pub y: f32,
+    /// Where the glyph's [`Glyph`] header is in the shared words.
     pub glyph: u32,
     pub left: f32,
     pub right: f32,

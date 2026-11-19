@@ -1,6 +1,9 @@
 //! Axis-aligned rectangles.
-use super::{Quad, corner};
-use isthmus::{Fragment, Primitive, Program, ShaderData, Vertex, VertexInput, glam::Vec2};
+use super::Quad;
+use isthmus::{
+    Fragment, Primitive, ShaderData,
+    glam::{Vec2, vec2},
+};
 
 /// Axis-aligned bounds in logical pixels; inverted corners represent an empty region.
 #[derive(Clone, Copy, Default, ShaderData)]
@@ -23,6 +26,11 @@ impl Rect {
     /// Creates bounds from their center and full size.
     pub fn from_center_size(center: Vec2, size: Vec2) -> Self {
         Self::new(center - size * 0.5, center + size * 0.5)
+    }
+
+    /// Corners in triangle-strip order.
+    pub const fn corners(self) -> [Vec2; 4] {
+        [self.min, vec2(self.max.x, self.min.y), vec2(self.min.x, self.max.y), self.max]
     }
 
     /// Center in logical screen coordinates.
@@ -90,16 +98,11 @@ impl From<Vec2> for Rect {
     }
 }
 
-impl<P: Program> Primitive<P> for Rect {
+impl Primitive for Rect {
     type Sample = ();
 
-    fn vertex_count(self) -> u32 {
-        if self.is_empty() { 0 } else { 4 }
-    }
-
-    fn vertex(self, input: VertexInput<P>) -> Vertex {
-        let uv = corner(input.index);
-        input.project(self.point(uv), uv)
+    fn region(self, _: f32) -> Option<[Vec2; 4]> {
+        (!self.is_empty()).then(|| self.corners())
     }
 
     fn sample(self, _: Fragment) -> ((), f32) {

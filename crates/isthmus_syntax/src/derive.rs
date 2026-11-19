@@ -10,10 +10,8 @@ pub fn derive(input: &DeriveInput, isthmus: &TokenStream) -> TokenStream {
     let word = |zero, decode, encode| {
         quote! {
             impl #isthmus::ShaderData for #name {
-                type View<'view> = Self;
                 const WORDS: usize = 1;
                 const ZERO: Self = #zero;
-                fn resolve(self, _: #isthmus::ResourceData<'_>) -> Self { self }
                 unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
                     let value = unsafe { <u32 as #isthmus::ShaderData>::read_unchecked(words, offset) };
                     #decode
@@ -75,15 +73,10 @@ pub fn derive(input: &DeriveInput, isthmus: &TokenStream) -> TokenStream {
     let mut zeros = Vec::new();
     let mut writes = Vec::new();
     let mut normalized = false;
-    let mut view: Option<syn::Type> = None;
     for attribute in input.attrs.iter().filter(|attribute| attribute.path().is_ident("shader_data")) {
         if let Err(error) = attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("view") && view.is_none() {
-                view = Some(meta.value()?.parse()?);
-                return Ok(());
-            }
             if !meta.path.is_ident("unorm16") || normalized {
-                return Err(meta.error("expected a unique unorm16 or view option"));
+                return Err(meta.error("expected a unique unorm16 option"));
             }
             normalized = true;
             Ok(())
@@ -91,17 +84,6 @@ pub fn derive(input: &DeriveInput, isthmus: &TokenStream) -> TokenStream {
             return error.to_compile_error();
         }
     }
-    let resolve = view.as_ref().map_or_else(
-        || quote!(type View<'view> = Self; fn resolve(self, _: #isthmus::ResourceData<'_>) -> Self { self }),
-        |view| {
-            quote! {
-                type View<'view> = #view;
-                fn resolve(self, resources: #isthmus::ResourceData<'_>) -> Self::View<'_> {
-                    Self::View::new(self, resources)
-                }
-            }
-        },
-    );
     let fields: Vec<_> = data
         .fields
         .iter()
@@ -132,7 +114,6 @@ pub fn derive(input: &DeriveInput, isthmus: &TokenStream) -> TokenStream {
     }
     quote! {
         impl #impl_generics #isthmus::ShaderData for #name #type_generics #where_clause {
-            #resolve
             const WORDS: usize = #offset;
             const ZERO: Self = Self { #(#zeros),* };
             unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {

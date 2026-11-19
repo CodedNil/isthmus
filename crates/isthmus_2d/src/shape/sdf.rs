@@ -1,14 +1,16 @@
 //! The `Sdf` trait: distance, bounds and outline, with combinators that preserve all three.
 use super::{Sample, Shape};
 use crate::{Rect, raster};
-use isthmus::{Float, Fragment, Primitive, Program, Vertex, VertexInput, glam::Vec2};
+use isthmus::{Float, Fragment, Primitive, glam::Vec2};
 
 /// Signed distance, geometry bounds and reserved outline shared by shapes and glyphs.
 pub trait Sdf: Copy {
     /// Axis-aligned bounds before outline expansion.
     fn geometry_bounds(self) -> Rect;
-    /// Reserved exterior margin.
-    fn outline_width(self) -> f32;
+    /// Reserved exterior margin, none unless the shape was [`outlined`](Self::outlined).
+    fn outline_width(self) -> f32 {
+        0.0
+    }
     /// Evaluates signed distance to the contour.
     fn distance_at(self, point: Vec2) -> f32;
 
@@ -142,19 +144,15 @@ impl<F: Fn(Vec2) -> f32 + Copy> Sdf for Shape<F> {
     }
 }
 
-impl<P: Program, F: Fn(Vec2) -> f32 + Copy> Primitive<P> for Shape<F> {
+impl<F: Fn(Vec2) -> f32 + Copy> Primitive for Shape<F> {
     type Sample = Sample;
+
+    fn region(self, pixel_size: f32) -> Option<[Vec2; 4]> {
+        raster(self.bounds(0.0)).region(pixel_size)
+    }
 
     fn sample(self, fragment: Fragment) -> (Sample, f32) {
         let sample = self.sample_at(fragment.pixel);
         (sample, sample.coverage)
-    }
-
-    fn vertex_count(self) -> u32 {
-        Primitive::<P>::vertex_count(raster(self.bounds(0.0)))
-    }
-
-    fn vertex(self, input: VertexInput<P>) -> Vertex {
-        raster(self.bounds(0.0)).vertex(input)
     }
 }

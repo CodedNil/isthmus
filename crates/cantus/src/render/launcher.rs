@@ -5,7 +5,7 @@ use crate::{
     interaction::key,
     platform,
     render::{
-        GAP, PADDING, Program, TEXT_COLOR, TEXT_HEADING, TEXT_SMALL, TEXT_TITLE, UNIT, UiContext,
+        GAP, PADDING, TEXT_COLOR, TEXT_HEADING, TEXT_SMALL, TEXT_TITLE, UNIT, UiContext,
         sdf::{deform, glass, presence},
     },
     timer::{self, Request},
@@ -492,25 +492,22 @@ impl LauncherState {
         let (left, right) = (PADDING + 34.0, rect.size().x - PADDING);
         let empty = self.field.text.is_empty();
         let query = if empty { "Search anything…" } else { &self.field.text };
-        let line = context.frame.resources.line(query, TEXT_HEADING, 600.0).translated(vec2(left, HEADER_HEIGHT * 0.5));
+        let line = Line::new(query, TEXT_HEADING, 600.0);
         let elapsed = self.field.edited_at.get_or_insert_with(Instant::now).elapsed().as_secs_f32();
         let blink = (elapsed * 1.4).fract();
-        let (caret, selection): (Vec2, Vec2) = {
-            let text = &mut *context.frame.resources;
-            let mut at = |offset: usize| {
-                (left + text.shape(slice(&self.field.text, ..offset), TEXT_HEADING, 600.0).text.width).min(right)
-            };
-            let caret = vec2(at(self.field.cursor), blink.smoothstep(0.62, 0.5));
-            let anchor = at(self.field.anchor);
-            let selection = vec2(caret.x.min(anchor), caret.x.max(anchor));
-            (caret, selection)
+        let x_at = |offset: usize| {
+            (left + Line::new(slice(&self.field.text, ..offset), TEXT_HEADING, 600.0).text.width).min(right)
         };
+        let caret: Vec2 = vec2(x_at(self.field.cursor), blink.smoothstep(0.62, 0.5));
+        let anchor = x_at(self.field.anchor);
+        let selection: Vec2 = vec2(caret.x.min(anchor), caret.x.max(anchor));
 
-        shader!(
-            "launcher search",
-            context.frame,
-            |frame, caret: Vec2, selection: Vec2, rect: Rect| deform(Shape::rounded_rect(rect, CORNER_RADIUS), frame),
-            |_, surface| {
+        context
+            .frame
+            .shader("launcher search")
+            .with((caret, selection, rect))
+            .shape(|frame| deform(Shape::rounded_rect(rect, CORNER_RADIUS), frame))
+            .paint(|_, surface| {
                 let point = surface.content - rect.min;
                 let mut color = Vec3::splat(0.09)
                     .lerp(ICON_COLOR, magnifier_icon(point - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
@@ -521,12 +518,11 @@ impl LauncherState {
                 let caret_mask = Shape::pill(vec2(1.8, 24.0)).fill_at(point - vec2(caret.x, HEADER_HEIGHT * 0.5));
                 color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
                 glass(surface, color) * vec4(1.0, 1.0, 1.0, 0.82)
-            },
-        );
+            });
         context.paint_text(
             rect,
             CORNER_RADIUS,
-            line.translated(rect.min),
+            line.at(rect.min + vec2(left, HEADER_HEIGHT * 0.5)),
             (if empty { MUTED_COLOR } else { TEXT_COLOR }).extend(1.0),
         );
     }
@@ -539,7 +535,7 @@ impl LauncherState {
         let mut activated = None;
         for index in 0..self.entries.len() {
             let y = origin.y + HEADER_HEIGHT + PADDING + index as f32 * (ROW_HEIGHT + GAP);
-            let pill = Rect::new(vec2(x, y), vec2(x + width, y + ROW_HEIGHT));
+            let pill: Rect = Rect::new(vec2(x, y), vec2(x + width, y + ROW_HEIGHT));
             let identity = match &self.entries[index] {
                 Entry::App(index) => key(("app", &self.catalog.apps[*index].id)),
                 Entry::Answer(answer) => key(("answer", answer)),
@@ -582,7 +578,7 @@ impl LauncherState {
                 }
             };
 
-            let mut action_lines = smallvec::SmallVec::<[Text; 4]>::new();
+            let mut action_lines = smallvec::SmallVec::<[(Line, Vec2); 4]>::new();
             let mut edge = width - ROW_HEIGHT * 0.5;
             let mut badge = |label: Option<&str>| {
                 let Some(label) = label.filter(|_| self.selected == index) else {
@@ -590,39 +586,37 @@ impl LauncherState {
                 };
                 let badge = vec2(edge - 13.5, 13.5);
                 edge -= 27.0 + GAP;
-                let line = context.frame.resources.line(label, TEXT_SMALL, 600.0);
-                let width = if let Some((first, last)) = label.rsplit_once(' ').filter(|_| line.width > 100.0) {
-                    let first = context.frame.resources.line(first, TEXT_SMALL, 600.0);
-                    let last = context.frame.resources.line(last, TEXT_SMALL, 600.0);
-                    action_lines.push(first.right(vec2(edge, ROW_HEIGHT * 0.5 - 7.0)));
-                    action_lines.push(last.right(vec2(edge, ROW_HEIGHT * 0.5 + 7.0)));
-                    first.width.max(last.width)
+                let line = Line::new(label, TEXT_SMALL, 600.0);
+                let width = if let Some((first, last)) = label.rsplit_once(' ').filter(|_| line.text.width > 100.0) {
+                    let first = Line::new(first, TEXT_SMALL, 600.0);
+                    let last = Line::new(last, TEXT_SMALL, 600.0);
+                    let width = first.text.width.max(last.text.width);
+                    action_lines.push((first, vec2(edge, ROW_HEIGHT * 0.5 - 7.0)));
+                    action_lines.push((last, vec2(edge, ROW_HEIGHT * 0.5 + 7.0)));
+                    width
                 } else {
-                    action_lines.push(line.right(vec2(edge, ROW_HEIGHT * 0.5)));
-                    line.width
+                    let width = line.text.width;
+                    action_lines.push((line, vec2(edge, ROW_HEIGHT * 0.5)));
+                    width
                 };
                 edge -= width + GAP * 2.0;
                 badge
             };
-            let enter_badge = badge(Some(entry.action));
-            let alternate_badge = badge(entry.alternate);
+            let enter_badge: Vec2 = badge(Some(entry.action));
+            let alternate_badge: Vec2 = badge(entry.alternate);
 
             let (name_y, detail_y) =
                 if entry.detail.is_empty() { (ROW_HEIGHT * 0.5, 0.0) } else { (ROW_HEIGHT * 0.34, ROW_HEIGHT * 0.68) };
-            let name_line =
-                context.frame.resources.line(entry.name, TEXT_TITLE, 700.0).translated(vec2(text_left, name_y));
-            let detail_line =
-                context.frame.resources.line(entry.detail, TEXT_SMALL, 600.0).translated(vec2(text_left, detail_y));
+            let name = Line::new(entry.name, TEXT_TITLE, 700.0);
+            let detail = Line::new(entry.detail, TEXT_SMALL, 600.0);
 
-            let icon_kind = if entry.image.is_some() { 0 } else { entry.icon_kind };
-            shader!(
-                "launcher entries",
-                context.frame,
-                |frame, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2, pill: Rect| deform(
-                    Shape::pill(pill),
-                    frame
-                ),
-                |_, surface| {
+            let icon_kind: u32 = if entry.image.is_some() { 0 } else { entry.icon_kind };
+            context
+                .frame
+                .shader("launcher entries")
+                .with((icon_kind, enter_badge, alternate_badge, pill))
+                .shape(|frame| deform(Shape::pill(pill), frame))
+                .paint(|_, surface| {
                     let mut color = Vec3::splat(0.15)
                         .lerp(Vec3::splat(0.235), presence(enter_badge.y))
                         .lerp(Vec3::splat(0.3), (surface.bulge / 8.0).min(1.0));
@@ -642,23 +636,28 @@ impl LauncherState {
                     color = paint_badge(color, enter_badge, false);
                     color = paint_badge(color, alternate_badge, true);
                     glass(surface, color) * vec4(1.0, 1.0, 1.0, 0.7)
-                },
-            );
+                });
             if let Some(image) = entry.image {
-                let rect = Rect::from_center_size(
+                let rect: Rect = Rect::from_center_size(
                     pill.center() - vec2((pill.size().x - pill.size().y) * 0.5, 0.0),
                     Vec2::splat(ICON_SIZE),
                 );
-                shader!("glass image", context.frame, |_, image: &Image, rect: Rect| rect, |_, fragment| image
-                    .sample(fragment.uv));
+                let image: &Image = image;
+                context
+                    .frame
+                    .shader("glass image")
+                    .with((image, rect))
+                    .shape(|_| rect)
+                    .paint(|_, fragment| image.sample(fragment.uv));
             }
 
             let origin = vec2(x, y);
-            for (line, color) in [(name_line, TEXT_COLOR), (detail_line, MUTED_COLOR)]
-                .into_iter()
-                .chain(action_lines.into_iter().map(|line| (line, MUTED_COLOR)))
-            {
-                context.paint_text(pill, ROW_HEIGHT * 0.5, line.translated(origin), color.extend(1.0));
+            let texts =
+                [(name.at(vec2(text_left, name_y)), TEXT_COLOR), (detail.at(vec2(text_left, detail_y)), MUTED_COLOR)]
+                    .into_iter()
+                    .chain(action_lines.iter().map(|(line, edge)| (line.at(Vec2::ZERO).right(*edge), MUTED_COLOR)));
+            for (text, color) in texts {
+                context.paint_text(pill, ROW_HEIGHT * 0.5, text.translated(origin), color.extend(1.0));
             }
         }
         if let Some(index) = activated {

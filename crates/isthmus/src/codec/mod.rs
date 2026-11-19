@@ -7,22 +7,16 @@ use spirv_std::arch::IndexUnchecked;
 mod inline;
 mod packed;
 
-/// Encoded records addressed by captures in the current frame.
-pub type ResourceData<'frame> = &'frame [u32];
+/// The words that a frame's draws share, such as text outlines, as the GPU reads them.
+pub type SharedWords<'frame> = &'frame [u32];
 
 /// A fixed-size word codec shared by CPU and GPU, independent of Rust's memory layout.
 pub trait ShaderData: Copy {
-    /// Value exposed inside a shader after resolving shared resource handles.
-    type View<'view>: Copy;
-    /// Resolves this capture against the current frame's resource storage.
-    fn resolve(self, resources: ResourceData<'_>) -> Self::View<'_>;
     #[cfg(not(target_arch = "spirv"))]
     /// Appends a value and returns its word offset, rejecting arenas larger than u32 can address.
     fn append(self, words: &mut Vec<u32>) -> u32 {
         let offset = u32::try_from(words.len()).expect("shader arena exceeds u32");
-        let end = words.len().checked_add(Self::WORDS).expect("shader arena size overflow");
-        u32::try_from(end).expect("shader arena exceeds u32");
-        words.resize(end, 0);
+        words.resize(words.len() + Self::WORDS, 0);
         self.write(words, offset as usize);
         offset
     }
@@ -49,14 +43,8 @@ pub trait ShaderData: Copy {
 macro_rules! codec {
     ($ty:ty, $storage:ty, $zero:expr, $decode:expr, $encode:expr) => {
         impl ShaderData for $ty {
-            type View<'view> = Self;
-
             const WORDS: usize = <$storage>::WORDS;
             const ZERO: Self = $zero;
-
-            fn resolve(self, _: ResourceData<'_>) -> Self {
-                self
-            }
 
             unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
                 // SAFETY: The storage codec occupies the same complete record.
@@ -79,10 +67,8 @@ codec!(Unorm16x2, u32, Self(0), Self, |value: Self| value.0);
 macro_rules! vector_codec {
     ($ty:ty, $scalar:ty, $count:expr, $($field:ident: $index:expr),+) => {
         impl ShaderData for $ty {
-            type View<'view> = Self;
             const WORDS: usize = $count;
             const ZERO: Self = Self::ZERO;
-            fn resolve(self, _: ResourceData<'_>) -> Self { self }
             unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
                 // SAFETY: Every component lies within the complete vector record.
                 Self::new($(unsafe { <$scalar>::read_unchecked(words, offset + $index) }),+)
@@ -102,14 +88,8 @@ vector_codec!(UVec4, u32, 4, x: 0, y: 1, z: 2, w: 3);
 codec!(Mat4, [f32; 16], Self::ZERO, |v: [f32; 16]| Self::from_cols_array(&v), |v: Self| v.to_cols_array());
 
 impl ShaderData for u32 {
-    type View<'view> = Self;
-
     const WORDS: usize = 1;
     const ZERO: Self = 0;
-
-    fn resolve(self, _: ResourceData<'_>) -> Self {
-        self
-    }
 
     unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
         // SAFETY: The caller guarantees this word belongs to a complete record.
@@ -122,12 +102,8 @@ impl ShaderData for u32 {
 }
 
 impl ShaderData for () {
-    type View<'view> = Self;
-
     const WORDS: usize = 0;
     const ZERO: Self = ();
-
-    fn resolve(self, _: ResourceData<'_>) -> Self {}
 
     unsafe fn read_unchecked(_: &[u32], _: usize) -> Self {}
 
@@ -135,14 +111,8 @@ impl ShaderData for () {
 }
 
 impl<T: ShaderData, const N: usize> ShaderData for [T; N] {
-    type View<'view> = Self;
-
     const WORDS: usize = T::WORDS * N;
     const ZERO: Self = [T::ZERO; N];
-
-    fn resolve(self, _: ResourceData<'_>) -> Self {
-        self
-    }
 
     unsafe fn read_unchecked(words: &[u32], offset: usize) -> Self {
         let mut values = Self::ZERO;
@@ -163,5 +133,27 @@ impl<T: ShaderData, const N: usize> ShaderData for [T; N] {
         for (index, value) in self.into_iter().enumerate() {
             value.write(words, offset + index * T::WORDS);
         }
+    }
+}
+
+/// A value a shader's code receives, and the record it is sent as.
+///
+/// Most values are their own record. Handles into the frame's words, such as text, are sent as the handle and restored
+/// on the GPU as the view they resolve to.
+pub trait Sent {
+    /// What travels in the draw's record.
+    type Record: ShaderData;
+    /// The value the shader's code sees, which may borrow the frame's words.
+    type Restored<'words>;
+    /// Restores the value from its record.
+    fn restore(record: Self::Record, words: SharedWords<'_>) -> Self::Restored<'_>;
+}
+
+impl<T: ShaderData> Sent for T {
+    type Record = T;
+    type Restored<'words> = T;
+
+    fn restore(record: T, _: SharedWords<'_>) -> T {
+        record
     }
 }

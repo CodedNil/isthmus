@@ -5,11 +5,11 @@ use crate::{
     interaction::{InputEvent, Interaction},
     platform::STATUS_SAMPLE_INTERVAL,
     render::{
-        PANEL_START, Renderer,
+        PANEL_START, Renderer, install_fonts,
         launcher::CORNER_RADIUS,
         lyrics,
         status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
-        text_cache, weathertime,
+        weathertime,
     },
 };
 use calloop::{EventLoop, channel};
@@ -841,15 +841,15 @@ impl LayerShellApp {
             }
             let size = (surface.size * surface.scale).to_array().map(|size| size.round().max(1.0) as u32);
             if self.gpu.is_none() {
-                let (gpu, handle) =
-                    match pollster::block_on(Renderer::new(Arc::clone(&surface.native), size, text_cache())) {
-                        Ok(renderer) => renderer,
-                        Err(error) => {
-                            tracing::error!(%error, "Could not initialize renderer; retrying");
-                            self.gpu_retry = Some(Instant::now() + Duration::from_secs(1));
-                            return;
-                        }
-                    };
+                install_fonts();
+                let (gpu, handle) = match pollster::block_on(Renderer::new(Arc::clone(&surface.native), size)) {
+                    Ok(renderer) => renderer,
+                    Err(error) => {
+                        tracing::error!(%error, "Could not initialize renderer; retrying");
+                        self.gpu_retry = Some(Instant::now() + Duration::from_secs(1));
+                        return;
+                    }
+                };
                 tracing::info!("Using GPU device: {}", gpu.device_name());
                 self.gpu = Some(gpu);
                 surface.gpu = Some(handle);

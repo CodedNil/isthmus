@@ -20,7 +20,7 @@ image = { version = "0.25.10", default-features = false, features = [
 ] }
 isthmus.workspace = true
 isthmus_2d.workspace = true
-jiff = { version = "1.0.0", default-features = false, features = [
+jiff = { version = "1.0.1", default-features = false, features = [
     "js",
     "serde",
     "tz-system",
@@ -37,7 +37,7 @@ resvg = { version = "0.50.0", default-features = false, features = [
 roxmltree = "0.21.2"
 serde.workspace = true
 serde_json = { version = "1.0.154", features = ["raw_value"] }
-serde-saphyr = { version = "2.1.1", default-features = false, features = [
+serde-saphyr = { version = "2.2.0", default-features = false, features = [
     "deserialize",
     "serialize",
 ] }

@@ -167,7 +167,7 @@ impl Wallpaper {
                     .add_surface(Arc::clone(&output.native), size)
                     .expect("wallpaper surface is incompatible with the renderer")
             } else {
-                let (renderer, surface) = pollster::block_on(Renderer::new(Arc::clone(&output.native), size, ()))
+                let (renderer, surface) = pollster::block_on(Renderer::new(Arc::clone(&output.native), size))
                     .expect("failed to initialize wallpaper renderer");
                 eprintln!("Paries is rendering with {}", renderer.device_name());
                 self.renderer = Some(renderer);

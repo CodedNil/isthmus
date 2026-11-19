@@ -6,7 +6,6 @@ use core::ops::Range;
 /// A run of consecutive instances of one shader, drawn together.
 pub(super) struct Paint {
     pub shader: usize,
-    pub vertices: u32,
     pub draws: Range<u32>,
     pub image: Option<wgpu::BindGroup>,
 }
@@ -45,16 +44,15 @@ impl SurfaceTarget {
     }
 
     /// Records the instance `draw` of `shader`, extending the previous paint when it continues the same run.
-    pub(super) fn push_draw(&mut self, shader: usize, vertices: u32, draw: u32, image: Option<wgpu::BindGroup>) {
+    pub(super) fn push_draw(&mut self, shader: usize, draw: u32, image: Option<wgpu::BindGroup>) {
         if let Some(previous) = self.paints.last_mut()
             && previous.shader == shader
-            && previous.vertices == vertices
             && previous.image == image
             && previous.draws.end == draw
         {
             previous.draws.end = draw + 1;
         } else {
-            self.paints.push(Paint { shader, vertices, draws: draw..draw + 1, image });
+            self.paints.push(Paint { shader, draws: draw..draw + 1, image });
         }
     }
 

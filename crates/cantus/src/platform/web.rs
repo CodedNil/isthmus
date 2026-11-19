@@ -4,9 +4,8 @@ use crate::{
     catalog::AppCatalog,
     interaction::InputEvent,
     render::{
-        Renderer,
+        Renderer, install_fonts,
         status::{AudioMonitor, ProcessorSample, SystemSample},
-        text_cache,
     },
 };
 use gloo_events::{EventListener, EventListenerOptions};
@@ -153,7 +152,8 @@ async fn run_web() -> Result<(), Box<dyn Error>> {
         (size.into(), size.map(|axis| (axis * window.device_pixel_ratio() as f32).round() as u32))
     };
     let (_, physical) = dimensions();
-    let (mut gpu, surface) = Renderer::new(SurfaceTarget::Canvas(canvas.clone()), physical, text_cache()).await?;
+    install_fonts();
+    let (mut gpu, surface) = Renderer::new(SurfaceTarget::Canvas(canvas.clone()), physical).await?;
     let (updater, pending) = mpsc::channel();
     let app = Rc::new(RefCell::new(CantusApp::new(updater)));
 

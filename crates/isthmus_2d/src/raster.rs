@@ -1,6 +1,6 @@
 //! Bounded fragment samplers, rasterized with an antialiasing margin.
 use crate::Rect;
-use isthmus::{Fragment, Primitive, Program, Vertex, VertexInput, glam::Vec2};
+use isthmus::{Fragment, Primitive, glam::Vec2};
 
 /// A bounded fragment sampler rasterized with an antialiasing margin.
 #[derive(Clone, Copy)]
@@ -19,15 +19,11 @@ pub fn raster(bounds: Rect) -> Surface<impl Fn(Vec2) -> ((), f32) + Copy> {
     surface(bounds, |_| ((), 1.0))
 }
 
-impl<P: Program, T, F: FnOnce(Vec2) -> (T, f32) + Copy> Primitive<P> for Surface<F> {
+impl<T, F: FnOnce(Vec2) -> (T, f32) + Copy> Primitive for Surface<F> {
     type Sample = T;
 
-    fn vertex_count(self) -> u32 {
-        Primitive::<P>::vertex_count(self.bounds)
-    }
-
-    fn vertex(self, input: VertexInput<P>) -> Vertex {
-        self.bounds.expanded(input.frame.pixel_size()).vertex(input)
+    fn region(self, pixel_size: f32) -> Option<[Vec2; 4]> {
+        (!self.bounds.is_empty()).then(|| self.bounds.expanded(pixel_size).corners())
     }
 
     fn sample(self, fragment: Fragment) -> (T, f32) {

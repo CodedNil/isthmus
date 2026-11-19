@@ -5,29 +5,34 @@ use isthmus::{
     F16x2, ShaderData,
     glam::{UVec2, vec2},
 };
-use kurbo::{PathEl, PathSeg, Point, QuadBez, Rect, Shape as _, cubics_to_quadratic_splines, segments};
-use skrifa::{
-    FontRef, GlyphId, MetadataProvider, Tag,
-    instance::Size,
-    outline::{
-        DrawSettings,
-        pen::{PathElement, PathStyle},
-    },
+use kurbo::{BezPath, PathSeg, Point, QuadBez, Rect, Shape as _, cubics_to_quadratic_splines};
+use skrifa::{DrawMemory, GlyphId, PathSink, ScalerFont, Tag};
+use std::sync::{
+    Arc, OnceLock, Weak,
+    atomic::{AtomicUsize, Ordering},
 };
-use std::sync::{Arc, OnceLock, Weak};
 
 pub(super) const WGHT: Tag = Tag::new(b"wght");
 pub(super) const WDTH: Tag = Tag::new(b"wdth");
 
-/// CPU runs own exact glyphs; offsets are assigned only when recording a frame.
-pub(super) struct Outline {
-    pub(super) data: GlyphData,
-    field: OnceLock<GlyphData>,
+/// Which outline: the font, the glyph, and the weight and width the font was instanced at.
+pub(super) type OutlineKey = (usize, u32, u32, u32);
+
+/// Gives each outline, and each line of text, a number no other has, to tell them apart within a frame.
+pub(super) fn next_id() -> usize {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-pub(super) struct GlyphData {
+/// A glyph's words as the shader reads them, which are the same wherever and whenever they are written.
+pub(super) struct Outline {
+    /// Distinguishes this outline from every other, even after one is freed.
+    pub(super) id: usize,
     pub(super) glyph: Glyph,
-    pub(super) words: Box<[u32]>,
+    /// The glyph header followed by its curves.
+    curves: Box<[u32]>,
+    /// The header followed by distance field samples, built when first wanted.
+    field: OnceLock<Box<[u32]>>,
 }
 
 impl Curve {
@@ -44,32 +49,57 @@ impl Curve {
     }
 }
 
+/// Collects a glyph's contours in units of the font's ascent-to-descent span.
+struct Contours {
+    path: BezPath,
+    span: f64,
+}
+
+impl Contours {
+    fn point(&self, x: f32, y: f32) -> Point {
+        Point::new(f64::from(x) / self.span, f64::from(y) / self.span)
+    }
+}
+
+impl PathSink for Contours {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.path.move_to(self.point(x, y));
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.path.line_to(self.point(x, y));
+    }
+
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        self.path.quad_to(self.point(cx0, cy0), self.point(x, y));
+    }
+
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        self.path.curve_to(self.point(cx0, cy0), self.point(cx1, cy1), self.point(x, y));
+    }
+
+    fn close(&mut self) {
+        self.path.close_path();
+    }
+}
+
 impl Outline {
+    /// The outline of a glyph, drawn at the scaler's font instance with `span` font units to the unit.
     pub(super) fn get(
-        glyphs: &mut HashMap<(usize, u32, u32, u32), Weak<Self>>,
-        face: &FontRef<'_>,
-        weight: f32,
-        width: f32,
+        glyphs: &mut HashMap<OutlineKey, Weak<Self>>,
+        key: OutlineKey,
+        scaler: &ScalerFont,
         span: f32,
-        font: usize,
-        id: u32,
     ) -> Arc<Self> {
-        let key = (font, id, weight.to_bits(), width.to_bits());
         if let Some(glyph) = glyphs.get(&key).and_then(Weak::upgrade) {
             return glyph;
         }
-        let mut path = Vec::new();
-        if let Some(glyph) = face.outline_glyphs().get(GlyphId::new(id)) {
-            let location = face.axes().location([(WGHT, weight), (WDTH, width)]);
-            glyph
-                .draw(
-                    DrawSettings::unhinted(Size::unscaled(), &location).with_path_style(PathStyle::HarfBuzz),
-                    &mut path,
-                )
-                .expect("read font outline");
+        let mut contours = Contours { path: BezPath::new(), span: f64::from(span) };
+        if let Some(outline) = scaler.outline(GlyphId::new(key.1)) {
+            outline.draw(DrawMemory::Scratch, &mut contours).expect("read font outline");
         }
         let mut curves = Vec::new();
-        for segment in outline_segments(path, span) {
+        for segment in contours.path.segments() {
             match segment {
                 PathSeg::Line(line) => {
                     curves.push(Curve::new(QuadBez::new(line.p0, line.p0.midpoint(line.p1), line.p1)));
@@ -83,60 +113,43 @@ impl Outline {
         }
         let bounds = curves.iter().copied().map(Curve::bounds).reduce(|a, b| a.union(b)).unwrap_or(Rect::ZERO);
         let glyph = Glyph {
-            start: 0,
             count: curves.len() as u32,
             min: vec2(bounds.x0 as f32, bounds.y0 as f32),
             max: vec2(bounds.x1 as f32, bounds.y1 as f32),
-            field_start: 0,
             field_size: UVec2::ZERO,
         };
         let mut words = Vec::new();
+        glyph.append(&mut words);
         for curve in curves {
             curve.append(&mut words);
         }
-        let outline =
-            Arc::new(Self { data: GlyphData { glyph, words: words.into_boxed_slice() }, field: OnceLock::new() });
+        let outline = Arc::new(Self { id: next_id(), glyph, curves: words.into(), field: OnceLock::new() });
         glyphs.insert(key, Arc::downgrade(&outline));
         outline
     }
-}
 
-impl Outline {
-    pub(super) fn field(&self) -> &GlyphData {
+    /// The words to write for the glyph: its curves, or its distance field, which is sampled once and kept.
+    pub(super) fn words(&self, field: bool) -> &[u32] {
+        if !field {
+            return &self.curves;
+        }
         self.field.get_or_init(|| {
-            let mut glyph = self.data.glyph;
-            let mut words = Vec::new();
+            let glyph = self.glyph;
             let size = ((glyph.max - glyph.min + FIELD_PADDING * 2.0) * FIELD_RESOLUTION).ceil();
-            glyph.field_size = UVec2::new(size.x as u32 + 1, size.y as u32 + 1);
-            glyph.field_start = 0;
+            let glyph = Glyph { field_size: UVec2::new(size.x as u32 + 1, size.y as u32 + 1), ..glyph };
             let count = glyph.field_size.x * glyph.field_size.y;
+            let mut words = Vec::new();
+            glyph.append(&mut words);
             for index in (0..count).step_by(2) {
                 let sample = |index: u32| {
                     let grid = vec2((index % glyph.field_size.x) as f32, (index / glyph.field_size.x) as f32);
-                    glyph_distance(
-                        &self.data.words,
-                        glyph.start,
-                        glyph.count,
-                        glyph.min - FIELD_PADDING + grid / FIELD_RESOLUTION,
-                    )
+                    let point = glyph.min - FIELD_PADDING + grid / FIELD_RESOLUTION;
+                    glyph_distance(&self.curves, Glyph::WORDS as u32, glyph.count, point)
                 };
                 let pair = vec2(sample(index), sample((index + 1).min(count - 1)));
                 F16x2::from_vec2(pair).append(&mut words);
             }
-            GlyphData { glyph, words: words.into_boxed_slice() }
+            words.into()
         })
     }
-}
-
-fn outline_segments(outline: Vec<PathElement>, span: f32) -> impl Iterator<Item = PathSeg> {
-    let point = move |x, y| Point::new(f64::from(x) / f64::from(span), f64::from(y) / f64::from(span));
-    segments(outline.into_iter().map(move |element| match element {
-        PathElement::MoveTo { x, y } => PathEl::MoveTo(point(x, y)),
-        PathElement::LineTo { x, y } => PathEl::LineTo(point(x, y)),
-        PathElement::QuadTo { cx0, cy0, x, y } => PathEl::QuadTo(point(cx0, cy0), point(x, y)),
-        PathElement::CurveTo { cx0, cy0, cx1, cy1, x, y } => {
-            PathEl::CurveTo(point(cx0, cy0), point(cx1, cy1), point(x, y))
-        }
-        PathElement::Close => PathEl::ClosePath,
-    }))
 }

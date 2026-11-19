@@ -1,5 +1,5 @@
 use super::{
-    Frame, Placement, Program, daylight, hash,
+    Frame, Placement, daylight, hash,
     landscape::{reflected_point, water_mask},
     noise, over, pigment, recede, scene_point, screen_point, undergrowth, wash, wind,
 };
@@ -7,48 +7,38 @@ use isthmus::{prelude::*, spirv_std::arch::kill};
 use isthmus_2d::prelude::*;
 
 pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
-    let size = frame.screen_size;
-    let root = plant.position(size);
+    let size: Vec2 = frame.screen_size;
+    let root: Vec2 = plant.position(size);
     if reflected && root.y >= 1.0 {
         return;
     }
     let young = hash(plant.seed + 9.0) < 0.12;
     let grove = noise(vec2(plant.bank_position * 2.3 + 19.0, plant.depth * 2.8)).smoothstep(0.28, 0.7);
-    let height = (0.32 + plant.depth * 1.25) * (0.65 + hash(plant.seed + 1.0) * 0.8) * if young { 0.58 } else { 1.0 };
-    let top = root + vec2((hash(plant.seed + 4.0) - 0.5) * height * 0.3, -height);
-    let width = (0.003 + plant.depth * 0.024)
+    let height: f32 =
+        (0.32 + plant.depth * 1.25) * (0.65 + hash(plant.seed + 1.0) * 0.8) * if young { 0.58 } else { 1.0 };
+    let top: Vec2 = root + vec2((hash(plant.seed + 4.0) - 0.5) * height * 0.3, -height);
+    let width: f32 = (0.003 + plant.depth * 0.024)
         * (0.75 + grove * 0.85)
         * (0.8 + hash(plant.seed + 2.0) * 0.4)
         * if young { 0.48 } else { 1.0 };
     let variation = hash(plant.seed + 5.0);
     let gust = wind(root, frame.time) * 0.65 + (frame.time * (0.36 + variation * 0.37) + plant.seed).sin() * 0.35;
-    let curvature = height * ((variation - 0.5) * 0.05 + gust * (0.009 + variation * 0.012));
-    let spacing = (0.035 + plant.depth * 0.16) * (0.8 + hash(plant.seed + 3.0) * 0.4);
-    let node_offset = hash(plant.seed);
+    let curvature: f32 = height * ((variation - 0.5) * 0.05 + gust * (0.009 + variation * 0.012));
+    let spacing: f32 = (0.035 + plant.depth * 0.16) * (0.8 + hash(plant.seed + 3.0) * 0.4);
+    let node_offset: f32 = hash(plant.seed);
     {
         let seed: f32 = plant.seed;
         let depth: f32 = plant.depth;
-        shader!(
-            "bamboo stalk",
-            frame,
-            |_,
-             size: Vec2,
-             root: Vec2,
-             top: Vec2,
-             width: f32,
-             height: f32,
-             curvature: f32,
-             spacing: f32,
-             node_offset: f32,
-             seed: f32,
-             depth: f32,
-             reflected: bool| {
+        frame
+            .shader("bamboo stalk")
+            .with((size, root, top, width, height, curvature, spacing, node_offset, seed, depth, reflected))
+            .shape(|_| {
                 let start = if reflected { root } else { top };
                 let end = if reflected { vec2(top.x, root.y * 2.0 - top.y) } else { root };
                 Rect::new(screen_point(start.min(end), size), screen_point(start.max(end), size))
                     .expanded((width * 1.5 + curvature.abs() * 1.44 + 0.006) * size.y)
-            },
-            |frame, surface| {
+            })
+            .paint(|frame, surface| {
                 let (point, reflection_mask) = plant_point(surface.pixel, size, root, frame.time, reflected);
                 let point = bend(point, root, curvature, height);
                 let along = root.y - point.y;
@@ -86,19 +76,18 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                 stem = stem.lerp(vec3(0.46, 0.45, 0.25), sheath * 0.7);
                 let alpha = mask * reflection_mask * if reflected { 0.2 } else { 1.0 };
                 plant_color(pigment(stem, vec2(along, across) + seed, aa), surface.pixel / size, depth, alpha)
-            },
-        );
+            });
     }
     let branches = if young { 3 } else { 4 + (hash(plant.seed + 11.0) * 3.0) as u32 };
     for branch in 0..branches + 2 {
-        let seed = plant.seed + branch as f32 * 13.7;
+        let seed: f32 = plant.seed + branch as f32 * 13.7;
         let crown = branch >= branches;
         let position =
             if crown { 0.985 } else { 0.22 + (branch as f32 + hash(seed + 8.0) * 0.65) / branches as f32 * 0.68 };
         let node = ((position * height / spacing + node_offset - 0.5).round() + 0.5 - node_offset) * spacing;
-        let origin = root.lerp(top, if crown { position } else { (node / height).clamp(0.12, 0.92) });
-        let reach = height * (0.12 + hash(seed + 12.0) * 0.1) * (1.15 - position * 0.3);
-        let direction = Vec2::from_angle(if crown {
+        let origin: Vec2 = root.lerp(top, if crown { position } else { (node / height).clamp(0.12, 0.92) });
+        let reach: f32 = height * (0.12 + hash(seed + 12.0) * 0.1) * (1.15 - position * 0.3);
+        let direction: Vec2 = Vec2::from_angle(if crown {
             -1.57 + (if branch == branches { -0.65 } else { 0.65 })
         } else if hash(seed) > 0.5 {
             0.1 - hash(seed + 3.0) * 1.3
@@ -107,28 +96,18 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
         });
         {
             let depth: f32 = plant.depth;
-            shader!(
-                "bamboo branch",
-                frame,
-                |_,
-                 size: Vec2,
-                 origin: Vec2,
-                 direction: Vec2,
-                 root: Vec2,
-                 seed: f32,
-                 curvature: f32,
-                 reach: f32,
-                 height: f32,
-                 depth: f32,
-                 reflected: bool| {
+            frame
+                .shader("bamboo branch")
+                .with((size, origin, direction, root, seed, curvature, reach, height, depth, reflected))
+                .shape(|_| {
                     let center = origin + (direction * 0.78 + direction.perp() * 0.35) * reach;
                     Quad::new(
                         screen_point(if reflected { vec2(center.x, root.y * 2.0 - center.y) } else { center }, size),
                         (vec2(2.0, 2.4) * reach + curvature.abs() * 2.88 + 0.012) * size.y,
                         if reflected { vec2(direction.x, -direction.y) } else { direction },
                     )
-                },
-                |frame, surface| {
+                })
+                .paint(|frame, surface| {
                     let (point, reflection_mask) = plant_point(surface.pixel, size, root, frame.time, reflected);
                     let point = bend(point, root, curvature, height);
                     let delta = point - origin;
@@ -170,8 +149,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                     }
                     let opacity = alpha * reflection_mask * if reflected { 0.28 } else { 1.0 };
                     plant_color(pigment(color / alpha, local + seed, aa), surface.pixel / size, depth, opacity)
-                },
-            );
+                });
         }
     }
     if !reflected {

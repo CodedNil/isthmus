@@ -1,4 +1,4 @@
-use super::{Frame, Program, atmosphere, daylight, hash, noise, pigment, scene_point, wash, wind};
+use super::{Frame, atmosphere, daylight, hash, noise, pigment, scene_point, wash, wind};
 use isthmus::{prelude::*, spirv_std::arch::kill};
 use isthmus_2d::prelude::*;
 
@@ -35,11 +35,12 @@ pub(super) fn reflected_point(point: Vec2, root: Vec2, time: f32) -> Vec2 {
 pub(super) fn draw(frame: &mut Frame<'_>) {
     {
         let size: Vec2 = frame.screen_size;
-        shader!(
-            "landscape",
-            frame.blend(Blend::Replace),
-            |_, size: Vec2| Quad::new(size * 0.5, size, Vec2::X),
-            |frame, surface| {
+        frame
+            .shader("landscape")
+            .blend(Blend::Replace)
+            .with(size)
+            .shape(|_| Quad::new(size * 0.5, size, Vec2::X))
+            .paint(|frame, surface| {
                 let point = scene_point(surface.pixel, size);
                 let uv = surface.pixel / size;
                 let glow = (-((point - vec2(0.08, 0.3)) * vec2(1.5, 0.8)).length_squared() * 3.0).exp();
@@ -133,60 +134,63 @@ pub(super) fn draw(frame: &mut Frame<'_>) {
                 }
                 color = pigment(color, point, 1.0 / size.y);
                 color.extend(1.0)
-            },
-        );
+            });
     }
 }
 
 pub(super) fn water(frame: &mut Frame<'_>) {
     {
         let size: Vec2 = frame.screen_size;
-        shader!("water", frame, |_, size: Vec2| Rect::new(vec2(0.0, size.y * 0.35), size), |frame, surface| {
-            let point = scene_point(surface.pixel, size);
-            let mask = water_mask(point, 1.0 / size.y);
-            if mask == 0.0 {
-                kill();
-            }
-            let flow = flow_coordinates(point, frame.time);
-            let broad = noise(flow * vec2(2.3, 17.0));
-            let warp = vec2(noise(flow * vec2(5.0, 23.0)), noise(flow * vec2(3.0, 31.0))) - 0.5;
-            let ripples = flow + warp * vec2(0.12, 0.008);
-            let strokes = noise(ripples * vec2(5.0, 61.0));
-            let broken = strokes.smoothstep(0.55, 0.7) * broad.smoothstep(0.38, 0.65);
-            let opening = (1.0 - (flow.x + broad * 0.35 - 0.12).abs()).saturate();
-            let detail = point.y.smoothstep(0.39, 0.64);
-            let lace = (noise(ripples * vec2(18.0, 53.0)) - 0.52).abs().smoothstep(0.07, 0.018);
-            let shallows = flow.x.abs().smoothstep(0.4, 0.95);
-            let caustics = lace * shallows * detail * 0.18;
-            let glints =
-                noise(ripples * vec2(13.0, 173.0)).smoothstep(0.68, 0.85) * broad.smoothstep(0.47, 0.66) * detail;
-            let color = vec3(0.29, 0.57, 0.54)
-                .lerp(vec3(0.83, 0.86, 0.69), opening * 0.48 + broken * 0.35)
-                .lerp(vec3(0.99, 0.96, 0.79), glints * 0.65 + caustics);
-            daylight(pigment(color, point, 1.0 / size.y), surface.pixel / size)
-                .extend(mask * (0.16 + broken * 0.48 + glints * 0.32 + caustics).saturate())
-        },);
+        frame.shader("water").with(size).shape(|_| Rect::new(vec2(0.0, size.y * 0.35), size)).paint(
+            |frame, surface| {
+                let point = scene_point(surface.pixel, size);
+                let mask = water_mask(point, 1.0 / size.y);
+                if mask == 0.0 {
+                    kill();
+                }
+                let flow = flow_coordinates(point, frame.time);
+                let broad = noise(flow * vec2(2.3, 17.0));
+                let warp = vec2(noise(flow * vec2(5.0, 23.0)), noise(flow * vec2(3.0, 31.0))) - 0.5;
+                let ripples = flow + warp * vec2(0.12, 0.008);
+                let strokes = noise(ripples * vec2(5.0, 61.0));
+                let broken = strokes.smoothstep(0.55, 0.7) * broad.smoothstep(0.38, 0.65);
+                let opening = (1.0 - (flow.x + broad * 0.35 - 0.12).abs()).saturate();
+                let detail = point.y.smoothstep(0.39, 0.64);
+                let lace = (noise(ripples * vec2(18.0, 53.0)) - 0.52).abs().smoothstep(0.07, 0.018);
+                let shallows = flow.x.abs().smoothstep(0.4, 0.95);
+                let caustics = lace * shallows * detail * 0.18;
+                let glints =
+                    noise(ripples * vec2(13.0, 173.0)).smoothstep(0.68, 0.85) * broad.smoothstep(0.47, 0.66) * detail;
+                let color = vec3(0.29, 0.57, 0.54)
+                    .lerp(vec3(0.83, 0.86, 0.69), opening * 0.48 + broken * 0.35)
+                    .lerp(vec3(0.99, 0.96, 0.79), glints * 0.65 + caustics);
+                daylight(pigment(color, point, 1.0 / size.y), surface.pixel / size)
+                    .extend(mask * (0.16 + broken * 0.48 + glints * 0.32 + caustics).saturate())
+            },
+        );
     }
 }
 
 pub(super) fn haze(frame: &mut Frame<'_>, layer: f32) {
     {
         let size: Vec2 = frame.screen_size;
-        shader!("haze", frame, |_, size: Vec2, layer: f32| Quad::new(size * 0.5, size, Vec2::X), |frame, surface| {
-            let point = scene_point(surface.pixel, size);
-            let fog = noise(point * vec2(3.0, 8.0) + vec2(frame.time * 0.018 + layer * 13.0, layer * 3.0));
-            let height = (-(point.y - 0.52 - layer * 0.12).powi(2) * 35.0).exp();
-            let offset = point - vec2(0.08, 0.22);
-            let shaft = wash(vec2((point.x + point.y * 0.24) * 3.0, frame.time * 0.012 + layer * 4.0));
-            let light = shaft.smoothstep(0.35, 0.75) * (-offset.length_squared() * 2.0).exp();
-            let drift = point * 65.0 + vec2(wind(point, frame.time) * 0.3, frame.time * 0.1);
-            let cell = drift.floor();
-            let speck = (drift.fract() - vec2(hash(cell.x), hash(cell.y))).length().smoothstep(0.09, 0.015)
-                * hash(cell.dot(vec2(17.0, 43.0))).smoothstep(0.985, 1.0);
-            atmosphere(surface.pixel / size)
-                .lerp(vec3(1.0, 0.86, 0.48), light)
-                .extend((fog * height * 0.075 + light * 0.04 + speck * light * 0.45) * (1.1 - layer * 0.45))
-        },);
+        frame.shader("haze").with((size, layer)).shape(|_| Quad::new(size * 0.5, size, Vec2::X)).paint(
+            |frame, surface| {
+                let point = scene_point(surface.pixel, size);
+                let fog = noise(point * vec2(3.0, 8.0) + vec2(frame.time * 0.018 + layer * 13.0, layer * 3.0));
+                let height = (-(point.y - 0.52 - layer * 0.12).powi(2) * 35.0).exp();
+                let offset = point - vec2(0.08, 0.22);
+                let shaft = wash(vec2((point.x + point.y * 0.24) * 3.0, frame.time * 0.012 + layer * 4.0));
+                let light = shaft.smoothstep(0.35, 0.75) * (-offset.length_squared() * 2.0).exp();
+                let drift = point * 65.0 + vec2(wind(point, frame.time) * 0.3, frame.time * 0.1);
+                let cell = drift.floor();
+                let speck = (drift.fract() - vec2(hash(cell.x), hash(cell.y))).length().smoothstep(0.09, 0.015)
+                    * hash(cell.dot(vec2(17.0, 43.0))).smoothstep(0.985, 1.0);
+                atmosphere(surface.pixel / size)
+                    .lerp(vec3(1.0, 0.86, 0.48), light)
+                    .extend((fog * height * 0.075 + light * 0.04 + speck * light * 0.45) * (1.1 - layer * 0.45))
+            },
+        );
     }
 }
 
@@ -195,9 +199,7 @@ pub(super) fn falling_leaves(frame: &mut Frame<'_>) {
         let seed = index as f32 * 13.7;
         let age = (frame.time * (0.012 + hash(seed) * 0.008) + hash(seed + 1.0)).fract();
         {
-            let alpha: f32 = age.smoothstep(0.0, 0.12) * age.smoothstep(1.0, 0.8) * 0.75;
-            let tint = hash(seed + 3.0);
-            let quad = Quad::oriented(
+            let quad: Quad = Quad::oriented(
                 vec2(
                     frame.screen_size.x * hash(seed + 2.0) + (age * 9.0 + seed).sin() * frame.screen_size.y * 0.035,
                     age * frame.screen_size.y,
@@ -206,21 +208,23 @@ pub(super) fn falling_leaves(frame: &mut Frame<'_>) {
                     * frame.screen_size.y,
                 Vec2::from_angle(frame.time * 0.3 + seed + (frame.time * 0.7 + seed).sin() * 0.6),
             );
-            shader!("falling leaves", frame, |_, alpha: f32, tint: f32, quad: Quad| quad, |_, surface| {
+            let alpha: f32 = age.smoothstep(0.0, 0.12) * age.smoothstep(1.0, 0.8) * 0.75;
+            let tint: f32 = hash(seed + 3.0);
+            frame.shader("falling leaves").with((alpha, tint, quad)).shape(|_| quad).paint(|_, surface| {
                 let point = surface.uv * 2.0 - 1.0;
                 let mask = (point.y.abs() - (1.0 - point.x * point.x).max(0.0)).smoothstep(0.2, -0.2);
                 vec3(0.23, 0.3, 0.075).lerp(vec3(0.65, 0.49, 0.14), tint).extend(mask * alpha)
-            },);
+            });
         }
     }
 }
 
 pub(super) fn butterflies(frame: &mut Frame<'_>) {
     for index in 0..3 {
-        let seed = index as f32 * 17.3 + 9.0;
+        let seed: f32 = index as f32 * 17.3 + 9.0;
         let phase = frame.time * (0.2 + hash(seed) * 0.12) + seed;
         {
-            let quad = Quad::new(
+            let quad: Quad = Quad::new(
                 vec2(
                     frame.screen_size.x * (0.26 + index as f32 * 0.21) + phase.sin() * frame.screen_size.y * 0.07,
                     frame.screen_size.y * (0.57 + (phase * 1.7).sin() * 0.05 + index as f32 * 0.055),
@@ -228,7 +232,7 @@ pub(super) fn butterflies(frame: &mut Frame<'_>) {
                 vec2(0.022, 0.018) * frame.screen_size.y,
                 Vec2::from_angle((phase * 1.3).sin() * 0.5),
             );
-            shader!("butterflies", frame, |_, seed: f32, quad: Quad| quad, |frame, surface| {
+            frame.shader("butterflies").with((seed, quad)).shape(|_| quad).paint(|frame, surface| {
                 let point = surface.uv * 2.0 - 1.0;
                 let spread = 0.15 + (frame.time * (7.0 + hash(seed) * 2.0) + seed).sin().abs() * 0.85;
                 let wing = vec2(point.x.abs() / spread, point.y);
@@ -241,7 +245,7 @@ pub(super) fn butterflies(frame: &mut Frame<'_>) {
                     .lerp(vec3(0.95, 0.78, 0.43), edge.smoothstep(0.0, -0.5))
                     .lerp(vec3(0.12, 0.24, 0.18), body);
                 color.extend(wings.max(body) * 0.9)
-            },);
+            });
         }
     }
 }

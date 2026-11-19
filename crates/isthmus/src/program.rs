@@ -5,10 +5,7 @@ pub trait Program: Copy + 'static {
     /// Application data shared by the program's shaders.
     type Globals: ShaderData;
     #[cfg(not(target_arch = "spirv"))]
-    /// Shared host resources used by this program's captured handles.
-    type Resources: crate::Resources;
-    #[cfg(not(target_arch = "spirv"))]
-    /// Generated shader entry points and pipeline state.
+    /// Generated shader entry points and pipeline state, sorted by name.
     const SHADERS: &'static [ShaderEntry];
     #[cfg(not(target_arch = "spirv"))]
     /// Most image bindings declared by any of the program's shaders.
@@ -37,7 +34,7 @@ pub enum Blend {
 pub struct ShaderEntry {
     /// Vertex and fragment WGSL, each containing only its stage's dependencies.
     pub code: [&'static str; 2],
-    /// The name given to `shader!`, which labels the shader's GPU objects and appears in logs.
+    /// The name given to `frame.shader(..)`, which keys the shader and labels its GPU objects in logs.
     pub name: &'static str,
     /// Color blending mode.
     pub blend: Blend,
@@ -45,17 +42,4 @@ pub struct ShaderEntry {
     pub images: usize,
     /// Optional offscreen attachment format; otherwise the presentation format.
     pub format: Option<wgpu::TextureFormat>,
-}
-
-#[cfg(not(target_arch = "spirv"))]
-/// Fails constant evaluation when a shader is absent from its generated program.
-pub const fn shader_index(entries: &[ShaderEntry], name: &str) -> usize {
-    let mut index = 0;
-    while index < entries.len() {
-        if entries[index].name.eq(name) {
-            return index;
-        }
-        index += 1;
-    }
-    panic!("shader was not extracted into this program");
 }

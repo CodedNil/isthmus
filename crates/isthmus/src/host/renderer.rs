@@ -4,7 +4,8 @@ use super::{
     setup,
     surface::{SurfaceTarget, Target},
 };
-use crate::{Frame, Image, Program, Resources, ShaderData, ShaderFrame, SurfaceHandle, glam::Vec2};
+use crate::{Frame, Image, Program, ShaderData, ShaderFrame, SurfaceHandle, glam::Vec2};
+use core::marker::PhantomData;
 use slotmap::SlotMap;
 use smallvec::SmallVec;
 use std::collections::HashSet;
@@ -17,7 +18,7 @@ const SLOW_FRAME: Duration = Duration::from_millis(8);
 pub struct Renderer<P: Program> {
     surfaces: SlotMap<SurfaceHandle, SurfaceTarget>,
     pub(super) gpu: Gpu,
-    resources: P::Resources,
+    program: PhantomData<P>,
     started: Instant,
     last_frame: f64,
     order: SmallVec<[SurfaceHandle; 4]>,
@@ -49,14 +50,8 @@ impl<P: Program> Render<'_, P> {
         renderer.order.push(surface);
         let pixel_scale = screen_size / Vec2::from_array(target.size().map(|v| v as f32));
         let state = ShaderFrame::<P> { screen_size, time: self.time, pixel_scale, globals };
-        target.frame = state.append(&mut renderer.gpu.words);
-        draw(Frame {
-            state,
-            delta_time: self.delta_time,
-            resources: &mut renderer.resources,
-            gpu: &mut renderer.gpu,
-            surface: target,
-        });
+        target.frame = state.append(&mut renderer.gpu.arena.words);
+        draw(Frame { state, delta_time: self.delta_time, gpu: &mut renderer.gpu, surface: target });
     }
 }
 impl<P: Program> Renderer<P> {
@@ -64,19 +59,18 @@ impl<P: Program> Renderer<P> {
     pub async fn new(
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         size: [u32; 2],
-        resources: P::Resources,
     ) -> Result<(Self, SurfaceHandle), SetupError> {
         let (gpu, target) = setup::new::<P>(target, size).await?;
-        let mut renderer = Self::with_gpu(gpu, resources);
+        let mut renderer = Self::with_gpu(gpu);
         let handle = renderer.surfaces.insert(target);
         Ok((renderer, handle))
     }
 
-    fn with_gpu(gpu: Gpu, resources: P::Resources) -> Self {
+    fn with_gpu(gpu: Gpu) -> Self {
         Self {
             surfaces: SlotMap::with_key(),
             gpu,
-            resources,
+            program: PhantomData,
             started: Instant::now(),
             last_frame: 0.0,
             order: SmallVec::new(),
@@ -99,7 +93,6 @@ impl<P: Program> Renderer<P> {
         for surface in self.surfaces.values_mut() {
             surface.clear_paints();
         }
-        self.resources.begin_frame();
         let elapsed = self.started.elapsed().as_secs_f64();
         let delta = (elapsed - self.last_frame).min(0.1) as f32;
         self.last_frame = elapsed;
@@ -108,11 +101,11 @@ impl<P: Program> Renderer<P> {
         let built = started.elapsed();
         self.gpu.check()?;
         let uploading = Instant::now();
-        self.gpu.prepare(self.resources.data())?;
+        self.gpu.prepare()?;
         self.gpu.check()?;
         let uploaded = uploading.elapsed();
         if built + uploaded > SLOW_FRAME {
-            tracing::debug!(?built, ?uploaded, words = self.gpu.words.len(), "Slow frame");
+            tracing::debug!(?built, ?uploaded, words = self.gpu.arena.words.len(), "Slow frame");
         }
         let mut outputs = SmallVec::<[wgpu::SurfaceTexture; 2]>::new();
         let mut encoder =
@@ -179,10 +172,10 @@ impl<P: Program> Renderer<P> {
     }
 
     /// Creates a renderer without a window for offscreen rendering and GPU tests.
-    pub async fn headless(resources: P::Resources, format: wgpu::TextureFormat) -> Result<Self, SetupError> {
+    pub async fn headless(format: wgpu::TextureFormat) -> Result<Self, SetupError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await?;
-        Ok(Self::with_gpu(setup::device::<P>(instance, adapter, format).await?, resources))
+        Ok(Self::with_gpu(setup::device::<P>(instance, adapter, format).await?))
     }
 
     /// Describes the selected adapter, including CPU software fallbacks.

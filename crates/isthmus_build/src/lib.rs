@@ -1,4 +1,4 @@
-//! Build-script support: extracts `shader!` declarations from a crate's source, compiles them
+//! Build-script support: extracts shader draws (`frame.shader("name")…paint(..)`) from a crate's source, compiles them
 //! with Rust-GPU and emits WGSL plus the manifest the `program!` macro includes.
 #![expect(clippy::wildcard_enum_match_arm, reason = "syn's syntax enums are non-exhaustive")]
 use anyhow::{Context as _, Result, bail};
@@ -40,9 +40,12 @@ pub fn build(source: &str) -> Result<()> {
     let output = env::var("OUT_DIR")?;
     let output = Path::new(&output);
     let entries: Vec<_> =
-        generated.shaders.iter().flat_map(|shader| [shader.vertex_entry(), shader.entry.value()]).collect();
+        generated.shaders.iter().flat_map(|shader| [shader.vertex_entry(), shader.fragment_entry()]).collect();
     wgsl::write_stages(&spirv, &entries, output)?;
-    let metadata = generated.shaders.iter().map(|shader| shader.metadata(&isthmus));
+    // Sorted by name, so that drawing finds a shader by binary search.
+    let mut sorted: Vec<_> = generated.shaders.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    let metadata = sorted.into_iter().map(|shader| shader.metadata(&isthmus));
     write_if_changed(
         &output.join("isthmus.manifest.rs"),
         &quote!({

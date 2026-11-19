@@ -32,7 +32,7 @@ fn write_stage(reflected: &Module, validator: &mut Validator, name: &str, output
     module.entry_points.retain(|entry| entry.name == name);
     let entry = module.entry_points.first_mut().with_context(|| format!("shader entry {name} was not exported"))?;
     // Each stage owns a separate module. Keep its GPU entry name stable
-    // when unrelated Rust edits move shader! declarations to new lines.
+    // when unrelated Rust edits move shaders to new lines.
     entry.name = "main".into();
     compact(&mut module, KeepUnused::No);
     let info = validator.validate(&module)?;

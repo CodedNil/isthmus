@@ -7,12 +7,13 @@ edition.workspace = true
 isthmus.workspace = true
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
+harfrust = "0.16"
 hashbrown = { version = "0.17.1", default-features = false, features = [
     "default-hasher",
     "inline-more",
 ] }
 kurbo = "0.13.1"
-skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
+skrifa = { version = "0.50", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

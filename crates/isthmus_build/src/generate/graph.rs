@@ -1,12 +1,12 @@
 //! The consumer crate's modules and the reachability walk that selects the code shaders need.
 use super::{
     items::{flatten, item_name, module_directory, segments, shader_derives},
-    references::References,
+    references::{Draw, Local, References},
 };
 use crate::cargo::directive;
 use isthmus_syntax::{
     program::Declaration,
-    shader::{Shader, SliceIndices},
+    shader::{Chain, Shader, SliceIndices},
 };
 use proc_macro2::TokenStream;
 use quote::{ToTokens as _, quote};
@@ -42,6 +42,8 @@ pub(super) struct Graph {
     modules: Vec<Module>,
     pending: VecDeque<(usize, usize)>,
     methods: HashSet<String>,
+    /// The module that declares `program!`.
+    program: Option<usize>,
 }
 
 impl Graph {
@@ -52,45 +54,55 @@ impl Graph {
         Ok(graph)
     }
 
-    /// Finds every `shader!` declaration and selects the items each one reaches.
+    /// The path, from the consumer's crate root, of the `Program` its `program!` declares.
+    fn program_path(&self) -> Result<syn::Path, String> {
+        let mut names = Vec::new();
+        let mut scope = self.program.ok_or("the source module declares no program!")?;
+        while let Some(parent) = self.modules[scope].parent {
+            let name = self.modules[parent].children.iter().find(|&(_, &child)| child == scope);
+            names.push(syn::Ident::new(
+                name.map(|(name, _)| name.as_str()).unwrap_or_default(),
+                proc_macro2::Span::call_site(),
+            ));
+            scope = parent;
+        }
+        let root = self.root.iter().map(|name| syn::Ident::new(name, proc_macro2::Span::call_site()));
+        let names = names.into_iter().rev();
+        Ok(syn::parse_quote!(crate::#(#root::)*#(#names::)*Program))
+    }
+
+    /// Finds every shader draw and selects the items each one reaches.
     pub(super) fn collect_shaders(&mut self) -> Result<Vec<Shader>, String> {
         let mut entries: Vec<Shader> = Vec::new();
+        let mut errors = Vec::new();
+        // Shaders name their program by path, so the host need not import it.
+        let program = self.program_path()?;
         for scope in 0..self.modules.len() {
             let mut shaders = References::default();
             for item in &self.modules[scope].items {
                 shaders.visit_item(item);
             }
-            for (declaration, location, outer_locals) in shaders.declarations {
-                let file = self.modules[scope].file.display();
-                let shader = Shader::parse(declaration.tokens.clone(), &self.isthmus)
-                    .map_err(|error| format!("{file}:{}: {error}", location.line))?;
-                if entries.iter().any(|other| other.entry.value() == shader.entry.value()) {
-                    return Err(format!(
-                        "{file}:{}: shader name {} is already used; names must be unique within a crate",
-                        location.line,
-                        shader.name.value()
-                    ));
-                }
+            let file = self.modules[scope].file.display().to_string();
+            for ((line, column), message) in &shaders.errors {
+                errors.push(format!("error: {message}\n  --> {file}:{line}:{column}"));
+            }
+            for Draw { chain, position: (line, column), locals } in shaders.draws {
+                let shader = match shader_for(chain, &locals, &entries) {
+                    Ok(shader) => shader,
+                    Err(message) => {
+                        errors.push(format!("error: {message}\n  --> {file}:{line}:{column}"));
+                        continue;
+                    }
+                };
                 let mut refs = References::default();
-                refs.visit_expr_closure(&shader.declaration);
-                if let Some(path) = refs
-                    .paths
-                    .iter()
-                    .find(|path| path.get_ident().is_some_and(|name| outer_locals.contains(&name.to_string())))
-                {
-                    return Err(format!(
-                        "{file}:{}: shader reference {} belongs to the surrounding function; pass values as typed captures and place shared helper items at module scope",
-                        location.line,
-                        path.to_token_stream()
-                    ));
-                }
+                refs.visit_expr_closure(&shader.declaration(&program));
                 self.follow(scope, refs);
-                let gpu = shader.gpu(&self.isthmus);
+                let gpu = shader.gpu(&self.isthmus, &program);
                 self.modules[scope].shaders.push(gpu);
                 entries.push(shader);
             }
         }
-        Ok(entries)
+        if errors.is_empty() { Ok(entries) } else { Err(errors.join("\n\n")) }
     }
 
     /// Follows references from the selected items until no further item or impl member is reached.
@@ -171,6 +183,7 @@ impl Graph {
                 let program = Declaration::parse(declaration.mac.tokens.clone()).map_err(|error| error.to_string())?;
                 let file: syn::File = syn::parse2(program.gpu(&self.isthmus)).map_err(|error| error.to_string())?;
                 expanded.extend(file.items);
+                self.program = Some(self.modules.len());
             } else {
                 expanded.push(item);
             }
@@ -343,4 +356,43 @@ fn rewrite_slices(signature: &mut syn::Signature, block: &mut syn::Block) {
         names.insert(ident.to_string());
     }
     SliceIndices(names).visit_block_mut(block);
+}
+
+/// A shader from its chain: the variables its closures use must be exactly the ones it sends, each with a declared
+/// type, and its name must be new.
+fn shader_for(chain: Chain, locals: &[Local], entries: &[Shader]) -> Result<Shader, String> {
+    let mut used = References::default();
+    used.visit_expr_closure(&chain.shape);
+    used.visit_expr_closure(&chain.paint);
+    let is_local = |name: &str| locals.iter().any(|(local, _)| local == name);
+    let used: Vec<String> = used
+        .paths
+        .iter()
+        .filter_map(|path| path.get_ident().map(ToString::to_string))
+        .filter(|name| is_local(name))
+        .collect();
+    let sent: Vec<String> = chain.with.iter().map(ToString::to_string).collect();
+    let name = &chain.name;
+    if let Some(variable) = used.iter().find(|variable| !sent.contains(variable)) {
+        return Err(format!(
+            "shader {name:?} uses the local variable `{variable}`, so list it in `.with(..)` to send it to the GPU"
+        ));
+    }
+    if let Some(variable) = sent.iter().find(|variable| !used.contains(variable)) {
+        return Err(format!("shader {name:?} sends `{variable}` but never uses it"));
+    }
+    let types = sent
+        .iter()
+        .map(|variable| match locals.iter().rev().find(|(local, _)| local == variable) {
+            Some((_, Some(ty))) => Ok(ty.clone()),
+            _ => Err(format!(
+                "shader {name:?} sends `{variable}`, which needs a type annotation (`let {variable}: Type = ..`) so the GPU knows it"
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let shader = Shader::new(chain, types).map_err(|error| error.to_string())?;
+    if entries.iter().any(|other| other.fragment_entry() == shader.fragment_entry()) {
+        return Err(format!("shader name {:?} is already used; names must be unique within a crate", shader.name));
+    }
+    Ok(shader)
 }

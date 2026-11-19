@@ -1,45 +1,16 @@
-//! The contract between a shader's stages: what a primitive provides to each, and what each receives.
-use crate::{
-    Program, ShaderFrame,
-    glam::{Vec2, Vec4, vec4},
-};
+//! The contract between a shader's primitive and its fragment closure.
+use crate::glam::Vec2;
 use core::ops::Deref;
 
-/// One vertex's index and shared frame data.
-#[derive(Clone, Copy)]
-pub struct VertexInput<P: Program> {
-    /// Index within the submitted triangle strip.
-    pub index: u32,
-    /// Frame data supplied to the stage constructor.
-    pub frame: ShaderFrame<P>,
-}
-
-impl<P: Program> VertexInput<P> {
-    /// Projects a logical position and supplies its texture coordinates.
-    pub fn project(self, pixel: Vec2, uv: Vec2) -> Vertex {
-        let ndc = pixel / self.frame.screen_size * 2.0 - 1.0;
-        Vertex { position: vec4(ndc.x, -ndc.y, 0.0, 1.0), uv }
-    }
-}
-
-/// Value returned by a vertex stage.
-#[derive(Clone, Copy)]
-pub struct Vertex {
-    /// Homogeneous clip-space position.
-    pub position: Vec4,
-    /// Texture coordinates interpolated across the primitive.
-    pub uv: Vec2,
-}
-
-/// Raster geometry and fragment preparation for a triangle strip.
-pub trait Primitive<P: Program>: Copy {
+/// Geometry rasterized by a shader, and how each pixel it covers is sampled.
+pub trait Primitive: Copy {
     /// Prepared input supplied to the fragment closure.
     type Sample;
-    /// Number of vertices to submit; zero suppresses the draw.
-    fn vertex_count(self) -> u32;
-    /// Evaluates one vertex entirely on the GPU.
-    fn vertex(self, input: VertexInput<P>) -> Vertex;
-    /// Prepares shading data and antialiased coverage before user fragment evaluation.
+    /// Corners of the screen region to rasterize in triangle-strip order (min, +x, +y, max), or `None` to draw
+    /// nothing. `pixel_size` is the logical size of a framebuffer pixel, for antialiasing margins.
+    /// Evaluated on the host; the GPU only ever samples.
+    fn region(self, pixel_size: f32) -> Option<[Vec2; 4]>;
+    /// Prepares shading data and antialiased coverage before the fragment closure runs.
     fn sample(self, fragment: Fragment) -> (Self::Sample, f32);
 }
 
@@ -48,12 +19,19 @@ pub trait Primitive<P: Program>: Copy {
 pub struct Fragment<T = ()> {
     /// Actual screen position in logical pixels.
     pub pixel: Vec2,
-    /// Interpolated coordinates supplied by the vertex stage.
+    /// Coordinates across the region, from 0 at its min corner to 1 at its max corner.
     pub uv: Vec2,
     /// Primitive-specific data, also accessible through dereferencing this fragment.
     pub sample: T,
     /// Coverage applied by the renderer after fragment evaluation.
     pub coverage: f32,
+}
+
+impl<T> Fragment<T> {
+    #[doc(hidden)]
+    pub const fn sampled<U>(&self, sample: U, coverage: f32) -> Fragment<U> {
+        Fragment { pixel: self.pixel, uv: self.uv, sample, coverage }
+    }
 }
 
 impl<T> Deref for Fragment<T> {

@@ -1,189 +1,185 @@
-//! A `shader!` declaration: its parsed captures, stages and options.
-use capture::{Binding, CaptureKind};
+//! A shader draw found in source, and the GPU entry points built from it.
+pub use chain::{Chain, parse};
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 pub use slices::SliceIndices;
-use std::mem;
-use syn::{
-    Expr, Ident, Lit, Pat, Token, parse::Parser as _, parse_quote, punctuated::Punctuated, spanned::Spanned as _,
-};
+use syn::{ExprClosure, Ident, Path, Type, parse_quote};
+use upload::{Upload, UploadKind};
 
-mod capture;
+mod chain;
 mod gpu;
-mod host;
 mod slices;
+mod upload;
 
 pub struct Shader {
-    pub declaration: syn::ExprClosure,
-    frame: Expr,
-    stage: Expr,
-    fragment: syn::ExprClosure,
-    captures: Vec<Binding>,
-    /// The name given in the `shader!` call, which labels the shader on the GPU and in logs.
-    pub name: syn::LitStr,
-    /// The unique identifier of its fragment entry point, derived from the name.
-    pub entry: syn::LitStr,
-    blend: syn::Path,
-    format: Option<syn::Path>,
-}
-
-fn argument(expr: &mut Expr, name: &str) -> syn::Result<Option<Expr>> {
-    if let Expr::MethodCall(call) = expr
-        && call.method == name
-    {
-        if call.args.len() != 1 || call.turbofish.is_some() {
-            return Err(syn::Error::new_spanned(call, "expected one argument"));
-        }
-        let value = call.args.pop().unwrap();
-        *expr = *call.receiver.clone();
-        Ok(Some(value))
-    } else {
-        Ok(None)
-    }
-}
-
-fn closure(expr: &mut Expr, parameters: usize) -> syn::Result<&mut syn::ExprClosure> {
-    let span = expr.span();
-    match expr {
-        Expr::Closure(closure)
-            if closure.asyncness.is_none()
-                && closure.constness.is_none()
-                && closure.inputs.len() == parameters
-                && closure.inputs.iter().all(|pat| !matches!(pat, Pat::Type(_))) =>
-        {
-            Ok(closure)
-        }
-        _ => Err(syn::Error::new(span, format!("expected a closure with {parameters} inferred parameters"))),
-    }
+    /// The name given to `frame.shader(..)`, which keys the shader and labels it on the GPU and in logs.
+    pub name: String,
+    uploads: Vec<Upload>,
+    shape: ExprClosure,
+    paint: ExprClosure,
+    blend: Ident,
+    format: Option<Ident>,
+    /// The identifier of its fragment entry point, derived from the name.
+    entry: String,
 }
 
 impl Shader {
-    pub fn parse(tokens: TokenStream, isthmus: &TokenStream) -> syn::Result<Self> {
-        let arguments = Punctuated::<Expr, Token![,]>::parse_terminated.parse2(tokens)?;
-        if arguments.len() != 4 {
-            return Err(syn::Error::new_spanned(
-                arguments,
-                "expected shader!(\"name\", frame, |frame, name: Type| primitive, |frame, fragment| color)",
-            ));
-        }
-        let mut arguments = arguments.into_iter();
-        let name = match arguments.next().unwrap() {
-            Expr::Lit(syn::ExprLit { lit: Lit::Str(name), .. }) if !name.value().trim().is_empty() => name,
-            other => return Err(syn::Error::new_spanned(other, "expected a shader name string first")),
-        };
-        let mut frame = arguments.next().unwrap();
-        let mut stage = arguments.next().unwrap();
-        let mut fragment = arguments.next().unwrap();
-        let fragment = closure(&mut fragment, 2)?.clone();
-        let Expr::Closure(factory) = &mut stage else {
-            return Err(syn::Error::new_spanned(stage, "expected |frame, name: Type| primitive"));
-        };
-        let mut inputs = mem::take(&mut factory.inputs).into_iter();
-        let input = inputs.next().ok_or_else(|| syn::Error::new_spanned(&*factory, "expected a frame parameter"))?;
-        let captures = inputs.map(Binding::parse).collect::<syn::Result<Vec<_>>>()?;
-        factory.inputs.push(input);
-        closure(&mut stage, 1)?;
-        let blend = argument(&mut frame, "blend")?.unwrap_or_else(|| parse_quote!(#isthmus::Blend::Over));
-        let Expr::Path(blend) = blend else {
-            return Err(syn::Error::new_spanned(blend, "expected a Blend variant"));
-        };
-        let format = argument(&mut frame, "format")?
-            .map(|format| match format {
-                Expr::Path(path) => Ok(path.path),
-                other => Err(syn::Error::new_spanned(other, "expected a TextureFormat variant")),
-            })
-            .transpose()?;
-        if let Expr::MethodCall(call) = &frame
-            && ["format", "blend"].iter().any(|name| call.method == *name)
+    /// A shader from its chain, given the type of each variable the chain sends.
+    pub fn new(chain: Chain, types: Vec<Type>) -> syn::Result<Self> {
+        let Chain { name, with, shape, paint, blend, format } = chain;
+        for (closure, parameters, shape_of) in
+            [(&shape, 1, "|frame| primitive"), (&paint, 2, "|frame, fragment| color")]
         {
-            return Err(syn::Error::new_spanned(call, "frame options must occur once, in format/blend order"));
+            if closure.inputs.len() != parameters {
+                return Err(syn::Error::new_spanned(closure, format!("expected a closure of the form {shape_of}")));
+            }
         }
-        let inputs = captures.iter().map(|Binding { name, ty, .. }| quote!(#name: #ty));
-        let declaration = parse_quote!(|#(#inputs),*| {
-            let _: Program;
-            #stage;
-            #fragment;
-        });
+        let uploads =
+            with.into_iter().zip(types).map(|(name, ty)| Upload::new(name, ty)).collect::<syn::Result<_>>()?;
         // Entry points are identifiers, so the name is reduced to letters and digits.
-        let identifier: String = name
-            .value()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
-            .collect();
-        let entry = syn::LitStr::new(&format!("isthmus_{identifier}_fragment"), name.span());
-        Ok(Self { declaration, frame, stage, fragment, captures, name, entry, blend: blend.path, format })
+        let identifier: String =
+            name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
+        let entry = format!("isthmus_{identifier}");
+        Ok(Self { name, uploads, shape, paint, blend, format, entry })
     }
 
+    /// The uploads as typed parameters around the closures, which the build script walks for references. `program`
+    /// is the path of the program the shader belongs to, which keeps it reachable.
+    pub fn declaration(&self, program: &Path) -> ExprClosure {
+        let (shape, paint) = (&self.shape, &self.paint);
+        let inputs = self.uploads.iter().map(|Upload { name, ty, .. }| quote!(#name: #ty));
+        parse_quote!(|#(#inputs),*| {
+            let _: #program;
+            #shape;
+            #paint;
+        })
+    }
+
+    /// The name of the vertex entry point, unique to this shader.
     pub fn vertex_entry(&self) -> String {
-        self.entry.value().strip_suffix("_fragment").map_or_else(String::new, |stem| format!("{stem}_vertex"))
+        format!("{}_vertex", self.entry)
+    }
+
+    /// The name of the fragment entry point, unique to this shader.
+    pub fn fragment_entry(&self) -> String {
+        format!("{}_fragment", self.entry)
     }
 
     fn images(&self) -> impl Iterator<Item = &Ident> {
-        self.captures.iter().filter(|capture| capture.kind == CaptureKind::Image).map(|capture| &capture.name)
+        self.uploads.iter().filter(|upload| upload.kind == UploadKind::Image).map(|upload| &upload.name)
     }
 
     pub fn metadata(&self, isthmus: &TokenStream) -> TokenStream {
-        let (name, entry, vertex) = (&self.name, &self.entry, self.vertex_entry());
-        let blend = &self.blend.segments.last().unwrap().ident;
+        let (name, blend) = (&self.name, &self.blend);
+        let (vertex, fragment) = (self.vertex_entry(), self.fragment_entry());
         let images = self.images().count();
         let format = self.format.as_ref().map_or_else(
             || quote!(None),
-            |format| {
-                let variant = &format.segments.last().unwrap().ident;
-                quote!({ use #isthmus::wgpu::TextureFormat; Some(TextureFormat::#variant) })
-            },
+            |format| quote!({ use #isthmus::wgpu::TextureFormat; Some(TextureFormat::#format) }),
         );
         quote!(ShaderEntry {
             name: #name, blend: Blend::#blend, images: #images, format: #format,
             code: [
                 include_str!(concat!(env!("OUT_DIR"), "/", #vertex, ".wgsl")),
-                include_str!(concat!(env!("OUT_DIR"), "/", #entry, ".wgsl")),
+                include_str!(concat!(env!("OUT_DIR"), "/", #fragment, ".wgsl")),
             ],
         })
     }
 
+    /// The draw record's struct: the region to rasterize, then every upload except images, which are bound
+    /// separately. Each field's type is a parameter, because a struct field cannot name an elided lifetime.
     fn payload(&self, isthmus: &TokenStream, name: &Ident) -> TokenStream {
-        let fields = self.captures.iter().filter(|capture| capture.kind != CaptureKind::Image).map(|capture| {
-            let (name, ty) = (&capture.name, &capture.ty);
-            let ty = if capture.kind == CaptureKind::Slice { quote!([u32; 2]) } else { quote!(#ty) };
-            quote!(#name: #ty)
+        let sent = self.uploads.iter().enumerate().filter(|(_, upload)| upload.kind != UploadKind::Image);
+        let parameters = sent
+            .clone()
+            .filter(|(_, upload)| upload.kind == UploadKind::Data)
+            .map(|(index, _)| format_ident!("T{index}"));
+        let fields = sent.map(|(index, upload)| {
+            let name = &upload.name;
+            if upload.kind == UploadKind::Slice {
+                quote!(#name: [u32; 2])
+            } else {
+                let parameter = format_ident!("T{index}");
+                quote!(#name: #parameter)
+            }
         });
         quote! {
             #[derive(Clone, Copy, #isthmus::ShaderData)]
-            struct #name { #(#fields),* }
+            struct #name<#(#parameters),*> { region: [#isthmus::glam::Vec2; 4], #(#fields),* }
         }
     }
 
-    fn stage(&self, isthmus: &TokenStream) -> Expr {
-        let mut stage = self.stage.clone();
-        let factory = closure(&mut stage, 1).unwrap();
-        let input = factory.inputs.first().unwrap();
-        let typed: syn::ExprClosure = parse_quote!(|#input: #isthmus::ShaderFrame<Program>| {});
-        factory.inputs = typed.inputs;
-        stage
+    /// The draw record's struct with its fields' types filled in, for use inside function bodies.
+    fn payload_type(&self, isthmus: &TokenStream, name: &Ident) -> TokenStream {
+        let records = self.uploads.iter().filter(|upload| upload.kind == UploadKind::Data).map(|upload| {
+            let ty = &upload.ty;
+            quote!(<#ty as #isthmus::Sent>::Record)
+        });
+        quote!(#name<#(#records),*>)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use syn::Stmt;
 
-    #[test]
-    fn mutable_captures_are_rejected_at_the_shader_boundary() {
-        for ty in [quote!(&mut Image), quote!(&mut [u32]), quote!(&mut Vec4)] {
-            let shader = Shader::parse(quote!("test", frame, |_, value: #ty| rect, |_, _| color), &quote!(::isthmus));
-            assert!(shader.is_err_and(|error| error.to_string() == "shader captures must be immutable"));
-        }
+    fn find(statement: &TokenStream) -> syn::Result<Option<Chain>> {
+        parse(&Stmt::Expr(syn::parse2(statement.clone())?, None))
     }
 
     #[test]
-    fn names_are_required_and_become_entry_identifiers() {
-        let parse = |tokens| Shader::parse(tokens, &quote!(::isthmus));
-        assert!(parse(quote!(frame, |_, rect: Rect| rect, |_, _| color)).is_err());
-        assert!(parse(quote!("  ", frame, |_, rect: Rect| rect, |_, _| color)).is_err());
-        let shader = parse(quote!("Track text", frame, |_, rect: Rect| rect, |_, _| color)).unwrap();
-        assert_eq!(shader.entry.value(), "isthmus_track_text_fragment");
+    fn the_chain_names_its_variables_and_options() {
+        let chain = find(&quote! {
+            context.frame.shader("Track text").blend(Blend::Add).format(TextureFormat::Rgba16Float)
+                .with((center, image)).shape(|_| raster(bounds)).paint(|_, fragment| image.sample(fragment.uv))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(chain.name, "Track text");
+        assert_eq!(chain.with.iter().map(ToString::to_string).collect::<Vec<_>>(), ["center", "image"]);
+        let types = vec![parse_quote!(Vec2), parse_quote!(&Image)];
+        let shader = Shader::new(chain, types).unwrap();
+        assert_eq!(
+            (shader.blend.to_string(), shader.format.as_ref().map(ToString::to_string)),
+            ("Add".into(), Some("Rgba16Float".into()))
+        );
+        assert_eq!(shader.fragment_entry(), "isthmus_track_text_fragment");
         assert_eq!(shader.vertex_entry(), "isthmus_track_text_vertex");
-        assert_eq!(shader.name.value(), "Track text");
+        assert_eq!(shader.images().count(), 1);
+    }
+
+    #[test]
+    fn sent_values_may_be_one_variable_or_none() {
+        let sent = |chain: &TokenStream| find(chain).unwrap().unwrap().with.len();
+        assert_eq!(sent(&quote!(frame.shader("a").with(x).shape(|_| r).paint(|_, _| c))), 1);
+        assert_eq!(sent(&quote!(frame.shader("a").with((x,)).shape(|_| r).paint(|_, _| c))), 1);
+        assert_eq!(sent(&quote!(frame.shader("a").shape(|_| r).paint(|_, _| c))), 0);
+    }
+
+    #[test]
+    fn other_paint_calls_are_not_shaders() {
+        assert!(find(&quote!(sample.paint(fill, outline))).unwrap().is_none());
+        assert!(find(&quote!(x.shape(1))).unwrap().is_none());
+        assert!(find(&quote!(x.shape(|_| r).paint(|_, _| c))).unwrap().is_none());
+    }
+
+    #[test]
+    fn mistakes_are_reported_where_the_build_can_see_them() {
+        let error = |chain: &TokenStream| find(chain).err().map(|error| error.to_string()).unwrap_or_default();
+        assert!(error(&quote!(frame.shader(name).shape(|_| r).paint(|_, _| c))).contains("string literal"));
+        assert!(
+            error(&quote!(frame.shader("a").with(draw.time).shape(|_| r).paint(|_, _| c))).contains("plain variable")
+        );
+        assert!(error(&quote!(frame.shader("a").with(1.0).shape(|_| r).paint(|_, _| c))).contains("plain variable"));
+        let chain = find(&quote!(frame.shader("a").with(x).shape(|_, _| r).paint(|_, _| c))).unwrap().unwrap();
+        let shader = Shader::new(chain, vec![parse_quote!(f32)]);
+        assert!(shader.err().is_some_and(|error| error.to_string().contains("closure of the form")));
+        let chain = find(&quote!(frame.shader("a").with(x).shape(|_| r).paint(|_, _| c))).unwrap().unwrap();
+        assert!(
+            Shader::new(chain, vec![parse_quote!(&mut Image)])
+                .err()
+                .is_some_and(|e| e.to_string().contains("immutable"))
+        );
     }
 }

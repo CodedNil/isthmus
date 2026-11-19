@@ -1,4 +1,5 @@
-//! Render pipelines, compiled lazily per shader (or eagerly in parallel where threads exist).
+//! Render pipelines, all compiled at startup so that no draw waits on one.
+use super::pipeline_cache::DiskCache;
 use crate::{Blend, Program};
 use std::sync::OnceLock;
 use web_time::Instant;
@@ -9,6 +10,7 @@ pub(super) struct Pipelines {
     format: wgpu::TextureFormat,
     cells: Vec<OnceLock<wgpu::RenderPipeline>>,
     layouts: Vec<wgpu::PipelineLayout>,
+    cache: Option<DiskCache>,
 }
 
 impl Pipelines {
@@ -18,6 +20,7 @@ impl Pipelines {
         format: wgpu::TextureFormat,
         frame_layout: &wgpu::BindGroupLayout,
         image_layouts: &[wgpu::BindGroupLayout],
+        cache: Option<DiskCache>,
     ) -> Self {
         let layouts = image_layouts
             .iter()
@@ -35,17 +38,27 @@ impl Pipelines {
             format,
             cells: (0..P::SHADERS.len()).map(|_| OnceLock::new()).collect(),
             layouts,
+            cache,
         };
-        // Browsers have no threads, so there pipelines stay lazy.
-        #[cfg(not(target_arch = "wasm32"))]
         this.compile_all::<P>();
+        if let Some(cache) = &this.cache {
+            cache.save();
+        }
         this
     }
 
-    /// Compiles every pipeline now, a few at a time. Each takes tens to hundreds of milliseconds, so leaving them
-    /// to the first draw that needs one hitches that frame.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Compiles every pipeline now, a few at a time where there are threads. Each takes tens to hundreds of
+    /// milliseconds, so leaving them to the first draw that needs one hitches that frame.
     fn compile_all<P: Program>(&self) {
+        // Browsers have no threads, but their pipelines compile in the background anyway.
+        #[cfg(target_arch = "wasm32")]
+        (0..P::SHADERS.len()).for_each(|shader| drop(self.get::<P>(shader)));
+        #[cfg(not(target_arch = "wasm32"))]
+        self.compile_in_parallel::<P>();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn compile_in_parallel<P: Program>(&self) {
         use core::sync::atomic::{AtomicUsize, Ordering};
         use std::thread;
         let threads = thread::available_parallelism().map_or(1, |threads| threads.get().min(4));
@@ -100,7 +113,7 @@ impl Pipelines {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
-            cache: None,
+            cache: self.cache.as_ref().map(|disk| &disk.cache),
         });
         tracing::debug!(shader = entry.name, elapsed = ?started.elapsed(), "Compiled pipeline");
         pipeline

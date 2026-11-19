@@ -1,5 +1,5 @@
 use super::{
-    Frame, Program, atmosphere, daylight, hash,
+    Frame, atmosphere, daylight, hash,
     landscape::{river, water_mask},
     noise, over, pigment, recede, scene_point, screen_point, undergrowth, wash,
 };
@@ -9,9 +9,8 @@ use isthmus_2d::prelude::*;
 pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
     for index in 0..3 {
         {
-            let size: Vec2 = frame.screen_size;
             let seed: f32 = seed + index as f32 * 17.0;
-            let quad = Quad::new(
+            let quad: Quad = Quad::new(
                 screen_point(
                     root + vec2(
                         (index as f32 - 1.0) * (0.035 + depth * 0.055),
@@ -24,7 +23,8 @@ pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                     * frame.screen_size.y,
                 Vec2::from_angle((hash(seed + index as f32 * 11.0) - 0.5) * 0.3),
             );
-            shader!("rocks", frame, |_, size: Vec2, depth: f32, seed: f32, quad: Quad| quad, |_, surface| {
+            let size: Vec2 = frame.screen_size;
+            frame.shader("rocks").with((size, depth, seed, quad)).shape(|_| quad).paint(|_, surface| {
                 let point = surface.uv * 2.0 - 1.0;
                 let aa = 2.0 / quad.size.y;
                 let mut distance: f32 = -2.0;
@@ -49,7 +49,7 @@ pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                 let color = stone.lerp(vec3(0.34, 0.51, 0.32).lerp(vec3(0.64, 0.7, 0.4), texture), moss * 0.88);
                 let uv = surface.pixel / size;
                 recede(daylight(pigment(color, point + seed, aa * 0.1), uv), atmosphere(uv), depth).extend(mask)
-            },);
+            });
         }
     }
     undergrowth::draw(frame, root + vec2(-0.025, 0.025), depth, seed + 10.0);
@@ -58,13 +58,13 @@ pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
 
 pub(super) fn deadwood(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
     {
-        let size: Vec2 = frame.screen_size;
-        let quad = Quad::new(
+        let quad: Quad = Quad::new(
             screen_point(root - vec2(0.0, 0.017), frame.screen_size),
             vec2(0.2 + depth * 0.32, 0.06 + depth * 0.06) * frame.screen_size.y,
             Vec2::from_angle(-0.18 + hash(seed) * 0.35),
         );
-        shader!("deadwood", frame, |_, size: Vec2, seed: f32, depth: f32, quad: Quad| quad, |_, surface| {
+        let size: Vec2 = frame.screen_size;
+        frame.shader("deadwood").with((size, seed, depth, quad)).shape(|_| quad).paint(|_, surface| {
             let mut point = surface.uv * 2.0 - 1.0;
             point.y += (point.x * 3.0).sin() * 0.09;
             let aa = 2.0 / quad.size.y;
@@ -90,14 +90,14 @@ pub(super) fn deadwood(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32)
             }
             let uv = surface.pixel / size;
             recede(daylight(pigment(color / alpha, point + seed, aa * 0.1), uv), atmosphere(uv), depth).extend(alpha)
-        },);
+        });
     }
     undergrowth::draw(frame, root + vec2(0.06, 0.01), depth, seed + 41.0);
 }
 
 pub(super) fn fish(frame: &mut Frame<'_>) {
     for index in 0..7 {
-        let seed = index as f32 * 9.31 + 13.0;
+        let seed: f32 = index as f32 * 9.31 + 13.0;
         let phase = frame.time * (0.2 + hash(seed) * 0.13) + seed + (frame.time * 0.31 + seed).sin() * 0.24;
         let path = |phase: f32| {
             let y = 0.71 + (index % 3) as f32 * 0.065 + phase.sin() * (0.055 + hash(seed + 3.0) * 0.025);
@@ -108,14 +108,14 @@ pub(super) fn fish(frame: &mut Frame<'_>) {
         let center = path(phase);
         let velocity = path(phase + 0.02) - center;
         {
-            let size: Vec2 = frame.screen_size;
             let beat: f32 = frame.time * (6.0 + hash(seed) * 2.0) + (phase * 2.0).sin() * 0.8 + seed;
-            let quad = Quad::oriented(
+            let quad: Quad = Quad::oriented(
                 screen_point(center, frame.screen_size),
                 vec2(0.055 + hash(seed + 2.0) * 0.018, 0.027) * frame.screen_size.y,
                 velocity,
             );
-            shader!("fish", frame, |_, size: Vec2, seed: f32, beat: f32, quad: Quad| quad, |_, surface| {
+            let size: Vec2 = frame.screen_size;
+            frame.shader("fish").with((size, seed, beat, quad)).shape(|_| quad).paint(|_, surface| {
                 let mut point = surface.uv * 2.0 - 1.0;
                 let aa = 2.0 / quad.size.y;
                 point.y -= (beat + point.x * 4.0).sin() * 0.075 * (1.0 - point.x).powi(2);
@@ -134,7 +134,7 @@ pub(super) fn fish(frame: &mut Frame<'_>) {
                     * (0.91 + scales * 0.16)
                     * (1.0 - eye * 0.8);
                 color.extend(alpha * water_mask(scene_point(surface.pixel, size), 1.0 / size.y) * 0.86)
-            },);
+            });
         }
     }
 }

@@ -106,7 +106,7 @@ async fn run(visibility: Vec<u8>, lighting: Vec<u8>) -> Result<(), Box<dyn Error
     laresProgress("Preparing graphics…");
     next_frame().await;
     let physical = physical_size();
-    let (mut gpu, surface) = Renderer::new(SurfaceTarget::Canvas(canvas.clone()), physical, ()).await?;
+    let (mut gpu, surface) = Renderer::new(SurfaceTarget::Canvas(canvas.clone()), physical).await?;
     let device_lost = Arc::new(AtomicBool::new(false));
     let lost = Arc::clone(&device_lost);
     gpu.device().set_device_lost_callback(move |reason, message| {

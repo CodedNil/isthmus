@@ -1,4 +1,4 @@
-//! Generates the standalone shader crate: the code reachable from `shader!` declarations.
+//! Generates the standalone shader crate: the code reachable from the crate's shader draws.
 use graph::Graph;
 use isthmus_syntax::shader::Shader;
 use items::flatten;

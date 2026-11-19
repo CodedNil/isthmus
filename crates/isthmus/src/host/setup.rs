@@ -1,6 +1,5 @@
 use super::{error::SetupError, gpu::Gpu, surface::SurfaceTarget};
 use crate::Program;
-use isthmus_abi as abi;
 
 pub(super) async fn new<P: Program>(
     source: impl Into<wgpu::SurfaceTarget<'static>>,
@@ -28,14 +27,15 @@ pub(super) async fn device<P: Program>(
 ) -> Result<Gpu, SetupError> {
     let images = u32::try_from(P::max_images()).unwrap_or(u32::MAX);
     let mut limits = wgpu::Limits::default().using_resolution(adapter.limits());
-    limits.max_storage_buffers_per_shader_stage = abi::BUFFER_COUNT as u32;
+    limits.max_storage_buffers_per_shader_stage = isthmus_abi::BUFFER_COUNT as u32;
     limits.max_sampled_textures_per_shader_stage = limits.max_sampled_textures_per_shader_stage.max(images);
     limits.max_samplers_per_shader_stage = 1;
     limits.max_bindings_per_bind_group = limits.max_bindings_per_bind_group.max(images.saturating_add(1));
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("isthmus"),
-            required_features: wgpu::Features::empty(),
+            // The driver's pipeline cache, where it has one, which lets later launches skip shader compilation.
+            required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
             required_limits: limits,
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()

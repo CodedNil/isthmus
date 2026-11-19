@@ -18,6 +18,9 @@ pub enum RenderError {
     /// A GPU operation failed; the renderer requires recovery before reuse.
     #[error("GPU operation failed: {0}")]
     Gpu(String),
+    /// A draw named a shader that the build did not extract.
+    #[error("shader {0:?} was not built into this program")]
+    UnknownShader(&'static str),
     /// Refused an upload before allocating or binding an oversized resource.
     #[error("{label} needs {required} bytes, exceeding the device limit of {limit}")]
     ResourceLimit { label: &'static str, required: u64, limit: u64 },

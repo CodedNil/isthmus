@@ -7,7 +7,6 @@ use crate::{
 use arrayvec::ArrayVec;
 use image::{RgbaImage, imageops};
 use isthmus::{Image, Unorm8x4, glam::Vec3};
-use isthmus_2d::text::TextCache;
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use std::{array, collections::HashMap, fmt::Display, hash::Hash, ops::Range, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
@@ -98,9 +97,9 @@ impl TrackCache {
         id.and_then(|id| self.audio.get(&id)).and_then(Fetch::ready).copied().unwrap_or_default()
     }
 
-    pub fn lyrics(&mut self, track: &Track, text: &mut TextCache) -> Option<&PreparedLyrics> {
+    pub fn lyrics(&mut self, track: &Track) -> Option<&PreparedLyrics> {
         let Fetch::Ready(lyrics) = self.lyrics.get_mut(&track.uri)? else { return None };
-        lyrics.prepare(track.duration_ms as f32, text);
+        lyrics.prepare(track.duration_ms as f32);
         Some(lyrics)
     }
 }

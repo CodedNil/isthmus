@@ -1,31 +1,24 @@
 //! The final pass: unpacks the samples, averages them in linear light and composites the presence ghosts.
 use crate::{
     presence::Ghost,
-    render::{Frame, Program, pipeline::ghosts},
+    render::{Frame, pipeline::ghosts},
 };
 use isthmus::prelude::*;
 use isthmus_2d::Rect;
 
 /// Averages the valid samples in linear light; a camera change invalidates all of them.
 pub fn resolve(frame: &mut Frame<'_>, images: &[Image; 4], mask: u32, interleaved: bool, people: &[Ghost]) {
+    let sample_size: Vec2 = Vec2::from_array(images[0].size().map(|value| value as f32));
     let first: &Image = &images[0];
     let second: &Image = &images[1];
     let third: &Image = &images[2];
     let fourth: &Image = &images[3];
-    let sample_size = Vec2::from_array(images[0].size().map(|value| value as f32));
-    shader!(
-        "resolve",
-        frame.blend(Blend::Replace),
-        |frame,
-         first: &Image,
-         second: &Image,
-         third: &Image,
-         fourth: &Image,
-         mask: u32,
-         sample_size: Vec2,
-         interleaved: bool,
-         people: &[Ghost]| Rect::new(Vec2::ZERO, frame.screen_size),
-        |frame, surface| {
+    frame
+        .shader("resolve")
+        .blend(Blend::Replace)
+        .with((first, second, third, fourth, mask, sample_size, interleaved, people))
+        .shape(|frame| Rect::new(Vec2::ZERO, frame.screen_size))
+        .paint(|frame, surface| {
             let size = sample_size;
             let p = surface.pixel * size / frame.screen_size;
             let color = resolved_sample(first, p, size, mask, 0, interleaved)
@@ -45,8 +38,7 @@ pub fn resolve(frame: &mut Frame<'_>, images: &[Image; 4], mask: u32, interleave
                 globals.pixel_angle,
             );
             color.powf(1.0 / 2.2).extend(1.0)
-        },
-    );
+        });
 }
 
 /// Where the interleaved image holds a native pixel: its own column or the neighbour's, and whether either is valid.

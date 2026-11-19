@@ -1,7 +1,7 @@
 //! Oriented rectangles.
-use super::{Rect, corner};
+use super::Rect;
 use isthmus::{
-    Fragment, Primitive, Program, ShaderData, Vertex, VertexInput,
+    Fragment, Primitive, ShaderData,
     glam::{Vec2, vec2},
 };
 
@@ -59,19 +59,15 @@ impl From<Vec2> for Quad {
     }
 }
 
-impl<P: Program> Primitive<P> for Quad {
+impl Primitive for Quad {
     type Sample = ();
+
+    fn region(self, _: f32) -> Option<[Vec2; 4]> {
+        let at = |x: f32, y: f32| self.point(self.size * vec2(x, y));
+        Some([at(-0.5, -0.5), at(0.5, -0.5), at(-0.5, 0.5), at(0.5, 0.5)])
+    }
 
     fn sample(self, _: Fragment) -> ((), f32) {
         ((), 1.0)
-    }
-
-    fn vertex_count(self) -> u32 {
-        4
-    }
-
-    fn vertex(self, input: VertexInput<P>) -> Vertex {
-        let uv = corner(input.index);
-        input.project(self.point(self.size * (uv - 0.5)), uv)
     }
 }

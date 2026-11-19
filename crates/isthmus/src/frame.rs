@@ -4,7 +4,7 @@ use crate::{Program, ShaderData, glam::Vec2};
 /// The same typed frame state is used by host recording and GPU invocations.
 #[derive(Clone, Copy, ShaderData)]
 pub struct FrameState<G> {
-    /// Surface dimensions in logical pixels.
+    /// Surface dimensions in logical pixels. Must stay first: the shared vertex stage reads it directly.
     pub screen_size: Vec2,
     /// Frame time in seconds.
     pub time: f32,
