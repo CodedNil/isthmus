@@ -26,8 +26,7 @@ struct LrclibRecord {
     artist_name: String,
     #[serde(rename = "albumName", default)]
     album_name: String,
-    #[serde(default)]
-    duration: f64,
+    duration: Option<f64>,
     lyricsfile: Option<String>,
 }
 
@@ -85,8 +84,9 @@ pub(super) async fn fetch_lrclib(track: &Track, http: &Client) -> MusicResult<Ly
         let matched_title = normalize(&record.track_name);
         let matched_artist = normalize(&record.artist_name);
         let album_match = !target_album.is_empty() && normalize(&record.album_name) == target_album;
-        let duration_delta = if record.duration > 0.0 { (record.duration - target_duration).abs() } else { f64::MAX };
-        let duration_match = track.duration_ms == 0 || record.duration <= 0.0 || duration_delta <= 5.0;
+        let duration = record.duration.unwrap_or_default();
+        let duration_delta = if duration > 0.0 { (duration - target_duration).abs() } else { f64::MAX };
+        let duration_match = track.duration_ms == 0 || duration <= 0.0 || duration_delta <= 5.0;
         let title_match = matched_title == title
             || matched_title == normalize(&track.name)
             || (record.track_name.split_once(" (").is_some_and(|(base, _)| normalize(base) == title) && duration_match);
@@ -334,4 +334,22 @@ fn upload_key(track: &Track, lyrics: &Lyrics) -> String {
         }
     }
     hex::encode(hash.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LrclibRecord;
+
+    #[test]
+    fn search_accepts_results_with_unknown_duration() {
+        let records = serde_json::from_str::<Vec<LrclibRecord>>(
+            r#"[
+                {"trackName":"Baby Steps","artistName":"Olivia Dean","duration":null},
+                {"trackName":"Baby Steps","artistName":"Olivia Dean","duration":180}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(records[0].duration, None);
+        assert_eq!(records[1].duration, Some(180.0));
+    }
 }

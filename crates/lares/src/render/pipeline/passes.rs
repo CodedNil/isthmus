@@ -10,7 +10,7 @@ use crate::{
     scene,
 };
 use isthmus::{prelude::*, spirv_std::arch::kill};
-use isthmus_2d::{Rect, raster};
+use isthmus_2d::Rect;
 
 /// The target columns this sample covers: all of them, or the half its parity owns when interleaved.
 fn columns(frame: ShaderFrame<Program>) -> Vec2 {
@@ -43,21 +43,16 @@ pub fn visibility_geometry(frame: &mut Frame<'_>, scene: &Scene) {
     assert!(scene.objects.len() < scene::VISIBILITY_OBJECTS as usize, "visibility object ID capacity exceeded");
     let nodes: &[Node] = &scene.nodes;
     let objects: &[Object] = &scene.objects;
+    let bounds = covered(**frame);
     frame
         .shader("visibility geometry")
         .format(TextureFormat::Rgba16Float)
         .blend(Blend::Raw)
         .with((nodes, objects))
-        .shape(|frame| raster(covered(frame)))
+        .bounds(bounds)
         .paint(|frame, surface| {
-            scene::visibility_geometry(
-                frame.globals,
-                nodes,
-                objects,
-                native_pixel(frame, surface.pixel),
-                frame.screen_size,
-                frame.pixel_size(),
-            )
+            let pixel = native_pixel(frame, surface.pixel);
+            scene::visibility_geometry(frame.globals, nodes, objects, pixel, frame.screen_size, frame.pixel_size())
         });
 }
 
@@ -67,19 +62,21 @@ pub fn visibility(frame: &mut Frame<'_>, scene: &Scene, geometry: &Image) {
     let contacts: &[u32] = &scene.contacts;
     let nodes: &[Node] = &scene.nodes;
     let objects: &[Object] = &scene.objects;
+    let bounds = covered(**frame);
     frame
         .shader("visibility")
         .format(TextureFormat::Rgba16Float)
         .blend(Blend::Raw)
         .with((geometry, mirror, contacts, nodes, objects))
-        .shape(|frame| raster(covered(frame)))
+        .bounds(bounds)
         .paint(|frame, surface| {
+            let pixel = native_pixel(frame, surface.pixel);
             scene::finish_visibility(
                 frame.globals,
                 nodes,
                 objects,
                 contacts,
-                native_pixel(frame, surface.pixel),
+                pixel,
                 frame.screen_size,
                 frame.pixel_size(),
                 geometry.texel(surface.pixel.as_ivec2()),
@@ -93,22 +90,25 @@ pub fn materials(frame: &mut Frame<'_>, scene: &Scene, visibility: &Image) {
     let grid: Grid = scene.grid;
     let probes: &[Probe] = &scene.probes;
     let mirror: u32 = scene.mirror;
+    let bounds = covered(**frame);
     frame
         .shader("materials")
         .format(TextureFormat::Rgba16Float)
         .blend(Blend::Raw)
         .with((objects, grid, probes, visibility, mirror))
-        .shape(|frame| raster(covered(frame)))
+        .bounds(bounds)
         .paint(|frame, surface| {
+            let texel = surface.pixel.as_ivec2();
+            let pixel = native_pixel(frame, surface.pixel);
             scene::material_visibility(
                 frame.globals,
                 objects,
                 grid,
                 probes,
-                native_pixel(frame, surface.pixel),
+                pixel,
                 frame.screen_size,
                 frame.pixel_size(),
-                visibility.texel(surface.pixel.as_ivec2()),
+                visibility.texel(texel),
                 mirror,
             )
         });
@@ -133,12 +133,15 @@ pub fn shade(
     let grid: Grid = scene.grid;
     let atlas: &Image = &shadows.image;
     let info: shadows::AtlasInfo = shadows.info;
+    let bounds = covered(**frame);
     frame
         .shader("shade 1 sample")
         .blend(Blend::Raw)
         .with((visibility, materials, mirror, objects, nodes, contacts, probes, lights, light_masks, grid, atlas, info))
-        .shape(|frame| raster(covered(frame)))
+        .bounds(bounds)
         .paint(|frame, surface| {
+            let texel = surface.pixel.as_ivec2();
+            let pixel = native_pixel(frame, surface.pixel);
             scene::shade_visibility::<1>(
                 frame.globals,
                 nodes,
@@ -148,23 +151,25 @@ pub fn shade(
                 contacts,
                 grid,
                 probes,
-                native_pixel(frame, surface.pixel),
+                pixel,
                 frame.screen_size,
                 frame.pixel_size(),
                 frame.time,
                 atlas,
                 info,
-                visibility.texel(surface.pixel.as_ivec2()),
+                visibility.texel(texel),
                 mirror,
-                materials.texel(surface.pixel.as_ivec2()),
+                materials.texel(texel),
             )
         });
     frame
         .shader("shade 2 samples")
         .blend(Blend::Raw)
         .with((visibility, materials, mirror, objects, nodes, contacts, probes, lights, light_masks, grid, atlas, info))
-        .shape(|frame| raster(covered(frame)))
+        .bounds(bounds)
         .paint(|frame, surface| {
+            let texel = surface.pixel.as_ivec2();
+            let pixel = native_pixel(frame, surface.pixel);
             scene::shade_visibility::<2>(
                 frame.globals,
                 nodes,
@@ -174,23 +179,25 @@ pub fn shade(
                 contacts,
                 grid,
                 probes,
-                native_pixel(frame, surface.pixel),
+                pixel,
                 frame.screen_size,
                 frame.pixel_size(),
                 frame.time,
                 atlas,
                 info,
-                visibility.texel(surface.pixel.as_ivec2()),
+                visibility.texel(texel),
                 mirror,
-                materials.texel(surface.pixel.as_ivec2()),
+                materials.texel(texel),
             )
         });
     frame
         .shader("shade 3 samples")
         .blend(Blend::Raw)
         .with((visibility, materials, mirror, objects, nodes, contacts, probes, lights, light_masks, grid, atlas, info))
-        .shape(|frame| raster(covered(frame)))
+        .bounds(bounds)
         .paint(|frame, surface| {
+            let texel = surface.pixel.as_ivec2();
+            let pixel = native_pixel(frame, surface.pixel);
             scene::shade_visibility::<3>(
                 frame.globals,
                 nodes,
@@ -200,23 +207,25 @@ pub fn shade(
                 contacts,
                 grid,
                 probes,
-                native_pixel(frame, surface.pixel),
+                pixel,
                 frame.screen_size,
                 frame.pixel_size(),
                 frame.time,
                 atlas,
                 info,
-                visibility.texel(surface.pixel.as_ivec2()),
+                visibility.texel(texel),
                 mirror,
-                materials.texel(surface.pixel.as_ivec2()),
+                materials.texel(texel),
             )
         });
     frame
         .shader("shade 4 samples")
         .blend(Blend::Raw)
         .with((visibility, materials, mirror, objects, nodes, contacts, probes, lights, light_masks, grid, atlas, info))
-        .shape(|frame| raster(covered(frame)))
+        .bounds(bounds)
         .paint(|frame, surface| {
+            let texel = surface.pixel.as_ivec2();
+            let pixel = native_pixel(frame, surface.pixel);
             scene::shade_visibility::<4>(
                 frame.globals,
                 nodes,
@@ -226,15 +235,15 @@ pub fn shade(
                 contacts,
                 grid,
                 probes,
-                native_pixel(frame, surface.pixel),
+                pixel,
                 frame.screen_size,
                 frame.pixel_size(),
                 frame.time,
                 atlas,
                 info,
-                visibility.texel(surface.pixel.as_ivec2()),
+                visibility.texel(texel),
                 mirror,
-                materials.texel(surface.pixel.as_ivec2()),
+                materials.texel(texel),
             )
         });
 }

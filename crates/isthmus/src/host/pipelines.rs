@@ -1,123 +1,105 @@
 //! Render pipelines, all compiled at startup so that no draw waits on one.
 use super::pipeline_cache::DiskCache;
-use crate::{Blend, Program};
-use std::sync::OnceLock;
+use crate::{Blend, Program, program::ShaderEntry};
 use web_time::Instant;
 
-/// The program's pipelines, one per shader, sharing a layout per image count.
-pub(super) struct Pipelines {
-    device: wgpu::Device,
+/// Compiles the program's pipelines in shader order, sharing a layout per image count.
+pub(super) fn compile_all<P: Program>(
+    device: &wgpu::Device,
     format: wgpu::TextureFormat,
-    cells: Vec<OnceLock<wgpu::RenderPipeline>>,
-    layouts: Vec<wgpu::PipelineLayout>,
+    frame_layout: &wgpu::BindGroupLayout,
+    image_layouts: &[wgpu::BindGroupLayout],
     cache: Option<DiskCache>,
+) -> Vec<wgpu::RenderPipeline> {
+    let layouts: Vec<_> = image_layouts
+        .iter()
+        .enumerate()
+        .map(|(images, layout)| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("isthmus"),
+                bind_group_layouts: &[Some(frame_layout), Some(layout)][..if images == 0 { 1 } else { 2 }],
+                immediate_size: 0,
+            })
+        })
+        .collect();
+    let driver_cache = cache.as_ref().map(|disk| &disk.cache);
+    let compile = |shader: usize| compile(device, format, &layouts, driver_cache, &P::SHADERS[shader]);
+    #[cfg(target_arch = "wasm32")]
+    let pipelines = (0..P::SHADERS.len()).map(compile).collect();
+    #[cfg(not(target_arch = "wasm32"))]
+    let pipelines = compile_in_parallel(P::SHADERS.len(), compile);
+    if let Some(cache) = cache {
+        cache.save();
+    }
+    pipelines
 }
 
-impl Pipelines {
-    /// Prepares pipeline slots; `image_layouts[n]` is the image bind group layout for `n` captured images.
-    pub fn new<P: Program>(
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-        frame_layout: &wgpu::BindGroupLayout,
-        image_layouts: &[wgpu::BindGroupLayout],
-        cache: Option<DiskCache>,
-    ) -> Self {
-        let layouts = image_layouts
-            .iter()
-            .enumerate()
-            .map(|(images, layout)| {
-                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("isthmus"),
-                    bind_group_layouts: &[Some(frame_layout), Some(layout)][..if images == 0 { 1 } else { 2 }],
-                    immediate_size: 0,
-                })
-            })
-            .collect();
-        let this = Self {
-            device: device.clone(),
-            format,
-            cells: (0..P::SHADERS.len()).map(|_| OnceLock::new()).collect(),
-            layouts,
-            cache,
-        };
-        this.compile_all::<P>();
-        if let Some(cache) = &this.cache {
-            cache.save();
+#[cfg(not(target_arch = "wasm32"))]
+fn compile_in_parallel(
+    count: usize,
+    compile: impl Fn(usize) -> wgpu::RenderPipeline + Sync,
+) -> Vec<wgpu::RenderPipeline> {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::{sync::OnceLock, thread};
+
+    let slots: Vec<_> = (0..count).map(|_| OnceLock::new()).collect();
+    let threads = thread::available_parallelism().map_or(1, |threads| threads.get().min(4));
+    let next = AtomicUsize::new(0);
+    thread::scope(|scope| {
+        for _ in 0..threads.min(count) {
+            scope.spawn(|| {
+                while let shader = next.fetch_add(1, Ordering::Relaxed)
+                    && let Some(slot) = slots.get(shader)
+                {
+                    slot.get_or_init(|| compile(shader));
+                }
+            });
         }
-        this
-    }
+    });
+    slots.into_iter().map(|slot| slot.into_inner().expect("each shader was compiled")).collect()
+}
 
-    /// Compiles every pipeline now, a few at a time where there are threads. Each takes tens to hundreds of
-    /// milliseconds, so leaving them to the first draw that needs one hitches that frame.
-    fn compile_all<P: Program>(&self) {
-        // Browsers have no threads, but their pipelines compile in the background anyway.
-        #[cfg(target_arch = "wasm32")]
-        (0..P::SHADERS.len()).for_each(|shader| drop(self.get::<P>(shader)));
-        #[cfg(not(target_arch = "wasm32"))]
-        self.compile_in_parallel::<P>();
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn compile_in_parallel<P: Program>(&self) {
-        use core::sync::atomic::{AtomicUsize, Ordering};
-        use std::thread;
-        let threads = thread::available_parallelism().map_or(1, |threads| threads.get().min(4));
-        let next = AtomicUsize::new(0);
-        thread::scope(|scope| {
-            for _ in 0..threads {
-                scope.spawn(|| {
-                    while let shader = next.fetch_add(1, Ordering::Relaxed)
-                        && shader < P::SHADERS.len()
-                    {
-                        self.get::<P>(shader);
-                    }
-                });
-            }
-        });
-    }
-
-    /// The pipeline for a shader, compiling it on first use.
-    pub fn get<P: Program>(&self, shader: usize) -> &wgpu::RenderPipeline {
-        self.cells[shader].get_or_init(|| self.compile::<P>(shader))
-    }
-
-    fn compile<P: Program>(&self, shader: usize) -> wgpu::RenderPipeline {
-        let started = Instant::now();
-        let entry = &P::SHADERS[shader];
-        let [vertex, fragment] = entry.code.map(|code| {
-            self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(entry.name),
-                source: wgpu::ShaderSource::Wgsl(code.into()),
-            })
-        });
-        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+fn compile(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layouts: &[wgpu::PipelineLayout],
+    cache: Option<&wgpu::PipelineCache>,
+    entry: &ShaderEntry,
+) -> wgpu::RenderPipeline {
+    let started = Instant::now();
+    let [vertex, fragment] = entry.code.map(|code| {
+        device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(entry.name),
-            layout: Some(&self.layouts[entry.images]),
-            vertex: wgpu::VertexState {
-                module: &vertex,
-                entry_point: None,
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &fragment,
-                entry_point: None,
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: entry.format.unwrap_or(self.format),
-                    blend: blend_state(entry.blend),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: self.cache.as_ref().map(|disk| &disk.cache),
-        });
-        tracing::debug!(shader = entry.name, elapsed = ?started.elapsed(), "Compiled pipeline");
-        pipeline
-    }
+            source: wgpu::ShaderSource::Wgsl(code.into()),
+        })
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(entry.name),
+        layout: Some(&layouts[entry.images]),
+        vertex: wgpu::VertexState {
+            module: &vertex,
+            entry_point: None,
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &fragment,
+            entry_point: None,
+            targets: &[Some(wgpu::ColorTargetState {
+                format: entry.format.unwrap_or(format),
+                blend: blend_state(entry.blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache,
+    });
+    tracing::debug!(shader = entry.name, elapsed = ?started.elapsed(), "Compiled pipeline");
+    pipeline
 }
 
 const fn blend_state(blend: Blend) -> Option<wgpu::BlendState> {

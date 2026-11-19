@@ -1,5 +1,5 @@
 //! Text: shaped lines, placed on screen and sampled as signed distance fields on the GPU.
-use crate::{Rect, Sample, Sdf, Shape, raster};
+use crate::{Rect, Sample, Sdf, Shape};
 use core::ops::{Deref, Range};
 use glyph::{Glyph, PlacedGlyph, glyph_distance};
 use isthmus::{
@@ -181,7 +181,7 @@ impl Primitive for Text<'_> {
     type Sample = Sample;
 
     fn region(self, pixel_size: f32) -> Option<[Vec2; 4]> {
-        raster(self.bounds(0.0)).region(pixel_size)
+        self.bounds(0.0).padded_region(pixel_size)
     }
 
     fn sample(self, fragment: Fragment) -> (Sample, f32) {

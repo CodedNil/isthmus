@@ -1,7 +1,7 @@
 //! The device and queue, the per-frame storage the shaders read, and recording draws into it.
 use super::{
-    arena::Arena, buffer::UploadBuffer, error::RenderError, images::ImageCache, pipeline_cache::DiskCache,
-    pipelines::Pipelines, surface::SurfaceTarget,
+    arena::Arena, buffer::UploadBuffer, error::RenderError, images::ImageCache, pipeline_cache::DiskCache, pipelines,
+    surface::SurfaceTarget,
 };
 use crate::{Image, Program, ShaderData};
 use core::{any::type_name, array::from_fn, mem};
@@ -15,7 +15,7 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     pub device_name: String,
     pub format: wgpu::TextureFormat,
-    pipelines: Pipelines,
+    pipelines: Vec<wgpu::RenderPipeline>,
     frame_layout: wgpu::BindGroupLayout,
     /// Draw records and the words they share for the frame being recorded, uploaded once by [`Gpu::prepare`].
     pub arena: Arena,
@@ -66,7 +66,7 @@ impl Gpu {
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("frame"), entries: &entries });
         let images = ImageCache::new(&device, P::max_images());
         let cache = DiskCache::open(&device, &adapter, type_name::<P>());
-        let pipelines = Pipelines::new::<P>(&device, format, &frame_layout, &images.layouts, cache);
+        let pipelines = pipelines::compile_all::<P>(&device, format, &frame_layout, &images.layouts, cache);
         Self {
             device_name: adapter.get_info().name,
             buffers: [("isthmus frame", false), ("isthmus shared", true)]
@@ -163,7 +163,7 @@ impl Gpu {
             // Names each run in GPU captures, such as RenderDoc's event list, without costing release builds.
             #[cfg(debug_assertions)]
             pass.insert_debug_marker(P::SHADERS[paint.shader].name);
-            pass.set_pipeline(self.pipelines.get::<P>(paint.shader));
+            pass.set_pipeline(&self.pipelines[paint.shader]);
             if let Some(image) = &paint.image {
                 pass.set_bind_group(abi::IMAGE_SET, image, &[]);
             }

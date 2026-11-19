@@ -24,7 +24,7 @@ pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                 Vec2::from_angle((hash(seed + index as f32 * 11.0) - 0.5) * 0.3),
             );
             let size: Vec2 = frame.screen_size;
-            frame.shader("rocks").with((size, depth, seed, quad)).shape(|_| quad).paint(|_, surface| {
+            frame.shader("rocks").with((size, depth, seed, quad)).bounds(quad).paint(|_, surface| {
                 let point = surface.uv * 2.0 - 1.0;
                 let aa = 2.0 / quad.size.y;
                 let mut distance: f32 = -2.0;
@@ -39,6 +39,8 @@ pub(super) fn rocks(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                 if mask == 0.0 {
                     kill();
                 }
+
+                // Shade the stone face, fissure and moss inside the silhouette.
                 let facet = (point.x * 0.43 - point.y + (texture - 0.5) * 0.17).smoothstep(-0.08, -0.02);
                 let crack = (point.x * 0.74 + point.y + (noise(point * 6.0 + seed) - 0.5) * 0.12 - 0.2)
                     .abs()
@@ -64,7 +66,7 @@ pub(super) fn deadwood(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32)
             Vec2::from_angle(-0.18 + hash(seed) * 0.35),
         );
         let size: Vec2 = frame.screen_size;
-        frame.shader("deadwood").with((size, seed, depth, quad)).shape(|_| quad).paint(|_, surface| {
+        frame.shader("deadwood").with((size, seed, depth, quad)).bounds(quad).paint(|_, surface| {
             let mut point = surface.uv * 2.0 - 1.0;
             point.y += (point.x * 3.0).sin() * 0.09;
             let aa = 2.0 / quad.size.y;
@@ -72,10 +74,13 @@ pub(super) fn deadwood(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32)
             let edge = (point.y.abs() - 0.49 + grain * 0.08)
                 .max(point.x.abs() - 0.89 + (noise(vec2(point.y * 23.0, seed)) - 0.5) * 0.12);
             let mut alpha = edge.smoothstep(aa, -aa);
+
             let moss = (-point.y + wash(point * 4.0 + seed) * 0.5).smoothstep(0.2, 0.65);
             let wood =
                 vec3(0.22, 0.27, 0.23).lerp(vec3(0.62, 0.49, 0.34), grain).lerp(vec3(0.39, 0.53, 0.33), moss * 0.8);
             let mut color = wood * alpha;
+
+            // Composite the fungus caps over the wood.
             for fungus in 0..4 {
                 let random = hash(seed + fungus as f32 * 7.0);
                 let offset = point - vec2(-0.6 + fungus as f32 * 0.31 + random * 0.09, -0.45 + random * 0.04);
@@ -115,7 +120,7 @@ pub(super) fn fish(frame: &mut Frame<'_>) {
                 velocity,
             );
             let size: Vec2 = frame.screen_size;
-            frame.shader("fish").with((size, seed, beat, quad)).shape(|_| quad).paint(|_, surface| {
+            frame.shader("fish").with((size, seed, beat, quad)).bounds(quad).paint(|_, surface| {
                 let mut point = surface.uv * 2.0 - 1.0;
                 let aa = 2.0 / quad.size.y;
                 point.y -= (beat + point.x * 4.0).sin() * 0.075 * (1.0 - point.x).powi(2);
@@ -126,6 +131,8 @@ pub(super) fn fish(frame: &mut Frame<'_>) {
                 let mask = body.min(tail).smoothstep(aa, -aa);
                 let fin_mask = fins.smoothstep(aa, -aa) * 0.48;
                 let alpha = mask + fin_mask * (1.0 - mask);
+
+                // Shade the fish inside the body and fin masks.
                 let scales = noise(point * vec2(29.0, 17.0) + seed);
                 let belly = point.y.smoothstep(-0.12, 0.22);
                 let sheen = (point.y + 0.065).abs().smoothstep(0.09 + aa, 0.02);

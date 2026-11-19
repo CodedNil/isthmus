@@ -206,6 +206,8 @@ impl StatusPanel {
                     let radius = graph_pill.size().y * 0.5;
                     let history_step = half_width * 2.0 / HISTORY_END as f32;
                     let graph_height = radius - 2.0;
+
+                    // Sample the history curve and convert its slope to a screen-space distance.
                     let curve = |channel: Vec2, color: Vec3, fill_strength: f32| {
                         let distance = {
                             let sample = ((point.x + half_width) / history_step + history_scroll)
@@ -223,6 +225,8 @@ impl StatusPanel {
                         let sample = Sample::new(distance, 0.0);
                         color * (sample.fill() * fill_strength + sample.band(-CHART_LINE_WIDTH..CHART_LINE_WIDTH))
                     };
+
+                    // Layer both curves over the grid and hardware frame.
                     let graphs = curve(Vec2::X, USAGE_COLOR, 0.156) + curve(Vec2::Y, MEMORY_COLOR, 0.084);
                     let cell = (((point + vec2(half_width, radius)) / vec2(7.0, 6.1)).fract() - 0.5).abs();
                     let grid = cell.x.smoothstep(0.49, 0.46).max(cell.y.smoothstep(0.49, 0.45)) * 0.045;
@@ -252,19 +256,22 @@ impl StatusPanel {
                 .frame
                 .shader("status battery")
                 .with((panel, rect, charging, level, liquid_color))
-                .shape(|_| rect)
+                .bounds(rect)
                 .paint(|frame, surface| {
                     let surface = sample_deformation(Shape::pill(panel), frame, surface.pixel);
                     let point = rect.local(surface.refracted) / 0.8;
                     let body = Shape::rounded_rect(vec2(23.0, 30.0), 3.2).translated(vec2(0.0, 1.0));
                     let terminal = Shape::rounded_rect(vec2(8.0, 3.6), 0.8).translated(vec2(0.0, -15.6));
                     let shell = body.union(terminal).fill_at(point);
+
+                    // Fill the shell to the charge level with a moving surface.
                     let inside = Shape::rounded_rect(vec2(17.0, 24.0), 1.7).translated(vec2(0.0, 1.0));
                     let liquid_y = 12.0 - level.saturate() * 24.0;
                     let wave = (point.x * 0.62 + frame.time * (1.4 + charging * 1.2)).sin() * 1.15
                         + (point.x * 0.27 - frame.time * 0.8).sin() * 0.45;
                     let liquid =
                         Sample::new(inside.distance_at(point).max(liquid_y + wave - (point.y - 1.0)), 0.0).fill();
+
                     // Two bubbles per 3px column, each with its own speed and phase so they trickle steadily.
                     // Neighbouring columns are checked so none is cut at a column edge.
                     let mut bubble = 0.0f32;
@@ -313,10 +320,9 @@ impl StatusPanel {
         }
 
         // The ribbon fills the section width; the lens layer is padded so nothing is clipped.
-        let visualizer_rect =
+        let visualizer_rect: Rect =
             Rect::from_center_size(audio_rect.center(), vec2(AUDIO_WIDTH, context.config.height - GAP * 2.0));
         let audio_rect: Rect = Rect::from_center_size(audio_rect.center(), audio_rect.size() + vec2(8.0, 0.0));
-        let visualizer_rect: Rect = visualizer_rect;
         context
             .frame
             .shader("status audio")
@@ -359,7 +365,7 @@ impl StatusPanel {
         context.interaction.interact(POWER_DRAG_ID, Shape::circle(icon_home, 13.0));
         let drag = context.interaction.drag_of(POWER_DRAG_ID);
         let pointer_y = context.interaction.mouse_pos().y;
-        let pull =
+        let pull: f32 =
             drag.map_or(0.0, |_| ((pointer_y - icon_home.y) / (context.config.height * 0.5)).clamp_num(-1.0, 1.0));
         if let Some(action) = power_action(pull).filter(|_| drag.is_some_and(|drag| drag.released)) {
             platform::run_power_action(action);
@@ -367,18 +373,12 @@ impl StatusPanel {
         let icon_y =
             drag.map_or(icon_home.y, |_| pointer_y.clamp_num(panel.min.y + ICON_RADIUS, panel.max.y - ICON_RADIUS));
         let snap_progress = ((pull.abs() - ARMED_PULL) / (1.0 - ARMED_PULL)).smoothstep(0.0, 1.0);
-        let action_rect =
+        let action_rect: Rect =
             Rect::from_center_size(icon_home, vec2(ACTION_WIDTH, context.config.height) + Vec2::splat(GAP * 2.0));
-        let action_rect: Rect = action_rect;
         let icon_center: Vec2 = vec2(icon_home.x, icon_y);
-        let pull: f32 = pull;
         let icon_scale: f32 = 1.0 + snap_progress * 0.35;
-        context
-            .frame
-            .shader("status power")
-            .with((action_rect, icon_center, pull, icon_scale))
-            .shape(|_| action_rect)
-            .paint(|_, surface| {
+        context.frame.shader("status power").with((icon_center, pull, icon_scale)).bounds(action_rect).paint(
+            |_, surface| {
                 let (shutdown, reboot) = (pull.saturate(), (-pull).saturate());
                 // No pointer lens, which would warp the thin strokes.
                 let point = (surface.pixel - icon_center) / icon_scale;
@@ -406,10 +406,12 @@ impl StatusPanel {
                 let barb = stroke(barb(1.0).min(barb(-1.0)), barb_presence);
                 let nearest = ring.0.min(stem.0).min(barb.0);
                 let alpha = ring.1.max(stem.1).max(barb.1);
+
                 let armed = ((pull.abs() - ARMED_PULL) / 0.08).saturate();
                 let color = TEXT_COLOR.lerp(vec3(1.0, 0.24, 0.2), armed);
                 with_halo(color, alpha, nearest, 0.3)
-            });
+            },
+        );
         context.interaction.input_region(panel);
     }
 }

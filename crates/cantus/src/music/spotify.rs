@@ -12,8 +12,11 @@ use futures_util::{
     stream::FuturesUnordered,
 };
 use librespot_core::{
-    FileId, Session, SessionConfig, SpotifyId, SpotifyUri, authentication::Credentials, cache::Cache,
-    dealer::protocol::Message as DealerMessage, error::ErrorKind,
+    FileId, Session, SessionConfig, SpotifyId, SpotifyUri,
+    authentication::Credentials,
+    cache::Cache,
+    dealer::protocol::{FallbackWrapper, Message as DealerMessage, PayloadValue},
+    error::ErrorKind,
 };
 use librespot_metadata::{Metadata as _, Playlist, Track as CatalogTrack};
 use librespot_oauth::OAuthClientBuilder;
@@ -52,13 +55,18 @@ use tokio::{
     task::spawn_blocking,
     time::{Instant as TokioInstant, MissedTickBehavior, interval, sleep, timeout},
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use web_time::Instant;
 
 const CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 const REDIRECT_URI: &str = "http://127.0.0.1:8898/login";
 const METADATA_CACHE_LIMIT: usize = 512;
-const PLAYBACK_REFRESH_INTERVAL: Duration = Duration::from_secs(180);
+const PLAYBACK_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const TRACK_END_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const CONNECT_STATE_TOPIC: &str = "hm://connect-state/v1";
+const CLUSTER_TOPIC: &str = "hm://connect-state/v1/cluster";
 
 const RATING_PLAYLISTS: [&str; 10] = ["0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0"];
 
@@ -83,8 +91,21 @@ impl Spotify {
                     let result = async {
                         let session = connect().await?;
                         connected_session.send_replace(Some(session.clone()));
-                        run_spotify(session, &mut receiver, updater.clone(), playlist_targets.clone(), ratings_enabled)
-                            .await
+                        let result = run_spotify(
+                            session.clone(),
+                            &mut receiver,
+                            updater.clone(),
+                            playlist_targets.clone(),
+                            ratings_enabled,
+                        )
+                        .await;
+                        connected_session.send_replace(None);
+                        freeze_playback(&updater);
+                        session.shutdown();
+                        if timeout(REQUEST_TIMEOUT, session.dealer().close()).await.is_err() {
+                            warn!("Timed out closing Spotify dealer");
+                        }
+                        result
                     }
                     .await;
                     connected_session.send_replace(None);
@@ -148,7 +169,7 @@ async fn connect() -> MusicResult<Session> {
         Credentials::with_access_token(token.access_token)
     };
     let session = Session::new(SessionConfig::default(), Some(cache));
-    session.connect(credentials, true).await?;
+    timeout(REQUEST_TIMEOUT, session.connect(credentials, true)).await??;
     info!(username = %session.username(), device_id = %session.device_id(), "Authenticated Spotify session");
     Ok(session)
 }
@@ -162,10 +183,10 @@ async fn run_spotify(
 ) -> MusicResult<()> {
     let dealer = session.dealer();
     let mut connections = dealer.listen_for("hm://pusher/v1/connections", Ok)?;
-    let mut clusters = dealer.listen_for("hm://connect-state/v1/cluster", DealerMessage::from_raw::<ClusterUpdate>)?;
+    let mut playback = dealer.add_listen_for(CONNECT_STATE_TOPIC)?;
     let mut playlist_changes = dealer.listen_for("hm://playlist/v2", |_| Ok(()))?;
-    dealer.start().await?;
-    let mut watchdog = interval(Duration::from_secs(15));
+    timeout(REQUEST_TIMEOUT, dealer.start()).await??;
+    let mut watchdog = interval(WATCHDOG_INTERVAL);
     watchdog.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut worker = SpotifyWorker {
@@ -179,11 +200,15 @@ async fn run_spotify(
         last_update: TokioInstant::now(),
         ..
     };
+    let mut last_refresh = TokioInstant::now();
+    let mut registered = false;
 
     loop {
-        let is_playing = worker.player.as_ref().is_some_and(|player| player.is_playing && !player.is_paused);
         tokio::select! {
-            Some(command) = commands.recv() => worker.command(command).await,
+            Some(command) = commands.recv() => {
+                timeout(Duration::from_secs(20), worker.command(command)).await
+                    .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, format!("Spotify command: {error}")))?;
+            }
             Some((requested, mut values)) = worker.pending.next() => {
                 let changed = !values.is_empty();
                 for uri in requested {
@@ -197,58 +222,140 @@ async fn run_spotify(
                     worker.publish(false);
                 }
             },
-            Some(message) = connections.next() => match message {
-                Ok(message) => {
+            message = connections.next() => match message {
+                Some(Ok(message)) => {
                     if let Some(connection_id) = message.headers.iter().find_map(|(key, value)| {
                         key.eq_ignore_ascii_case("Spotify-Connection-Id").then_some(value)
                     }) {
                         worker.session.set_connection_id(connection_id);
-                        let reason = if worker.player.is_none() {
-                            PutStateReason::NEW_DEVICE
-                        } else {
+                        let reason = if registered {
                             PutStateReason::NEW_CONNECTION
+                        } else {
+                            PutStateReason::NEW_DEVICE
                         };
-                        match SpotifyWorker::register(&worker.session, reason).await {
-                            Ok(cluster) => worker.update_cluster(cluster),
-                            Err(error) => error!(%error, "Failed to register Spotify observer"),
-                        }
+                        let cluster = timeout(REQUEST_TIMEOUT, SpotifyWorker::register(&worker.session, reason))
+                            .await.map_err(|error| {
+                                io::Error::new(io::ErrorKind::TimedOut, format!("Spotify observer registration: {error}"))
+                            })??;
+                        info!(reconnected = registered, "Spotify playback subscription registered");
+                        registered = true;
+                        worker.update_cluster(cluster, "registration");
                         worker.refresh_playlists().await;
+                    } else {
+                        warn!("Spotify dealer connection event had no connection ID");
                     }
                 }
-                Err(error) => warn!(%error, "Invalid Spotify connection update"),
+                Some(Err(error)) => warn!(%error, "Invalid Spotify connection update"),
+                None => return Err(io::Error::other("Spotify dealer connection stream closed").into()),
             },
-            Some(update) = clusters.next() => match update {
-                Ok(update) => {
-                    if let Some(cluster) = update.cluster.into_option() {
-                        worker.update_cluster(cluster);
+            message = playback.next() => {
+                let message = message.ok_or_else(|| io::Error::other("Spotify playback stream closed"))?;
+                let topic = message.uri.split_once('?').map_or(message.uri.as_str(), |(topic, _)| topic);
+                let cluster_topic = topic == CLUSTER_TOPIC
+                    || topic.strip_prefix(CLUSTER_TOPIC).is_some_and(|tail| tail.starts_with('/'));
+                if cluster_topic {
+                    match decode_cluster(message) {
+                        Ok(update) => {
+                            debug!(reason = ?update.update_reason, "Spotify dealer cluster event");
+                            if let Some(cluster) = update.cluster.into_option() {
+                                worker.update_cluster(cluster, "dealer");
+                            } else {
+                                warn!("Spotify dealer update contained no cluster");
+                            }
+                        }
+                        Err(error) => warn!(%error, "Invalid Spotify cluster update"),
                     }
+                } else {
+                    debug!(%topic, "Unhandled Spotify Connect dealer topic");
                 }
-                Err(error) => warn!(%error, "Invalid Spotify cluster update"),
-            },
-            _ = watchdog.tick(), if is_playing => {
-                if worker.last_update.elapsed() < PLAYBACK_REFRESH_INTERVAL && worker.refresh_failures == 0 {
+            }
+            _ = watchdog.tick() => {
+                if worker.session.is_invalid() {
+                    return Err(io::Error::other("Spotify session invalidated").into());
+                }
+                if !registered && last_refresh.elapsed() >= PLAYBACK_REFRESH_INTERVAL {
+                    return Err(io::Error::other("Spotify dealer did not announce a connection").into());
+                }
+                let quiet = worker.last_update.elapsed();
+                let track_end = worker.player.as_ref().is_some_and(|player| {
+                    let (position, rate) = playback_position(player, worker.server_now());
+                    rate > 0.0 && player.duration > 0 && position >= player.duration as f32
+                });
+                let since_refresh = last_refresh.elapsed();
+                let due = quiet >= PLAYBACK_REFRESH_INTERVAL && since_refresh >= PLAYBACK_REFRESH_INTERVAL
+                    || track_end && since_refresh >= TRACK_END_REFRESH_INTERVAL;
+                if !registered || !due && worker.refresh_failures == 0 {
                     continue;
                 }
-                // Dealer keeps the WebSocket alive, so a quiet stream is not a dead session.
-                let refresh = SpotifyWorker::register(&worker.session, PutStateReason::PULL_PLAYBACK);
-                match timeout(Duration::from_secs(8), refresh).await {
-                    Ok(Ok(cluster)) => worker.update_cluster(cluster),
-                    result => {
+                last_refresh = TokioInstant::now();
+                debug!(?quiet, track_end, "Refreshing Spotify playback from server");
+                let refresh = async {
+                    timeout(REQUEST_TIMEOUT, SpotifyWorker::register(&worker.session, PutStateReason::PULL_PLAYBACK))
+                        .await?
+                };
+                match refresh.await {
+                    Ok(cluster) => {
+                        worker.refresh_failures = 0;
+                        worker.update_cluster(cluster, "watchdog");
+                    }
+                    Err(error) => {
                         worker.refresh_failures += 1;
-                        warn!(?result, failures = worker.refresh_failures, "Failed to refresh quiet Spotify playback stream");
+                        warn!(%error, attempts = worker.refresh_failures, ?quiet, "Spotify playback refresh failed");
                         if worker.session.is_invalid() || worker.refresh_failures >= 3 {
                             return Err(io::Error::other("Spotify playback refresh repeatedly failed").into());
                         }
                     }
                 }
             }
-            Some(change) = playlist_changes.next() => match change {
-                Ok(()) => worker.refresh_playlists().await,
-                Err(error) => warn!(%error, "Invalid Spotify playlist update"),
+            change = playlist_changes.next() => match change {
+                Some(Ok(())) => worker.refresh_playlists().await,
+                Some(Err(error)) => warn!(%error, "Invalid Spotify playlist update"),
+                None => return Err(io::Error::other("Spotify playlist stream closed").into()),
             },
-            else => return Ok(()),
         }
     }
+}
+
+fn decode_cluster(message: DealerMessage) -> MusicResult<ClusterUpdate> {
+    match &message.payload {
+        PayloadValue::Raw(_) => Ok(DealerMessage::from_raw(message)?),
+        PayloadValue::Json(_) => match DealerMessage::try_from_json(message) {
+            Ok(FallbackWrapper::Inner(update)) => Ok(update),
+            _ => Err(io::Error::other("Unrecognized JSON cluster update").into()),
+        },
+        PayloadValue::Empty => Err(io::Error::other("Empty cluster update").into()),
+    }
+}
+
+fn freeze_playback(updater: &AppUpdater) {
+    send_update(updater, |app| {
+        let queue = &mut app.music.queue;
+        let position = queue.timeline.position_now();
+        let position = queue
+            .tracks
+            .get(queue.index)
+            .filter(|track| track.duration_ms > 0)
+            .map_or(position, |track| position.min(track.duration_ms as f32));
+        queue.observe(queue.index, position, 0.0, Instant::now());
+        app.music.playing = false;
+    });
+}
+
+fn playback_position(player: &PlayerState, server_now: i64) -> (f32, f32) {
+    let rate = if player.is_playing
+        && !player.is_paused
+        && !player.is_buffering
+        && player.playback_speed.is_finite()
+        && player.playback_speed > 0.0
+    {
+        player.playback_speed as f32
+    } else {
+        0.0
+    };
+    // Spotify timestamps use the server clock. A missing timestamp supplies no elapsed time.
+    let age_ms = if player.timestamp > 0 { server_now.saturating_sub(player.timestamp).max(0) } else { 0 };
+    let position = (player.position_as_of_timestamp.max(0) as f64 + age_ms as f64 * f64::from(rate)) as f32;
+    (position, rate)
 }
 
 struct SpotifyWorker {
@@ -372,27 +479,84 @@ impl SpotifyWorker {
         Ok(Cluster::parse_from_bytes(&bytes)?)
     }
 
-    fn update_cluster(&mut self, cluster: Cluster) {
-        self.last_update = TokioInstant::now();
-        self.refresh_failures = 0;
+    fn server_now(&self) -> i64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+            + self.session.time_delta() * 1000
+    }
+
+    fn update_cluster(&mut self, cluster: Cluster, source: &str) {
+        let quiet = self.last_update.elapsed();
         let Some(player) = cluster.player_state.into_option() else {
-            warn!("Spotify cluster update contained no player state");
+            warn!(source, ?quiet, "Spotify cluster update contained no player state");
             return;
         };
         if player.track.as_ref().is_none_or(|track| track.uri.is_empty()) {
-            warn!(active_device = %cluster.active_device_id, playing = player.is_playing,
-                buffering = player.is_buffering, "Ignoring Spotify snapshot without a current track");
+            warn!(
+                source,
+                ?quiet,
+                has_active_device = !cluster.active_device_id.is_empty(),
+                playing = player.is_playing,
+                paused = player.is_paused,
+                buffering = player.is_buffering,
+                "Spotify snapshot contained no current track"
+            );
             if cluster.active_device_id.is_empty() && !player.is_playing {
-                self.active_device = None;
-                send_update(&self.updater, |app| {
-                    let queue = &mut app.music.queue;
-                    queue.observe(queue.index, queue.timeline.position_now(), 0.0, Instant::now());
-                    app.music.playing = false;
-                });
+                self.clear_active_device();
+            } else if self.active_device.as_deref() == Some(cluster.active_device_id.as_str()) && player.is_paused {
+                if let Some(previous) = &mut self.player {
+                    previous.is_paused = true;
+                }
+                freeze_playback(&self.updater);
             }
             return;
         }
-        self.active_device = (!cluster.active_device_id.is_empty()).then_some(cluster.active_device_id);
+        self.last_update = TokioInstant::now();
+        self.refresh_failures = 0;
+        let active_device = (!cluster.active_device_id.is_empty()).then_some(cluster.active_device_id);
+        let now = self.server_now();
+        let (position_ms, rate) = playback_position(&player, now);
+        let device_changed = active_device != self.active_device;
+        let previous_position_ms = self.player.as_ref().map(|previous| playback_position(previous, now).0);
+        let same_track = self
+            .player
+            .as_ref()
+            .and_then(|state| state.track.as_ref())
+            .zip(player.track.as_ref())
+            .is_some_and(|(before, after)| before.uri == after.uri && before.uid == after.uid);
+        let corrected =
+            same_track && previous_position_ms.is_some_and(|previous| (previous - position_ms).abs() >= 3_000.0);
+        let state_changed = self.player.as_ref().is_some_and(|previous| {
+            previous.is_playing != player.is_playing
+                || previous.is_paused != player.is_paused
+                || previous.is_buffering != player.is_buffering
+        });
+        let track = player.track.as_ref().map(|track| track.uri.as_str());
+        if device_changed || state_changed || corrected || source == "watchdog" && !same_track {
+            info!(
+                source,
+                ?quiet,
+                ?track,
+                device_changed,
+                same_track,
+                ?previous_position_ms,
+                position_ms,
+                rate,
+                playing = player.is_playing,
+                paused = player.is_paused,
+                buffering = player.is_buffering,
+                "Spotify playback state changed"
+            );
+        }
+        debug!(
+            source,
+            ?track,
+            position_ms,
+            rate,
+            player_timestamp_ms = player.timestamp,
+            cluster_timestamp_ms = cluster.server_timestamp_ms,
+            "Spotify playback snapshot"
+        );
+        self.active_device = active_device;
         let tracks = player.prev_tracks.iter().chain(player.track.as_ref()).chain(&player.next_tracks);
         // Keep recent metadata across temporary queue gaps.
         if self.track_metadata.len() > METADATA_CACHE_LIMIT {
@@ -422,6 +586,18 @@ impl SpotifyWorker {
         self.publish(true);
     }
 
+    fn clear_active_device(&mut self) {
+        self.last_update = TokioInstant::now();
+        self.refresh_failures = 0;
+        if self.active_device.take().is_some() {
+            info!("Spotify has no active playback device");
+        }
+        if let Some(player) = &mut self.player {
+            player.is_playing = false;
+        }
+        freeze_playback(&self.updater);
+    }
+
     /// Publish queue metadata; only a new player report may reset the playback clock.
     fn publish(&self, observe_playback: bool) {
         let Some(player) = &self.player else { return };
@@ -443,21 +619,7 @@ impl SpotifyWorker {
             .collect();
         let playing = player.is_playing && !player.is_paused;
         let observation = observe_playback.then(|| {
-            // Spotify timestamps use its server clock, not this machine's wall clock.
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
-                + self.session.time_delta() * 1000;
-            let rate = if playing
-                && !player.is_buffering
-                && player.playback_speed.is_finite()
-                && player.playback_speed > 0.0
-            {
-                player.playback_speed as f32
-            } else {
-                0.0
-            };
-            // A missing timestamp supplies no elapsed time.
-            let age_ms = if player.timestamp > 0 { now.saturating_sub(player.timestamp).max(0) } else { 0 };
-            let position = (player.position_as_of_timestamp.max(0) as f64 + age_ms as f64 * f64::from(rate)) as f32;
+            let (position, rate) = playback_position(player, self.server_now());
             (position, rate, Instant::now())
         });
         send_update(&self.updater, move |app| {
@@ -484,8 +646,10 @@ impl SpotifyWorker {
     }
 
     async fn refresh_playlists(&mut self) {
-        if let Err(error) = self.load_playlists().await {
-            warn!(%error, "Spotify library refresh failed");
+        match timeout(Duration::from_secs(15), self.load_playlists()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!(%error, "Spotify library refresh failed"),
+            Err(_) => warn!("Spotify library refresh timed out"),
         }
     }
 
@@ -778,6 +942,39 @@ mod tests {
     const PLAYBACK: &str = "spotify:track:3OIgsG6duyvwodGPoFYVzJ";
 
     #[test]
+    fn playback_clock_only_advances_when_playing_and_ready() {
+        let mut player = PlayerState {
+            position_as_of_timestamp: 4_000,
+            timestamp: 1_000,
+            playback_speed: 1.0,
+            is_playing: true,
+            ..Default::default()
+        };
+        assert_eq!(playback_position(&player, 3_000), (6_000.0, 1.0));
+        player.is_buffering = true;
+        assert_eq!(playback_position(&player, 3_000), (4_000.0, 0.0));
+        player.is_buffering = false;
+        player.is_paused = true;
+        assert_eq!(playback_position(&player, 3_000), (4_000.0, 0.0));
+    }
+
+    #[test]
+    fn dealer_decodes_binary_and_json_cluster_events() {
+        let raw = ClusterUpdate {
+            cluster: MessageField::some(Cluster { active_device_id: "phone".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        for payload in [
+            PayloadValue::Raw(raw.write_to_bytes().unwrap()),
+            PayloadValue::Json(r#"{"cluster":{"activeDeviceId":"phone"}}"#.into()),
+        ] {
+            let message = DealerMessage { headers: HashMap::new(), payload, uri: CLUSTER_TOPIC.into() };
+            let update = decode_cluster(message).unwrap();
+            assert_eq!(update.cluster.as_ref().unwrap().active_device_id, "phone");
+        }
+    }
+
+    #[test]
     fn sparse_reports_keep_metadata_without_reusing_changed_occurrence_state() {
         for uid in ["original", "after-reconnect"] {
             let provided = ProvidedTrack {
@@ -833,15 +1030,20 @@ mod tests {
             }),
             ..
         };
-        worker.update_cluster(Cluster {
-            active_device_id: "playing-device".into(),
-            player_state: MessageField::some(PlayerState { is_buffering: true, ..Default::default() }),
-            ..Default::default()
-        });
+        worker.update_cluster(
+            Cluster {
+                active_device_id: "playing-device".into(),
+                player_state: MessageField::some(PlayerState { is_buffering: true, ..Default::default() }),
+                ..Default::default()
+            },
+            "test",
+        );
         assert_eq!(worker.player.as_ref().unwrap().track.as_ref().unwrap().uri, REQUESTED);
         assert_eq!(worker.active_device.as_deref(), Some("playing-device"));
-        worker
-            .update_cluster(Cluster { player_state: MessageField::some(PlayerState::default()), ..Default::default() });
+        worker.update_cluster(
+            Cluster { player_state: MessageField::some(PlayerState::default()), ..Default::default() },
+            "test",
+        );
         assert_eq!(worker.player.as_ref().unwrap().track.as_ref().unwrap().uri, REQUESTED);
         assert!(worker.active_device.is_none());
     }

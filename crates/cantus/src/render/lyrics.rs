@@ -294,10 +294,11 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
     if contributed {
         let bounds: Rect = Rect::from_center_size(badge, Vec2::splat(10.0)).expanded(BACKDROP_REACH);
         let center: Vec2 = badge;
-        context.frame.shader("lyric badge").with((bounds, center)).shape(|_| raster(bounds)).paint(|_, fragment| {
+        context.frame.shader("lyric badge").with(center).bounds(bounds).paint(|_, fragment| {
             let sample = lyric_sample(Shape::star(4.0, 2.56).offset(0.8).sample_at(fragment.pixel - center));
-            let color = sample.paint(vec4(1.0, 0.82, 0.24, 1.0), lyric_shadow(sample.distance));
-            color.with_w(color.w * 0.5 / sample.coverage.max(f32::MIN_POSITIVE))
+            let shadow = lyric_shadow(sample.distance);
+            let badge = sample.paint(vec4(1.0, 0.82, 0.24, 1.0), shadow);
+            badge.with_w(badge.w * 0.5 / sample.coverage.max(f32::MIN_POSITIVE))
         });
     }
     for track in &tracks[first..] {
@@ -308,50 +309,63 @@ pub fn show(context: &mut UiContext, music: &mut Music, layout: BarLayout) {
         let baseline: f32 = PANEL_START + context.config.height + LYRIC_INSET;
 
         for channel in &lyrics.channels {
-            let color = channel.singer.map_or(GROUP_COLOR, |singer| CHANNEL_COLORS[singer % CHANNEL_COLORS.len()]);
+            let color: Vec3 =
+                channel.singer.map_or(GROUP_COLOR, |singer| CHANNEL_COLORS[singer % CHANNEL_COLORS.len()]);
             for run in channel
                 .runs
                 .iter()
                 .skip_while(|run| x + run.x + run.width < screen.start)
                 .take_while(|run| x + run.x <= screen.end)
             {
-                let origin = vec2(x + run.x - run.line.text.min.x.min(0.0) * run.scale, baseline);
-                let stretch = vec2(run.scale, 1.0);
+                let scale: f32 = run.scale;
+                let row = run.lane as f32;
+                let origin = vec2(x + run.x - run.line.text.min.x.min(0.0) * scale, baseline);
+                let line: Text = run.line.at(origin);
+                let stretch = vec2(scale, 1.0);
                 let bounds: Rect = Rect::new(
                     origin + run.line.text.min * stretch,
-                    origin + run.line.text.max * stretch + vec2(0.0, run.lane as f32 * ROW_SPACING),
+                    origin + run.line.text.max * stretch + vec2(0.0, row * ROW_SPACING),
                 )
-                .expanded(BACKDROP_REACH * run.scale + 2.0);
+                .expanded(BACKDROP_REACH * scale + 2.0);
+
                 // One light field crosses every fragment and lane at the playhead.
-                let line: Text = run.line.at(origin);
-                let row = run.lane as f32;
-                let scale: f32 = run.scale;
-                let color: Vec4 = color.extend(1.0);
                 context
                     .frame
                     .shader("lyric line")
-                    .with((layout, row, scale, baseline, color, bounds, line))
-                    .shape(|_| raster(bounds))
+                    .with((layout, line, scale, row, color, baseline))
+                    .bounds(bounds)
                     .paint(|frame, fragment| {
-                        let distance = fragment.pixel.x - layout.playhead_x;
-                        let active = (1.0 - (distance / 52.0).powi(2)).max(0.0).powi(2);
-                        let wave = distance * 0.16 - frame.time * 3.0;
-                        let mut point = line.origin + (fragment.pixel - line.origin) / vec2(scale, 1.0);
+                        let playhead_x = layout.playhead_x;
+                        let pixel = fragment.pixel;
+                        let playhead_offset = pixel.x - playhead_x;
+                        let light = (1.0 - (playhead_offset / 52.0).powi(2)).max(0.0).powi(2);
+                        let wave = playhead_offset * 0.16 - frame.time * 3.0;
+
+                        // Sample the glyphs in unstretched coordinates, with the lane offset and ripple applied.
+                        let stretch = vec2(scale, 1.0);
+                        let mut point = line.origin + (pixel - line.origin) / stretch;
                         point.y -= ROW_SPACING * row;
-                        point.y += active * (0.6 + 0.4 * wave.sin());
+                        point.y += light * (0.6 + 0.4 * wave.sin());
                         let surface = lyric_sample(line.outlined(BACKDROP_REACH).sample_at(point));
-                        let mut ink = color.truncate();
-                        let mut halo = lyric_shadow(surface.distance);
-                        if active > 0.0 {
-                            let sheen = (wave + (fragment.pixel.y - baseline) * 0.25).sin().max(0.0).powi(8);
-                            ink = ink.lerp(Vec3::ONE, active * (0.3 + 0.7 * sheen));
-                            let glow = active
+
+                        // The playhead brightens the ink and layers a glow over the shadow.
+                        let edge_distance = surface.distance;
+                        let shadow = lyric_shadow(edge_distance);
+                        let (ink, halo) = if light > 0.0 {
+                            let height = pixel.y - baseline;
+                            let sheen = (wave + height * 0.25).sin().max(0.0).powi(8);
+                            let ink = color.lerp(Vec3::ONE, light * (0.3 + 0.7 * sheen));
+                            let glow = light
                                 * (0.1 + 0.12 * sheen)
-                                * (-surface.distance.max(0.0) * 0.6).exp()
-                                * surface.distance.smoothstep(GLOW_REACH, GLOW_REACH - 2.0);
-                            halo = source_over(color.truncate().lerp(Vec3::ONE, 0.7).extend(glow), halo);
-                        }
-                        let opacity = history_opacity(fragment.pixel.x, layout.playhead_x);
+                                * (-edge_distance.max(0.0) * 0.6).exp()
+                                * edge_distance.smoothstep(GLOW_REACH, GLOW_REACH - 2.0);
+                            let glow_color = color.lerp(Vec3::ONE, 0.7).extend(glow);
+                            (ink, source_over(glow_color, shadow))
+                        } else {
+                            (color, shadow)
+                        };
+
+                        let opacity = history_opacity(pixel.x, playhead_x);
                         surface.paint(ink.extend(1.0), halo) * vec4(1.0, 1.0, 1.0, opacity)
                     });
             }

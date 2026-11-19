@@ -597,8 +597,9 @@ impl WeatherLayout {
                 refract(weather_panel(pill, expansion, timer_support), frame, line.outlined(TEXT_SHADOW_REACH))
             })
             .paint(|_, surface| {
-                surface.paint(color.with_w(1.0), TEXT_SHADOW.with_w(TEXT_SHADOW.w * TEXT_SHADOW_STRENGTH))
-                    * vec4(1.0, 1.0, 1.0, color.w * if clip { surface.parent_fill } else { 1.0 })
+                let coverage = if clip { surface.parent_fill } else { 1.0 };
+                let shadow = TEXT_SHADOW.with_w(TEXT_SHADOW.w * TEXT_SHADOW_STRENGTH);
+                surface.paint(color.with_w(1.0), shadow) * vec4(1.0, 1.0, 1.0, color.w * coverage)
             });
     }
 
@@ -687,9 +688,10 @@ impl WeatherPanel {
             .shape(|frame| deform(weather_panel(pill, expansion, timer_support), frame))
             .paint(|frame, surface| {
                 let body_local = surface.pixel - pill.min;
-                let mut color = scene(frame.time, frame.globals.bar_height, body_local, pill.size().x, phase, current);
+                let sky = scene(frame.time, frame.globals.bar_height, body_local, pill.size().x, phase, current);
+
                 let distance = body_local.distance(sun_center);
-                color = color.lerp(
+                let color = sky.lerp(
                     sun_color.truncate(),
                     (distance.smoothstep(62.0, 4.0) * 0.24 + distance.smoothstep(11.0, 1.0) * 0.7) * sun_color.w,
                 );
@@ -797,6 +799,8 @@ impl WeatherPanel {
                 .shape(|frame| deform(Shape::pill(forecast_pill), frame))
                 .paint(|frame, surface| {
                     let panel = sample_deformation(weather_panel(pill, expansion, timer_support), frame, surface.pixel);
+
+                    // Interpolate between the adjacent forecast entries.
                     let position =
                         (forecast_pill.uv(surface.pixel).x * count as f32 - 0.5).clamp_num(0.0, count as f32 - 1.0);
                     let index = position.floor() as usize;
@@ -804,11 +808,12 @@ impl WeatherPanel {
                         .lerp(conditions[(index + 1).min(count as usize - 1)], position.fract().smoothstep(0.0, 1.0));
                     let hour =
                         if start_hour < 0.0 { 12.0 } else { (start_hour + position * HOURLY_STEP_HOURS as f32) % 24.0 };
-                    let p = forecast_pill.center() - pill.min + (surface.pixel - forecast_pill.center()) * 2.0;
+                    let scene_point =
+                        forecast_pill.center() - pill.min + (surface.pixel - forecast_pill.center()) * 2.0;
                     let color = scene(
                         frame.time,
                         frame.globals.bar_height,
-                        p,
+                        scene_point,
                         forecast_pill.size().x * 2.0,
                         sky_phase(sun_position(hour, sun_hours)[1]),
                         conditions,

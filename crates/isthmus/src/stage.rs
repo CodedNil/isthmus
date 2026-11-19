@@ -14,6 +14,19 @@ pub trait Primitive: Copy {
     fn sample(self, fragment: Fragment) -> (Self::Sample, f32);
 }
 
+// Bounds-only draws provide their corners separately and use unit coverage.
+impl Primitive for () {
+    type Sample = ();
+
+    fn region(self, _: f32) -> Option<[Vec2; 4]> {
+        None
+    }
+
+    fn sample(self, _: Fragment) -> ((), f32) {
+        ((), 1.0)
+    }
+}
+
 /// Rasterized fragment coordinates.
 #[derive(Clone, Copy)]
 pub struct Fragment<T = ()> {

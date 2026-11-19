@@ -13,30 +13,34 @@ pub fn resolve(frame: &mut Frame<'_>, images: &[Image; 4], mask: u32, interleave
     let second: &Image = &images[1];
     let third: &Image = &images[2];
     let fourth: &Image = &images[3];
+    let bounds = Rect::new(Vec2::ZERO, frame.screen_size);
     frame
         .shader("resolve")
         .blend(Blend::Replace)
         .with((first, second, third, fourth, mask, sample_size, interleaved, people))
-        .shape(|frame| Rect::new(Vec2::ZERO, frame.screen_size))
+        .bounds(bounds)
         .paint(|frame, surface| {
             let size = sample_size;
-            let p = surface.pixel * size / frame.screen_size;
-            let color = resolved_sample(first, p, size, mask, 0, interleaved)
-                + resolved_sample(second, p, size, mask, 1, interleaved)
-                + resolved_sample(third, p, size, mask, 2, interleaved)
-                + resolved_sample(fourth, p, size, mask, 3, interleaved);
+            let sample_pixel = surface.pixel * size / frame.screen_size;
+            let samples = resolved_sample(first, sample_pixel, size, mask, 0, interleaved)
+                + resolved_sample(second, sample_pixel, size, mask, 1, interleaved)
+                + resolved_sample(third, sample_pixel, size, mask, 2, interleaved)
+                + resolved_sample(fourth, sample_pixel, size, mask, 3, interleaved);
+
+            // Reconstruct the view ray for compositing people into the resolved scene.
             let ndc = surface.pixel / frame.screen_size * 2.0 - 1.0;
             let globals = frame.globals;
             let ray = (globals.forward + globals.right * ndc.x - globals.up * ndc.y).normalize();
-            let height = resolved_height(first, p, size, mask, interleaved);
+            let height = resolved_height(first, sample_pixel, size, mask, interleaved);
             let color = ghosts::composite(
-                color.truncate() / color.w.max_num(1.0),
+                samples.truncate() / samples.w.max_num(1.0),
                 people,
                 globals.eye,
                 ray,
                 height,
                 globals.pixel_angle,
             );
+
             color.powf(1.0 / 2.2).extend(1.0)
         });
 }

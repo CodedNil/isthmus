@@ -32,7 +32,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
         frame
             .shader("bamboo stalk")
             .with((size, root, top, width, height, curvature, spacing, node_offset, seed, depth, reflected))
-            .shape(|_| {
+            .bounds({
                 let start = if reflected { root } else { top };
                 let end = if reflected { vec2(top.x, root.y * 2.0 - top.y) } else { root };
                 Rect::new(screen_point(start.min(end), size), screen_point(start.max(end), size))
@@ -48,6 +48,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                 if (across.abs() - radius * 1.1).max(-along).max(along - height) > 1.0 / size.y {
                     kill();
                 }
+
+                // Resolve the node collar and grain against the stalk silhouette.
                 let normal = (across / radius).clamp(-1.0, 1.0);
                 let node =
                     ((along / spacing + node_offset).fract() - 0.5) * spacing + radius * 0.12 * (1.0 - normal * normal);
@@ -58,6 +60,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                     .max(-along)
                     .max(along - height);
                 let mask = distance.smoothstep(aa, -aa);
+
                 let light = (normal * if root.x < 0.08 { 0.5 } else { -0.5 }) + 0.5;
                 let panel = light.smoothstep(0.16 + texture * 0.2, 0.75 + texture * 0.1);
                 let warm = hash(seed + 7.0);
@@ -74,6 +77,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                 stem = stem.lerp(vec3(0.79, 0.82, 0.58), collar * (0.18 + panel * 0.4) * (0.65 + texture * 0.35));
                 let sheath = (along / width).smoothstep(4.8, 0.0) * (normal + texture * 0.5).smoothstep(0.15, 0.75);
                 stem = stem.lerp(vec3(0.46, 0.45, 0.25), sheath * 0.7);
+
                 let alpha = mask * reflection_mask * if reflected { 0.2 } else { 1.0 };
                 plant_color(pigment(stem, vec2(along, across) + seed, aa), surface.pixel / size, depth, alpha)
             });
@@ -99,7 +103,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
             frame
                 .shader("bamboo branch")
                 .with((size, origin, direction, root, seed, curvature, reach, height, depth, reflected))
-                .shape(|_| {
+                .bounds({
                     let center = origin + (direction * 0.78 + direction.perp() * 0.35) * reach;
                     Quad::new(
                         screen_point(if reflected { vec2(center.x, root.y * 2.0 - center.y) } else { center }, size),
@@ -117,6 +121,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, plant: Placement, reflected: bool) {
                     let aa = 1.0 / size.y;
                     let stem = (local.y.abs() - reach * 0.008).max(-local.x).max(local.x - reach).smoothstep(aa, -aa);
                     let (mut color, mut alpha) = (vec3(0.025, 0.09, 0.04) * stem, stem);
+
+                    // Composite the leaves over the branch in draw order.
                     for leaf in 0..7 {
                         let random = hash(seed + leaf as f32 * 7.3);
                         let angle = (if leaf % 2 == 0 { 1.0 } else { -1.0 }) * (0.28 + random * 0.85)

@@ -14,7 +14,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use tracing::{info, warn};
-use web_time::Instant;
+use web_time::{Duration, Instant};
 
 pub mod enrichment;
 pub mod lyrics;
@@ -31,6 +31,8 @@ pub type PlaylistId = ArrayString<22>;
 pub type MusicResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 pub const ART_SIZE: u32 = 128;
 pub const TRACK_SPACING_MS: f32 = 3000.0;
+const SCROLL_RESTART_AFTER_MS: f32 = 10_000.0;
+const SCROLL_RESTART_GRACE: Duration = Duration::from_secs(2);
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn audio_features_path(id: TrackId) -> String {
@@ -43,6 +45,7 @@ pub struct Music {
     pub queue: Queue,
     pub playlists: Vec<CondensedPlaylist> = Vec::new(),
     pub last_toggle: Instant,
+    scroll_restart: Option<(u64, Instant)> = None,
     pub(crate) spotify: spotify::Spotify,
 }
 
@@ -75,6 +78,34 @@ impl Music {
         } else {
             PlaybackCommand::Skip(skip)
         });
+    }
+
+    /// Navigates from the actual playing track, even while the visible timeline is catching up.
+    pub(crate) fn scroll_tracks(&mut self, notches: i32) {
+        let index = self.queue.index;
+        let Some(track) = self.queue.tracks.get(index) else {
+            self.scroll_restart = None;
+            return;
+        };
+        let now = Instant::now();
+        let recently_restarted =
+            self.scroll_restart.is_some_and(|(id, at)| id == track.interaction_id && now - at < SCROLL_RESTART_GRACE);
+        let (restart, skip) = scroll_playback(
+            notches,
+            self.queue.timeline.position_now(),
+            recently_restarted,
+            index,
+            self.queue.tracks.len() - index - 1,
+        );
+        if restart {
+            self.scroll_restart = Some((track.interaction_id, now));
+            self.spotify.command(PlaybackCommand::Seek(0));
+        } else if notches > 0 || !recently_restarted {
+            self.scroll_restart = None;
+        }
+        if skip != 0 {
+            self.spotify.command(PlaybackCommand::Skip(skip));
+        }
     }
 
     pub fn toggle_playing(&self) {
@@ -113,6 +144,35 @@ impl Music {
             playlists: vec![(playlist_id, add)],
             liked: None,
         });
+    }
+}
+
+fn scroll_playback(
+    notches: i32,
+    position_ms: f32,
+    recently_restarted: bool,
+    previous: usize,
+    next: usize,
+) -> (bool, i8) {
+    let restart = notches < 0 && position_ms > SCROLL_RESTART_AFTER_MS && !recently_restarted;
+    let skip = (notches + i32::from(restart)).clamp(-(previous.min(10) as i32), next.min(10) as i32);
+    (restart, skip as i8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scroll_playback;
+
+    #[test]
+    fn wheel_scroll_restarts_then_skips_back() {
+        assert_eq!(scroll_playback(1, 15_000.0, false, 2, 2), (false, 1));
+        assert_eq!(scroll_playback(-1, 10_000.0, false, 2, 2), (false, -1));
+        assert_eq!(scroll_playback(-1, 15_000.0, false, 2, 2), (true, 0));
+        assert_eq!(scroll_playback(-1, 15_000.0, true, 2, 2), (false, -1));
+        assert_eq!(scroll_playback(-2, 15_000.0, false, 2, 2), (true, -1));
+        assert_eq!(scroll_playback(-1, 15_000.0, false, 0, 2), (true, 0));
+        assert_eq!(scroll_playback(-1, 0.0, false, 0, 2), (false, 0));
+        assert_eq!(scroll_playback(1, 0.0, false, 2, 0), (false, 0));
     }
 }
 

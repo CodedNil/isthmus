@@ -121,6 +121,12 @@ impl<'draw, P: Program> Shader<'draw, P> {
         self
     }
 
+    /// Places a draw using host-only geometry. Paint receives full coverage and no prepared sample.
+    pub fn bounds(self, bounds: impl Primitive<Sample = ()>) -> Shaped<'draw, P, ()> {
+        let region = bounds.region(self.state.pixel_size());
+        Shaped { shader: self, region, primitive: PhantomData }
+    }
+
     /// The geometry. The CPU evaluates it to place the draw, and the GPU evaluates it to cover each pixel.
     pub fn shape<S: Primitive>(self, shape: impl FnOnce(ShaderFrame<P>) -> S) -> Shaped<'draw, P, S> {
         let region = shape(self.state).region(self.state.pixel_size());
@@ -139,7 +145,10 @@ impl<P: Program, S: Primitive> Shaped<'_, P, S> {
     /// The colour of each pixel the shape covers. The GPU runs this once per pixel; the CPU only checks it.
     pub fn paint(self, _: impl FnOnce(ShaderFrame<P>, Fragment<S::Sample>) -> Vec4) {
         let Shader { surface, name, blend, format, mut record, .. } = self.shader;
-        let Some(region) = self.region else { return };
+        let Some(region) = self.region else {
+            record.gpu.scratch = record.payload;
+            return;
+        };
         let Ok(index) = P::SHADERS.binary_search_by_key(&name, |entry| entry.name) else {
             record.gpu.fail(RenderError::UnknownShader(name));
             return;

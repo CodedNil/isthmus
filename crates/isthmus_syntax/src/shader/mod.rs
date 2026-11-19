@@ -132,7 +132,7 @@ mod tests {
     fn the_chain_names_its_variables_and_options() {
         let chain = find(&quote! {
             context.frame.shader("Track text").blend(Blend::Add).format(TextureFormat::Rgba16Float)
-                .with((center, image)).shape(|_| raster(bounds)).paint(|_, fragment| image.sample(fragment.uv))
+                .with((center, image)).shape(|_| bounds).paint(|_, fragment| image.sample(fragment.uv))
         })
         .unwrap()
         .unwrap();

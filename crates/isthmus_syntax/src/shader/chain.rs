@@ -1,5 +1,5 @@
 //! Recognizes a shader draw in source: `frame.shader("name").with((a, b)).shape(|frame| ..).paint(|frame, fragment| ..)`.
-use syn::{Expr, ExprClosure, ExprMethodCall, Ident, Lit, Stmt};
+use syn::{Expr, ExprClosure, ExprMethodCall, Ident, Lit, Stmt, parse_quote};
 
 /// A shader draw as written: its name, the variables it sends, its closures and its pipeline options.
 pub struct Chain {
@@ -16,14 +16,24 @@ pub struct Chain {
 pub fn parse(statement: &Stmt) -> syn::Result<Option<Chain>> {
     let Stmt::Expr(expr, _) = statement else { return Ok(None) };
     let Some(paint) = method(expr, "paint") else { return Ok(None) };
-    let Some(shape) = method(&paint.receiver, "shape") else { return Ok(None) };
-    let ([Expr::Closure(shape_closure)], [Expr::Closure(paint_closure)]) =
-        (shape.args.iter().collect::<Vec<_>>().as_slice(), paint.args.iter().collect::<Vec<_>>().as_slice())
-    else {
+    let Some(geometry) = method(&paint.receiver, "shape").or_else(|| method(&paint.receiver, "bounds")) else {
         return Ok(None);
     };
-    let Some((name, with, blend, format)) = start(&shape.receiver)? else { return Ok(None) };
-    Ok(Some(Chain { name, with, shape: shape_closure.clone(), paint: paint_closure.clone(), blend, format }))
+    if geometry.args.len() != 1 || paint.args.len() != 1 {
+        return Ok(None);
+    }
+    let (Some(geometry_arg), Some(Expr::Closure(paint_closure))) = (geometry.args.first(), paint.args.first()) else {
+        return Ok(None);
+    };
+    let shape = if geometry.method == "bounds" {
+        parse_quote!(|_| ())
+    } else if let Expr::Closure(closure) = geometry_arg {
+        closure.clone()
+    } else {
+        return Ok(None);
+    };
+    let Some((name, with, blend, format)) = start(&geometry.receiver)? else { return Ok(None) };
+    Ok(Some(Chain { name, with, shape, paint: paint_closure.clone(), blend, format }))
 }
 
 fn method<'expr>(expr: &'expr Expr, name: &str) -> Option<&'expr ExprMethodCall> {

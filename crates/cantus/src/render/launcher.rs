@@ -511,10 +511,12 @@ impl LauncherState {
                 let point = surface.content - rect.min;
                 let mut color = Vec3::splat(0.09)
                     .lerp(ICON_COLOR, magnifier_icon(point - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
+
                 let selection_width = selection.y - selection.x;
                 let highlight = Shape::rounded_rect(vec2(selection_width, 26.0), 3.0)
                     .fill_at(point - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5));
                 color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
+
                 let caret_mask = Shape::pill(vec2(1.8, 24.0)).fill_at(point - vec2(caret.x, HEADER_HEIGHT * 0.5));
                 color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
                 glass(surface, color) * vec4(1.0, 1.0, 1.0, 0.82)
@@ -620,6 +622,7 @@ impl LauncherState {
                     let mut color = Vec3::splat(0.15)
                         .lerp(Vec3::splat(0.235), presence(enter_badge.y))
                         .lerp(Vec3::splat(0.3), (surface.bulge / 8.0).min(1.0));
+
                     let icon_point = pill.local(surface.pixel) + vec2((pill.size().x - pill.size().y) * 0.5, 0.0);
                     if icon_kind == CALCULATOR_ICON {
                         color = source_over(calculator_icon(icon_point), color.extend(1.0)).truncate();
@@ -628,6 +631,8 @@ impl LauncherState {
                     } else if icon_kind == TIMER_ICON {
                         color = color.lerp(ICON_COLOR, timer_icon(icon_point));
                     }
+
+                    // Draw the key hints in the refracted surface coordinates.
                     let point = surface.content - pill.min;
                     let paint_badge = |color: Vec3, badge: Vec2, shift: bool| {
                         let ink = action_badge(point - vec2(badge.x, ROW_HEIGHT * 0.5), badge.y, shift);
@@ -646,8 +651,8 @@ impl LauncherState {
                 context
                     .frame
                     .shader("glass image")
-                    .with((image, rect))
-                    .shape(|_| rect)
+                    .with(image)
+                    .bounds(rect)
                     .paint(|_, fragment| image.sample(fragment.uv));
             }
 

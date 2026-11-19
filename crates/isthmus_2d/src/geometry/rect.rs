@@ -63,9 +63,18 @@ impl Rect {
         self.min.cmpgt(self.max).any()
     }
 
+    /// Tests whether a point is inside the rectangle, including its edges.
+    pub fn contains(self, point: Vec2) -> bool {
+        point.cmpge(self.min).all() && point.cmple(self.max).all()
+    }
+
     /// Reserves an additional margin around every edge.
     pub fn expanded(self, amount: f32) -> Self {
         Self::new(self.min - amount, self.max + amount)
+    }
+
+    pub(crate) fn padded_region(self, margin: f32) -> Option<[Vec2; 4]> {
+        (!self.is_empty()).then(|| self.expanded(margin).corners())
     }
 
     /// Encloses both regions.

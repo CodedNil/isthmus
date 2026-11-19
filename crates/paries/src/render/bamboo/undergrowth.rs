@@ -10,7 +10,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
         frame
             .shader("undergrowth")
             .with((size, root, depth, seed, kind, reach))
-            .shape(|_| {
+            .bounds({
                 Quad::new(screen_point(root - vec2(0.0, reach * 0.4), size), vec2(2.4, 1.6) * reach * size.y, Vec2::X)
                     .expanded(2.0)
             })
@@ -19,6 +19,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                 let local = (point - root) / reach;
                 let aa = 1.0 / (size.y * reach);
                 let gust = wind(root, frame.time);
+
+                // Start with the optional stone beneath the foliage.
                 let (mut color, mut alpha) = if hash(seed + 19.0) > 0.68 {
                     let stone = (local - vec2((hash(seed + 27.0) - 0.5) * 0.65, -0.02)) / vec2(0.36, 0.24);
                     let chips = (noise(stone * 9.0 + seed) - 0.5) * 0.06;
@@ -37,6 +39,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                 } else {
                     (Vec3::ZERO, 0.0)
                 };
+
+                // Composite each blade using the silhouette for this plant.
                 for leaf in 0..if kind == 1 { 15 } else { 9 } {
                     let random = hash(seed + leaf as f32 * 8.71);
                     let axis = Vec2::from_angle(-1.57 + (random - 0.5) * 2.8);
@@ -71,6 +75,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                         .lerp(vec3(0.67, 0.44, 0.3), if kind == 0 && random > 0.73 { 0.6 } else { 0.0 });
                     (color, alpha) = over(color, alpha, blade, mask);
                 }
+
+                // Add the flower stalks, petals and centers.
                 if kind >= 2 {
                     for flower in 0..5 {
                         let random = hash(seed + flower as f32 * 9.7);
@@ -100,6 +106,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, root: Vec2, depth: f32, seed: f32) {
                         (color, alpha) = over(color, alpha, throat, heart);
                     }
                 }
+
                 if alpha == 0.0 {
                     kill();
                 }

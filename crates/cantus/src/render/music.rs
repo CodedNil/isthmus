@@ -55,11 +55,12 @@ struct TrackFrame {
     future_end: f32,
 }
 
-/// Clicks collected while drawing tracks, applied afterwards.
+/// Input collected while drawing tracks, applied afterwards.
 #[derive(Default)]
 struct Actions {
     burst: bool,
     seek: Option<(usize, f32)>,
+    track_scroll: i32,
     rated: Option<(TrackId, u8)>,
     playlist_toggle: Option<(TrackId, PlaylistId)>,
 }
@@ -429,9 +430,10 @@ impl MusicView {
                         let uv = rect.uv(surface.pixel);
                         let texture = image.sample(uv);
                         let background = vec3(0.3, 0.2, 0.65).lerp(vec3(0.65, 0.8, 0.7), uv.y);
+
                         let color = if liked {
-                            let p = (uv - vec2(0.5, 0.43)) * vec2(2.0, -2.0);
-                            let heart = vec2(p.x.abs(), p.y);
+                            let point = (uv - vec2(0.5, 0.43)) * vec2(2.0, -2.0);
+                            let heart = vec2(point.x.abs(), point.y);
                             let distance = (heart - vec2(0.23, 0.0)).length() - 0.3;
                             let tip = (heart.x - heart.y * 0.75 - 0.35).max(heart.y);
                             background.lerp(Vec3::ONE, 1.0 - distance.min(tip).smoothstep(-0.02, 0.02))
@@ -493,6 +495,8 @@ impl MusicView {
         }
         if let Some((index, position)) = actions.seek {
             music.seek(index, position);
+        } else if actions.track_scroll != 0 {
+            music.scroll_tracks(actions.track_scroll);
         }
         if let Some((track_id, rating)) = actions.rated {
             music.rate_track(track_id, rating);
@@ -639,6 +643,7 @@ impl MusicView {
             }
         }
         let body = context.interaction.interact(track.interaction_id, hit_shape.intersection(visible_area));
+        actions.track_scroll += body.scroll;
         let mut hovered = body.hovered;
         if body.clicked && context.interaction.drag_of(track.interaction_id).is_none() && track.duration_ms > 0 {
             let duration_px = track.duration_ms as f32 * shared.bar.px_per_ms;
@@ -678,6 +683,7 @@ impl MusicView {
                 ("music-icon", track.interaction_id, is_star.then_some(slot), playlist.map(|playlist| playlist.id)),
                 Shape::circle(center, ICON_WIDTH * 0.5).intersection(visible_area),
             );
+            actions.track_scroll += response.scroll;
             hovered |= response.hovered;
             if is_star && response.hovered {
                 rating = Some(slot as i32 * 2 + 1 + i32::from(mouse_pos.x >= center.x));
@@ -698,7 +704,7 @@ impl MusicView {
         let strength = clipping.smoothstep(Vec2::ZERO, Vec2::splat(height * 0.3)) * (1.0 - collapse);
         let droplets = Droplets::new(pill, rounding, strength, seed, droplet_progress);
         let time = context.frame.time;
-        let flow_time =
+        let flow_time: f32 =
             time * 0.2 + seed + (time * 0.17).sin() * (audio.energy + ((audio.tempo - 0.2) * 2.5).saturate());
         let pulse =
             ((f64::from(time) * f64::from(audio.tempo) * 5.0).fract() * f64::consts::TAU).sin() as f32 * 0.5 + 0.5;
@@ -707,7 +713,6 @@ impl MusicView {
         let colors: [Unorm8x4; PALETTE_COLORS] = music.resources.palette(track.image.as_deref());
         let drops: &[Drop] = droplets.live();
         let limits: Vec2 = droplets.vertical_limits;
-        let flow_time: f32 = flow_time;
         let beat: f32 = pulse * pulse * audio.danceability * (0.025 + audio.energy * 0.055);
         context
             .frame
@@ -739,7 +744,9 @@ impl MusicView {
                 if shadow <= 0.0 {
                     kill();
                 }
-                let face = if Shape::rectangle(viewport).contains(surface.pixel) { 1.0 } else { 0.0 };
+                let face = if viewport.contains(surface.pixel) { 1.0 } else { 0.0 };
+
+                // Warp the palette field through the moving glass.
                 let uv = pill.uv(surface.pixel);
                 let lens = (1.0 + surface.sdf.distance.min(0.0) / 120.0).saturate();
                 let deformation = (uv - 0.5) * lens * lens * 0.6 + surface.ripple;
@@ -749,6 +756,8 @@ impl MusicView {
                         (field.y * 2.7 + flow_time).sin() + (field.x * 1.3 - flow_time * 0.7).cos(),
                         (field.x * 2.3 - flow_time * 0.8).cos() + (field.y * 1.7 + flow_time * 0.6).sin(),
                     ) * (0.14 + turbulence * 0.2 + beat);
+
+                // Blend the palette swatches with travelling waves.
                 let directions = [vec2(2.1, 0.7), vec2(0.6, -2.4), vec2(-1.5, 1.9), vec2(2.4, 1.6)];
                 let phases = [
                     flow_time,
@@ -763,6 +772,8 @@ impl MusicView {
                     let weight = (0.12 + wave * wave) * (0.25 + swatch.w * 3.0);
                     plasma += (swatch.truncate() * weight).extend(weight);
                 }
+
+                // Grade the blended palette, then add speckles and caustics.
                 let mut color = plasma.truncate() / plasma.w.max(0.001);
                 let luma = color.dot(vec3(0.2126, 0.7152, 0.0722));
                 color = Vec3::splat(luma)
@@ -773,6 +784,7 @@ impl MusicView {
                     * (0.84 + pill.uv(surface.refracted).y.smoothstep(0.45, 1.0) * 0.1);
                 color += colors[3].to_vec3().lerp(Vec3::ONE, 0.25) * speckle(uv * pill.size(), frame.time, seed, audio);
                 color *= 1.0 + caustics(uv * pill.size() / pill.size().y, frame.time, seed, audio);
+
                 let center = pill.center() + vec2((pill.size().x - pill.size().y) * 0.5, 0.0);
                 let radius = f32::midpoint(pill.size().y, surface.bulge);
                 // Match the artwork crop's cornering on both sides.
@@ -784,6 +796,8 @@ impl MusicView {
                 // Clip the artwork to the track shape.
                 let inside = surface.sdf.distance.smoothstep(0.0, -1.0);
                 let art_alpha = edge.smoothstep(0.0, -1.0) * art_uv.x.smoothstep(0.0, 0.08) * face * inside;
+
+                // Composite the cropped artwork over the glass.
                 let base = music_shape(pill, rounding, icon_supports).distance_at(surface.pixel);
                 let alpha = opacity * droplet_field(drops, limits, base, surface.pixel, pill.size().y).y;
                 source_over(
@@ -809,13 +823,14 @@ impl MusicView {
                         refract(track_shape(pill, rounding), frame, either_text(compact, full))
                     })
                     .paint(|_, surface| {
-                        if !Shape::rectangle(viewport).contains(surface.pixel) {
+                        if !viewport.contains(surface.pixel) {
                             kill();
                         }
                         let image_center = pill.center() + vec2((pill.size().x - pill.size().y) * 0.5, 0.0);
                         if surface.refracted.x >= image_center.x {
                             kill();
                         }
+
                         let alpha = (surface.refracted.distance(image_center)
                             - f32::midpoint(pill.size().y, surface.bulge))
                         .smoothstep(2.0, 18.0);
@@ -866,17 +881,19 @@ impl MusicView {
                 context
                     .frame
                     .shader("track icon")
-                    .with((image, viewport, is_star, fill, desaturation, alpha, quad))
-                    .shape(|_| quad)
+                    .with((image, viewport, is_star, fill, desaturation, alpha))
+                    .bounds(quad)
                     .paint(|_, surface| {
-                        if !Shape::rectangle(viewport).contains(surface.pixel) {
+                        if !viewport.contains(surface.pixel) {
                             kill();
                         }
+
                         let point = (surface.uv * 2.0 - 1.0) * 18.0;
                         let color = if is_star {
                             let split = surface.uv.x - fill;
+                            let filled = (split / split.fwidth() + 0.5).saturate();
                             shade_icon(
-                                vec3(1.0, 0.85, 0.2).lerp(Vec3::splat(0.33), (split / split.fwidth() + 0.5).saturate()),
+                                vec3(1.0, 0.85, 0.2).lerp(Vec3::splat(0.33), filled),
                                 Shape::star(5.6, 3.58).offset(1.12),
                                 point,
                             )
@@ -941,10 +958,11 @@ impl MusicView {
                 particle.velocity,
             );
             let color: Vec4 = particle.color.extend((1.0 - age) * elapsed.smoothstep(0.0, 0.15));
-            context.frame.shader("spark").blend(Blend::Add).with((quad, color)).shape(|_| quad).paint(|_, surface| {
-                // Lighten and brighten the source colour for additive sparks.
-                (color.truncate().lerp(Vec3::ONE, 0.2) * 2.0)
-                    .extend(color.w * (1.0 - (surface.uv * 2.0 - 1.0).length_squared()).max(0.0).powi(3))
+            context.frame.shader("spark").blend(Blend::Add).with(color).bounds(quad).paint(|_, surface| {
+                let point = surface.uv * 2.0 - 1.0;
+                let falloff = (1.0 - point.length_squared()).max(0.0).powi(3);
+                let light = color.truncate().lerp(Vec3::ONE, 0.2) * 2.0;
+                light.extend(color.w * falloff)
             });
         }
     }
@@ -974,7 +992,7 @@ impl MusicView {
             music.toggle_playing();
         }
 
-        let (bar_split, icon_presence, icon_morph) = (
+        let (bar_split, icon_presence, icon_morph): (f32, f32, f32) = (
             self.bar_split.at(context.frame.time),
             self.icon_presence.at(context.frame.time),
             self.icon_morph.at(context.frame.time),
@@ -983,23 +1001,23 @@ impl MusicView {
             vec2(x - half_width, PANEL_START - 5.0),
             vec2(x + half_width, PANEL_START + context.config.height + 5.0),
         );
-        let bar_split: f32 = bar_split;
-        let icon_presence: f32 = icon_presence;
-        let icon_morph: f32 = icon_morph;
-        context.frame.shader("playhead").with((bar_split, icon_presence, icon_morph, rect)).shape(|_| rect).paint(
+        context.frame.shader("playhead").with((bar_split, icon_presence, icon_morph, rect)).bounds(rect).paint(
             |frame, surface| {
                 let local = rect.local(surface.pixel);
                 let mirrored = local.abs();
                 let span = frame.globals.bar_height * PLAYHEAD_HEIGHT;
-                let bar_len = span * (0.5 - 0.375 * bar_split);
-                let bar = Shape::pill(vec2(bar_len + 9.0, 9.0))
-                    .sample_at(vec2(mirrored.y - (span - bar_len) * 0.5, mirrored.x));
+                let bar_length = span * (0.5 - 0.375 * bar_split);
+                let bar = Shape::pill(vec2(bar_length + 9.0, 9.0))
+                    .sample_at(vec2(mirrored.y - (span - bar_length) * 0.5, mirrored.x));
+
+                // Morph the icon independently of the split bar.
                 let pause =
                     Shape::pill(vec2(7.0, frame.globals.bar_height * 0.2 + 7.0)).translated(vec2(4.0 * bar_split, 0.0));
                 let play_scale = frame.globals.bar_height * 0.18 * (1.0 + icon_morph * (1.0 - icon_presence));
                 let play = Shape::rounded_triangle(play_scale, play_scale * 0.5);
                 let icon =
                     Sample::new(pause.distance_at(local.abs()).lerp(play.distance_at(local.perp()), icon_morph), 0.0);
+
                 let alpha = (icon.fill() * icon_presence).max(bar.fill());
                 if alpha <= 0.0 {
                     kill();
@@ -1163,7 +1181,7 @@ mod tests {
                         assert!(sample.y <= 0.501, "distant droplet remained opaque");
                     }
                     if sample.x < 0.0 {
-                        assert!(Shape::rectangle(drops.shape(body, height).bounds(0.0)).contains(point));
+                        assert!(drops.shape(body, height).bounds(0.0).contains(point));
                     }
                     for y in [pill.min.y - 0.5, pill.max.y + 0.5] {
                         let point = vec2(ball.center.x, y);

@@ -1,6 +1,6 @@
 //! The `Sdf` trait: distance, bounds and outline, with combinators that preserve all three.
 use super::{Sample, Shape};
-use crate::{Rect, raster};
+use crate::Rect;
 use isthmus::{Float, Fragment, Primitive, glam::Vec2};
 
 /// Signed distance, geometry bounds and reserved outline shared by shapes and glyphs.
@@ -148,7 +148,7 @@ impl<F: Fn(Vec2) -> f32 + Copy> Primitive for Shape<F> {
     type Sample = Sample;
 
     fn region(self, pixel_size: f32) -> Option<[Vec2; 4]> {
-        raster(self.bounds(0.0)).region(pixel_size)
+        self.bounds(0.0).padded_region(pixel_size)
     }
 
     fn sample(self, fragment: Fragment) -> (Sample, f32) {
