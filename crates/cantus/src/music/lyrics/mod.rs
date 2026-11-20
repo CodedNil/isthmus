@@ -27,6 +27,7 @@ pub(super) fn matches_track(track: &Track, matched: &Value, duration_key: &str) 
         && !artist.is_empty()
         && (title == normalize(&track.name) || title == normalize(track.compact_title()))
         && (track.artists.iter().any(|name| normalize(name) == artist) || normalize(&track.artists.join("")) == artist)
+        && track.isrc.as_deref().zip(matched["isrc"].as_str()).is_none_or(|(a, b)| a.eq_ignore_ascii_case(b))
         && matched[duration_key]
             .as_f64()
             .is_none_or(|length| length == 0.0 || (length - f64::from(track.duration_ms) / 1000.0).abs() <= 5.0)
@@ -171,7 +172,7 @@ pub(super) async fn fetch(
             Source::Lrclib => continue,
             Source::Spotify => {
                 let Some(id) = track.id else { continue };
-                spotify.get_lyrics(id).await.and_then(|response| spotify::parse_spotify(&response, track.duration_ms))
+                spotify.get_lyrics(id).await.and_then(|response| spotify::parse_spotify(response, track.duration_ms))
             }
             Source::Musixmatch => {
                 let mut session = session.lock().await;
@@ -187,9 +188,6 @@ pub(super) async fn fetch(
             selected_source = Some(source);
         }
         best = prefer_lyrics(best, result);
-        if best.as_ref().is_ok_and(|lyrics| lyrics.timing >= Timing::Word) {
-            break;
-        }
     }
     let mut report = vec![format!("♫  {title:.32}  ·  {artist:.24}")];
     for (source, details) in options {
@@ -244,9 +242,11 @@ pub(super) fn contributed_by_us(track: &Track, lyrics: &Lyrics) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apple::{matches_apple_result, parse_ttml};
+    use apple::parse_ttml;
     use serde_json::json;
-    use spotify::parse_spotify;
+    fn parse_spotify(response: &Value, duration: u32) -> MusicResult<Lyrics> {
+        spotify::parse_spotify(serde_json::from_value(response.clone())?, duration)
+    }
 
     fn track() -> Track {
         serde_json::from_value(json!({
@@ -286,15 +286,15 @@ mod tests {
         let track = track();
         let mut result = json!({"track_name":"Lego Bricks", "artist_name":"Euan Allison, Lily Williams",
             "duration":236,"isrc":"NL2VN2000027"});
-        assert!(matches_apple_result(&track, &result));
+        assert!(matches_track(&track, &result, "duration"));
         result["artist_name"] = json!("Euan Allison, Someone Else");
-        assert!(!matches_apple_result(&track, &result));
+        assert!(!matches_track(&track, &result, "duration"));
         result["artist_name"] = json!("Euan Allison, Lily Williams");
         result["isrc"] = json!("OTHER");
-        assert!(!matches_apple_result(&track, &result));
+        assert!(!matches_track(&track, &result, "duration"));
         result["isrc"] = json!("NL2VN2000027");
         result["duration"] = json!(210);
-        assert!(!matches_apple_result(&track, &result));
+        assert!(!matches_track(&track, &result, "duration"));
     }
 
     #[test]
@@ -302,7 +302,7 @@ mod tests {
         let response = json!({"lyrics":{"syncType":"LINE_SYNCED","lines":[
             {"startTimeMs":"1000","endTimeMs":"0","words":"First"},
             {"startTimeMs":"2000","endTimeMs":"0","words":"♪"},
-            {"startTimeMs":"3000","endTimeMs":"0","words":"Last"}
+            {"startTimeMs":3000,"endTimeMs":"0","words":"Last"}
         ]}});
         let lyrics = parse_spotify(&response, 5000).expect("line timing");
         assert_eq!(lyrics.timing, Timing::Line);

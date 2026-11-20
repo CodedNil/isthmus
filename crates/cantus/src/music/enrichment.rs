@@ -8,30 +8,52 @@ use arrayvec::ArrayVec;
 use image::{RgbaImage, imageops};
 use isthmus::{Image, Unorm8x4, glam::Vec3};
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
-use std::{array, collections::HashMap, fmt::Display, hash::Hash, ops::Range, sync::Arc, time::Duration};
+use std::{
+    array,
+    collections::{HashMap, HashSet},
+    fmt::Display,
+    hash::Hash,
+    ops::Range,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::spawn_blocking;
 use tracing::warn;
 use web_time::Instant;
 
+const AUDIO_FEATURE_BATCH_SIZE: usize = 240;
 const RETRY_DELAY: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+#[test]
+fn fresh_fetch_starts_immediately_and_failed_fetch_waits() {
+    let now = Instant::now();
+    assert!(Fetch::<()>::default().request(now));
+
+    let mut failed = Fetch::<()>::Missing(Some(now + RETRY_DELAY));
+    assert!(!failed.request(now));
+    assert!(failed.request(now + RETRY_DELAY));
+}
+
 pub enum Fetch<T> {
-    Missing(Instant),
+    Missing(Option<Instant>),
     Fetching,
+    Unavailable,
     Ready(T),
 }
 
 impl<T> Default for Fetch<T> {
     fn default() -> Self {
-        Self::Missing(Instant::now())
+        Self::Missing(None)
     }
 }
 
 impl<T> Fetch<T> {
     pub fn request(&mut self, now: Instant) -> bool {
         let Self::Missing(retry_at) = self else { return false };
-        if *retry_at > now {
+        if retry_at.is_some_and(|retry_at| retry_at > now) {
             return false;
         }
         *self = Self::Fetching;
@@ -41,7 +63,7 @@ impl<T> Fetch<T> {
     pub const fn ready(&self) -> Option<&T> {
         match self {
             Self::Ready(value) => Some(value),
-            Self::Missing(_) | Self::Fetching => None,
+            Self::Missing(_) | Self::Fetching | Self::Unavailable => None,
         }
     }
 }
@@ -58,7 +80,7 @@ impl Background {
                 Ok(value) => Fetch::Ready(value),
                 Err(error) => {
                     warn!(%error, %key, "Failed to fetch music resource");
-                    Fetch::Missing(Instant::now() + RETRY_DELAY)
+                    Fetch::Missing(Some(Instant::now() + RETRY_DELAY))
                 }
             };
             Some(move |app: &mut CantusApp| {
@@ -78,7 +100,9 @@ pub struct AlbumArt {
 #[derive(Default)]
 pub struct TrackCache {
     pub art: HashMap<String, Fetch<AlbumArt>>,
-    pub audio: HashMap<TrackId, Fetch<AudioFeatures>>,
+    audio: HashMap<TrackId, Fetch<AudioFeatures>>,
+    visible_tracks: Vec<u64>,
+    pub(crate) visibility_changed: bool,
     pub lyrics: HashMap<String, Fetch<PreparedLyrics>>,
     lyrics_session: Arc<Mutex<lyrics::Session>>,
 }
@@ -91,6 +115,14 @@ impl TrackCache {
     pub fn palette(&self, url: Option<&str>) -> [Unorm8x4; PALETTE_COLORS] {
         self.art(url)
             .map_or_else(|| [Unorm8x4::from_vec3(Vec3::new(0.24, 0.32, 0.44)); PALETTE_COLORS], |art| art.palette)
+    }
+
+    pub fn set_visible_tracks(&mut self, tracks: impl Iterator<Item = u64> + Clone) {
+        if !self.visible_tracks.iter().copied().eq(tracks.clone()) {
+            self.visible_tracks.clear();
+            self.visible_tracks.extend(tracks);
+            self.visibility_changed = true;
+        }
     }
 
     pub fn audio(&self, id: Option<TrackId>) -> AudioFeatures {
@@ -122,72 +154,90 @@ impl CantusApp {
         let music = &mut self.music;
         let resources = &mut music.resources;
         let queue = &music.queue;
-        let tracks = queue.tracks.iter();
-        resources.art.retain(|url, state| {
-            matches!(state, Fetch::Fetching)
-                || tracks.clone().any(|track| track.image.as_ref() == Some(url))
-                || music.playlists.iter().any(|playlist| playlist.image_url.as_ref() == Some(url))
+        let artwork: HashSet<_> = queue
+            .tracks
+            .iter()
+            .filter_map(|track| track.image.as_deref())
+            .chain(music.playlists.iter().filter_map(|playlist| playlist.image_url.as_deref()))
+            .collect();
+        let track_ids: HashSet<_> = queue.tracks.iter().filter_map(|track| track.id).collect();
+        let track_uris: HashSet<_> = queue.tracks.iter().map(|track| track.uri.as_str()).collect();
+        resources.art.retain(|url, state| matches!(state, Fetch::Fetching) || artwork.contains(url.as_str()));
+        resources.audio.retain(|id, state| matches!(state, Fetch::Fetching) || track_ids.contains(id));
+        resources.lyrics.retain(|uri, state| matches!(state, Fetch::Fetching) || track_uris.contains(uri.as_str()));
+        let tracks = &queue.tracks;
+        let focus = queue.span_at_playhead().map_or(queue.index, |(index, _)| index);
+        let focus = focus.min(tracks.len());
+        let nearby = tracks[focus..(focus + 3).min(tracks.len())]
+            .iter()
+            .chain(&tracks[focus.saturating_sub(1)..focus])
+            .chain(tracks.get(queue.index));
+        let visible = tracks.iter().enumerate().filter_map(|(index, track)| {
+            tracks[index.saturating_sub(1)..(index + 2).min(tracks.len())]
+                .iter()
+                .any(|entry| resources.visible_tracks.contains(&entry.interaction_id))
+                .then_some(track)
         });
-        resources.audio.retain(|id, state| {
-            matches!(state, Fetch::Fetching) || queue.tracks.iter().any(|track| track.id == Some(*id))
-        });
-        resources
-            .lyrics
-            .retain(|uri, state| matches!(state, Fetch::Fetching) || tracks.clone().any(|track| &track.uri == uri));
+        let demand = nearby.clone().chain(visible).filter(|_| !resources.visible_tracks.is_empty());
         if self.config.lyrics_enabled
-            && let Some((playhead, _)) = queue.span_at_playhead()
-        {
-            let end = (playhead + 3).min(queue.tracks.len());
-            let candidates =
-                queue.tracks[playhead..end].iter().chain(&queue.tracks[playhead.saturating_sub(1)..playhead]);
-            if let Some(track) = candidates
+            && let Some(track) = nearby
                 .filter(|track| {
                     !track.name.trim().is_empty() && !track.primary_artist().trim().is_empty() && track.duration_ms > 0
                 })
                 .find(|track| resources.lyrics.entry(track.uri.clone()).or_default().request(now))
-            {
-                let track = track.clone();
-                let session = Arc::clone(&resources.lyrics_session);
-                let http = self.background.http.clone();
-                let spotify = music.spotify.clone();
-                self.background.fetch(
-                    track.uri.clone(),
-                    async move {
-                        lyrics::fetch(&track, &http, &session, &spotify, publish_lyrics).await.map(|source| {
-                            let contributed = lyrics::contributed_by_us(&track, &source);
-                            PreparedLyrics::new(source, contributed)
-                        })
-                    },
-                    |cache| &mut cache.lyrics,
-                );
-            }
-        }
-        for id in queue
-            .tracks
-            .iter()
-            .filter_map(|track| track.id)
-            .filter(|id| resources.audio.entry(*id).or_default().request(now))
         {
+            let track = track.clone();
+            let session = Arc::clone(&resources.lyrics_session);
+            let http = self.background.http.clone();
             let spotify = music.spotify.clone();
             self.background.fetch(
-                id,
+                track.uri.clone(),
                 async move {
-                    let path = super::audio_features_path(id);
-                    let response = spotify.get_json(&path).await?;
-                    let features: AudioFeatures = serde_json::from_slice(response.as_ref())?;
-                    Ok(AudioFeatures {
-                        energy: features.energy.clamp(0.0, 1.0),
-                        danceability: features.danceability.clamp(0.0, 1.0),
-                        acousticness: features.acousticness.clamp(0.0, 1.0),
-                        tempo: (features.tempo / 300.0).clamp(0.0, 1.0),
-                        valence: features.valence.clamp(0.0, 1.0),
-                        instrumentalness: features.instrumentalness.clamp(0.0, 1.0),
+                    lyrics::fetch(&track, &http, &session, &spotify, publish_lyrics).await.map(|source| {
+                        let contributed = lyrics::contributed_by_us(&track, &source);
+                        PreparedLyrics::new(source, contributed)
                     })
                 },
-                |cache| &mut cache.audio,
+                |cache| &mut cache.lyrics,
             );
         }
-        for url in tracks
+        let audio_ids = demand
+            .clone()
+            .filter_map(|track| track.id)
+            .filter(|id| resources.audio.entry(*id).or_default().request(now))
+            .collect::<Vec<_>>();
+        for batch in audio_ids.chunks(AUDIO_FEATURE_BATCH_SIZE) {
+            let ids = batch.to_vec();
+            let spotify = music.spotify.clone();
+            self.background.spawn_update(async move {
+                let result = spotify.audio_features(&ids).await;
+                if let Err(error) = &result {
+                    warn!(%error, tracks = ids.len(), "Failed to fetch Spotify audio features");
+                }
+                let retry_at = Instant::now() + RETRY_DELAY;
+                Some(move |app: &mut Self| {
+                    for id in ids {
+                        if let Some(slot @ Fetch::Fetching) = app.music.resources.audio.get_mut(&id) {
+                            let Ok(features) = &result else {
+                                *slot = Fetch::Missing(Some(retry_at));
+                                continue;
+                            };
+                            *slot = features.get(&id).map_or(Fetch::Unavailable, |features| {
+                                Fetch::Ready(AudioFeatures {
+                                    energy: features.energy.clamp(0.0, 1.0),
+                                    danceability: features.danceability.clamp(0.0, 1.0),
+                                    acousticness: features.acousticness.clamp(0.0, 1.0),
+                                    tempo: (features.tempo / 300.0).clamp(0.0, 1.0),
+                                    valence: features.valence.clamp(0.0, 1.0),
+                                    instrumentalness: features.instrumentalness.clamp(0.0, 1.0),
+                                })
+                            });
+                        }
+                    }
+                })
+            });
+        }
+        for url in demand
             .filter_map(|track| track.image.as_ref())
             .chain(music.playlists.iter().filter_map(|playlist| playlist.image_url.as_ref()))
         {

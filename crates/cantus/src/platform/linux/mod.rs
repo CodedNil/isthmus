@@ -24,7 +24,6 @@ use isthmus::{
     },
 };
 use microfft::real::rfft_1024;
-use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
 use serde_json::Value;
 use smallvec::SmallVec;
 use std::{
@@ -207,9 +206,13 @@ pub fn spawn(command: &[String]) {
 }
 
 pub fn open_url(url: &str) {
-    if let Err(error) = Command::new("xdg-open").arg(url).spawn() {
+    if let Err(error) = try_open_url(url) {
         warn!(%error, %url, "Failed to open URL");
     }
+}
+
+pub fn try_open_url(url: &str) -> io::Result<()> {
+    Command::new("xdg-open").arg(url).spawn().map(|_| ())
 }
 
 pub fn start_launcher_listener(updater: &AppUpdater) {
@@ -413,12 +416,10 @@ fn monitor_status(updates: &AppUpdater) {
             (path, temperature)
         })
         .collect();
-    let nvml = Nvml::init().ok();
-    let nvidia: Vec<_> = nvml
-        .as_ref()
-        .into_iter()
-        .flat_map(|nvml| (0..nvml.device_count().unwrap_or(0)).filter_map(|index| nvml.device_by_index(index).ok()))
-        .collect();
+    let nvidia = directory_paths("/sys/bus/pci/devices").any(|path| {
+        fs::read_to_string(path.join("vendor")).is_ok_and(|vendor| vendor.trim() == "0x10de")
+            && fs::read_to_string(path.join("class")).is_ok_and(|class| class.starts_with("0x03"))
+    });
     let battery = directory_paths("/sys/class/power_supply")
         .find(|path| fs::read_to_string(path.join("type")).is_ok_and(|kind| kind.trim() == "Battery"));
     let counters = || fs::read_to_string("/proc/stat").ok().and_then(|stat| cpu_counters(&stat));
@@ -443,15 +444,9 @@ fn monitor_status(updates: &AppUpdater) {
             memory: ((total - memory_value("MemAvailable:")) / total.max(1.0)).clamp(0.0, 1.0),
         };
         let gpu = nvidia
-            .iter()
-            .filter_map(|device| {
-                let memory = device.memory_info().ok()?;
-                Some((memory.total as f32, ProcessorSample {
-                    temperature: device.temperature(TemperatureSensor::Gpu).unwrap_or_default() as f32,
-                    usage: device.utilization_rates().map_or(0.0, |rates| rates.gpu as f32 / 100.0),
-                    memory: memory.used as f32 / memory.total.max(1) as f32,
-                }))
-            })
+            .then(nvidia_samples)
+            .into_iter()
+            .flatten()
             .chain(amd.iter().filter_map(|(path, temperature)| {
                 let total = read_number(path.join("mem_info_vram_total"))?;
                 Some((total, ProcessorSample {
@@ -472,6 +467,31 @@ fn monitor_status(updates: &AppUpdater) {
         }
         thread::sleep(STATUS_SAMPLE_INTERVAL);
     }
+}
+
+fn nvidia_samples() -> Vec<(f32, ProcessorSample)> {
+    let Ok(output) = Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total,memory.used,temperature.gpu,utilization.gpu", "--format=csv,noheader,nounits"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut values = line.split(',').map(|value| value.trim().parse::<f32>().ok());
+            let total = values.next()??;
+            let used = values.next()??;
+            Some((total * 1_048_576.0, ProcessorSample {
+                temperature: values.next().flatten().unwrap_or_default(),
+                usage: values.next().flatten().unwrap_or_default() / 100.0,
+                memory: used / total.max(1.0),
+            }))
+        })
+        .collect()
 }
 
 fn directory_paths(path: impl AsRef<Path>) -> impl Iterator<Item = PathBuf> {

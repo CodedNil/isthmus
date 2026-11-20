@@ -23,7 +23,6 @@ fn animated_font_axes_reclaim_residency_without_invalidating_live_runs() {
         Text::on(placed, &arena.shared).distance_at(vec2(5.0, 0.0))
     };
     let reference = sample(&mut arena, &held);
-    let started = Instant::now();
     let mut peak = 0;
     for index in 0..800 {
         arena.begin_frame();
@@ -45,13 +44,6 @@ fn animated_font_axes_reclaim_residency_without_invalidating_live_runs() {
     let records = reused.text.count as usize * 5 + 4;
     assert!(arena.shared.len() - before <= records, "live fields were rebuilt after source-run eviction");
     assert!(peak < 64 * 1024, "obsolete font axes accumulated {peak} words");
-    eprintln!("800 animated font weights: {:?}, peak resident bytes: {}", started.elapsed(), peak * 4);
-    let started = Instant::now();
-    for _ in 0..1000 {
-        arena.begin_frame();
-        held.placed(&mut arena, Vec2::ZERO);
-    }
-    eprintln!("Steady glyph packing: {:?}/frame, resource bytes: {}", started.elapsed() / 1000, arena.shared.len() * 4);
 }
 
 #[test]

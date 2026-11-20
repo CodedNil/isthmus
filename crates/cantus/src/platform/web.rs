@@ -124,7 +124,7 @@ pub const fn spawn(_command: &[String]) {}
 
 pub fn open_url(url: &str) {
     if let Some(window) = web_sys::window() {
-        let _ = window.open_with_url_and_target(url, "_blank");
+        drop(window.open_with_url_and_target(url, "_blank"));
     }
 }
 
@@ -167,7 +167,7 @@ async fn run_web() -> Result<(), Box<dyn Error>> {
                 let mut app = app.borrow_mut();
                 let input = match name {
                     "pointerdown" if event.button() == 0 => {
-                        let _ = pointer_canvas.set_pointer_capture(event.pointer_id());
+                        drop(pointer_canvas.set_pointer_capture(event.pointer_id()));
                         app.interaction.apply(InputEvent::Enter(position));
                         InputEvent::Press
                     }
@@ -237,7 +237,9 @@ async fn run_web() -> Result<(), Box<dyn Error>> {
     loop {
         let (sender, frame) = oneshot::channel();
         let _animation = request_animation_frame(move |time| {
-            let _ = sender.send(time);
+            if sender.send(time).is_err() {
+                tracing::debug!("Browser frame receiver closed");
+            }
         });
         let Ok(time) = frame.await else { break };
         let elapsed = time - rendered_at;
@@ -258,7 +260,7 @@ async fn run_web() -> Result<(), Box<dyn Error>> {
                 app.draw(render, surface, size, View { bar: true, launcher: true });
             })?;
             if let Some(text) = app.launcher.pending_copy.take() {
-                let _ = window.navigator().clipboard().write_text(&text);
+                drop(window.navigator().clipboard().write_text(&text));
             }
         }
     }

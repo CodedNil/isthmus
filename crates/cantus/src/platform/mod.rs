@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+pub(crate) use backend::try_open_url;
 pub use backend::{
     Task, current_location, load_desktop_icons, open_url, run, run_power_action, set_volume, sleep, spawn, spawn_task,
     start_app_catalog, start_launcher_listener, start_status_monitor, trigger_launcher,

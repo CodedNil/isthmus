@@ -1,9 +1,8 @@
-use super::{MusicResult, PlaybackCommand, Track, TrackId};
+use super::{AudioFeatures, MusicResult, PlaybackCommand, Track, TrackId, spotify_lyrics::SpotifyLyrics};
 use crate::{
     app::{AppUpdater, send_update},
     config::Config,
 };
-use serde_json::{Value, value::RawValue};
 use std::{
     collections::HashMap,
     future::{Ready, ready},
@@ -14,7 +13,7 @@ use web_time::Instant;
 #[derive(Clone)]
 pub struct Spotify {
     updater: AppUpdater,
-    responses: Arc<HashMap<String, Box<RawValue>>>,
+    audio: Arc<HashMap<TrackId, AudioFeatures>>,
 }
 
 impl Spotify {
@@ -23,8 +22,8 @@ impl Spotify {
         clippy::unused_async_trait_impl,
         reason = "the browser fixture implements the native async client interface"
     )]
-    pub(super) async fn get_lyrics(&self, _id: TrackId) -> MusicResult<Value> {
-        Ok(Value::Null)
+    pub(super) async fn get_lyrics(&self, _id: TrackId) -> MusicResult<Option<SpotifyLyrics>> {
+        Ok(None)
     }
 
     pub(super) fn new(_config: &Config, updater: &AppUpdater) -> Self {
@@ -34,10 +33,10 @@ impl Spotify {
                 Vec::new()
             });
         let mut queue = Vec::new();
-        let mut responses = HashMap::new();
+        let mut audio = HashMap::new();
         for fixture in tracks {
             if let Some(id) = fixture.track.id {
-                responses.insert(super::audio_features_path(id), fixture.audio);
+                audio.insert(id, fixture.audio);
             }
             queue.push(fixture.track);
         }
@@ -47,7 +46,7 @@ impl Spotify {
             app.music.queue.observe(3, 42_000.0, 1.0, Instant::now());
             app.music.playing = true;
         });
-        Self { updater: updater.clone(), responses: Arc::new(responses) }
+        Self { updater: updater.clone(), audio: Arc::new(audio) }
     }
 
     pub(super) fn command(&self, command: PlaybackCommand) {
@@ -61,11 +60,19 @@ impl Spotify {
                 }
                 PlaybackCommand::SetPlaying(playing) => music.playing = playing,
                 PlaybackCommand::Seek(milliseconds) => position = milliseconds as f32,
-                PlaybackCommand::Skip(offset) => {
+                PlaybackCommand::Skip { forward } => {
                     index = index
-                        .saturating_add_signed(isize::from(offset))
+                        .saturating_add_signed(if forward { 1 } else { -1 })
                         .min(music.queue.tracks.len().saturating_sub(1));
                     position = 0.0;
+                }
+                PlaybackCommand::JumpTo { uri, uid } => {
+                    if let Some(target) =
+                        music.queue.tracks.iter().position(|track| track.uri == uri && track.queue_uid == uid)
+                    {
+                        index = target;
+                        position = 0.0;
+                    }
                 }
                 PlaybackCommand::UpdateLibrary { track_id, playlists, liked } => {
                     for (id, include) in playlists {
@@ -85,13 +92,8 @@ impl Spotify {
         });
     }
 
-    pub(super) fn get_json(&self, path: &str) -> Ready<MusicResult<&str>> {
-        ready(
-            self.responses
-                .get(path)
-                .map(|response| response.get())
-                .ok_or_else(|| format!("No demo Spotify response for {path}").into()),
-        )
+    pub(super) fn audio_features(&self, ids: &[TrackId]) -> Ready<MusicResult<HashMap<TrackId, AudioFeatures>>> {
+        ready(Ok(ids.iter().filter_map(|id| self.audio.get(id).map(|features| (*id, *features))).collect()))
     }
 }
 
@@ -100,7 +102,7 @@ impl Spotify {
 struct FixtureTrack {
     #[serde(flatten)]
     track: Track,
-    audio: Box<RawValue>,
+    audio: AudioFeatures,
 }
 
 impl super::Music {

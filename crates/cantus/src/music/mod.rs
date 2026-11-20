@@ -14,6 +14,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use tracing::{info, warn};
+#[cfg(target_arch = "wasm32")]
+use web as spotify;
 use web_time::{Duration, Instant};
 
 pub mod enrichment;
@@ -21,10 +23,10 @@ pub mod lyrics;
 pub mod queue;
 #[cfg(not(target_arch = "wasm32"))]
 mod spotify;
+#[path = "spotify/lyrics.rs"]
+mod spotify_lyrics;
 #[cfg(target_arch = "wasm32")]
 mod web;
-#[cfg(target_arch = "wasm32")]
-use web as spotify;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
@@ -34,10 +36,6 @@ pub const TRACK_SPACING_MS: f32 = 3000.0;
 const SCROLL_RESTART_AFTER_MS: f32 = 10_000.0;
 const SCROLL_RESTART_GRACE: Duration = Duration::from_secs(2);
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
-
-fn audio_features_path(id: TrackId) -> String {
-    format!("/audio-attributes/v1/audio-features/{id}?format=json")
-}
 
 pub struct Music {
     pub resources: TrackCache,
@@ -72,11 +70,10 @@ impl Music {
 
     pub fn seek(&self, index: usize, position: f32) {
         let Some(track) = self.queue.tracks.get(index) else { return };
-        let skip = (index as i64 - self.queue.index as i64).clamp(-10, 10) as i8;
-        self.spotify.command(if skip == 0 {
+        self.spotify.command(if index == self.queue.index {
             PlaybackCommand::Seek(position.clamp(0.0, track.duration_ms as f32).round() as u32)
         } else {
-            PlaybackCommand::Skip(skip)
+            PlaybackCommand::JumpTo { uri: track.uri.clone(), uid: track.queue_uid.clone() }
         });
     }
 
@@ -99,12 +96,14 @@ impl Music {
         );
         if restart {
             self.scroll_restart = Some((track.interaction_id, now));
-            self.spotify.command(PlaybackCommand::Seek(0));
         } else if notches > 0 || !recently_restarted {
             self.scroll_restart = None;
         }
-        if skip != 0 {
-            self.spotify.command(PlaybackCommand::Skip(skip));
+        match skip {
+            0 if restart => self.seek(index, 0.0),
+            0 => {}
+            -1 | 1 => self.spotify.command(PlaybackCommand::Skip { forward: skip > 0 }),
+            _ => self.seek(index.saturating_add_signed(skip as isize), 0.0),
         }
     }
 
@@ -153,10 +152,11 @@ fn scroll_playback(
     recently_restarted: bool,
     previous: usize,
     next: usize,
-) -> (bool, i8) {
+) -> (bool, i32) {
     let restart = notches < 0 && position_ms > SCROLL_RESTART_AFTER_MS && !recently_restarted;
-    let skip = (notches + i32::from(restart)).clamp(-(previous.min(10) as i32), next.min(10) as i32);
-    (restart, skip as i8)
+    let skip = (notches + i32::from(restart))
+        .clamp(-i32::try_from(previous).unwrap_or(i32::MAX), i32::try_from(next).unwrap_or(i32::MAX));
+    (restart, skip)
 }
 
 #[cfg(test)]
@@ -173,13 +173,15 @@ mod tests {
         assert_eq!(scroll_playback(-1, 15_000.0, false, 0, 2), (true, 0));
         assert_eq!(scroll_playback(-1, 0.0, false, 0, 2), (false, 0));
         assert_eq!(scroll_playback(1, 0.0, false, 2, 0), (false, 0));
+        assert_eq!(scroll_playback(25, 0.0, false, 2, 30), (false, 25));
     }
 }
 
 #[derive(Clone, Deserialize)]
 pub struct Track {
+    /// Spotify track ID used for playback and library requests.
     pub id: Option<TrackId>,
-    /// Recording id for matching lyrics.
+    /// Recording identifier shared by providers that expose an ISRC.
     #[serde(default)]
     pub isrc: Option<String>,
     /// The requested recording, kept when Spotify plays an alternative.
@@ -238,6 +240,7 @@ pub enum PlaybackCommand {
     PlayPlaylist(Option<PlaylistId>),
     SetPlaying(bool),
     Seek(u32),
-    Skip(i8),
+    Skip { forward: bool },
+    JumpTo { uri: String, uid: String },
     UpdateLibrary { track_id: TrackId, playlists: Vec<(PlaylistId, bool)>, liked: Option<bool> },
 }

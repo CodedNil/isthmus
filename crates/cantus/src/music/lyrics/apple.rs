@@ -28,7 +28,7 @@ pub(super) async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicRes
     let mut best = Ok(Lyrics::default());
     for timing in [Timing::Syllable, Timing::Word, Timing::Line] {
         for result in results.iter().filter(|result| {
-            result["timing_type"].as_str() == Some(timing.as_ref()) && matches_apple_result(track, result)
+            result["timing_type"].as_str() == Some(timing.as_ref()) && matches_track(track, result, "duration")
         }) {
             let Some(url) = result["lyricsUrl"].as_str() else { continue };
             let fetched: MusicResult<Lyrics> = async {
@@ -47,11 +47,6 @@ pub(super) async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicRes
         }
     }
     best
-}
-
-pub(super) fn matches_apple_result(track: &Track, matched: &Value) -> bool {
-    matches_track(track, matched, "duration")
-        && track.isrc.as_deref().zip(matched["isrc"].as_str()).is_none_or(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 fn time(value: &str) -> Option<f32> {

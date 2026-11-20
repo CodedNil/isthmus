@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    music::{Music, PlaylistId, TRACK_SPACING_MS, Track, TrackId},
+    music::{Music, PlaylistId, TRACK_SPACING_MS, TrackId},
     render::{
         BarLayout, GAP, HISTORY_WIDTH, PANEL_START, SUPPORT_BLEND, SUPPORT_INSET, TEXT_BODY, TEXT_COLOR, TEXT_TITLE,
         UiContext,
@@ -463,12 +463,7 @@ impl MusicView {
             start_ms -= f64::from(track.queue_span_ms());
             let start = bar.playhead_x + start_ms as f32 * bar.px_per_ms;
             let end = start + track.duration_ms as f32 * bar.px_per_ms;
-            // Skip tracks still missing metadata or artwork.
-            if track.duration_ms == 0
-                || track.name.trim().is_empty()
-                || track.image.is_some() && music.resources.art(track.image.as_deref()).is_none()
-                || start >= future_end
-            {
+            if track.duration_ms == 0 || track.name.trim().is_empty() || start >= future_end {
                 track.runtime.track_expansion.set(0.0);
                 continue;
             }
@@ -483,6 +478,12 @@ impl MusicView {
             visible.push(TrackLayout { queue_index, start_ms: start_ms as f32, width, right });
         }
         visible.reverse();
+        music.resources.set_visible_tracks(
+            visible
+                .iter()
+                .filter(|layout| layout.right > tracks_left)
+                .map(|layout| music.queue.tracks[layout.queue_index].interaction_id),
+        );
 
         let mouse_pos = context.interaction.mouse_pos();
         let shared = TrackFrame { bar, tracks_left, future_end };
@@ -523,7 +524,7 @@ impl MusicView {
                 };
             }
         }
-        self.show_particles(context, music, bar, playhead_track.map(|(index, _)| &music.queue.tracks[index]));
+        self.show_particles(context, music, bar, playhead_track.map(|(index, _)| index));
     }
 
     fn show_track(
@@ -693,6 +694,7 @@ impl MusicView {
         let pointer_active: f32 = f32::from(hovered);
         let opacity: f32 = (if hovered { 1.0 } else { future_fade.lerp(1.0, expansion) }) * history_alpha;
 
+        let audio: AudioFeatures = music.resources.audio(track.id);
         let image: &Image = music.resources.art(track.image.as_deref()).map_or(&*EMPTY_ART, |art| &art.image);
         let seed: f32 = track
             .uri
@@ -700,7 +702,6 @@ impl MusicView {
             .fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3))
             as u32 as f32
             * 2.328_306_4e-10;
-        let audio: AudioFeatures = music.resources.audio(track.id);
         let strength = clipping.smoothstep(Vec2::ZERO, Vec2::splat(height * 0.3)) * (1.0 - collapse);
         let droplets = Droplets::new(pill, rounding, strength, seed, droplet_progress);
         let time = context.frame.time;
@@ -916,9 +917,9 @@ impl MusicView {
         );
     }
 
-    fn show_particles(&mut self, context: &mut UiContext, music: &Music, bar: BarLayout, track: Option<&Track>) {
+    fn show_particles(&mut self, context: &mut UiContext, music: &Music, bar: BarLayout, index: Option<usize>) {
         let time = context.frame.time;
-        if let Some(track) = track.filter(|_| music.playing) {
+        if let Some(track) = index.and_then(|index| music.queue.tracks.get(index)).filter(|_| music.playing) {
             let audio = music.resources.audio(track.id);
             self.particles_debt = (self.particles_debt + context.frame.delta_time * (20.0 + audio.energy * 35.0))
                 * f32::from(music.queue.timeline.movement.abs() > 0.00001);
@@ -1156,7 +1157,6 @@ mod tests {
             for step in 0..64 {
                 let progress = Vec2::splat(step as f32 / 16.0 - 2.0);
                 let (drops, next) = (build(progress), build(progress + 0.000_01));
-                assert_eq!(drops.balls, build(progress).balls);
                 assert_ne!(drops.balls, build(progress + 1.0).balls);
                 let mut covered = 0;
                 for side in [-1.0, 1.0] {

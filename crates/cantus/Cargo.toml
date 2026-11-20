@@ -27,16 +27,15 @@ jiff = { version = "1.0.1", default-features = false, features = [
     "tzdb-bundle-always",
 ] }
 palette = { version = "0.7.7", default-features = false, features = ["std"] }
-reqwest = { version = "0.12.28", default-features = false, features = [
-    "json",
-    "rustls-tls-webpki-roots",
+reqwest = { version = "0.13.5", default-features = false, features = [
+    "form", "http2", "json", "query", "rustls",
 ] }
 resvg = { version = "0.50.0", default-features = false, features = [
     "raster-images",
 ] }
 roxmltree = "0.21.2"
 serde.workspace = true
-serde_json = { version = "1.0.154", features = ["raw_value"] }
+serde_json = "1.0.154"
 serde-saphyr = { version = "2.2.0", default-features = false, features = [
     "deserialize",
     "serialize",
@@ -44,7 +43,6 @@ serde-saphyr = { version = "2.2.0", default-features = false, features = [
 sha2 = "0.11.1"
 hex = "0.4.3"
 smallvec.workspace = true
-strsim = "0.11.1"
 strum_macros = "0.28.0"
 tokio = { workspace = true, features = ["macros", "sync"] }
 toml.workspace = true
@@ -54,37 +52,41 @@ unicode-segmentation = "1.13.3"
 web-time.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+base64 = "0.23.1"
 bytemuck.workspace = true
+bytes = "1.12.2"
 calloop = "0.14"
 calloop-wayland-source = "0.4.1"
 flate2 = "1.1.11"
 freedesktop-desktop-entry = { version = "0.8.4", default-features = false }
 freedesktop-icons = "0.4.0"
-librespot-core = { version = "0.8.0", default-features = false, features = [
-    "rustls-tls-webpki-roots",
+futures-util = { version = "0.3.34", default-features = false, features = [
+    "sink",
 ] }
-librespot-metadata = { version = "0.8.0", default-features = false, features = [
-    "rustls-tls-webpki-roots",
-] }
-librespot-oauth = { version = "0.8.0", default-features = false, features = [
-    "rustls-tls-webpki-roots",
-] }
-librespot-protocol = "0.8.0"
+getrandom = "0.4.3"
 microfft = { version = "0.6.0", default-features = false, features = [
     "size-1024",
     "std",
 ] }
-nvml-wrapper = "0.13.0"
 notify = "8.2.2"
 pollster.workspace = true
 protobuf = "3.7.2"
 schemars = { version = "1.2.3", features = ["arrayvec07", "preserve_order"] }
 smithay-clipboard = { version = "0.7.3", default-features = false }
-tokio = { workspace = true, features = ["net", "rt-multi-thread", "time"] }
+tempfile = "3.27.0"
+tokio = { workspace = true, features = [
+    "io-util",
+    "net",
+    "rt-multi-thread",
+    "time",
+] }
+tokio-tungstenite = { version = "0.30.0", features = [
+    "rustls-tls-webpki-roots",
+] }
 wayland-backend.workspace = true
 wayland-client.workspace = true
-wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
+wayland-protocols.workspace = true
 xkbcommon = { version = "0.9.0", default-features = false }
 zbus = { version = "6.3.0", default-features = false, features = [
     "proxy",
@@ -113,8 +115,8 @@ web-sys = { workspace = true, features = [
 
 [build-dependencies]
 isthmus_build.workspace = true
-# librespot-core 0.8's vergen-gitcl build dependency is incompatible with vergen 9.1.
-vergen = "=9.0.6"
+protobuf = "3.7.2"
+protobuf-codegen = "3.7.2"
 
 [lints]
 workspace = true

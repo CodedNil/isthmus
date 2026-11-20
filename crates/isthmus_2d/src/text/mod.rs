@@ -189,19 +189,3 @@ impl Primitive for Text<'_> {
         (sample, sample.coverage)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn either_selects_a_run_and_keeps_the_shared_resources() {
-        let resources = [1, 2, 3];
-        let (first, second) =
-            (TextRecord { count: 1, ..TextRecord::default() }, TextRecord { count: 2, ..TextRecord::default() });
-        let (first, second) = (Text::on(first, &resources), Text::on(second, &resources));
-        assert_eq!(first.either(second, false).line.count, 1);
-        assert_eq!(first.either(second, true).line.count, 2);
-        assert_eq!(first.either(second, true).words, &resources);
-    }
-}

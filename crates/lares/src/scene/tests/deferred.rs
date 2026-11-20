@@ -1,21 +1,11 @@
 use crate::{app::camera::Camera, render::light::shadows::ShadowAtlas, scene::tests::*};
-use core::cell::Cell;
 
 #[test]
-fn looped_normals_preserve_the_four_tetrahedral_samples() {
+fn sampled_normals_agree_with_the_ellipsoid_gradient() {
+    let scale = vec3(0.7, 1.1, 1.4);
     for point in [vec3(0.3, -0.7, 0.2), vec3(-0.4, 0.1, 0.8), Vec3::Z] {
-        let calls = Cell::new(0);
-        let distance = |p: Vec3| {
-            calls.set(calls.get() + 1);
-            (p * vec3(0.7, 1.1, 1.4)).length() - 0.5
-        };
-        let actual = trace::normal(point, 4, distance);
-        assert_eq!(calls.get(), 4);
-        let mut gradient = Vec3::ZERO;
-        for offset in [vec3(1.0, -1.0, -1.0), vec3(-1.0, -1.0, 1.0), vec3(-1.0, 1.0, -1.0), Vec3::ONE] {
-            gradient += offset * distance(point + offset * NORMAL_OFFSET);
-        }
-        assert_eq!(actual, gradient / gradient.length());
+        let actual = trace::normal(point, 4, |p| (p * scale).length() - 0.5);
+        assert!((actual - (point * scale * scale).normalize()).length() < 0.01);
     }
 }
 

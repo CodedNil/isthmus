@@ -1,6 +1,7 @@
 //! Metadata snapshots with pre-normalized search terms; icons load separately.
 
 use crate::platform::DesktopApp;
+use std::mem::replace;
 
 const MIN_CONFIDENCE: f32 = 0.6;
 
@@ -81,12 +82,26 @@ impl AppCatalog {
     }
 }
 
-/// Normalized edit distance between two words, from 0 to 1.
+/// Unicode scalar similarity, from 0 for no match to 1 for identical nonempty strings.
 pub fn similarity(a: &str, b: &str) -> f32 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
-    1.0 - strsim::levenshtein(a, b) as f32 / a.chars().count().max(b.chars().count()) as f32
+    if a == b {
+        return 1.0;
+    }
+    let (a_len, b_len) = (a.chars().count(), b.chars().count());
+    let (short, long) = if a_len <= b_len { (a, b) } else { (b, a) };
+    let mut costs: Vec<_> = (1..=a_len.min(b_len)).collect();
+    for (row, left) in long.chars().enumerate() {
+        let mut diagonal = row;
+        let mut beside = row + 1;
+        for (above, right) in costs.iter_mut().zip(short.chars()) {
+            beside = (diagonal + usize::from(left != right)).min(1 + beside.min(*above));
+            diagonal = replace(above, beside);
+        }
+    }
+    1.0 - costs[costs.len() - 1] as f32 / a_len.max(b_len) as f32
 }
 
 #[cfg(test)]

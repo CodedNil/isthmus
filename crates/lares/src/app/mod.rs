@@ -171,13 +171,13 @@ mod tests {
             motion: Vec::new(),
             display: (1.3, Vec3::ONE),
         };
-        for step in 0..20 {
-            app.camera.pan(Vec2::splat(step as f32), Vec2::splat(800.0));
+        for (pan, intensity) in [(8.0, 0.0), (-19.0, 0.75), (4.0, 1.0)] {
+            app.camera.pan(Vec2::splat(pan), Vec2::splat(800.0));
             app.camera.zoom(0.1);
-            app.scene.set_light_state("test", step as f32 / 20.0);
+            app.scene.set_light_state("test", intensity);
             for size in [Vec2::splat(600.0), Vec2::new(1600.0, 900.0)] {
                 let globals = app.globals(size);
-                assert_eq!((globals.exposure, globals.white_balance), app.display);
+                assert_eq!((globals.exposure, globals.white_balance), (1.3, Vec3::ONE));
             }
         }
     }

@@ -168,6 +168,10 @@ impl CantusApp {
                 self.launcher.show(&mut context);
             }
         });
+        if view.bar && self.music.resources.visibility_changed {
+            self.music.resources.visibility_changed = false;
+            self.refresh_enrichment();
+        }
         if owns_input {
             self.interaction.end_frame();
         }

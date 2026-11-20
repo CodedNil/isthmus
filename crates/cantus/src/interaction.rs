@@ -127,6 +127,7 @@ impl Interaction {
         Some(Drag { offset: self.position - press.origin, scroll: press.scroll, released: press.up })
     }
 
+    #[cfg(target_os = "linux")]
     pub fn dragging(&self) -> bool {
         self.held().is_some_and(|press| press.dragged)
     }
