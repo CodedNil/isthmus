@@ -1,114 +1,124 @@
-//! Render pipelines, all compiled at startup so that no draw waits on one.
-use super::pipeline_cache::DiskCache;
+//! Dynamic-rendering pipelines with shared descriptor heap mappings.
+use super::{error::RenderError, heap::Layout, images::TextureFormat, setup::Device};
 use crate::{Blend, Program, program::ShaderEntry};
-use std::time::Instant;
+use ash::{
+    util::read_spv,
+    vk::{self, TaggedStructure as _},
+};
+use std::{ffi::CStr, io::Cursor, rc::Rc};
 
-/// Compiles the program's pipelines in shader order, sharing a layout per image count.
-pub(super) fn compile_all<P: Program>(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-    frame_layout: &wgpu::BindGroupLayout,
-    image_layouts: &[wgpu::BindGroupLayout],
-    cache: Option<DiskCache>,
-) -> Vec<wgpu::RenderPipeline> {
-    let layouts: Vec<_> = image_layouts
-        .iter()
-        .enumerate()
-        .map(|(images, layout)| {
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("isthmus"),
-                bind_group_layouts: &[Some(frame_layout), Some(layout)][..if images == 0 { 1 } else { 2 }],
-                immediate_size: 0,
-            })
-        })
-        .collect();
-    let driver_cache = cache.as_ref().map(|disk| &disk.cache);
-    let compile = |shader: usize| compile(device, format, &layouts, driver_cache, &P::SHADERS[shader]);
-    let pipelines = compile_in_parallel(P::SHADERS.len(), compile);
-    if let Some(cache) = cache {
-        cache.save();
-    }
-    pipelines
+pub struct Pipelines {
+    device: Rc<Device>,
+    pub shaders: Vec<vk::Pipeline>,
 }
 
-fn compile_in_parallel(
-    count: usize,
-    compile: impl Fn(usize) -> wgpu::RenderPipeline + Sync,
-) -> Vec<wgpu::RenderPipeline> {
-    use core::sync::atomic::{AtomicUsize, Ordering};
-    use std::{sync::OnceLock, thread};
-
-    let slots: Vec<_> = (0..count).map(|_| OnceLock::new()).collect();
-    let threads = thread::available_parallelism().map_or(1, |threads| threads.get().min(4));
-    let next = AtomicUsize::new(0);
-    thread::scope(|scope| {
-        for _ in 0..threads.min(count) {
-            scope.spawn(|| {
-                while let shader = next.fetch_add(1, Ordering::Relaxed)
-                    && let Some(slot) = slots.get(shader)
-                {
-                    slot.get_or_init(|| compile(shader));
-                }
-            });
+impl Pipelines {
+    pub fn new<P: Program>(device: &Rc<Device>, format: TextureFormat) -> Result<Self, RenderError> {
+        let mut pipelines = Self { device: Rc::clone(device), shaders: Vec::new() };
+        let mappings = Layout::new(&device.heap_properties).mappings();
+        for entry in P::SHADERS {
+            pipelines.shaders.push(compile(&device.raw, format, &mappings, entry)?);
         }
-    });
-    slots.into_iter().map(|slot| slot.into_inner().expect("each shader was compiled")).collect()
+        Ok(pipelines)
+    }
+}
+
+impl Drop for Pipelines {
+    fn drop(&mut self) {
+        for &shader in &self.shaders {
+            // SAFETY: Gpu waits for pending commands before dropping its pipelines.
+            unsafe {
+                self.device.raw.destroy_pipeline(shader, None);
+            }
+        }
+    }
 }
 
 fn compile(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-    layouts: &[wgpu::PipelineLayout],
-    cache: Option<&wgpu::PipelineCache>,
+    device: &ash::Device,
+    surface_format: TextureFormat,
+    mappings: &[vk::DescriptorSetAndBindingMappingEXT<'_>],
     entry: &ShaderEntry,
-) -> wgpu::RenderPipeline {
-    let started = Instant::now();
-    let [vertex, fragment] = entry.code.map(|code| {
-        device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(entry.name),
-            source: wgpu::ShaderSource::Wgsl(code.into()),
-        })
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(entry.name),
-        layout: Some(&layouts[entry.images]),
-        vertex: wgpu::VertexState {
-            module: &vertex,
-            entry_point: None,
-            buffers: &[],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &fragment,
-            entry_point: None,
-            targets: &[Some(wgpu::ColorTargetState {
-                format: entry.format.unwrap_or(format),
-                blend: blend_state(entry.blend),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache,
-    });
-    tracing::debug!(shader = entry.name, elapsed = ?started.elapsed(), "Compiled pipeline");
-    pipeline
+) -> Result<vk::Pipeline, RenderError> {
+    let [vertex_name, fragment_name] = entry
+        .entries
+        .map(|name| CStr::from_bytes_with_nul(name.as_bytes()).map_err(|error| RenderError::Gpu(error.to_string())));
+    let [vertex_code, fragment_code] =
+        entry.code.map(|code| read_spv(&mut Cursor::new(code)).map_err(|error| RenderError::Gpu(error.to_string())));
+    let (vertex_code, fragment_code) = (vertex_code?, fragment_code?);
+    let mut vertex_module = vk::ShaderModuleCreateInfo::default().code(&vertex_code);
+    let mut fragment_module = vk::ShaderModuleCreateInfo::default().code(&fragment_code);
+    let mut vertex_mapping = vk::ShaderDescriptorSetAndBindingMappingInfoEXT::default().mappings(mappings);
+    let mut fragment_mapping = vertex_mapping;
+    let vertex_stage =
+        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).name(vertex_name?);
+    let fragment_stage =
+        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).name(fragment_name?);
+    // SAFETY: pointers in each stage chain refer to structs that live through compilation.
+    let vertex_stage = unsafe { vertex_stage.extend(&mut vertex_module) };
+    // SAFETY: the mapping points into the live layout and starts an independent chain.
+    let vertex_stage = unsafe { vertex_stage.extend(&mut vertex_mapping) };
+    // SAFETY: the fragment module lives through compilation.
+    let fragment_stage = unsafe { fragment_stage.extend(&mut fragment_module) };
+    // SAFETY: the fragment stage has its own mapping referencing the live layout.
+    let fragment_stage = unsafe { fragment_stage.extend(&mut fragment_mapping) };
+    let stages = [vertex_stage, fragment_stage];
+    let vertex = vk::PipelineVertexInputStateCreateInfo::default();
+    let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_STRIP);
+    let viewport = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+    let raster =
+        vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::FILL).line_width(1.0);
+    let samples = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let blends = [blend(entry.blend)];
+    let blending = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blends);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let formats = [entry.format.unwrap_or(surface_format).raw()];
+    let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex)
+        .input_assembly_state(&assembly)
+        .viewport_state(&viewport)
+        .rasterization_state(&raster)
+        .multisample_state(&samples)
+        .color_blend_state(&blending)
+        .dynamic_state(&dynamic);
+    let mut flags = vk::PipelineCreateFlags2CreateInfo::default().flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
+    // SAFETY: both extension structs live through compilation and start with empty chains.
+    let info = unsafe { info.extend(&mut rendering) };
+    // SAFETY: the flags extend this graphics pipeline and remain live through compilation.
+    let info = unsafe { info.extend(&mut flags) };
+    // SAFETY: all referenced state is live and the layout matches the shader ABI.
+    match unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) } {
+        Ok(pipelines) => Ok(pipelines[0]),
+        Err((pipelines, error)) => {
+            for pipeline in pipelines {
+                // SAFETY: any returned pipelines are unused.
+                unsafe {
+                    device.destroy_pipeline(pipeline, None);
+                }
+            }
+            Err(RenderError::Gpu(format!("pipeline {:?}: {error}", entry.name)))
+        }
+    }
 }
 
-const fn blend_state(blend: Blend) -> Option<wgpu::BlendState> {
-    match blend {
-        Blend::Over => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-        Blend::Replace | Blend::Raw => None,
-        Blend::Add => Some(wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::One,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING.alpha,
-        }),
+fn blend(mode: Blend) -> vk::PipelineColorBlendAttachmentState {
+    let state = vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA);
+    match mode {
+        Blend::Replace | Blend::Raw => state,
+        Blend::Add | Blend::Over => state
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::ONE)
+            .dst_color_blend_factor(if mode == Blend::Add {
+                vk::BlendFactor::ONE
+            } else {
+                vk::BlendFactor::ONE_MINUS_SRC_ALPHA
+            })
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD),
     }
 }

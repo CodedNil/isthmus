@@ -2,27 +2,23 @@
 use super::runtime::Runtime;
 use calloop::EventLoop;
 use input::Input;
-use isthmus::wgpu::rwh::{
-    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WaylandWindowHandle, WindowHandle,
+use isthmus::{
+    WaylandWindow,
+    rwh::{DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle},
 };
 use std::{
-    collections::HashMap,
     error::Error,
-    ptr::NonNull,
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::runtime::Builder;
 use wayland_client::{
-    Connection, Proxy as _, QueueHandle,
-    backend::Backend,
-    delegate_noop,
-    globals::{Global, GlobalListContents, registry_queue_init},
+    Connection, QueueHandle, delegate_noop,
+    globals::{GlobalListContents, registry_queue_init},
     protocol::{
         wl_callback::WlCallback,
         wl_compositor::WlCompositor,
-        wl_output::{self, WlOutput},
-        wl_registry::{self, WlRegistry},
+        wl_registry::WlRegistry,
         wl_seat::WlSeat,
         wl_surface::{self, WlSurface},
     },
@@ -72,7 +68,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let connection = Connection::connect_to_env()?;
     let (globals, events) = registry_queue_init::<Wayland>(&connection)?;
     let queue = events.handle();
-    let compositor: WlCompositor = globals.bind(&queue, 3..=6, ())?;
+    let compositor: WlCompositor = globals.bind(&queue, 6..=6, ())?;
     let shell: XdgWmBase = globals.bind(&queue, 1..=6, ())?;
     let _seat: Option<WlSeat> = globals.bind(&queue, 1..=8, ()).ok();
     let wl = compositor.create_surface(&queue, ());
@@ -100,10 +96,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     wl.commit();
 
     let mut app = Wayland {
-        window: Arc::new(NativeWindow { backend: connection.backend(), wl, surface, toplevel, scaling, decoration }),
+        window: Arc::new(NativeWindow { native: WaylandWindow::new(wl), surface, toplevel, scaling, decoration }),
         runtime: None,
         input: Input::new(globals.bind(&queue, 1..=1, ()).ok()),
-        outputs: HashMap::new(),
         logical: [1280, 800],
         pending: Configure::default(),
         integer_scale: 1,
@@ -112,12 +107,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         status: WindowStatus::Configuring,
         activated: false,
     };
-
-    if app.window.wl.version() < 6 {
-        for global in globals.contents().clone_list() {
-            app.add_output(globals.registry(), &global, &queue);
-        }
-    }
 
     let mut event_loop = EventLoop::try_new()?;
     calloop_wayland_source::WaylandSource::new(connection, events).insert(event_loop.handle())?;
@@ -133,8 +122,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 }
 
 pub(super) struct NativeWindow {
-    backend: Backend,
-    wl: WlSurface,
+    native: WaylandWindow,
     surface: XdgSurface,
     toplevel: XdgToplevel,
     scaling: Option<(WpViewport, WpFractionalScaleV1)>,
@@ -143,15 +131,13 @@ pub(super) struct NativeWindow {
 
 impl HasDisplayHandle for NativeWindow {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        self.backend.display_handle()
+        self.native.display_handle()
     }
 }
 
 impl HasWindowHandle for NativeWindow {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let pointer = NonNull::new(self.wl.id().as_ptr().cast()).ok_or(HandleError::Unavailable)?;
-        // SAFETY: The wl_surface and its display remain alive until the surface owner is dropped.
-        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Wayland(WaylandWindowHandle::new(pointer))) })
+        self.native.window_handle()
     }
 }
 
@@ -166,7 +152,6 @@ impl Drop for NativeWindow {
         }
         self.toplevel.destroy();
         self.surface.destroy();
-        self.wl.destroy();
     }
 }
 
@@ -174,7 +159,6 @@ struct Wayland {
     runtime: Option<Runtime>,
     window: Arc<NativeWindow>,
     input: Input,
-    outputs: HashMap<u32, Output>,
     logical: [i32; 2],
     pending: Configure,
     integer_scale: i32,
@@ -199,40 +183,7 @@ struct Configure {
     activated: bool,
 }
 
-struct Output {
-    proxy: WlOutput,
-    scale: i32,
-    entered: bool,
-}
-
 impl Wayland {
-    fn add_output(&mut self, registry: &WlRegistry, global: &Global, queue: &QueueHandle<Self>) {
-        // Older surfaces receive scale changes through their entered outputs.
-        if self.window.wl.version() < 6 && global.interface == "wl_output" && global.version >= 2 {
-            self.outputs.entry(global.name).or_insert_with(|| Output {
-                proxy: registry.bind(global.name, global.version.min(3), queue, global.name),
-                scale: 1,
-                entered: false,
-            });
-        }
-    }
-
-    fn update_output_scale(&mut self) {
-        let scale = self.outputs.values().filter(|output| output.entered).map(|output| output.scale).max();
-        if let Some(scale) = scale {
-            self.set_integer_scale(scale);
-        }
-    }
-
-    fn set_integer_scale(&mut self, factor: i32) {
-        if factor > 0 && factor != self.integer_scale {
-            self.integer_scale = factor;
-            if self.fractional_scale.is_none() {
-                self.request_redraw();
-            }
-        }
-    }
-
     fn wait(&self) -> Option<Duration> {
         if self.status != WindowStatus::Visible || self.frame_callback.is_some() {
             return None;
@@ -266,20 +217,20 @@ impl Wayland {
             && let Some((viewport, _)) = &window.scaling
         {
             viewport.set_destination(self.logical[0], self.logical[1]);
-            window.wl.set_buffer_scale(1);
+            window.native.wl.set_buffer_scale(1);
         } else {
-            window.wl.set_buffer_scale(self.integer_scale);
+            window.native.wl.set_buffer_scale(self.integer_scale);
         }
         if self.runtime.is_none() {
             self.runtime = Some(Runtime::new(Arc::clone(window), size)?);
         }
-        self.frame_callback = Some(window.wl.frame(queue, ()));
+        self.frame_callback = Some(window.native.wl.frame(queue, ()));
         if !self.runtime.as_mut().expect("runtime initialized").draw(window, size)? {
             // A recovered surface can be unmapped until the next frame is presented.
             self.frame_callback = None;
         }
         // Also submit the callback when Vulkan skipped a presentation.
-        window.wl.commit();
+        window.native.wl.commit();
         Ok(())
     }
 }
@@ -333,18 +284,14 @@ dispatch!(WlCallback, |state, proxy, _event, _queue| {
 });
 
 dispatch!(WlSurface, |state, _proxy, event, _queue| {
-    let (proxy, entered) = match event {
-        wl_surface::Event::PreferredBufferScale { factor } => {
-            state.set_integer_scale(factor);
-            return;
+    if let wl_surface::Event::PreferredBufferScale { factor } = event
+        && factor > 0
+        && factor != state.integer_scale
+    {
+        state.integer_scale = factor;
+        if state.fractional_scale.is_none() {
+            state.request_redraw();
         }
-        wl_surface::Event::Enter { output } => (output, true),
-        wl_surface::Event::Leave { output } => (output, false),
-        _ => return,
-    };
-    if let Some(output) = state.outputs.values_mut().find(|output| output.proxy == proxy) {
-        output.entered = entered;
-        state.update_output_scale();
     }
 });
 
@@ -366,46 +313,14 @@ delegate_noop!(Wayland: ignore WpCursorShapeManagerV1);
 delegate_noop!(Wayland: ignore ZxdgDecorationManagerV1);
 delegate_noop!(Wayland: ignore ZxdgToplevelDecorationV1);
 
-impl wayland_client::Dispatch<WlOutput, u32> for Wayland {
-    fn event(
-        state: &mut Self,
-        _proxy: &WlOutput,
-        event: wl_output::Event,
-        data: &u32,
-        _connection: &Connection,
-        _queue: &QueueHandle<Self>,
-    ) {
-        if let wl_output::Event::Scale { factor } = event
-            && let Some(output) = state.outputs.get_mut(data)
-        {
-            output.scale = factor;
-            state.update_output_scale();
-        }
-    }
-}
-
 impl wayland_client::Dispatch<WlRegistry, GlobalListContents> for Wayland {
     fn event(
-        state: &mut Self,
-        proxy: &WlRegistry,
-        event: wl_registry::Event,
-        _globals: &GlobalListContents,
-        _connection: &Connection,
-        qhandle: &QueueHandle<Self>,
+        _: &mut Self,
+        _: &WlRegistry,
+        _: <WlRegistry as wayland_client::Proxy>::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
     ) {
-        match event {
-            wl_registry::Event::Global { name, interface, version } => {
-                state.add_output(proxy, &Global { name, interface, version }, qhandle);
-            }
-            wl_registry::Event::GlobalRemove { name } => {
-                if let Some(output) = state.outputs.remove(&name) {
-                    if output.proxy.version() >= 3 {
-                        output.proxy.release();
-                    }
-                    state.update_output_scale();
-                }
-            }
-            _ => {}
-        }
     }
 }

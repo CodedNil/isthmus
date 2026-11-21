@@ -7,7 +7,6 @@ version = "0.1.0"
 [dependencies]
 # Shader parsing and compilation
 isthmus_syntax.workspace = true
-naga = { version = "30.0.2", features = ["spv-in", "wgsl-in", "wgsl-out"] }
 spirv-builder.workspace = true
 
 # Rust code generation
@@ -23,6 +22,8 @@ toml = { workspace = true, features = ["display"] }
 
 # Build errors
 anyhow = "1.0.104"
+rustix = { version = "1.1.6", features = ["stdio"] }
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

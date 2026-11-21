@@ -2,7 +2,7 @@ use serde::{Deserialize, Deserializer, de::Error as _};
 use std::{collections::HashMap, fmt::Display, str::FromStr};
 
 /// Dealer push carrying an updated Spotify Connect cluster.
-#[derive(Clone, prost::Message, Deserialize)]
+#[derive(prost::Message, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ClusterUpdate {
     #[prost(message, optional, tag = "1")]
@@ -10,7 +10,7 @@ pub struct ClusterUpdate {
 }
 
 /// Device identity and playback state sent during Connect registration.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct Device {
     #[prost(message, optional, tag = "1")]
     pub device_info: Option<DeviceInfo>,
@@ -19,7 +19,7 @@ pub struct Device {
 }
 
 /// Playback state for the active device and the server timestamp used to align clocks.
-#[derive(Clone, prost::Message, Deserialize)]
+#[derive(prost::Message, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Cluster {
     #[prost(string, tag = "2")]
@@ -34,7 +34,7 @@ pub struct Cluster {
 }
 
 /// Registers or refreshes Cantus as a Spotify Connect observer.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct PutStateRequest {
     #[prost(message, optional, tag = "2")]
     pub device: Option<Device>,
@@ -47,7 +47,7 @@ pub struct PutStateRequest {
 }
 
 /// Client and device identifiers, display name, and advertised capabilities.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct DeviceInfo {
     #[prost(string, tag = "3")]
     pub name: String,
@@ -63,7 +63,7 @@ pub struct DeviceInfo {
 
 /// Connect features advertised by the Cantus observer.
 #[expect(clippy::struct_excessive_bools, reason = "Spotify assigns a separate protobuf tag to each capability")]
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct Capabilities {
     #[prost(bool, tag = "7")]
     pub is_observable: bool,
@@ -80,7 +80,7 @@ pub struct Capabilities {
 }
 
 /// Reported track, queue, playback flags, and timing for a Connect session.
-#[derive(Clone, prost::Message, Deserialize)]
+#[derive(prost::Message, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PlayerState {
     /// Server timestamp of this playback state in milliseconds.
@@ -131,7 +131,7 @@ pub struct PlayerState {
 }
 
 /// One queue occurrence with its Spotify URI, occurrence ID, and metadata.
-#[derive(Clone, prost::Message, Deserialize)]
+#[derive(prost::Message, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ProvidedTrack {
     #[prost(string, tag = "1")]
@@ -147,7 +147,7 @@ pub struct ProvidedTrack {
 }
 
 /// Reason Spotify Connect uses to distinguish device registration from reconnects.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[derive(Debug, PartialEq, Eq, prost::Enumeration)]
 #[repr(i32)]
 pub enum PutStateReason {
     /// Default value when a reason is unavailable.
@@ -159,7 +159,7 @@ pub enum PutStateReason {
 }
 
 /// Connect protocol used by the registering device.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[derive(Debug, PartialEq, Eq, prost::Enumeration)]
 #[repr(i32)]
 pub enum MemberType {
     /// Legacy Spotify remote-control membership.
@@ -169,7 +169,7 @@ pub enum MemberType {
 }
 
 /// Device role advertised to Spotify Connect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[derive(Debug, PartialEq, Eq, prost::Enumeration)]
 #[repr(i32)]
 pub enum DeviceType {
     /// Default value when a device role is unavailable.

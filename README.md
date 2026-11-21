@@ -2,7 +2,7 @@
 
 Write GPU graphics in Rust, alongside the application that drives them.
 
-The renderer uses Vulkan. Cantus, Lares, and Paries run on Linux Wayland.
+The renderer requires Vulkan 1.4 with `VK_EXT_descriptor_heap` and non-uniform sampled-image indexing. Cantus, Lares, and Paries run on Linux Wayland.
 
 Project code is licensed under the [GNU GPL v3 or later](LICENSE).
 
@@ -10,6 +10,16 @@ Project code is licensed under the [GNU GPL v3 or later](LICENSE).
 - **Composable 2D graphics.** `isthmus_2d` provides shapes, smooth unions, cutouts, outlines and scalable text. Custom distance functions work with the same antialiasing and painting tools.
 - **Shared Rust.** Reuse types and helpers across CPU and GPU code, with checked data interfaces.
 - **Rendering beyond a window.** Draw to images, combine multiple passes, and share a renderer across surfaces.
+
+## GPU pass timings
+
+Launch with `ISTHMUS_GPU_TIMINGS=1 lares` or `ISTHMUS_GPU_TIMINGS=1 cantus`. The log shows median and p95 GPU time per named pass every 120 timed frames, with a sample count for each pass. Skipped passes contribute no samples. Timings cover the pass and its image transitions. CPU recording and presentation are outside those intervals.
+
+Use `render.surface("pass name", …)` to label each pass. The pass targets either a window or an offscreen image and can contain several named shader draws. Isthmus reads timestamps after its existing frame fences signal.
+
+Launch Cantus with `ISTHMUS_GPU_TIMINGS=shaders cantus` to include individual shader timings. If a shader runs in several draw groups in one pass, its sample is the sum of those groups for that frame. Fine-grained timestamps can affect GPU scheduling.
+
+Set `ISTHMUS_GPU_LABELS=1` to use the same pass and shader names in GPU captures when Vulkan debug labels are available.
 
 ## An image with a moving, wavy border
 
@@ -49,6 +59,8 @@ The image fills an animated circle, with an antialiased lavender outline. Each s
 - `.with((..))` lists the local variables the closures use, which are sent to the GPU. The build checks that the list matches the closures' captures exactly, and reads each variable's type from its annotation, so the GPU knows it too. The CPU can still use them normally.
 - `.shape(..)` is the geometry. The CPU evaluates it to place the draw, and the GPU evaluates it to cover each pixel.
 - `.paint(..)` is the colour. It runs on the GPU, once per covered pixel.
+
+When Rust-GPU reports an error in generated code, Isthmus adds the original closure or helper location when it can identify it. Shader diagnostics also list the captures.
 
 ## Text uses the same drawing tools
 

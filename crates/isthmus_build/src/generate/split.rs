@@ -59,7 +59,7 @@ fn write_file(path: &Path, children: &Path, mut file: File, written: &mut BTreeS
         fs::create_dir_all(directory)?;
     }
     written.insert(path.to_path_buf());
-    write_if_changed(path, &prettyplease::unparse(&file))
+    write_if_changed(path, prettyplease::unparse(&file))
 }
 
 #[cfg(test)]

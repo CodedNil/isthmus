@@ -1,7 +1,7 @@
 /// Save or remove a track in a user’s Spotify collection.
 ///
 /// Wire fields verified against go-librespot’s collection/v2 implementation.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct CollectionItem {
     #[prost(string, tag = "1")]
     pub uri: String,
@@ -12,7 +12,7 @@ pub struct CollectionItem {
 }
 
 /// Batch of saved-track changes for a user and collection set.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct WriteRequest {
     #[prost(string, tag = "1")]
     pub username: String,

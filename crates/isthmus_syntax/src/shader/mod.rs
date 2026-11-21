@@ -75,21 +75,25 @@ impl Shader {
         let images = self.images().count();
         let format = self.format.as_ref().map_or_else(
             || quote!(None),
-            |format| quote!({ use #isthmus::wgpu::TextureFormat; Some(TextureFormat::#format) }),
+            |format| quote!({ use #isthmus::TextureFormat; Some(TextureFormat::#format) }),
         );
-        quote!(ShaderEntry {
-            name: #name, blend: Blend::#blend, images: #images, format: #format,
-            code: [
-                include_str!(concat!(env!("OUT_DIR"), "/", #vertex, ".wgsl")),
-                include_str!(concat!(env!("OUT_DIR"), "/", #fragment, ".wgsl")),
-            ],
+        quote!(unsafe {
+            ShaderEntry::new(
+                #name, Blend::#blend, #images, #format,
+                [concat!(#vertex, "\0"), concat!(#fragment, "\0")],
+                [
+                    include_bytes!(concat!(env!("OUT_DIR"), "/", #vertex, ".spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/", #fragment, ".spv")),
+                ],
+            )
         })
     }
 
-    /// The draw record's struct: the region to rasterize, then every upload except images, which are bound
-    /// separately. Each field's type is a parameter, because a struct field cannot name an elided lifetime.
+    /// The draw record's struct: the region to rasterize, then non-image uploads followed by the image table indices
+    /// in capture order. Each data field is generic because a struct type cannot name an elided lifetime.
     fn payload(&self, isthmus: &TokenStream, name: &Ident) -> TokenStream {
         let sent = self.uploads.iter().enumerate().filter(|(_, upload)| !upload.kind.is_image());
+        let images = self.images();
         let parameters =
             sent.clone().filter(|(_, upload)| upload.kind.is_data()).map(|(index, _)| format_ident!("T{index}"));
         let fields = sent.map(|(index, upload)| {
@@ -103,7 +107,7 @@ impl Shader {
         });
         quote! {
             #[derive(Clone, Copy, #isthmus::ShaderData)]
-            struct #name<#(#parameters),*> { region: [#isthmus::glam::Vec2; 4], #(#fields),* }
+            struct #name<#(#parameters),*> { region: [#isthmus::glam::Vec2; 4], #(#fields,)* #(#images: u32),* }
         }
     }
 

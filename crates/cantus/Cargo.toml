@@ -8,14 +8,13 @@ version = "0.10.0"
 # Rendering and media analysis
 bytemuck.workspace = true
 image = { workspace = true, features = ["jpeg", "png"] }
-isthmus.workspace = true
+isthmus = { workspace = true, features = ["wayland"] }
 isthmus_2d.workspace = true
 microfft = { version = "0.6.0", default-features = false, features = [
     "size-1024",
     "std",
 ] }
 palette = { version = "0.7.7", default-features = false, features = ["std"] }
-pollster.workspace = true
 resvg = { version = "0.50.0", default-features = false, features = [
     "raster-images",
 ] }
@@ -25,8 +24,7 @@ calloop.workspace = true
 calloop-wayland-source.workspace = true
 freedesktop-desktop-entry = { version = "0.8.4", default-features = false }
 freedesktop-icons = "0.4.0"
-notify = "8.2.2"
-wayland-backend.workspace = true
+notify = "9.0.0"
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true

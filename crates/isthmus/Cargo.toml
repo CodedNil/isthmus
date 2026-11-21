@@ -4,6 +4,9 @@ license.workspace = true
 name = "isthmus"
 version = "0.1.0"
 
+[features]
+wayland = ["dep:wayland-client", "dep:wayland-backend"]
+
 [dependencies]
 # Shared shader ABI and macros
 isthmus_abi.workspace = true
@@ -16,7 +19,12 @@ spirv-std.workspace = true
 # GPU rendering and image data
 bytemuck.workspace = true
 half = "2.7.1"
-wgpu.workspace = true
+ash.workspace = true
+ash-allocator.workspace = true
+gpu-allocator.workspace = true
+raw-window-handle.workspace = true
+wayland-client = { workspace = true, optional = true }
+wayland-backend = { workspace = true, optional = true }
 
 # Resource collections
 slotmap = "1.1.1"
@@ -25,10 +33,6 @@ smallvec.workspace = true
 # Errors and diagnostics
 thiserror = "2.0.21"
 tracing.workspace = true
-
-[dev-dependencies]
-# Async GPU tests
-pollster.workspace = true
 
 [lints]
 workspace = true

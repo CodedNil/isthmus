@@ -97,7 +97,7 @@ dispatch!(WlSeat, |state, proxy, event, queue| {
 
 dispatch!(WlPointer, |state, _proxy, event, _queue| {
     match event {
-        wl_pointer::Event::Enter { serial, surface, surface_x, surface_y } if surface == state.window.wl => {
+        wl_pointer::Event::Enter { serial, surface, surface_x, surface_y } if surface == state.window.native.wl => {
             state.input.inside = true;
             if let Some(cursor) = &state.input.cursor {
                 cursor.set_shape(serial, Shape::Default);
@@ -135,7 +135,7 @@ dispatch!(WlTouch, |state, _proxy, event, _queue| {
     match event {
         wl_touch::Event::Down { id, surface, x, y, .. }
             if state.input.touch_id.is_none()
-                && surface == state.window.wl
+                && surface == state.window.native.wl
                 && state.runtime.as_ref().is_some_and(|runtime| !runtime.app.is_dragging()) =>
         {
             state.input.touch_id = Some(id);

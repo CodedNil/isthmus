@@ -1,12 +1,12 @@
 /// Playlist entry identified by its Spotify URI.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(PartialEq, Eq, prost::Message)]
 pub struct Item {
     #[prost(string, required, tag = "1")]
     pub uri: String,
 }
 
 /// Appends entries to a playlist.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(PartialEq, Eq, prost::Message)]
 pub struct Add {
     #[prost(message, repeated, tag = "2")]
     pub items: Vec<Item>,
@@ -15,7 +15,7 @@ pub struct Add {
 }
 
 /// Removes entries by URI.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(PartialEq, Eq, prost::Message)]
 pub struct Remove {
     #[prost(message, repeated, tag = "3")]
     pub items: Vec<Item>,
@@ -25,7 +25,7 @@ pub struct Remove {
 }
 
 /// One playlist edit, with a kind that selects the matching payload.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(PartialEq, Eq, prost::Message)]
 pub struct Operation {
     #[prost(enumeration = "OperationKind", required, tag = "1")]
     pub kind: i32,
@@ -36,7 +36,7 @@ pub struct Operation {
 }
 
 /// Wire discriminator for the supported playlist edit payloads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[derive(Debug, PartialEq, Eq, prost::Enumeration)]
 #[repr(i32)]
 pub enum OperationKind {
     /// Default value for an unrecognized edit kind.
@@ -48,7 +48,7 @@ pub enum OperationKind {
 }
 
 /// Ordered edits based on one playlist revision.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct Delta {
     #[prost(bytes, optional, tag = "1")]
     pub base_version: Option<Vec<u8>>,
@@ -57,7 +57,7 @@ pub struct Delta {
 }
 
 /// Write request carrying the base revision and edits.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct ListChanges {
     #[prost(bytes, optional, tag = "1")]
     pub base_revision: Option<Vec<u8>>,

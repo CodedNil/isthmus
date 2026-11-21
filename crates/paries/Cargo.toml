@@ -6,12 +6,10 @@ version = "0.1.0"
 
 [dependencies]
 # Rendering
-isthmus.workspace = true
+isthmus = { workspace = true, features = ["wayland"] }
 isthmus_2d.workspace = true
-pollster.workspace = true
 
 # Wayland wallpaper surfaces
-wayland-backend.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true

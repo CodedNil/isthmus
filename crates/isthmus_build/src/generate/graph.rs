@@ -3,7 +3,7 @@ use super::{
     items::{flatten, item_name, module_directory, segments, shader_derives},
     references::{Draw, Local, References},
 };
-use crate::cargo::directive;
+use crate::{cargo::directive, diagnostics::origin};
 use isthmus_syntax::{
     program::Declaration,
     shader::{Chain, Shader, SliceIndices},
@@ -15,7 +15,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use syn::{Item, visit::Visit as _, visit_mut::VisitMut as _};
+use syn::{Item, spanned::Spanned as _, visit::Visit as _, visit_mut::VisitMut as _};
 
 /// One source file (or inline module) of the consumer crate, with its items and name resolution state.
 #[derive(Default)]
@@ -87,6 +87,9 @@ impl Graph {
                 errors.push(format!("error: {message}\n  --> {file}:{line}:{column}"));
             }
             for Draw { chain, position: (line, column), locals } in shaders.draws {
+                let captures = chain.with.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+                let paint = chain.paint.span().start();
+                let shape_span = chain.shape.span();
                 let shader = match shader_for(chain, &locals, &entries) {
                     Ok(shader) => shader,
                     Err(message) => {
@@ -97,8 +100,21 @@ impl Graph {
                 let mut refs = References::default();
                 refs.visit_expr_closure(&shader.declaration(&program));
                 self.follow(scope, refs);
+                let mut label = if captures.is_empty() {
+                    format!("shader {:?} paint closure", shader.name)
+                } else {
+                    format!("shader {:?} paint closure, captures: {captures}", shader.name)
+                };
+                if !shape_span.byte_range().is_empty() {
+                    use std::fmt::Write as _;
+                    let shape = shape_span.start();
+                    write!(label, ", shape closure at {}:{}", shape.line, shape.column + 1)
+                        .expect("writing to a string cannot fail");
+                }
+                let tag = origin(&self.modules[scope].file, paint, &label);
                 let gpu = shader.gpu(&self.isthmus, &program);
-                self.modules[scope].shaders.push(gpu);
+                let generated: syn::File = syn::parse2(gpu).map_err(|error| error.to_string())?;
+                self.modules[scope].shaders.extend(generated.items.into_iter().map(|item| quote!(#[doc = #tag] #item)));
                 entries.push(shader);
             }
         }
@@ -303,7 +319,14 @@ impl Graph {
                     }
                 }
             }
-            output.extend(item.to_token_stream());
+            if !matches!(item, Item::Macro(_))
+                && let Some(name) = item_name(&item)
+            {
+                let tag = origin(&module.file, item.span().start(), &name);
+                output.extend(quote!(#[doc = #tag] #item));
+            } else {
+                output.extend(item.to_token_stream());
+            }
         }
         for (index, item) in module.items.iter().enumerate() {
             if let Item::Impl(item) = item {
@@ -316,6 +339,8 @@ impl Graph {
                     .collect();
                 for member in &mut item.items {
                     if let syn::ImplItem::Fn(function) = member {
+                        let tag = origin(&module.file, function.span().start(), &function.sig.ident.to_string());
+                        function.attrs.insert(0, syn::parse_quote!(#[doc = #tag]));
                         rewrite_slices(&mut function.sig, &mut function.block);
                     }
                 }

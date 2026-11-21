@@ -12,13 +12,6 @@ pub struct Frame<'draw, P: Program> {
     pub(crate) surface: &'draw mut SurfaceTarget,
 }
 
-#[cfg(test)]
-impl<P: Program> Frame<'_, P> {
-    pub(crate) fn record(&mut self, shader: usize, payload: &[u32], images: &[&crate::Image]) {
-        self.gpu.emit(self.surface, shader, payload, images);
-    }
-}
-
 impl<P: Program> Deref for Frame<'_, P> {
     type Target = ShaderFrame<P>;
 

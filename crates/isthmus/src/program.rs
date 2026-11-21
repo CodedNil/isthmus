@@ -8,7 +8,7 @@ pub trait Program: Copy + 'static {
     /// Generated shader entry points and pipeline state, sorted by name.
     const SHADERS: &'static [ShaderEntry];
     #[cfg(not(target_arch = "spirv"))]
-    /// Most image bindings declared by any of the program's shaders.
+    /// Largest number of images captured by one draw.
     fn max_images() -> usize {
         Self::SHADERS.iter().map(|entry| entry.images).max().unwrap_or(0)
     }
@@ -32,14 +32,35 @@ pub enum Blend {
 #[cfg(not(target_arch = "spirv"))]
 /// Generated entry points and resource requirements for one shader pipeline.
 pub struct ShaderEntry {
-    /// Vertex and fragment WGSL, each containing only its stage's dependencies.
-    pub code: [&'static str; 2],
+    /// Vertex and fragment SPIR-V, each containing only its stage's dependencies.
+    pub(crate) code: [&'static [u8]; 2],
+    /// NUL-terminated SPIR-V entry point names in stage order.
+    pub(crate) entries: [&'static str; 2],
     /// The name given to `frame.shader(..)`, which keys the shader and labels its GPU objects in logs.
-    pub name: &'static str,
+    pub(crate) name: &'static str,
     /// Color blending mode.
-    pub blend: Blend,
-    /// Number of image bindings required by this shader.
-    pub images: usize,
+    pub(crate) blend: Blend,
+    /// Number of image indices in the draw record.
+    pub(crate) images: usize,
     /// Optional offscreen attachment format; otherwise the presentation format.
-    pub format: Option<wgpu::TextureFormat>,
+    pub(crate) format: Option<crate::TextureFormat>,
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl ShaderEntry {
+    /// Describes a compiled shader in a generated program manifest.
+    ///
+    /// # Safety
+    /// Both binaries must be valid Vulkan 1.4 SPIR-V with the specified entry points,
+    /// generated for Isthmus's buffer, texture table, and draw record layout.
+    pub const unsafe fn new(
+        name: &'static str,
+        blend: Blend,
+        images: usize,
+        format: Option<crate::TextureFormat>,
+        entries: [&'static str; 2],
+        code: [&'static [u8]; 2],
+    ) -> Self {
+        Self { code, entries, name, blend, images, format }
+    }
 }

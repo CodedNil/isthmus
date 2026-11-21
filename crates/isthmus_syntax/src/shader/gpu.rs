@@ -8,14 +8,13 @@ use isthmus_abi as abi;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::BTreeSet;
-use syn::{Expr, Ident, Path, Type, visit_mut::VisitMut as _};
+use syn::{Expr, Path, Type, visit_mut::VisitMut as _};
 
 impl Shader {
     pub fn gpu(&self, isthmus: &TokenStream, program: &Path) -> TokenStream {
         let payload_name = format_ident!("IsthmusPayload{}", self.entry.replace('_', ""));
         let payload = self.payload(isthmus, &payload_name);
         let payload_type = self.payload_type(isthmus, &payload_name);
-        let images = self.images().collect::<Vec<_>>();
         let slices = self
             .uploads
             .iter()
@@ -30,7 +29,7 @@ impl Shader {
         let bindings = self.uploads.iter().map(|Upload { name, ty, kind }| {
             let value = match kind {
                 UploadKind::Image => {
-                    let image = image_name(name);
+                    let image = quote!(unsafe { __isthmus_images.index(__data.#name as usize) });
                     let value = quote!(#isthmus::Image::new(#image, *__isthmus_sampler));
                     if matches!(ty, Type::Reference(_)) { quote!(&#value) } else { value }
                 }
@@ -49,18 +48,13 @@ impl Shader {
         let (vertex_name, fragment_name) = (self.vertex_entry(), self.fragment_entry());
         let (vertex_ident, fragment_ident) = (format_ident!("{vertex_name}"), format_ident!("{fragment_name}"));
         let (frame_set, frame_binding, shared_binding) = (abi::FRAME_SET, abi::FRAME_BINDING, abi::SHARED_BINDING);
-        let (image_set, sampler_binding) = (abi::IMAGE_SET, abi::SAMPLER_BINDING);
-        let image_resources = images.iter().zip(abi::FIRST_IMAGE_BINDING..).map(|(name, binding)| {
-            let image = image_name(name);
-            quote! {
-                #[spirv(descriptor_set = #image_set, binding = #binding)]
-                #image: &#isthmus::spirv_std::image::Image2d,
-            }
-        });
-        let sampler = (!images.is_empty()).then(|| {
+        let (image_set, sampler_binding, image_binding) = (abi::IMAGE_SET, abi::SAMPLER_BINDING, abi::IMAGE_BINDING);
+        let image_table = self.images().next().is_some().then(|| {
             quote! {
                 #[spirv(descriptor_set = #image_set, binding = #sampler_binding)]
                 __isthmus_sampler: &#isthmus::spirv_std::Sampler,
+                #[spirv(descriptor_set = #image_set, binding = #image_binding)]
+                __isthmus_images: &#isthmus::spirv_std::RuntimeArray<#isthmus::spirv_std::image::Image2d>,
             }
         });
         quote! {
@@ -87,8 +81,7 @@ impl Shader {
                 #[spirv(location = 0)] __out: &mut #isthmus::glam::Vec4,
                 #[spirv(storage_buffer, descriptor_set = #frame_set, binding = #frame_binding)] __words: &[u32],
                 #[spirv(storage_buffer, descriptor_set = #frame_set, binding = #shared_binding)] __shared: &[u32],
-                #sampler
-                #(#image_resources)*
+                #image_table
             ) {
                 let (__frame, __data, __fragment) =
                     #isthmus::__private::fragment_input::<#program, #payload_type>(__words, __draw, __coord, __uv);
@@ -97,9 +90,4 @@ impl Shader {
             }
         }
     }
-}
-
-/// Name of the entry-point parameter carrying an uploaded image.
-fn image_name(name: &Ident) -> Ident {
-    format_ident!("__isthmus_image_{name}")
 }

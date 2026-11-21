@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     io::{self, Read as _},
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -32,7 +33,8 @@ use tracing::warn;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const PING_TIMEOUT: Duration = Duration::from_secs(3);
-const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(10);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(120);
 const ANNOUNCEMENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -51,7 +53,7 @@ pub(super) enum Event {
 }
 
 impl Dealer {
-    pub(super) async fn start(session: Session) -> MusicResult<Self> {
+    pub(super) async fn start(session: Arc<Session>) -> MusicResult<Self> {
         let socket = connect(&session).await?;
         let (send, messages) = mpsc::unbounded_channel();
         let task = tokio::spawn(run(session, socket, send));
@@ -80,15 +82,23 @@ async fn connect(session: &Session) -> MusicResult<Socket> {
     .await?
 }
 
-async fn run(session: Session, mut socket: Socket, events: UnboundedSender<Event>) {
+async fn run(session: Arc<Session>, mut socket: Socket, events: UnboundedSender<Event>) {
+    let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     loop {
-        if let Err(error) = receive(&mut socket, &events, ANNOUNCEMENT_TIMEOUT).await {
+        if let Err(error) = receive(&mut socket, &events, ANNOUNCEMENT_TIMEOUT, &mut reconnect_delay).await {
             warn!(%error, "Spotify dealer disconnected");
         }
         if events.send(Event::Disconnected).is_err() {
             return;
         }
         loop {
+            let jitter = f64::from(getrandom::u32().unwrap_or(u32::MAX)) / f64::from(u32::MAX);
+            let delay = reconnect_delay.mul_f64(0.5 + 0.5 * jitter);
+            reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
+            tokio::select! {
+                () = events.closed() => return,
+                () = sleep(delay) => {}
+            }
             match connect(&session).await {
                 Ok(connected) => {
                     socket = connected;
@@ -100,10 +110,6 @@ async fn run(session: Session, mut socket: Socket, events: UnboundedSender<Event
                 }
                 Err(error) => warn!(%error, "Could not reconnect Spotify dealer"),
             }
-            sleep(RECONNECT_INTERVAL).await;
-            if events.is_closed() {
-                return;
-            }
         }
     }
 }
@@ -112,6 +118,7 @@ async fn receive<Stream: AsyncRead + AsyncWrite + Unpin>(
     socket: &mut WebSocketStream<Stream>,
     events: &UnboundedSender<Event>,
     announcement_timeout: Duration,
+    reconnect_delay: &mut Duration,
 ) -> MusicResult<()> {
     let mut interval = interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -141,7 +148,10 @@ async fn receive<Stream: AsyncRead + AsyncWrite + Unpin>(
                         Ok(Envelope::Message { uri, headers, payloads }) => {
                             match decode_event(&uri, &headers, payloads) {
                                 Ok(Some(event)) => {
-                                    announced |= matches!(event, Event::Connected(_));
+                                    if matches!(event, Event::Connected(_)) {
+                                        announced = true;
+                                        *reconnect_delay = INITIAL_RECONNECT_DELAY;
+                                    }
                                     if announced {
                                         events.send(event)?;
                                     }
@@ -274,8 +284,29 @@ mod tests {
         let mut socket = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
         server.send(Message::Text(r#"{"type":"pong"}"#.into())).await.unwrap();
         let (events, _receiver) = mpsc::unbounded_channel();
-        let error = receive(&mut socket, &events, Duration::from_millis(30)).await.unwrap_err();
+        let mut reconnect_delay = MAX_RECONNECT_DELAY;
+        let error = receive(&mut socket, &events, Duration::from_millis(30), &mut reconnect_delay).await.unwrap_err();
         assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::TimedOut);
+        assert_eq!(reconnect_delay, MAX_RECONNECT_DELAY);
+    }
+
+    #[tokio::test]
+    async fn dealer_resets_reconnect_delay_after_announcement() {
+        let (client, server) = duplex(1024);
+        let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let mut socket = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let announcement = json!({
+            "type": "message",
+            "uri": "hm://pusher/v1/connections",
+            "headers": {"Spotify-Connection-Id": "test"}
+        });
+        server.send(Message::Text(announcement.to_string().into())).await.unwrap();
+        server.close(None).await.unwrap();
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let mut reconnect_delay = MAX_RECONNECT_DELAY;
+        receive(&mut socket, &events, ANNOUNCEMENT_TIMEOUT, &mut reconnect_delay).await.unwrap();
+        assert!(matches!(receiver.try_recv(), Ok(Event::Connected(id)) if id == "test"));
+        assert_eq!(reconnect_delay, INITIAL_RECONNECT_DELAY);
     }
 
     #[test]

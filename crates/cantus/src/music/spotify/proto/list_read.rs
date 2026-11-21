@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 /// Batch of playlist and root-list reads sent to `GetLists`.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct GetListsRequest {
     #[prost(message, repeated, tag = "1")]
     pub requests: Vec<GetListRequest>,
 }
 
 /// Identifies one list and selects the fields to return.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct GetListRequest {
     #[prost(message, optional, tag = "1")]
     pub identifier: Option<ListIdentifier>,
@@ -17,14 +17,14 @@ pub struct GetListRequest {
 }
 
 /// Spotify URI of a playlist or a user’s root list.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct ListIdentifier {
     #[prost(string, tag = "1")]
     pub uri: String,
 }
 
 /// Options for reading one list, including the response field selection.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct RequestOptions {
     #[prost(message, optional, tag = "4")]
     pub requested_fields: Option<RequestedFields>,
@@ -77,14 +77,14 @@ pub struct AttributesRequestedFields {
 }
 
 /// Per-list results in the order they were requested.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct GetListsResponse {
     #[prost(message, repeated, tag = "1")]
     pub responses: Vec<GetListResponse>,
 }
 
 /// One requested list and its revision or error information.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct GetListResponse {
     #[prost(message, optional, tag = "1")]
     pub entity: Option<ListEntity>,
@@ -93,7 +93,7 @@ pub struct GetListResponse {
 }
 
 /// Playlist or root list with entries and metadata for referenced lists.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct ListEntity {
     #[prost(message, optional, tag = "1")]
     pub attributes: Option<Attributes>,
@@ -104,14 +104,14 @@ pub struct ListEntity {
 }
 
 /// One entry in a playlist or root list.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct ListItem {
     #[prost(message, optional, tag = "2")]
     pub attributes: Option<Attributes>,
 }
 
 /// Attributes and revision information for a list referenced by a root list.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(PartialEq, Eq, prost::Message)]
 pub struct MetaItem {
     #[prost(message, optional, tag = "1")]
     pub attributes: Option<Attributes>,
@@ -120,7 +120,7 @@ pub struct MetaItem {
 }
 
 /// Requested Spotify URI, name, and artwork fields for a list or entry.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(PartialEq, Eq, prost::Message)]
 pub struct Attributes {
     #[prost(string, tag = "1")]
     pub uri: String,
@@ -133,21 +133,21 @@ pub struct Attributes {
 }
 
 /// Available artwork URLs for a list, in Spotify’s response order.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(PartialEq, Eq, prost::Message)]
 pub struct PictureSizes {
     #[prost(message, repeated, tag = "1")]
     pub picture_size: Vec<PictureSize>,
 }
 
 /// Artwork URL for one size variant.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(PartialEq, Eq, prost::Message)]
 pub struct PictureSize {
     #[prost(string, tag = "2")]
     pub url: String,
 }
 
 /// Revision and possible error for an individual list read.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(PartialEq, Eq, prost::Message)]
 pub struct ResponseInfo {
     #[prost(message, optional, tag = "1")]
     pub request_error: Option<RequestError>,
@@ -156,14 +156,14 @@ pub struct ResponseInfo {
 }
 
 /// Spotify’s error message for a failed list read.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(PartialEq, Eq, prost::Message)]
 pub struct RequestError {
     #[prost(string, tag = "6")]
     pub message: String,
 }
 
 /// Attribute IDs that can be requested from `GetLists`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[derive(Debug, PartialEq, Eq, prost::Enumeration)]
 #[repr(i32)]
 pub enum AttributeKind {
     /// Default when no attribute has been selected.

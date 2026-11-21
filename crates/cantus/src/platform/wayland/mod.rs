@@ -8,18 +8,13 @@ use crate::{
 use calloop::{EventLoop, channel};
 use clipboard::Clipboard;
 use isthmus::{
-    RenderError, SurfaceHandle,
+    RenderError, SurfaceHandle, WaylandWindow,
     glam::{Vec2, vec2},
-    wgpu::rwh::{
-        DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WaylandWindowHandle,
-        WindowHandle,
-    },
 };
 use smallvec::SmallVec;
 use std::{
     fs::File,
     os::unix::fs::FileExt as _,
-    ptr::NonNull,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -27,9 +22,7 @@ use strum::VariantArray as _;
 use tokio::runtime;
 use tracing::warn;
 use wayland_client::{
-    Connection, Proxy as _, QueueHandle, WEnum,
-    backend::Backend,
-    delegate_noop,
+    Connection, Proxy as _, QueueHandle, WEnum, delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
         wl_callback::{self, WlCallback},
@@ -85,31 +78,6 @@ macro_rules! dispatch {
 
 mod clipboard;
 
-struct NativeSurface {
-    backend: Backend,
-    wl: WlSurface,
-}
-
-impl HasDisplayHandle for NativeSurface {
-    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        self.backend.display_handle()
-    }
-}
-
-impl HasWindowHandle for NativeSurface {
-    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let pointer = NonNull::new(self.wl.id().as_ptr().cast()).ok_or(HandleError::Unavailable)?;
-        // SAFETY: The wl_surface and its display remain alive until this owner is dropped.
-        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Wayland(WaylandWindowHandle::new(pointer))) })
-    }
-}
-
-impl Drop for NativeSurface {
-    fn drop(&mut self) {
-        self.wl.destroy();
-    }
-}
-
 /// Runs the Wayland application event loop.
 pub fn run() {
     let runtime = runtime::Builder::new_multi_thread()
@@ -134,7 +102,6 @@ pub fn run() {
         shell: globals.bind(&qhandle, 4..=4, ()).expect("missing zwlr_layer_shell_v1"),
         viewporter: globals.bind(&qhandle, 1..=1, ()).expect("missing wp_viewporter"),
         fractional: globals.bind(&qhandle, 1..=1, ()).expect("missing wp_fractional_scale_manager_v1"),
-        backend: connection.backend(),
         clipboard: globals.bind(&qhandle, 1..=3, ()).ok().map(|manager| Clipboard::new(manager, &seat, &qhandle)),
         cantus: CantusApp::new(sender),
         background_manager: globals.bind(&qhandle, 1..=1, ()).ok(),
@@ -200,7 +167,6 @@ struct LayerShellApp {
     shell: ZwlrLayerShellV1,
     viewporter: WpViewporter,
     fractional: WpFractionalScaleManagerV1,
-    backend: Backend,
     pointer: Option<WlPointer> = None,
     keyboard: Option<WlKeyboard> = None,
     xkb_state: Option<xkb::State> = None,
@@ -217,7 +183,7 @@ struct LayerShellApp {
 }
 
 struct WaylandSurface {
-    native: Arc<NativeSurface>,
+    native: Arc<WaylandWindow>,
     layer: ZwlrLayerSurfaceV1,
     fractional: WpFractionalScaleV1,
     viewport: WpViewport,
@@ -290,7 +256,7 @@ impl LayerShellApp {
             effect: self.background_manager.as_ref().map(|manager| manager.get_background_effect(&wl, qhandle, ())),
             viewport: self.viewporter.get_viewport(&wl, qhandle, ()),
             fractional: self.fractional.get_fractional_scale(&wl, qhandle, kind),
-            native: Arc::new(NativeSurface { backend: self.backend.clone(), wl }),
+            native: Arc::new(WaylandWindow::new(wl)),
             layer,
             size: vec2(0.0, height),
             scale: 1.0,
@@ -370,7 +336,7 @@ impl LayerShellApp {
             let size = (surface.size * surface.scale).to_array().map(|size| size.round().max(1.0) as u32);
             if self.gpu.is_none() {
                 install_fonts();
-                let (gpu, handle) = match pollster::block_on(Renderer::new(Arc::clone(&surface.native), size)) {
+                let (gpu, handle) = match Renderer::new(Arc::clone(&surface.native), size) {
                     Ok(renderer) => renderer,
                     Err(error) => {
                         tracing::error!(%error, "Could not initialize renderer; retrying");
@@ -407,11 +373,17 @@ impl LayerShellApp {
             }
         }) {
             tracing::error!(%error, "Could not render frame");
-            if !matches!(error, RenderError::Validation | RenderError::ResourceLimit { .. } | RenderError::MissingImage)
-                && (matches!(error, RenderError::SurfaceLost)
-                    || pollster::block_on(self.gpu.as_mut().unwrap().recover())
-                        .inspect_err(|error| tracing::error!(%error, "Could not recover GPU device"))
-                        .is_err())
+            if !matches!(
+                error,
+                RenderError::ResourceLimit { .. } | RenderError::MissingImage | RenderError::ImageLimit(_)
+            ) && (matches!(error, RenderError::SurfaceLost)
+                || self
+                    .gpu
+                    .as_mut()
+                    .unwrap()
+                    .recover()
+                    .inspect_err(|error| tracing::error!(%error, "Could not recover GPU device"))
+                    .is_err())
             {
                 // A fresh instance is the fallback if the adapter itself is gone.
                 self.gpu_retry = Some(Instant::now() + Duration::from_secs(1));

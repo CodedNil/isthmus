@@ -1,12 +1,12 @@
 /// Artist credit returned in track metadata.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct Artist {
     #[prost(string, optional, tag = "2")]
     pub name: Option<String>,
 }
 
 /// Album name and cover images returned with a track.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct Album {
     #[prost(string, optional, tag = "2")]
     pub name: Option<String>,
@@ -17,7 +17,7 @@ pub struct Album {
 }
 
 /// Subset of Spotify catalog track metadata used by Cantus.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct Track {
     #[prost(string, optional, tag = "2")]
     pub name: Option<String>,
@@ -34,7 +34,7 @@ pub struct Track {
 }
 
 /// Cover image file ID and pixel width.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct Image {
     #[prost(bytes, optional, tag = "1")]
     pub file_id: Option<Vec<u8>>,
@@ -43,14 +43,14 @@ pub struct Image {
 }
 
 /// Set of cover image variants for one album.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct ImageGroup {
     #[prost(message, repeated, tag = "1")]
     pub image: Vec<Image>,
 }
 
 /// External identifier with a scheme and value, such as an ISRC.
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message)]
 pub struct ExternalId {
     #[prost(string, optional, tag = "1")]
     pub r#type: Option<String>,

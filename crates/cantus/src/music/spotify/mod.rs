@@ -50,7 +50,7 @@ const CLUSTER_TOPIC: &str = "hm://connect-state/v1/cluster";
 #[derive(Clone)]
 pub struct Spotify {
     commands: UnboundedSender<PlaybackCommand>,
-    session: watch::Receiver<Option<Session>>,
+    session: watch::Receiver<Option<Arc<Session>>>,
 }
 
 type CatalogTrack = metadata::Track;
@@ -68,7 +68,7 @@ impl Spotify {
                 loop {
                     match auth::connect().await {
                         Ok(session) => {
-                            connected_session.send_replace(Some(session.clone()));
+                            connected_session.send_replace(Some(Arc::clone(&session)));
                             let result = run_spotify(
                                 session,
                                 &mut receiver,
@@ -125,14 +125,14 @@ impl Spotify {
 }
 
 async fn run_spotify(
-    session: Session,
+    session: Arc<Session>,
     commands: &mut UnboundedReceiver<PlaybackCommand>,
     updater: AppUpdater,
     playlist_targets: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
     ratings_enabled: bool,
     local_playback: watch::Receiver<bool>,
 ) -> MusicResult<()> {
-    let mut dealer = dealer::Dealer::start(session.clone()).await?;
+    let mut dealer = dealer::Dealer::start(Arc::clone(&session)).await?;
 
     let (mpris, mut media_keys) = mpris::start(local_playback.clone());
     let mut worker =
@@ -160,7 +160,7 @@ async fn run_spotify(
             worker.metadata_dirty = false;
             let uris = worker.missing_metadata();
             if !uris.is_empty() {
-                let session = worker.session.clone();
+                let session = Arc::clone(&worker.session);
                 metadata = Some(Box::pin(async move { session.track_metadata(&uris).await }));
             }
         }
@@ -200,9 +200,9 @@ async fn run_spotify(
             }
             event = dealer.next() => match event? {
                 dealer::Event::Connected(connection_id) => {
-                    worker.session.set_connection_id(&connection_id);
+                    worker.connection_id = connection_id;
                     let reason = if registered { PutStateReason::NewConnection } else { PutStateReason::NewDevice };
-                    let cluster = timeout(REQUEST_TIMEOUT, SpotifyWorker::register(&worker.session, reason))
+                    let cluster = timeout(REQUEST_TIMEOUT, worker.register(reason))
                         .await.map_err(|error| {
                             io::Error::new(io::ErrorKind::TimedOut, format!("Spotify observer registration: {error}"))
                         })??;
@@ -217,7 +217,7 @@ async fn run_spotify(
                 }
                 dealer::Event::Cluster(cluster) => worker.update_cluster(*cluster),
                 dealer::Event::Disconnected => {
-                    worker.session.set_connection_id("");
+                    worker.connection_id.clear();
                     worker.metadata_dirty = false;
                     worker.clear_active_device();
                 }
@@ -271,8 +271,9 @@ fn playback_position(player: &PlayerState, server_now: i64) -> (f32, f32) {
 }
 
 struct SpotifyWorker {
-    session: Session,
+    session: Arc<Session>,
     updater: AppUpdater,
+    connection_id: String = String::new(),
     active_device: Option<String> = None,
     playlist_targets: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
     cached_playlists: Arc<HashMap<PlaylistId, CachedPlaylist>>,
@@ -288,7 +289,7 @@ struct SpotifyWorker {
 }
 
 impl SpotifyWorker {
-    fn new(session: Session, updater: AppUpdater) -> Self {
+    fn new(session: Arc<Session>, updater: AppUpdater) -> Self {
         Self {
             session,
             updater,
@@ -303,7 +304,7 @@ impl SpotifyWorker {
         let mut command = match command {
             PlaybackCommand::PlayPlaylist(id) => {
                 let uri = id.map_or_else(
-                    || format!("spotify:user:{}:collection", self.session.username()),
+                    || format!("spotify:user:{}:collection", self.session.username),
                     |id| format!("spotify:playlist:{id}"),
                 );
                 json!({
@@ -351,13 +352,13 @@ impl SpotifyWorker {
         }
         command["logging_params"] = json!({});
         let Some(target) = &self.active_device else { return false };
-        if let Err(error) = self.session.post_player_command(target, &command).await {
+        if let Err(error) = self.session.post_player_command(&self.connection_id, target, &command).await {
             error!(%error, endpoint = %command["endpoint"], "Spotify player command failed");
         }
         false
     }
 
-    async fn register(session: &Session, reason: PutStateReason) -> MusicResult<Cluster> {
+    async fn register(&self, reason: PutStateReason) -> MusicResult<Cluster> {
         let request = PutStateRequest {
             device: Some(ConnectDevice {
                 device_info: Some(DeviceInfo {
@@ -371,11 +372,11 @@ impl SpotifyWorker {
                         supported_types: vec!["audio/track".into(), "audio/episode".into()],
                     }),
                     device_type: DeviceType::Observer as i32,
-                    device_id: session.device_id().into(),
+                    device_id: self.session.device_id.clone(),
                     client_id: auth::CLIENT_ID.into(),
                 }),
                 player_state: Some(PlayerState {
-                    session_id: session.session_id().to_owned(),
+                    session_id: self.session.id.clone(),
                     playback_speed: 1.0,
                     options: Some(()),
                     suppressions: Some(()),
@@ -386,7 +387,7 @@ impl SpotifyWorker {
             put_state_reason: reason as i32,
             client_side_timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
         };
-        session.put_connect_state(&request).await
+        self.session.put_connect_state(&self.connection_id, &request).await
     }
 
     fn server_now(&self) -> i64 {
@@ -492,7 +493,7 @@ impl SpotifyWorker {
             mpris.send_replace(None);
             return;
         };
-        if device == self.session.device_id() || !(player.is_playing || player.is_paused || player.is_buffering) {
+        if device == &self.session.device_id || !(player.is_playing || player.is_paused || player.is_buffering) {
             mpris.send_replace(None);
             return;
         }
@@ -729,7 +730,7 @@ mod tests {
                 is_playing: true,
                 ..Default::default()
             }),
-            ..SpotifyWorker::new(Session::new().unwrap(), updater)
+            ..SpotifyWorker::new(Arc::new(Session::new().unwrap()), updater)
         };
         for device in [Some("playing-device"), None] {
             worker.update_cluster(Cluster {
@@ -749,7 +750,7 @@ mod tests {
         let mut worker = SpotifyWorker {
             active_device: Some("phone".into()),
             mpris: Some(mpris),
-            ..SpotifyWorker::new(Session::new().unwrap(), updater)
+            ..SpotifyWorker::new(Arc::new(Session::new().unwrap()), updater)
         };
         let report = |uri: &str, title: Option<&str>| PlayerState {
             track: Some(ProvidedTrack {

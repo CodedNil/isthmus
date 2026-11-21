@@ -14,15 +14,19 @@ use super::{
         },
         playlist_edit::ListChanges,
     },
-    session::{Endpoint, Session},
+    session::Session,
     track_id_from_uri,
 };
+use crate::http::client_builder;
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
 use prost::Message;
 use reqwest::{
     Client, Error as HttpError, IntoUrl, Method, StatusCode, Version,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER},
+    header::{
+        ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER,
+        USER_AGENT,
+    },
     redirect::Policy,
 };
 use serde::{Deserialize, de::DeserializeOwned};
@@ -46,17 +50,6 @@ type ListResult = MusicResult<(ListEntity, Vec<u8>)>;
 pub(super) type PlaylistResult = MusicResult<(CachedPlaylist, Option<Attributes>)>;
 
 impl Session {
-    async fn base_url(&self) -> String {
-        let mut endpoint = self.api_endpoint().lock().await;
-        if let Some(url) = endpoint.as_ref() {
-            return url.clone();
-        }
-        let (host, port) = self.resolve(Endpoint::Api).await;
-        let url = format!("https://{host}:{port}");
-        *endpoint = Some(url.clone());
-        url
-    }
-
     async fn request_with_protobuf(
         &self,
         method: &Method,
@@ -87,17 +80,12 @@ impl Session {
             let (base, token) = tokio::join!(self.base_url(), self.auth_token());
             let token = token?;
             headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}"))?);
-            let result = self.http_client().request(method, format!("{base}{endpoint}"), &headers, body.clone()).await;
+            let result = self.http_client.request(method, format!("{base}{endpoint}"), &headers, body.clone()).await;
             if !result.as_ref().is_err_and(|error| retryable(error.as_ref())) {
                 return result;
             }
 
-            {
-                let mut cached_endpoint = self.api_endpoint().lock().await;
-                if cached_endpoint.as_ref() == Some(&base) {
-                    *cached_endpoint = None;
-                }
-            }
+            self.invalidate_base_url(&base).await;
             remaining -= 1;
             if remaining == 0 {
                 return result;
@@ -105,18 +93,29 @@ impl Session {
         }
     }
 
-    pub(super) async fn put_connect_state(&self, state: &PutStateRequest) -> MusicResult<Cluster> {
-        let endpoint = format!("/connect-state/v1/devices/{}", self.device_id());
-        let bytes = self.request_with_protobuf(&Method::PUT, &endpoint, self.connected_headers()?, state).await?;
+    pub(super) async fn put_connect_state(&self, connection_id: &str, state: &PutStateRequest) -> MusicResult<Cluster> {
+        let endpoint = format!("/connect-state/v1/devices/{}", self.device_id);
+        let bytes =
+            self.request_with_protobuf(&Method::PUT, &endpoint, connected_headers(connection_id)?, state).await?;
         Ok(Cluster::decode(bytes)?)
     }
 
-    pub(super) async fn change_playlist(&self, id: PlaylistId, changes: &ListChanges) -> MusicResult<()> {
+    pub(super) async fn change_playlist(
+        &self,
+        connection_id: &str,
+        id: PlaylistId,
+        changes: &ListChanges,
+    ) -> MusicResult<()> {
         let path = format!("/playlist/v2/playlist/{id}/changes");
-        self.request_with_protobuf(&Method::POST, &path, self.connected_headers()?, changes).await.map(drop)
+        self.request_with_protobuf(&Method::POST, &path, connected_headers(connection_id)?, changes).await.map(drop)
     }
 
-    pub(super) async fn write_liked_song(&self, uri: String, should_like: bool) -> MusicResult<()> {
+    pub(super) async fn write_liked_song(
+        &self,
+        connection_id: &str,
+        uri: String,
+        should_like: bool,
+    ) -> MusicResult<()> {
         const MEDIA_TYPE: HeaderValue = HeaderValue::from_static("application/vnd.collection-v2.spotify.proto");
         let item = CollectionItem {
             uri,
@@ -127,15 +126,20 @@ impl Session {
             },
             is_removed: !should_like,
         };
-        let request = WriteRequest { username: self.username(), set: "collection".into(), items: vec![item] };
-        let mut headers = self.connected_headers()?;
+        let request = WriteRequest { username: self.username.clone(), set: "collection".into(), items: vec![item] };
+        let mut headers = connected_headers(connection_id)?;
         headers.insert(CONTENT_TYPE, MEDIA_TYPE);
         headers.insert(ACCEPT, MEDIA_TYPE);
         self.request(&Method::POST, "/collection/v2/write", headers, request.encode_to_vec().into()).await.map(drop)
     }
 
-    pub(super) async fn post_player_command(&self, target: &str, command: &Value) -> MusicResult<()> {
-        let path = format!("/connect-state/v1/player/command/from/{}/to/{target}", self.device_id());
+    pub(super) async fn post_player_command(
+        &self,
+        connection_id: &str,
+        target: &str,
+        command: &Value,
+    ) -> MusicResult<()> {
+        let path = format!("/connect-state/v1/player/command/from/{}/to/{target}", self.device_id);
         let mut body = gzip_encoder();
         serde_json::to_writer(
             &mut body,
@@ -145,20 +149,10 @@ impl Session {
                 "intent_id": format!("{:032x}", fastrand::u128(..)),
             }),
         )?;
-        let mut headers = self.connected_headers()?;
+        let mut headers = connected_headers(connection_id)?;
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
         self.request(&Method::POST, &path, headers, body.finish()?.into()).await.map(drop)
-    }
-
-    fn connected_headers(&self) -> MusicResult<HeaderMap> {
-        let connection_id = self.connection_id();
-        if connection_id.is_empty() {
-            return Err("Spotify Dealer is not connected".into());
-        }
-        let mut headers = HeaderMap::new();
-        headers.insert(CONNECTION_ID, connection_id.parse()?);
-        Ok(headers)
     }
 
     pub(super) async fn track_metadata(&self, uris: &[String]) -> MusicResult<Metadata> {
@@ -241,7 +235,7 @@ impl Session {
     }
 
     pub(super) async fn root_playlist(&self) -> ListResult {
-        let uri = format!("spotify:user:{}:rootlist", self.username());
+        let uri = format!("spotify:user:{}:rootlist", self.username);
         self.read_lists(&[uri], playlist_fields(true)).await?.pop().ok_or("Missing Spotify root list")?
     }
 
@@ -261,6 +255,15 @@ impl Session {
         let bytes = self.request_with_protobuf(&Method::POST, GET_LISTS, HeaderMap::new(), &request).await?;
         decode_list_results(&bytes, uris)
     }
+}
+
+fn connected_headers(connection_id: &str) -> MusicResult<HeaderMap> {
+    if connection_id.is_empty() {
+        return Err("Spotify Dealer is not connected".into());
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(CONNECTION_ID, connection_id.parse()?);
+    Ok(headers)
 }
 
 fn decode_list_results(bytes: &[u8], uris: &[String]) -> MusicResult<Vec<ListResult>> {
@@ -283,19 +286,22 @@ fn decode_list_results(bytes: &[u8], uris: &[String]) -> MusicResult<Vec<ListRes
 }
 
 fn playlist_fields(root: bool) -> RequestedFields {
-    const ARTWORK: [AttributeKind; 3] =
-        [AttributeKind::Name, AttributeKind::PictureFileId, AttributeKind::PictureSizes];
-    let attributes = |kinds: &[AttributeKind]| {
-        Some(AttributesRequestedFields { requested_field: kinds.iter().copied().map(|kind| kind as i32).collect() })
-    };
+    let artwork = Some(AttributesRequestedFields {
+        requested_field: [AttributeKind::Name, AttributeKind::PictureFileId, AttributeKind::PictureSizes]
+            .into_iter()
+            .map(|kind| kind as i32)
+            .collect(),
+    });
     let mut entity = ListEntityRequestedFields {
-        items: Some(ItemRequestedFields { attributes: attributes(&[AttributeKind::Uri]) }),
+        items: Some(ItemRequestedFields {
+            attributes: Some(AttributesRequestedFields { requested_field: vec![AttributeKind::Uri as i32] }),
+        }),
         ..Default::default()
     };
     if root {
-        entity.meta_items = Some(MetaItemsRequestedFields { attributes: attributes(&ARTWORK) });
+        entity.meta_items = Some(MetaItemsRequestedFields { attributes: artwork });
     } else {
-        entity.attributes = attributes(&ARTWORK);
+        entity.attributes = artwork;
     }
     RequestedFields { list_response: Some(ListResponseRequestedFields { entity: Some(entity) }) }
 }
@@ -304,19 +310,12 @@ pub(super) fn gzip_encoder() -> GzEncoder<Vec<u8>> {
     GzEncoder::new(Vec::new(), Compression::fast())
 }
 
-const USER_AGENT: &str = concat!("Spotify/124200290 Linux/0 (Cantus/", env!("CARGO_PKG_VERSION"), ")");
-pub struct HttpClient(Client);
+const SPOTIFY_USER_AGENT: &str = concat!("Spotify/124200290 Linux/0 (Cantus/", env!("CARGO_PKG_VERSION"), ")");
+pub(super) struct HttpClient(pub(super) Client);
 
 impl HttpClient {
-    pub fn new() -> MusicResult<Self> {
-        Ok(Self(
-            Client::builder()
-                .user_agent(USER_AGENT)
-                .redirect(Policy::none())
-                .timeout(REQUEST_TIMEOUT)
-                .no_proxy()
-                .build()?,
-        ))
+    pub(super) fn new() -> MusicResult<Self> {
+        Ok(Self(client_builder().redirect(Policy::none()).timeout(REQUEST_TIMEOUT).no_proxy().build()?))
     }
 
     pub(super) async fn request(
@@ -332,6 +331,7 @@ impl HttpClient {
                 .0
                 .request(method.clone(), url.clone())
                 .version(Version::HTTP_3)
+                .header(USER_AGENT, SPOTIFY_USER_AGENT)
                 .headers(headers.clone())
                 .body(body.clone())
                 .send()

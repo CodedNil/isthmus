@@ -1,6 +1,6 @@
 #![expect(clippy::print_stderr, reason = "Timing measurements are printed for humans")]
 use super::*;
-use isthmus::{Arena, wgpu};
+use isthmus::Arena;
 use std::{
     env, fs,
     time::{Duration, Instant},
@@ -50,7 +50,7 @@ fn animated_font_axes_reclaim_residency_without_invalidating_live_runs() {
 #[ignore = "manual release-mode rendering profile"]
 fn profile_rendering() {
     install_fonts();
-    let mut renderer = pollster::block_on(Renderer::headless(TextureFormat::Rgba8Unorm)).unwrap();
+    let mut renderer = Renderer::headless(TextureFormat::Rgba8Unorm).unwrap();
     let (target, _) = renderer.add_image([1920, 96]);
     let config = Config::default();
     let mut interaction = Interaction::default();
@@ -66,6 +66,7 @@ fn profile_rendering() {
                 render.time = index as f32 / 60.0;
                 render.delta_time = 1.0 / 60.0;
                 render.surface(
+                    "bar",
                     target,
                     vec2(1920.0, 96.0),
                     Globals { bar_height: config.height, ..Globals::default() },
@@ -82,7 +83,7 @@ fn profile_rendering() {
             })
             .unwrap();
         let submitted = Instant::now();
-        renderer.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        renderer.wait(Duration::from_secs(5)).unwrap();
         if index >= 100 {
             recording += submitted - started;
             completion += submitted.elapsed();

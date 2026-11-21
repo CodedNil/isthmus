@@ -13,9 +13,9 @@ pub const SHARED_BINDING: u32 = 1;
 /// Number of storage buffers in [`FRAME_SET`].
 pub const BUFFER_COUNT: usize = 2;
 
-/// Descriptor set holding the sampler and captured images.
+/// Descriptor set holding the shared sampler and bindless image table.
 pub const IMAGE_SET: u32 = 1;
 /// Binding of the shared sampler in [`IMAGE_SET`].
 pub const SAMPLER_BINDING: u32 = 0;
-/// Binding of the first captured image in [`IMAGE_SET`]; later images follow in capture order.
-pub const FIRST_IMAGE_BINDING: u32 = 1;
+/// Binding of the runtime texture array in [`IMAGE_SET`].
+pub const IMAGE_BINDING: u32 = 1;

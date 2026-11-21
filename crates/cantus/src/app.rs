@@ -1,5 +1,6 @@
 use crate::{
     config::{self, Config},
+    http::client_builder,
     interaction::Interaction,
     music::Music,
     platform,
@@ -54,10 +55,13 @@ fn log_time(writer: &mut Writer<'_>) -> FmtResult {
 
 pub fn run() {
     // `RUST_LOG=isthmus=debug` shows renderer diagnostics.
-    let filter = env::var("RUST_LOG")
+    let mut filter = env::var("RUST_LOG")
         .ok()
         .and_then(|spec| spec.parse::<Targets>().ok())
         .unwrap_or_else(|| Targets::new().with_default(LevelFilter::WARN).with_target("cantus", Level::INFO));
+    if matches!(env::var("ISTHMUS_GPU_TIMINGS").as_deref(), Ok("1" | "shaders")) {
+        filter = filter.with_target("isthmus::gpu_timings", Level::INFO);
+    }
     tracing_subscriber::registry()
         .with(
             fmt::layer()
@@ -104,7 +108,7 @@ pub struct CantusApp {
 
 impl CantusApp {
     pub(crate) fn new(updater: AppUpdater) -> Self {
-        let http = Client::builder().timeout(Duration::from_secs(15));
+        let http = client_builder().timeout(Duration::from_secs(15));
         let background = Background { updater, http: http.build().expect("failed to construct HTTP client") };
         let config = config::load();
         platform::start_launcher_listener(&background.updater);
@@ -167,7 +171,11 @@ impl CantusApp {
         };
         let globals =
             Globals { pointer: self.interaction.mouse_pos(), pressure, bar_height: self.config.height, ripples };
-        render.surface(surface, screen_size, globals, |frame| {
+        let name = match view {
+            View::Bar => "bar",
+            View::Launcher => "launcher",
+        };
+        render.surface(name, surface, screen_size, globals, |frame| {
             let mut context = UiContext { frame, config: &self.config, interaction: &mut self.interaction };
             match view {
                 View::Bar => self.bar.show(&mut context, &mut self.music, &self.timer),

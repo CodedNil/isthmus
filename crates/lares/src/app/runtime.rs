@@ -12,10 +12,7 @@ use crate::{
         pipeline::{targets::Targets, temporal::Accumulation},
     },
 };
-use isthmus::{
-    RenderError, SurfaceHandle,
-    wgpu::{DeviceType, PollType, SurfaceTarget},
-};
+use isthmus::{RenderError, SurfaceHandle, Window, vk};
 use std::{
     error::Error,
     fs,
@@ -41,13 +38,13 @@ pub(super) struct Runtime {
 }
 
 impl Runtime {
-    pub(super) fn new(window: impl Into<SurfaceTarget<'static>>, size: [u32; 2]) -> Result<Self, Box<dyn Error>> {
-        let (mut gpu, surface) = pollster::block_on(Renderer::new(window, size))?;
+    pub(super) fn new(window: impl Window, size: [u32; 2]) -> Result<Self, Box<dyn Error>> {
+        let (mut gpu, surface) = Renderer::new(window, size)?;
         let adapter = gpu.adapter_info();
-        if adapter.device_type == DeviceType::Cpu {
+        if adapter.device_type == vk::PhysicalDeviceType::CPU {
             return Err("Lares needs a hardware Vulkan adapter".into());
         }
-        info!(adapter = %adapter.name, "Using Vulkan");
+        info!(adapter = %gpu.device_name(), "Using Vulkan");
         info!("Preparing lighting and scene");
         ensure_assets()?;
         let baked = baked_dir();
@@ -105,7 +102,7 @@ impl Runtime {
                     self.gpu.remove_surface(self.surface);
                     self.surface = self.gpu.add_surface(Arc::clone(window), size)?;
                 } else {
-                    pollster::block_on(self.gpu.recover())?;
+                    self.gpu.recover()?;
                 }
                 self.last_rendered = None;
                 self.next_frame = started;
@@ -115,7 +112,7 @@ impl Runtime {
             Err(error) => return Err(error.into()),
         }
         // Keep one ray-traced frame in flight, including while a drag is active.
-        self.gpu.device().poll(PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(5)) })?;
+        self.gpu.wait(Duration::from_secs(5))?;
         self.last_rendered = Some(stamp);
         if self.first_frame {
             info!("Lares ready");

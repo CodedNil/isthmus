@@ -1,14 +1,14 @@
 use super::{MusicResult, REQUEST_TIMEOUT, session::Session};
 use crate::{config, platform};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use reqwest::{Client, StatusCode, Url, redirect::Policy};
+use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
     error::Error as StdError,
     fmt::{Display, Formatter, Result as FmtResult},
     fs, io,
-    path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
@@ -26,29 +26,30 @@ const REDIRECT_URI: &str = "http://127.0.0.1:8898/login";
 const TOKEN_ENDPOINT: &str = "https://accounts.spotify.com/api/token";
 const OAUTH_CACHE: &str = "spotify-oauth.json";
 
-pub(super) async fn connect() -> MusicResult<Session> {
-    let session = Session::new()?;
+pub(super) async fn connect() -> MusicResult<Arc<Session>> {
+    let mut session = Session::new()?;
     if let Some(credentials) = spawn_blocking(load_credentials).await? {
-        session.set_credentials(credentials);
+        session.username = credentials.username;
+        session.auth.get_mut().refresh_token = credentials.refresh_token;
         match timeout(REQUEST_TIMEOUT, session.auth_token()).await? {
-            Ok(_) => return Ok(session),
+            Ok(_) => return Ok(Arc::new(session)),
             Err(error) if error.is::<AuthorizationExpired>() => {}
             Err(error) => return Err(error),
         }
     }
 
-    let (credentials, token) = browser_login().await?;
-    session.set_credentials(credentials.clone());
-    *session.access_token_cache().lock().await = Some(token);
-    spawn_blocking(move || save_credentials(&credentials)).await?;
-    Ok(session)
+    let (credentials, token) = browser_login(&session.http_client.0).await?;
+    let credentials = spawn_blocking(move || {
+        save_credentials(&credentials);
+        credentials
+    })
+    .await?;
+    session.username = credentials.username;
+    *session.auth.get_mut() = Auth { refresh_token: credentials.refresh_token, access_token: Some(token) };
+    Ok(Arc::new(session))
 }
 
-fn oauth_client() -> Result<Client, reqwest::Error> {
-    Client::builder().http3_prior_knowledge().redirect(Policy::none()).timeout(REQUEST_TIMEOUT).build()
-}
-
-async fn browser_login() -> MusicResult<(Credentials, Token)> {
+async fn browser_login(http: &Client) -> MusicResult<(Credentials, Token)> {
     let random_secret = || -> MusicResult<String> {
         let mut bytes = [0; 32];
         getrandom::fill(&mut bytes)?;
@@ -89,7 +90,7 @@ async fn browser_login() -> MusicResult<(Credentials, Token)> {
             socket.get_mut().write_all(response).await?;
             continue;
         };
-        let result = exchange_code(&code, &verifier).await;
+        let result = exchange_code(http, &code, &verifier).await;
         let (status, message) = if result.is_ok() {
             ("200 OK", "Cantus connected successfully. You can close this tab.")
         } else {
@@ -114,8 +115,8 @@ struct OAuthToken {
     refresh_token: Option<String>,
 }
 
-async fn exchange_code(code: &str, verifier: &str) -> MusicResult<(Credentials, Token)> {
-    let token = oauth_client()?
+async fn exchange_code(http: &Client, code: &str, verifier: &str) -> MusicResult<(Credentials, Token)> {
+    let token = http
         .post(TOKEN_ENDPOINT)
         .form(&[
             ("grant_type", "authorization_code"),
@@ -138,8 +139,8 @@ async fn exchange_code(code: &str, verifier: &str) -> MusicResult<(Credentials, 
     Ok((Credentials { username, refresh_token }, Token::new(token.access_token, Duration::from_secs(token.expires_in))))
 }
 
-async fn refresh_access_token(refresh_token: &str) -> MusicResult<OAuthToken> {
-    let response = oauth_client()?
+async fn refresh_access_token(http: &Client, refresh_token: &str) -> MusicResult<OAuthToken> {
+    let response = http
         .post(TOKEN_ENDPOINT)
         .form(&[("grant_type", "refresh_token"), ("client_id", CLIENT_ID), ("refresh_token", refresh_token)])
         .send()
@@ -191,7 +192,14 @@ fn callback_code(request: &str, expected_state: &str) -> Option<Result<String, (
 }
 
 fn load_credentials() -> Option<Credentials> {
-    read_credentials(&config::directory().join(OAUTH_CACHE))
+    let read = || -> MusicResult<Credentials> {
+        let credentials: Credentials = serde_json::from_slice(&fs::read(config::directory().join(OAUTH_CACHE))?)?;
+        if credentials.username.is_empty() || credentials.refresh_token.is_empty() {
+            return Err("Invalid cached Spotify credentials".into());
+        }
+        Ok(credentials)
+    };
+    read()
         .inspect_err(|error| {
             if error.downcast_ref::<io::Error>().is_none_or(|error| error.kind() != io::ErrorKind::NotFound) {
                 warn!(%error, "Could not read cached Spotify credentials");
@@ -200,71 +208,67 @@ fn load_credentials() -> Option<Credentials> {
         .ok()
 }
 
-fn read_credentials(path: &Path) -> MusicResult<Credentials> {
-    let credentials: Credentials = serde_json::from_slice(&fs::read(path)?)?;
-    if credentials.username.is_empty() || credentials.refresh_token.is_empty() {
-        return Err("Invalid cached Spotify credentials".into());
-    }
-    Ok(credentials)
-}
-
 fn save_credentials(credentials: &Credentials) {
-    if let Err(error) = write_credentials(&config::directory().join(OAUTH_CACHE), credentials) {
+    let write = || -> MusicResult<()> {
+        let directory = config::directory();
+        fs::create_dir_all(&directory)?;
+        let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+        serde_json::to_writer(file.as_file_mut(), credentials)?;
+        file.persist(directory.join(OAUTH_CACHE))?;
+        Ok(())
+    };
+    if let Err(error) = write() {
         warn!(%error, "Could not save Spotify credentials");
     }
 }
 
-fn write_credentials(path: &Path, credentials: &Credentials) -> MusicResult<()> {
-    let directory = path.parent().ok_or_else(|| io::Error::other("Missing Spotify credentials directory"))?;
-    fs::create_dir_all(directory)?;
-    let mut file = tempfile::NamedTempFile::new_in(directory)?;
-    serde_json::to_writer(file.as_file_mut(), credentials)?;
-    file.persist(path)?;
-    Ok(())
+#[derive(Serialize, Deserialize)]
+struct Credentials {
+    username: String,
+    refresh_token: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Credentials {
-    pub(super) username: String,
+#[derive(Default)]
+pub(super) struct Auth {
     refresh_token: String,
+    access_token: Option<Token>,
 }
 
 impl Session {
     pub(super) async fn auth_token(&self) -> MusicResult<String> {
-        let access_token = {
-            let mut cached = self.access_token_cache().lock().await;
-            if let Some(token) = cached.as_ref().filter(|token| !token.is_expired()) {
-                return Ok(token.access_token.clone());
-            }
-            let mut credentials = self.credentials().ok_or_else(|| io::Error::other("Spotify sign-in required"))?;
-            let response = refresh_access_token(&credentials.refresh_token).await?;
-            if let Some(next) =
-                response.refresh_token.filter(|next| !next.is_empty() && next != &credentials.refresh_token)
-            {
-                credentials.refresh_token = next;
-                self.set_credentials(credentials.clone());
-                spawn_blocking(move || save_credentials(&credentials)).await?;
-            }
-
-            let access_token = response.access_token;
-            *cached = Some(Token::new(access_token.clone(), Duration::from_secs(response.expires_in)));
-            access_token
-        };
+        let mut auth = self.auth.lock().await;
+        if let Some(token) = auth.access_token.as_ref().filter(|token| !token.is_expired()) {
+            return Ok(token.access_token.clone());
+        }
+        if auth.refresh_token.is_empty() {
+            return Err(io::Error::other("Spotify sign-in required").into());
+        }
+        let response = refresh_access_token(&self.http_client.0, &auth.refresh_token).await?;
+        if let Some(refresh_token) =
+            response.refresh_token.filter(|next| !next.is_empty() && next != &auth.refresh_token)
+        {
+            auth.refresh_token.clone_from(&refresh_token);
+            let credentials = Credentials { username: self.username.clone(), refresh_token };
+            spawn_blocking(move || save_credentials(&credentials)).await?;
+        }
+        let access_token = response.access_token;
+        auth.access_token = Some(Token::new(access_token.clone(), Duration::from_secs(response.expires_in)));
+        drop(auth);
         Ok(access_token)
     }
 }
 
-pub(super) struct Token {
-    pub(super) access_token: String,
+struct Token {
+    access_token: String,
     expires_at: Instant,
 }
 
 impl Token {
-    pub(super) fn new(access_token: String, lifetime: Duration) -> Self {
+    fn new(access_token: String, lifetime: Duration) -> Self {
         Self { access_token, expires_at: Instant::now() + lifetime.saturating_sub(Duration::from_secs(10)) }
     }
 
-    pub(super) fn is_expired(&self) -> bool {
+    fn is_expired(&self) -> bool {
         self.expires_at <= Instant::now()
     }
 }

@@ -122,6 +122,27 @@ mod tests {
     use crate::app::*;
 
     #[test]
+    fn offscreen_passes_submit_and_resolve() {
+        use crate::render::{Renderer, light::shadows::ShadowAtlas, pipeline::targets::Targets};
+        use isthmus::TextureFormat;
+        use std::time::Duration;
+
+        let room =
+            home::Room::new(Vec2::ZERO, Vec2::splat(3.0), home::Material::Paint).downlights("test", &[(0.0, 0.0)]);
+        let scene = Scene::new_at(&[room], 1_782_043_200.0, SunSettings::default());
+        let shadows = ShadowAtlas::bake_cpu(&scene, 16);
+        let app = App::from_scene(scene);
+        let mut renderer = Renderer::headless(TextureFormat::Bgra8Unorm).unwrap();
+        let size = [32, 24];
+        let targets = Targets::new(&mut renderer, size);
+        let (output, _) = renderer.add_image(size);
+        targets.record(&mut renderer, &app, &shadows, output, 0, 1, true).unwrap();
+        targets.record(&mut renderer, &app, &shadows, output, 1, 3, true).unwrap();
+        targets.record(&mut renderer, &app, &shadows, output, 1, 3, false).unwrap();
+        renderer.wait(Duration::from_secs(10)).unwrap();
+    }
+
+    #[test]
     fn dragging_stays_anchored_across_duplicate_events_and_zoom() {
         let scene = Scene::new_at(&[], 1_782_043_200.0, SunSettings::default());
         let mut app = App::from_scene(scene);

@@ -7,14 +7,12 @@ version = "0.1.0"
 [dependencies]
 # Rendering and scene data
 bitflags.workspace = true
-isthmus.workspace = true
+isthmus = { workspace = true, features = ["wayland"] }
 isthmus_2d.workspace = true
-pollster.workspace = true
 
 # Wayland windowing
 calloop.workspace = true
 calloop-wayland-source.workspace = true
-wayland-backend.workspace = true
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["unstable"] }
 

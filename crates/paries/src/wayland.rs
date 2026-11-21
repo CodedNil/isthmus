@@ -1,23 +1,13 @@
 #![expect(clippy::print_stderr, reason = "The wallpaper daemon logs to stderr")]
 use crate::render::{Renderer, bamboo::Bamboo};
-use isthmus::{
-    SurfaceHandle,
-    glam::Vec2,
-    wgpu::rwh::{
-        DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WaylandWindowHandle,
-        WindowHandle,
-    },
-};
+use isthmus::{SurfaceHandle, WaylandWindow, glam::Vec2};
 use std::{
     collections::BTreeMap,
-    ptr::NonNull,
     sync::Arc,
     time::{Duration, Instant},
 };
 use wayland_client::{
-    Connection, Proxy as _, QueueHandle,
-    backend::Backend,
-    delegate_noop,
+    Connection, Proxy as _, QueueHandle, delegate_noop,
     globals::{Global, GlobalListContents, registry_queue_init},
     protocol::{
         wl_callback::{self, WlCallback},
@@ -56,37 +46,12 @@ macro_rules! dispatch {
     };
 }
 
-struct NativeSurface {
-    backend: Backend,
-    wl: WlSurface,
-}
-
-impl HasDisplayHandle for NativeSurface {
-    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        self.backend.display_handle()
-    }
-}
-
-impl HasWindowHandle for NativeSurface {
-    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let pointer = NonNull::new(self.wl.id().as_ptr().cast()).ok_or(HandleError::Unavailable)?;
-        // SAFETY: The wl_surface and its display remain alive until this owner is dropped.
-        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Wayland(WaylandWindowHandle::new(pointer))) })
-    }
-}
-
-impl Drop for NativeSurface {
-    fn drop(&mut self) {
-        self.wl.destroy();
-    }
-}
-
 type OutputId = u32;
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
 struct OutputSurface {
     output: WlOutput,
-    native: Arc<NativeSurface>,
+    native: Arc<WaylandWindow>,
     layer: ZwlrLayerSurfaceV1,
     fractional: WpFractionalScaleV1,
     viewport: WpViewport,
@@ -102,7 +67,6 @@ struct Wallpaper {
     shell: ZwlrLayerShellV1,
     viewporter: WpViewporter,
     fractional: WpFractionalScaleManagerV1,
-    backend: Backend,
     renderer: Option<Renderer>,
     bamboo: Bamboo,
     outputs: BTreeMap<OutputId, OutputSurface>,
@@ -130,7 +94,7 @@ impl Wallpaper {
             output,
             viewport,
             fractional,
-            native: Arc::new(NativeSurface { backend: self.backend.clone(), wl }),
+            native: Arc::new(WaylandWindow::new(wl)),
             layer,
             size: Vec2::ZERO,
             scale: 1.0,
@@ -167,8 +131,8 @@ impl Wallpaper {
                     .add_surface(Arc::clone(&output.native), size)
                     .expect("wallpaper surface is incompatible with the renderer")
             } else {
-                let (renderer, surface) = pollster::block_on(Renderer::new(Arc::clone(&output.native), size))
-                    .expect("failed to initialize wallpaper renderer");
+                let (renderer, surface) =
+                    Renderer::new(Arc::clone(&output.native), size).expect("failed to initialize wallpaper renderer");
                 eprintln!("Paries is rendering with {}", renderer.device_name());
                 self.renderer = Some(renderer);
                 surface
@@ -179,7 +143,7 @@ impl Wallpaper {
         let renderer = self.renderer.as_mut().unwrap();
         renderer.resize(render_surface, size);
         if let Err(error) = renderer.render(|render| {
-            render.surface(render_surface, output.size, (), |mut frame| {
+            render.surface("wallpaper", render_surface, output.size, (), |mut frame| {
                 self.bamboo.show(&mut frame);
             });
         }) {
@@ -209,7 +173,6 @@ pub fn run() -> ! {
         shell: globals.bind(&qhandle, 4..=4, ()).expect("missing zwlr_layer_shell_v1"),
         viewporter: globals.bind(&qhandle, 1..=1, ()).expect("missing wp_viewporter"),
         fractional: globals.bind(&qhandle, 1..=1, ()).expect("missing wp_fractional_scale_manager_v1"),
-        backend: connection.backend(),
         renderer: None,
         bamboo: Bamboo::default(),
         outputs: BTreeMap::new(),

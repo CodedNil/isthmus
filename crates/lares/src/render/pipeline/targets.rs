@@ -8,7 +8,7 @@ use crate::{
     },
 };
 use core::array::from_fn;
-use isthmus::{Image, RenderError, SurfaceHandle, glam::Vec2, wgpu::TextureFormat};
+use isthmus::{Image, RenderError, SurfaceHandle, TextureFormat, glam::Vec2};
 
 /// Views above this many pixels interleave their samples.
 const INTERLEAVE_PIXELS: f32 = 2_500_000.0;
@@ -78,20 +78,20 @@ impl Targets {
                 let sample = if interleaved { phase / 2 } else { phase };
                 let globals = Globals { sample_index: sample, interleaved, parity: phase & 1, ..app.globals(size) };
                 let scene = &app.scene;
-                render.surface(self.geometry, size, globals, |mut frame: Frame<'_>| {
+                render.surface("geometry", self.geometry, size, globals, |mut frame: Frame<'_>| {
                     passes::visibility_geometry(&mut frame, scene);
                 });
-                render.surface(self.visibility.0, size, globals, |mut frame: Frame<'_>| {
+                render.surface("visibility", self.visibility.0, size, globals, |mut frame: Frame<'_>| {
                     passes::visibility(&mut frame, scene, &self.materials.1);
                 });
-                render.surface(self.materials.0, size, globals, |mut frame: Frame<'_>| {
+                render.surface("materials", self.materials.0, size, globals, |mut frame: Frame<'_>| {
                     passes::materials(&mut frame, scene, &self.visibility.1);
                 });
-                render.surface(self.samples[sample as usize], size, globals, |mut frame: Frame<'_>| {
+                render.surface("shade", self.samples[sample as usize], size, globals, |mut frame: Frame<'_>| {
                     passes::shade(&mut frame, scene, shadows, &self.visibility.1, &self.materials.1);
                 });
             }
-            render.surface(output, size, app.globals(size), |mut frame: Frame<'_>| {
+            render.surface("resolve", output, size, app.globals(size), |mut frame: Frame<'_>| {
                 resolve(&mut frame, &self.images, mask, interleaved, &app.presence.ghosts);
             });
         })

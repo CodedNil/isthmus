@@ -1,38 +1,34 @@
-use super::{
-    MusicResult,
-    auth::{Credentials, Token},
-    client::HttpClient,
-};
+use super::{MusicResult, auth::Auth, client::HttpClient};
 use bytes::Bytes;
 use reqwest::{Method, header::HeaderMap};
 use serde::Deserialize;
-use std::{
-    collections::VecDeque,
-    mem,
-    sync::{Arc, RwLock},
-};
+use std::{collections::VecDeque, mem};
 use strum::IntoEnumIterator as _;
 use strum_macros::{EnumIter, IntoStaticStr};
 use tokio::sync::Mutex;
 use tracing::warn;
 
-const SESSION_DATA_POISON_MSG: &str = "session data rwlock should not be poisoned";
-
-struct SessionInternal {
-    device_id: String,
-    session_id: String,
-    connection_id: RwLock<String>,
-    credentials: RwLock<Option<Credentials>>,
-
-    http_client: HttpClient,
-
+pub(super) struct Session {
+    pub(super) device_id: String,
+    pub(super) id: String,
+    pub(super) username: String,
+    pub(super) http_client: HttpClient,
+    pub(super) auth: Mutex<Auth>,
     endpoints: Mutex<ServiceEndpoints>,
-    access_token: Mutex<Option<Token>>,
-    api_endpoint: Mutex<Option<String>>,
 }
 
-#[derive(Clone)]
-pub struct Session(Arc<SessionInternal>);
+impl Session {
+    pub(super) fn new() -> MusicResult<Self> {
+        Ok(Self {
+            device_id: device_id()?,
+            id: hex::encode(random_uuid_bytes()?),
+            username: String::new(),
+            http_client: HttpClient::new()?,
+            auth: Mutex::default(),
+            endpoints: Mutex::default(),
+        })
+    }
+}
 
 fn random_uuid_bytes() -> Result<[u8; 16], getrandom::Error> {
     let mut bytes = [0; 16];
@@ -48,69 +44,6 @@ fn device_id() -> Result<String, getrandom::Error> {
         id.insert(index, '-');
     }
     Ok(id)
-}
-
-impl Session {
-    pub(super) fn access_token_cache(&self) -> &Mutex<Option<Token>> {
-        &self.0.access_token
-    }
-
-    pub(super) fn api_endpoint(&self) -> &Mutex<Option<String>> {
-        &self.0.api_endpoint
-    }
-}
-
-impl Session {
-    pub fn new() -> MusicResult<Self> {
-        Ok(Self(Arc::new(SessionInternal {
-            device_id: device_id()?,
-            session_id: hex::encode(random_uuid_bytes()?),
-            connection_id: RwLock::default(),
-            credentials: RwLock::default(),
-            http_client: HttpClient::new()?,
-            endpoints: Mutex::default(),
-            access_token: Mutex::default(),
-            api_endpoint: Mutex::default(),
-        })))
-    }
-
-    pub(super) fn http_client(&self) -> &HttpClient {
-        &self.0.http_client
-    }
-
-    pub(super) fn device_id(&self) -> &str {
-        &self.0.device_id
-    }
-
-    pub(super) fn session_id(&self) -> &str {
-        &self.0.session_id
-    }
-
-    pub(super) fn connection_id(&self) -> String {
-        self.0.connection_id.read().expect(SESSION_DATA_POISON_MSG).clone()
-    }
-
-    pub(super) fn set_connection_id(&self, id: &str) {
-        id.clone_into(&mut self.0.connection_id.write().expect(SESSION_DATA_POISON_MSG));
-    }
-
-    pub(super) fn credentials(&self) -> Option<Credentials> {
-        self.0.credentials.read().expect(SESSION_DATA_POISON_MSG).clone()
-    }
-
-    pub(super) fn set_credentials(&self, credentials: Credentials) {
-        *self.0.credentials.write().expect(SESSION_DATA_POISON_MSG) = Some(credentials);
-    }
-
-    pub(super) fn username(&self) -> String {
-        self.0
-            .credentials
-            .read()
-            .expect(SESSION_DATA_POISON_MSG)
-            .as_ref()
-            .map(|credentials| credentials.username.clone())
-            .unwrap_or_default()
-    }
 }
 
 pub(super) type SocketAddress = (String, u16);
@@ -135,6 +68,8 @@ impl Endpoint {
 struct ServiceEndpoints {
     dealer: VecDeque<String>,
     spclient: VecDeque<String>,
+    #[serde(skip)]
+    api_url: Option<String>,
 }
 
 impl ServiceEndpoints {
@@ -148,9 +83,31 @@ impl ServiceEndpoints {
 
 impl Session {
     pub(super) async fn resolve(&self, endpoint: Endpoint) -> SocketAddress {
-        let mut points = self.0.endpoints.lock().await;
-        let queue = points.queue(endpoint);
-        if queue.is_empty() {
+        let mut endpoints = self.endpoints.lock().await;
+        self.resolve_endpoint(&mut endpoints, endpoint).await
+    }
+
+    pub(super) async fn base_url(&self) -> String {
+        let mut endpoints = self.endpoints.lock().await;
+        if let Some(url) = &endpoints.api_url {
+            return url.clone();
+        }
+
+        let (host, port) = self.resolve_endpoint(&mut endpoints, Endpoint::Api).await;
+        let url = format!("https://{host}:{port}");
+        endpoints.api_url = Some(url.clone());
+        url
+    }
+
+    pub(super) async fn invalidate_base_url(&self, url: &str) {
+        let mut endpoints = self.endpoints.lock().await;
+        if endpoints.api_url.as_deref() == Some(url) {
+            endpoints.api_url = None;
+        }
+    }
+
+    async fn resolve_endpoint(&self, points: &mut ServiceEndpoints, endpoint: Endpoint) -> SocketAddress {
+        if points.queue(endpoint).is_empty() {
             match self.fetch_endpoints().await {
                 Ok(mut resolved) => {
                     // Preserve other queues so resolving the dealer cannot reset an API failover.
@@ -175,7 +132,7 @@ impl Session {
 
     async fn fetch_endpoints(&self) -> MusicResult<ServiceEndpoints> {
         let body = self
-            .http_client()
+            .http_client
             .request(
                 &Method::GET,
                 "https://apresolve.spotify.com/?type=dealer&type=spclient",

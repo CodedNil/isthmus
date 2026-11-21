@@ -13,8 +13,9 @@ pub fn directive(directive: fmt::Arguments<'_>) {
 }
 
 /// Writes `contents` unless the file already holds them, so unchanged output does not trigger rebuilds.
-pub fn write_if_changed(path: &Path, contents: &str) -> Result<()> {
-    if !fs::read_to_string(path).is_ok_and(|current| current == contents) {
+pub fn write_if_changed(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    let contents = contents.as_ref();
+    if !fs::read(path).is_ok_and(|current| current == contents) {
         fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
     }
     Ok(())

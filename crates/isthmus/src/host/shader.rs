@@ -4,7 +4,7 @@ use crate::{
     Blend, Fragment, Image, Primitive, Program, ShaderData, ShaderFrame,
     glam::{Vec2, Vec4},
 };
-use core::marker::PhantomData;
+use core::{marker::PhantomData, mem};
 use smallvec::SmallVec;
 
 /// A value that can be sent to a shader draw: any shader data, an image, a slice, or a tuple of those.
@@ -86,14 +86,16 @@ pub struct Shader<'draw, P: Program> {
     state: ShaderFrame<P>,
     name: &'static str,
     blend: Blend,
-    format: Option<wgpu::TextureFormat>,
+    format: Option<crate::TextureFormat>,
     record: Record<'draw>,
 }
 
 impl<P: Program> Frame<'_, P> {
     /// Starts a draw of the shader `name`.
     pub fn shader(&mut self, name: &'static str) -> Shader<'_, P> {
-        let payload = self.gpu.scratch(<[Vec2; 4]>::WORDS);
+        let mut payload = mem::take(&mut self.gpu.scratch);
+        payload.clear();
+        payload.resize(<[Vec2; 4]>::WORDS, 0);
         let record = Record { gpu: &mut *self.gpu, payload, images: SmallVec::new() };
         Shader { surface: &mut *self.surface, state: self.state, name, blend: Blend::Over, format: None, record }
     }
@@ -107,7 +109,7 @@ impl<'draw, P: Program> Shader<'draw, P> {
     }
 
     /// Draws to offscreen images of this format instead of the presentation surface. The build reads this too.
-    pub const fn format(mut self, format: wgpu::TextureFormat) -> Self {
+    pub const fn format(mut self, format: crate::TextureFormat) -> Self {
         self.format = Some(format);
         self
     }
@@ -153,6 +155,10 @@ impl<P: Program, S: Primitive> Shaped<'_, P, S> {
             record.gpu.fail(RenderError::UnknownShader(name));
             return;
         };
+        if P::SHADERS[index].images != record.images.len() {
+            record.gpu.fail(RenderError::Gpu(format!("wrong image count for {name:?}")));
+            return;
+        }
         debug_assert!(
             P::SHADERS[index].blend == blend && P::SHADERS[index].format == format,
             "shader {name:?} must declare the same blend and format literally, so the build can see them"

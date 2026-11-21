@@ -56,7 +56,7 @@ impl SpotifyWorker {
         &self,
         ids: Vec<PlaylistId>,
     ) -> impl Future<Output = MusicResult<PlaylistRead>> + use<> {
-        let session = self.session.clone();
+        let session = Arc::clone(&self.session);
         let targets = self.playlist_targets.clone();
         let ratings = self.ratings_enabled;
         let cache = Arc::clone(&self.cached_playlists);
@@ -176,7 +176,7 @@ impl SpotifyWorker {
                 base_revision: Some(revision.clone()),
                 deltas: vec![Delta { base_version: Some(revision), ops: vec![operation] }],
             };
-            if let Err(error) = self.session.change_playlist(playlist_id, &request).await {
+            if let Err(error) = self.session.change_playlist(&self.connection_id, playlist_id, &request).await {
                 error!(%error, %playlist_id, "Failed to update Spotify playlist");
             }
             // A transport error can arrive after Spotify has applied the write.
@@ -188,7 +188,7 @@ impl SpotifyWorker {
             refresh_needed |= self.apply_playlist_results(&edited, results);
         }
         if let Some(should_like) = liked
-            && let Err(error) = self.session.write_liked_song(uri, should_like).await
+            && let Err(error) = self.session.write_liked_song(&self.connection_id, uri, should_like).await
         {
             error!(%error, %track_id, "Failed to update Spotify library");
         }
@@ -307,7 +307,7 @@ mod tests {
         let id = parse_id("37i9dQZF1DXcBWIGoYBM5M").unwrap();
         let (updater, _updates) = channel::channel();
         let mut worker =
-            SpotifyWorker { root_revision: vec![1], ..SpotifyWorker::new(Session::new().unwrap(), updater) };
+            SpotifyWorker { root_revision: vec![1], ..SpotifyWorker::new(Arc::new(Session::new().unwrap()), updater) };
         assert!(!worker.needs_root_refresh(&[1]));
         assert!(worker.needs_root_refresh(&[2]));
         assert!(worker.needs_root_refresh(&[]));
@@ -328,7 +328,7 @@ mod tests {
         let second = parse_id("37i9dQZF1DXcBWIGoYBM5N").unwrap();
         let track = parse_id("6vWfZZyIlODYPMEbsrOK3G").unwrap();
         let (updater, _updates) = channel::channel();
-        let mut worker = SpotifyWorker::new(Session::new().unwrap(), updater);
+        let mut worker = SpotifyWorker::new(Arc::new(Session::new().unwrap()), updater);
         let previous =
             CachedPlaylist { revision: vec![1], tracks: Arc::new(HashSet::from([track])), name: String::new() };
         Arc::make_mut(&mut worker.cached_playlists).extend([(first, previous.clone()), (second, previous.clone())]);

@@ -16,9 +16,14 @@ rustPlatform.buildRustPackage {
   cargoDeps = pkgs.symlinkJoin {
     name = "cargo-vendor-dir";
     # Rust-GPU builds core using the pinned sysroot's lockfile.
-    paths = map (lockFile: rustPlatform.importCargoLock { inherit lockFile; }) [
-      ../../Cargo.lock
-      "${rust}/lib/rustlib/src/rust/library/Cargo.lock"
+    paths = [
+      (rustPlatform.importCargoLock {
+        lockFile = ../../Cargo.lock;
+        outputHashes."ash-0.38.0+1.4.352" = "sha256-tq/WozqxpZHRAG8dtVtAYADM058f5hfMsyQsU5EwIGY=";
+      })
+      (rustPlatform.importCargoLock {
+        lockFile = "${rust}/lib/rustlib/src/rust/library/Cargo.lock";
+      })
     ];
   };
 
