@@ -1,7 +1,7 @@
 //! Render pipelines, all compiled at startup so that no draw waits on one.
 use super::pipeline_cache::DiskCache;
 use crate::{Blend, Program, program::ShaderEntry};
-use web_time::Instant;
+use std::time::Instant;
 
 /// Compiles the program's pipelines in shader order, sharing a layout per image count.
 pub(super) fn compile_all<P: Program>(
@@ -24,9 +24,6 @@ pub(super) fn compile_all<P: Program>(
         .collect();
     let driver_cache = cache.as_ref().map(|disk| &disk.cache);
     let compile = |shader: usize| compile(device, format, &layouts, driver_cache, &P::SHADERS[shader]);
-    #[cfg(target_arch = "wasm32")]
-    let pipelines = (0..P::SHADERS.len()).map(compile).collect();
-    #[cfg(not(target_arch = "wasm32"))]
     let pipelines = compile_in_parallel(P::SHADERS.len(), compile);
     if let Some(cache) = cache {
         cache.save();
@@ -34,7 +31,6 @@ pub(super) fn compile_all<P: Program>(
     pipelines
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn compile_in_parallel(
     count: usize,
     compile: impl Fn(usize) -> wgpu::RenderPipeline + Sync,

@@ -6,7 +6,6 @@ use isthmus::{
     ShaderData,
     glam::{FloatExt, Vec3, vec3},
 };
-#[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, ShaderData)]
@@ -88,19 +87,8 @@ impl Sun {
 }
 
 /// Wall-clock UTC seconds.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn utc_now() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |time| time.as_secs_f64())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn utc_now() -> f64 {
-    #[wasm_bindgen::prelude::wasm_bindgen]
-    extern "C" {
-        #[wasm_bindgen(js_namespace = Date, js_name = now)]
-        fn date_now() -> f64;
-    }
-    date_now() * 0.001
 }
 
 #[cfg(test)]

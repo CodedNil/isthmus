@@ -9,7 +9,6 @@ use crate::{
 };
 use isthmus::prelude::*;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub mod bake;
 mod cache;
 mod controls;

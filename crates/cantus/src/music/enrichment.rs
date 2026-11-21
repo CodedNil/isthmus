@@ -1,7 +1,6 @@
 use super::{ART_SIZE, AudioFeatures, MusicResult, Track, TrackId, lyrics};
 use crate::{
     app::{Background, CantusApp},
-    platform::Task,
     render::{lyrics::PreparedLyrics, music::PALETTE_COLORS},
 };
 use arrayvec::ArrayVec;
@@ -15,13 +14,11 @@ use std::{
     hash::Hash,
     ops::Range,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::task::spawn_blocking;
+use strum_macros::{EnumIs, EnumTryAs};
+use tokio::{sync::Mutex, task::spawn_blocking};
 use tracing::warn;
-use web_time::Instant;
 
 const AUDIO_FEATURE_BATCH_SIZE: usize = 240;
 const RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -37,6 +34,7 @@ fn fresh_fetch_starts_immediately_and_failed_fetch_waits() {
     assert!(failed.request(now + RETRY_DELAY));
 }
 
+#[derive(EnumIs, EnumTryAs)]
 pub enum Fetch<T> {
     Missing(Option<Instant>),
     Fetching,
@@ -59,20 +57,13 @@ impl<T> Fetch<T> {
         *self = Self::Fetching;
         true
     }
-
-    pub const fn ready(&self) -> Option<&T> {
-        match self {
-            Self::Ready(value) => Some(value),
-            Self::Missing(_) | Self::Fetching | Self::Unavailable => None,
-        }
-    }
 }
 
 impl Background {
     fn fetch<K: Eq + Hash + Display + Send + 'static, T: Send + 'static>(
         &self,
         key: K,
-        task: impl Task<Output = MusicResult<T>>,
+        task: impl Future<Output = MusicResult<T>> + Send + 'static,
         cache: fn(&mut TrackCache) -> &mut HashMap<K, Fetch<T>>,
     ) {
         self.spawn_update(async move {
@@ -109,7 +100,7 @@ pub struct TrackCache {
 
 impl TrackCache {
     pub fn art(&self, url: Option<&str>) -> Option<&AlbumArt> {
-        url.and_then(|url| self.art.get(url)).and_then(Fetch::ready)
+        url.and_then(|url| self.art.get(url)).and_then(Fetch::try_as_ready_ref)
     }
 
     pub fn palette(&self, url: Option<&str>) -> [Unorm8x4; PALETTE_COLORS] {
@@ -126,7 +117,7 @@ impl TrackCache {
     }
 
     pub fn audio(&self, id: Option<TrackId>) -> AudioFeatures {
-        id.and_then(|id| self.audio.get(&id)).and_then(Fetch::ready).copied().unwrap_or_default()
+        id.and_then(|id| self.audio.get(&id)).and_then(Fetch::try_as_ready_ref).copied().unwrap_or_default()
     }
 
     pub fn lyrics(&mut self, track: &Track) -> Option<&PreparedLyrics> {
@@ -162,9 +153,9 @@ impl CantusApp {
             .collect();
         let track_ids: HashSet<_> = queue.tracks.iter().filter_map(|track| track.id).collect();
         let track_uris: HashSet<_> = queue.tracks.iter().map(|track| track.uri.as_str()).collect();
-        resources.art.retain(|url, state| matches!(state, Fetch::Fetching) || artwork.contains(url.as_str()));
-        resources.audio.retain(|id, state| matches!(state, Fetch::Fetching) || track_ids.contains(id));
-        resources.lyrics.retain(|uri, state| matches!(state, Fetch::Fetching) || track_uris.contains(uri.as_str()));
+        resources.art.retain(|url, state| state.is_fetching() || artwork.contains(url.as_str()));
+        resources.audio.retain(|id, state| state.is_fetching() || track_ids.contains(id));
+        resources.lyrics.retain(|uri, state| state.is_fetching() || track_uris.contains(uri.as_str()));
         let tracks = &queue.tracks;
         let focus = queue.span_at_playhead().map_or(queue.index, |(index, _)| index);
         let focus = focus.min(tracks.len());
@@ -250,10 +241,7 @@ impl CantusApp {
                 url.clone(),
                 async move {
                     let bytes = http.get(&url).send().await?.error_for_status()?.bytes().await?;
-                    #[cfg(not(target_arch = "wasm32"))]
                     let art = spawn_blocking(move || decode_art(&bytes)).await??;
-                    #[cfg(target_arch = "wasm32")]
-                    let art = decode_art(&bytes)?;
                     Ok(art)
                 },
                 |cache| &mut cache.art,

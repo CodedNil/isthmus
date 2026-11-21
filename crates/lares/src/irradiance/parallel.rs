@@ -1,7 +1,6 @@
-//! Data-parallel maps for the bake. The browser only decodes baked assets, so it runs them on one thread.
+//! Data-parallel maps for the bake.
 
 /// Collects `work(0..len)` in order, spreading the calls over every core. Results are identical to a serial map.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn map<T: Send>(len: usize, work: impl Fn(usize) -> T + Sync) -> Vec<T> {
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
@@ -30,11 +29,6 @@ pub fn map<T: Send>(len: usize, work: impl Fn(usize) -> T + Sync) -> Vec<T> {
     });
     parts.sort_unstable_by_key(|part| part.0);
     parts.into_iter().flat_map(|(_, values)| values).collect()
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn map<T: Send>(len: usize, work: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    (0..len).map(work).collect()
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use crate::{
     music::{
         Music, TRACK_SPACING_MS,
+        enrichment::Fetch,
         lyrics::{LyricSegment, Lyrics},
     },
     render::{BarLayout, PANEL_START, TEXT_SHADOW, UiContext},
@@ -260,13 +261,12 @@ fn lyric_sample(mut sample: Sample) -> Sample {
     sample
 }
 
-#[cfg(target_os = "linux")]
 pub fn height(music: &Music) -> f32 {
     let rows = music
         .resources
         .lyrics
         .values()
-        .filter_map(|state| state.ready())
+        .filter_map(Fetch::try_as_ready_ref)
         .map(|lyrics| lyrics.source.lines.iter().map(|line| line.lane).max().unwrap_or(0) + 1)
         .max()
         .unwrap_or(1);

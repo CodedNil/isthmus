@@ -1,12 +1,13 @@
 use super::Frame;
 use isthmus::prelude::*;
+use strum_macros::EnumIs;
 
 mod habitat;
 mod landscape;
 mod undergrowth;
 mod vegetation;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, EnumIs)]
 enum Feature {
     Bamboo,
     Undergrowth,
@@ -30,7 +31,7 @@ impl Placement {
         let available = (size.x / size.y * 0.56 - bank_side * bank.x - bank.y).max(0.04);
         let mut x = bank.x + bank_side * (bank.y + 0.018 + self.bank_position.abs() * available);
         let uv_x = x * size.y / size.x + 0.5;
-        if self.feature == Feature::Bamboo && uv_x > 0.6 {
+        if self.feature.is_bamboo() && uv_x > 0.6 {
             let opening = 0.8 + (uv_x - 0.6) * 0.72;
             x = (opening - 0.5) * size.x / size.y;
         }
@@ -82,7 +83,7 @@ impl Default for Bamboo {
 impl Bamboo {
     pub fn show(&mut self, frame: &mut Frame<'_>) {
         landscape::draw(frame);
-        for plant in self.plants.iter().filter(|plant| plant.feature == Feature::Bamboo) {
+        for plant in self.plants.iter().filter(|plant| plant.feature.is_bamboo()) {
             vegetation::draw(frame, *plant, true);
         }
         habitat::fish(frame);

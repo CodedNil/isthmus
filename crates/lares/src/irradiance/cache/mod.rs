@@ -796,7 +796,6 @@ pub fn bake_cached(
         for (index, fixtures) in projected.into_iter().enumerate() {
             cache.fixtures[index * lights.len()..(index + 1) * lights.len()].copy_from_slice(&fixtures);
         }
-        drop(direct_sources);
     }
     let stencils = parallel::map(cache.paths.len(), |index| {
         let path = &cache.paths[index];

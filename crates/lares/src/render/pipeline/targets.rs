@@ -45,15 +45,19 @@ impl Targets {
         size[0] as f32 * size[1] as f32 > INTERLEAVE_PIXELS
     }
 
+    pub const fn size(&self) -> [u32; 2] {
+        self.size
+    }
+
     /// Releases the images and recreates them at a new size.
-    pub fn resized(self, gpu: &mut Renderer, size: [u32; 2]) -> Self {
+    pub fn resize(&mut self, gpu: &mut Renderer, size: [u32; 2]) {
         for sample in self.samples {
             gpu.remove_surface(sample);
         }
         gpu.remove_surface(self.visibility.0);
         gpu.remove_surface(self.geometry);
         gpu.remove_surface(self.materials.0);
-        Self::new(gpu, size)
+        *self = Self::new(gpu, size);
     }
 
     /// Records one frame: the sample for `phase` when `redraw` is set, then the resolve into `output`.
@@ -62,7 +66,7 @@ impl Targets {
         gpu: &mut Renderer,
         app: &App,
         shadows: &ShadowAtlas,
-        output: (SurfaceHandle, Vec2),
+        output: SurfaceHandle,
         phase: u32,
         mask: u32,
         redraw: bool,
@@ -87,7 +91,7 @@ impl Targets {
                     passes::shade(&mut frame, scene, shadows, &self.visibility.1, &self.materials.1);
                 });
             }
-            render.surface(output.0, output.1, app.globals(output.1), |mut frame: Frame<'_>| {
+            render.surface(output, size, app.globals(size), |mut frame: Frame<'_>| {
                 resolve(&mut frame, &self.images, mask, interleaved, &app.presence.ghosts);
             });
         })

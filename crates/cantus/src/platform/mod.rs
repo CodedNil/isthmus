@@ -1,63 +1,18 @@
-#[cfg(target_os = "linux")]
-pub(crate) use backend::try_open_url;
-pub use backend::{
-    Task, current_location, load_desktop_icons, open_url, run, run_power_action, set_volume, sleep, spawn, spawn_task,
-    start_app_catalog, start_launcher_listener, start_status_monitor, trigger_launcher,
+pub use catalog::{DesktopApp, decode_icon, load_desktop_icons, start_app_catalog};
+pub use desktop::{
+    PowerAction, current_location, open_url, run_power_action, spawn, start_launcher_listener, trigger_launcher,
+    try_open_url,
 };
-use core::time::Duration;
-use image::imageops::FilterType;
-use isthmus::Image;
-#[cfg(target_os = "linux")]
-use linux as backend;
-use resvg::{
-    render,
-    tiny_skia::{Pixmap, Transform},
-    usvg::{self, Tree},
-};
-use strum_macros::IntoStaticStr;
-#[cfg(target_arch = "wasm32")]
-use web as backend;
+use std::thread;
+pub use system::{STATUS_SAMPLE_INTERVAL, monitor_audio, set_volume, start_status_monitor};
+pub use wayland::run;
 
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_arch = "wasm32")]
-mod web;
+mod catalog;
+mod desktop;
+pub(crate) mod mpris;
+mod system;
+mod wayland;
 
-#[derive(Clone, Copy, IntoStaticStr)]
-pub enum PowerAction {
-    PowerOff,
-    Reboot,
-}
-
-pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
-
-/// One launchable application entry exposed to the launcher.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DesktopApp {
-    pub id: String,
-    pub name: String,
-    pub search_terms: Vec<String>,
-    pub exec: Vec<String>,
-    pub comment: String,
-    pub action: Option<(String, Vec<String>)>,
-    /// An icon name or absolute file path. Resolved and decoded only for visible results.
-    pub icon: Option<String>,
-}
-
-pub fn decode_icon(bytes: &[u8]) -> Option<Image> {
-    const SIZE: u32 = 48;
-    let pixels = if let Ok(image) = image::load_from_memory(bytes) {
-        image.resize_to_fill(SIZE, SIZE, FilterType::Triangle).into_rgba8().into_raw()
-    } else {
-        let tree = Tree::from_data(bytes, &usvg::Options::default()).ok()?;
-        let mut pixmap = Pixmap::new(SIZE, SIZE)?;
-        let source = tree.size();
-        render(
-            &tree,
-            Transform::from_scale(SIZE as f32 / source.width(), SIZE as f32 / source.height()),
-            &mut pixmap.as_mut(),
-        );
-        pixmap.take_demultiplied()
-    };
-    Some(Image::rgba8([SIZE; 2], pixels))
+fn spawn_thread(name: &'static str, job: impl FnOnce() + Send + 'static) {
+    thread::Builder::new().name(name.into()).spawn(job).expect("failed to spawn background thread");
 }

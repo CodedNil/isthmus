@@ -1,24 +1,32 @@
 [package]
+edition.workspace = true
 name = "isthmus"
 version = "0.1.0"
-edition.workspace = true
 
 [dependencies]
+# Shared shader ABI and macros
 isthmus_abi.workspace = true
 isthmus_macros.workspace = true
+
+# Shader runtime
 spirv-std.workspace = true
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
+# GPU rendering and image data
 bytemuck.workspace = true
 half = "2.7.1"
+wgpu.workspace = true
+
+# Resource collections
 slotmap = "1.1.1"
 smallvec.workspace = true
+
+# Errors and diagnostics
 thiserror = "2.0.21"
 tracing.workspace = true
-web-time.workspace = true
-wgpu = { workspace = true, features = ["std", "vulkan", "webgpu", "wgsl"] }
 
 [dev-dependencies]
+# Async GPU tests
 pollster.workspace = true
 
 [lints]

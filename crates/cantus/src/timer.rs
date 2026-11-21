@@ -1,10 +1,8 @@
-//! A single in-memory countdown timer, started from the launcher.
-
 use crate::catalog::similarity;
 use core::time::Duration;
 use jiff::ZonedDateTime;
+use std::time::Instant;
 use strum_macros::IntoStaticStr;
-use web_time::Instant;
 
 /// Words that clear the running timer.
 const CANCEL_WORDS: [&str; 5] = ["cancel", "stop", "end", "clear", "remove"];
@@ -14,7 +12,7 @@ const TRIGGER: f32 = 0.7;
 const MAX_SECONDS: f64 = 86_400.0;
 
 /// What the launcher asks of the timer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, IntoStaticStr)]
+#[derive(Clone, Copy, Debug, IntoStaticStr, PartialEq, Eq)]
 pub enum Request {
     Start(Duration),
     Cancel,

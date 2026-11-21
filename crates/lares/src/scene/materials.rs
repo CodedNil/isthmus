@@ -533,33 +533,11 @@ pub(super) fn bump(n: Vec3, gradient: Vec3, limit: f32) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use crate::scene::materials::*;
+    use strum::VariantArray as _;
 
     #[test]
     fn materials_remain_finite_across_projection_and_filter_scales() {
-        for material in [
-            Material::Floorboards,
-            Material::Maple,
-            Material::MapleHorizontal,
-            Material::Fabric,
-            Material::Satin,
-            Material::Knit,
-            Material::Shag,
-            Material::Carpet,
-            Material::Stone,
-            Material::Tile,
-            Material::Ceramic,
-            Material::GlazedTile,
-            Material::BathroomTile,
-            Material::Metal,
-            Material::Paint,
-            Material::Foliage,
-            Material::VariegatedFoliage,
-            Material::MarbledFoliage,
-            Material::Soil,
-            Material::Emissive,
-            Material::Mirror,
-            Material::Wood,
-        ] {
+        for &material in Material::VARIANTS {
             for normal in [Vec3::X, -Vec3::Y, Vec3::Z, vec3(1.0, -1.0, 1.0).normalize()] {
                 for pixel in [0.0001, 0.005, 0.1] {
                     for point in [Vec3::ZERO, vec3(-1.65, -0.19, 0.4), vec3(12.5, 0.001, -2.0)] {

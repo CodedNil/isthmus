@@ -9,16 +9,12 @@ use crate::{
     },
 };
 use isthmus::glam::{Vec2, Vec3};
+pub use wayland::run;
 
 pub mod camera;
-#[cfg(target_arch = "wasm32")]
-mod input;
-#[cfg(target_arch = "wasm32")]
 mod runtime;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod server;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod views;
+mod wayland;
 
 /// How far a moving object is between its authored pose (0) and its moved one (1).
 #[derive(Clone, Copy, Default)]

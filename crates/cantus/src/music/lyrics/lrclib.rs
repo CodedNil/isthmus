@@ -1,21 +1,18 @@
 use super::{LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, normalize};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::config::directory;
-use crate::music::{MusicResult, Track};
-#[cfg(target_arch = "wasm32")]
-use gloo_timers::future::TimeoutFuture;
+use crate::{
+    config::directory,
+    music::{MusicResult, Track},
+};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-#[cfg(not(target_arch = "wasm32"))]
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{self, BufRead as _, BufReader, Write as _},
     sync::{Mutex, MutexGuard, OnceLock},
 };
-#[cfg(not(target_arch = "wasm32"))]
 use tokio::task;
 
 #[derive(Deserialize)]
@@ -30,7 +27,6 @@ struct LrclibRecord {
     lyricsfile: Option<String>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Deserialize, Serialize)]
 struct UploadEntry {
     uploaded_at: String,
@@ -195,10 +191,7 @@ pub(super) async fn publish_lrclib(
         attempts += 1;
         if attempts == 4096 {
             attempts = 0;
-            #[cfg(not(target_arch = "wasm32"))]
             task::yield_now().await;
-            #[cfg(target_arch = "wasm32")]
-            TimeoutFuture::new(0).await;
         }
     }
     let lines: Vec<_> = lyrics
@@ -243,25 +236,16 @@ pub(super) async fn publish_lrclib(
     let status = response.status();
     response.error_for_status()?;
     tracing::debug!(source, %status, "Published lyrics to LRCLIB");
-    #[cfg(not(target_arch = "wasm32"))]
     if let Err(error) = append_upload_log(track, lyrics, source, status) {
         tracing::warn!("LRCLIB upload succeeded, but its local history could not be written: {error}");
     }
     Ok(status)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn was_uploaded(track: &Track, lyrics: &Lyrics) -> MusicResult<bool> {
     Ok(upload_history()?.contains(&upload_key(track, lyrics)))
 }
 
-#[cfg(target_arch = "wasm32")]
-#[expect(clippy::unnecessary_wraps, reason = "mirrors the native signature")]
-pub(super) fn was_uploaded(_: &Track, _: &Lyrics) -> MusicResult<bool> {
-    Ok(false)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn append_upload_log(track: &Track, lyrics: &Lyrics, source: &str, status: StatusCode) -> MusicResult<()> {
     let directory = directory();
     fs::create_dir_all(&directory)?;
@@ -285,7 +269,6 @@ fn append_upload_log(track: &Track, lyrics: &Lyrics, source: &str, status: Statu
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn upload_history() -> MusicResult<MutexGuard<'static, HashSet<String>>> {
     static HISTORY: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     let history = HISTORY.get_or_init(|| {
@@ -305,7 +288,6 @@ fn upload_history() -> MusicResult<MutexGuard<'static, HashSet<String>>> {
     Ok(history.lock().map_err(|_error| io::Error::other("LRCLIB upload history lock poisoned"))?)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn upload_key(track: &Track, lyrics: &Lyrics) -> String {
     let mut hash = Sha256::new();
     for value in [track.compact_title(), track.primary_artist(), &track.album] {

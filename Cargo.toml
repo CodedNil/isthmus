@@ -1,47 +1,74 @@
 [workspace]
-resolver = "3"
 members = ["crates/*"]
+resolver = "3"
 
 [workspace.package]
 edition = "2024"
 
 [workspace.dependencies]
-bitflags = "2"
-bytemuck = "1"
-form_urlencoded = "1.2.2"
-gloo-events = "0.3.1"
-gloo-render = "0.3.1"
+# Workspace crates
 isthmus = { path = "crates/isthmus" }
 isthmus_2d = { path = "crates/isthmus_2d" }
 isthmus_abi = { path = "crates/isthmus_abi" }
 isthmus_build = { path = "crates/isthmus_build" }
 isthmus_macros = { path = "crates/isthmus_macros" }
 isthmus_syntax = { path = "crates/isthmus_syntax" }
-pollster = "1"
-proc-macro2 = { version = "1", features = ["span-locations"] }
-quote = "1"
-serde = { version = "1.0", features = ["derive"] }
-smallvec = "1.16.6"
+
+# Rendering and shader tooling
+image = { version = "0.25.10", default-features = false }
 spirv-builder = "0.11.0"
 spirv-std = "0.11.0"
-syn = { version = "3", features = ["full"] }
-tokio = { version = "1", default-features = false }
-toml = { version = "1", default-features = false, features = [
+wgpu = { version = "30.0.2", default-features = false, features = [
+    "std",
+    "vulkan",
+    "wgsl",
+] }
+
+# Wayland and compositor protocols
+calloop = "0.14.5"
+calloop-wayland-source = "0.4.1"
+wayland-backend = { version = "0.3.17", features = ["rwh_06"] }
+wayland-client = { version = "0.31.15", features = ["system"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+
+# Procedural macros and enum derives
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+quote = "1.0.47"
+strum = "0.28.0"
+strum_macros = "0.28.0"
+syn = { version = "3.0.10", features = ["full"] }
+
+# Async execution, networking, and diagnostics
+futures-util = { version = "0.3.34", default-features = false, features = [
+    "sink",
+    "std",
+] }
+pollster = "1.0.3"
+tokio = { version = "1.54.1", features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+tokio-tungstenite = "0.30.0"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = "0.3.23"
+
+# Serialization and URL encoding
+form_urlencoded = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = { version = "1.2.1", default-features = false, features = [
     "parse",
     "serde",
     "std",
 ] }
-tracing = { version = "0.1", default-features = false, features = ["std"] }
-tracing-subscriber = "0.3"
-wasm-bindgen = "=0.2.129"
-wasm-bindgen-futures = "=0.4.79"
-wayland-backend = { version = "0.3", features = ["rwh_06"] }
-wayland-client = { version = "0.31", features = ["system"] }
-wayland-protocols = { version = "0.32", features = ["client", "staging"] }
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-web-sys = "=0.3.106"
-web-time = "1.1.0"
-wgpu = { version = "30.0.2", default-features = false }
+
+# Data layout and collections
+bitflags = "2.13.2"
+bytemuck = "1.25.2"
+smallvec = "1.16.6"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = [
@@ -50,102 +77,115 @@ unexpected_cfgs = { level = "allow", check-cfg = [
 unused_qualifications = "warn"
 
 [workspace.lints.clippy]
-pedantic = { level = "warn", priority = -1 }
+# Lint presets
 nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
 
-return_self_not_must_use = "allow"
-must_use_candidate = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-too_many_lines = "allow"
-too_many_arguments = "allow"
+# Workspace exceptions
 cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
-cast_possible_wrap = "allow"
-suboptimal_flops = "allow"
 many_single_char_names = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+# Variables sent to a shader are typed where they are declared, so the GPU knows their types.
+redundant_type_annotations = "allow"
+return_self_not_must_use = "allow"
 similar_names = "allow"
+suboptimal_flops = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
 
-absolute_paths = "warn"
-allow_attributes = "warn"
-infinite_loop = "warn"
-let_underscore_must_use = "warn"
-string_slice = "warn"
-single_char_lifetime_names = "warn"
-wildcard_enum_match_arm = "warn"
-print_stdout = "warn"
-print_stderr = "warn"
-self_named_module_files = "warn"
-arbitrary_source_item_ordering = "warn"
-allow_attributes_without_reason = "warn"
-assertions_on_result_states = "warn"
+# Unsafe code and ownership
 clone_on_ref_ptr = "warn"
-create_dir = "warn"
-dbg_macro = "warn"
-empty_drop = "warn"
-empty_enum_variants_with_brackets = "warn"
-empty_structs_with_brackets = "warn"
-error_impl_error = "warn"
-exit = "warn"
-filetype_is_file = "warn"
-float_cmp_const = "warn"
-fn_to_numeric_cast_any = "warn"
-get_unwrap = "warn"
-if_then_some_else_none = "warn"
-iter_over_hash_type = "warn"
-lossy_float_literal = "warn"
-map_err_ignore = "warn"
 mem_forget = "warn"
-missing_assert_message = "warn"
 mixed_read_write_in_expression = "warn"
 multiple_unsafe_ops_per_block = "warn"
 mutex_atomic = "warn"
 mutex_integer = "warn"
-needless_raw_strings = "warn"
-non_zero_suggestions = "warn"
-panic_in_result_fn = "warn"
-pathbuf_init_then_push = "warn"
-precedence_bits = "warn"
 rc_buffer = "warn"
 rc_mutex = "warn"
-redundant_test_prefix = "warn"
-# Variables sent to a shader are typed where they are declared, so the GPU knows their types.
-redundant_type_annotations = "allow"
-renamed_function_params = "warn"
-rest_pat_in_fully_bound_structs = "warn"
-semicolon_inside_block = "warn"
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+
+# Control flow and error handling
+empty_drop = "warn"
+error_impl_error = "warn"
+exit = "warn"
+get_unwrap = "warn"
+if_then_some_else_none = "warn"
+infinite_loop = "warn"
+let_underscore_must_use = "warn"
+map_err_ignore = "warn"
+panic_in_result_fn = "warn"
+todo = "warn"
+try_err = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+unused_result_ok = "warn"
+wildcard_enum_match_arm = "warn"
+
+# Numeric operations and literals
+float_cmp_const = "warn"
+fn_to_numeric_cast_any = "warn"
+lossy_float_literal = "warn"
+non_zero_suggestions = "warn"
+precedence_bits = "warn"
 separated_literal_suffix = "warn"
+suspicious_xor_used_as_pow = "warn"
+
+# File, string, and collection operations
+create_dir = "warn"
+filetype_is_file = "warn"
+iter_over_hash_type = "warn"
+needless_raw_strings = "warn"
+pathbuf_init_then_push = "warn"
 str_to_string = "warn"
 string_add = "warn"
 string_lit_chars_any = "warn"
-suspicious_xor_used_as_pow = "warn"
-tests_outside_test_module = "warn"
-todo = "warn"
-try_err = "warn"
-undocumented_unsafe_blocks = "warn"
-unimplemented = "warn"
-unnecessary_safety_comment = "warn"
-unnecessary_safety_doc = "warn"
-unnecessary_self_imports = "warn"
-unneeded_field_pattern = "warn"
-unreachable = "warn"
-unused_result_ok = "warn"
+string_slice = "warn"
 verbose_file_reads = "warn"
 
+# Tests and diagnostics
+assertions_on_result_states = "warn"
+dbg_macro = "warn"
+missing_assert_message = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+redundant_test_prefix = "warn"
+tests_outside_test_module = "warn"
+
+# Source organization and style
+absolute_paths = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+arbitrary_source_item_ordering = "warn"
+empty_enum_variants_with_brackets = "warn"
+empty_structs_with_brackets = "warn"
+renamed_function_params = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+self_named_module_files = "warn"
+semicolon_inside_block = "warn"
+single_char_lifetime_names = "warn"
+unnecessary_self_imports = "warn"
+unneeded_field_pattern = "warn"
+
 [profile.release]
-opt-level = 3
 codegen-units = 16
 lto = "thin"
+opt-level = 3
 strip = true
 
 [profile.release.build-override]
-opt-level = 0
 codegen-units = 256
+opt-level = 0
 
 [profile.dev]
-opt-level = 1
 codegen-units = 1
+opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3

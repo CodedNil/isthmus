@@ -1,15 +1,9 @@
-#![cfg_attr(target_arch = "wasm32", expect(clippy::future_not_send, reason = "browser futures run on one thread"))]
 #![expect(
     clippy::wildcard_enum_match_arm,
     reason = "scene dispatch names the few kinds and materials it treats specially"
 )]
 
-pub use app::camera;
-#[cfg(not(target_arch = "wasm32"))]
-pub use app::server;
-#[cfg(not(target_arch = "wasm32"))]
-pub use app::views;
-#[cfg(not(target_arch = "wasm32"))]
+pub use app::{camera, run, views};
 pub use irradiance::bake;
 
 pub mod app;
@@ -20,8 +14,7 @@ pub(crate) mod scene;
 
 pub mod presence;
 
-/// Logs at info level to stderr, for the server and the command line tools.
-#[cfg(not(target_arch = "wasm32"))]
+/// Logs at info level to stderr for the app and command line tools.
 pub fn init_logging() {
     tracing_subscriber::fmt().with_target(false).with_max_level(tracing::Level::INFO).init();
 }

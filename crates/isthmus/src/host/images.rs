@@ -6,8 +6,8 @@ use std::{
     collections::HashMap,
     iter,
     sync::{Arc, Weak},
+    time::Instant,
 };
-use web_time::Instant;
 use wgpu::util::{DeviceExt, TextureDataOrder};
 
 struct CachedImage {

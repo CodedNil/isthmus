@@ -90,11 +90,12 @@ impl Session {
                 return result;
             }
 
-            let mut endpoint = self.api_endpoint().lock().await;
-            if endpoint.as_ref() == Some(&base) {
-                *endpoint = None;
+            {
+                let mut endpoint = self.api_endpoint().lock().await;
+                if endpoint.as_ref() == Some(&base) {
+                    *endpoint = None;
+                }
             }
-            drop(endpoint);
             remaining -= 1;
             if remaining == 0 {
                 return result;

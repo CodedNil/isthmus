@@ -13,7 +13,6 @@ pub mod status;
 pub mod weathertime;
 
 #[cfg(test)]
-#[cfg(not(target_arch = "wasm32"))]
 mod tests;
 
 /// Space for playlist buttons and compact history tracks, in logical pixels.

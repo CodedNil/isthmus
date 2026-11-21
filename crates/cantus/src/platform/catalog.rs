@@ -1,17 +1,20 @@
-//! Filesystem-driven metadata snapshots and deferred icon loading.
-
 use super::spawn_thread;
 use crate::{
     app::{AppUpdater, send_update},
     catalog::AppCatalog,
-    platform::{DesktopApp, decode_icon},
 };
 use freedesktop_desktop_entry::{Iter, default_paths, get_languages_from_env};
+use image::imageops::FilterType;
 use isthmus::Image;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use resvg::{
+    render,
+    tiny_skia::{Pixmap, Transform},
+    usvg::{self, Tree},
+};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
-    fs, mem,
+    fs,
     path::{Path, PathBuf},
     sync::mpsc,
     thread,
@@ -23,6 +26,19 @@ use tracing::warn;
 const DEBOUNCE: Duration = Duration::from_millis(120);
 // Reconcile missed notifications, symlinked files, and unavailable watches.
 const RECONCILE: Duration = Duration::from_secs(30);
+
+/// One launchable application entry exposed to the launcher.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DesktopApp {
+    pub id: String,
+    pub name: String,
+    pub search_terms: Vec<String>,
+    pub exec: Vec<String>,
+    pub comment: String,
+    pub action: Option<(String, Vec<String>)>,
+    /// An icon name or absolute file path. Resolved and decoded only for visible results.
+    pub icon: Option<String>,
+}
 
 pub fn start_app_catalog(updater: &AppUpdater) {
     let updater = updater.clone();
@@ -58,8 +74,7 @@ fn monitor(updater: &AppUpdater, roots: &[PathBuf]) {
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
         // Rearm even if the path looks the same; a replaced directory leaves inotify on the old inode.
-        let replacement = watch(roots, &sender);
-        drop(mem::replace(&mut watcher, replacement));
+        watcher = watch(roots, &sender).or(watcher);
     }
 }
 
@@ -177,26 +192,28 @@ pub async fn load_desktop_icons(sources: Vec<String>) -> Vec<(String, Option<Ima
     .expect("desktop icon loader panicked")
 }
 
+pub fn decode_icon(bytes: &[u8]) -> Option<Image> {
+    const SIZE: u32 = 48;
+    let pixels = if let Ok(image) = image::load_from_memory(bytes) {
+        image.resize_to_fill(SIZE, SIZE, FilterType::Triangle).into_rgba8().into_raw()
+    } else {
+        let tree = Tree::from_data(bytes, &usvg::Options::default()).ok()?;
+        let mut pixmap = Pixmap::new(SIZE, SIZE)?;
+        let source = tree.size();
+        render(
+            &tree,
+            Transform::from_scale(SIZE as f32 / source.width(), SIZE as f32 / source.height()),
+            &mut pixmap.as_mut(),
+        );
+        pixmap.take_demultiplied()
+    };
+    Some(Image::rgba8([SIZE; 2], pixels))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{env, os::unix::fs::symlink, process};
-
-    struct Directory(PathBuf);
-
-    impl Directory {
-        fn new() -> Self {
-            let path = env::temp_dir().join(format!("cantus-catalog-{}-{:x}", process::id(), fastrand::u64(..)));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for Directory {
-        fn drop(&mut self) {
-            drop(fs::remove_dir_all(&self.0));
-        }
-    }
+    use std::os::unix::fs::symlink;
 
     fn desktop(path: &Path, name: &str, hidden: bool) {
         fs::write(
@@ -208,30 +225,30 @@ mod tests {
 
     #[test]
     fn follows_and_rearms_profile_symlink_replacements() {
-        let directory = Directory::new();
-        let profiles = directory.0.join("profiles");
+        let directory = tempfile::tempdir().unwrap();
+        let profiles = directory.path().join("profiles");
         fs::create_dir_all(&profiles).unwrap();
         for (generation, name) in [("one", "Old Steam"), ("two", "New Steam")] {
-            let apps = directory.0.join(generation).join("share/applications");
+            let apps = directory.path().join(generation).join("share/applications");
             fs::create_dir_all(&apps).unwrap();
             desktop(&apps.join("steam.desktop"), name, false);
         }
-        symlink(directory.0.join("one"), profiles.join("current")).unwrap();
-        symlink(profiles.join("current"), directory.0.join("profile")).unwrap();
-        let roots = vec![directory.0.join("profile/share/applications")];
+        symlink(directory.path().join("one"), profiles.join("current")).unwrap();
+        symlink(profiles.join("current"), directory.path().join("profile")).unwrap();
+        let roots = vec![directory.path().join("profile/share/applications")];
         let (sender, events) = mpsc::sync_channel(1);
-        let first = watch(&roots, &sender).unwrap();
-        assert_eq!(scan_desktop_apps(&roots)[0].name, "Old Steam");
-        symlink(directory.0.join("two"), profiles.join("next")).unwrap();
-        fs::rename(profiles.join("next"), profiles.join("current")).unwrap();
-        events.recv_timeout(Duration::from_secs(5)).expect("missing profile replacement notification");
-        let replacement = watch(&roots, &sender).unwrap();
-        drop(first);
+        let _replacement = {
+            let _first = watch(&roots, &sender).unwrap();
+            assert_eq!(scan_desktop_apps(&roots)[0].name, "Old Steam");
+            symlink(directory.path().join("two"), profiles.join("next")).unwrap();
+            fs::rename(profiles.join("next"), profiles.join("current")).unwrap();
+            events.recv_timeout(Duration::from_secs(5)).expect("missing profile replacement notification");
+            watch(&roots, &sender).unwrap()
+        };
         assert_eq!(scan_desktop_apps(&roots)[0].name, "New Steam");
         while events.try_recv().is_ok() {}
-        desktop(&directory.0.join("two/share/applications/steam.desktop"), "Edited Steam", false);
+        desktop(&directory.path().join("two/share/applications/steam.desktop"), "Edited Steam", false);
         events.recv_timeout(Duration::from_secs(5)).expect("missing notification from new generation");
         assert_eq!(scan_desktop_apps(&roots)[0].name, "Edited Steam");
-        drop(replacement);
     }
 }

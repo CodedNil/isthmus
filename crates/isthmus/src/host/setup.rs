@@ -1,11 +1,17 @@
 use super::{error::SetupError, gpu::Gpu, surface::SurfaceTarget};
 use crate::Program;
 
+pub(super) fn vulkan_instance() -> wgpu::Instance {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::VULKAN;
+    wgpu::Instance::new(descriptor)
+}
+
 pub(super) async fn new<P: Program>(
     source: impl Into<wgpu::SurfaceTarget<'static>>,
     [width, height]: [u32; 2],
 ) -> Result<(Gpu, SurfaceTarget), SetupError> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = vulkan_instance();
     let surface = instance.create_surface(source)?;
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -64,16 +70,12 @@ pub(super) fn configure_surface(
             .or_else(|| caps.formats.first().copied())
             .ok_or(SetupError::UnsupportedSurface)?,
     };
-    // WebGPU supports premultiplied canvases, although wgpu's web capabilities only list Opaque.
-    let alpha_mode = if cfg!(target_arch = "wasm32") {
-        wgpu::CompositeAlphaMode::PreMultiplied
-    } else {
+    let alpha_mode =
         [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::Auto, wgpu::CompositeAlphaMode::Opaque]
             .into_iter()
             .find(|mode| caps.alpha_modes.contains(mode))
             .or_else(|| caps.alpha_modes.first().copied())
-            .ok_or(SetupError::UnsupportedSurface)?
-    };
+            .ok_or(SetupError::UnsupportedSurface)?;
     Ok(wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format,

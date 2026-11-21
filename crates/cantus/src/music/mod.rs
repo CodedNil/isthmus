@@ -12,21 +12,15 @@ use std::{
     collections::HashSet,
     error::Error,
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
+use tokio::sync::watch;
 use tracing::{info, warn};
-#[cfg(target_arch = "wasm32")]
-use web as spotify;
-use web_time::{Duration, Instant};
 
 pub mod enrichment;
 pub mod lyrics;
 pub mod queue;
-#[cfg(not(target_arch = "wasm32"))]
 mod spotify;
-#[path = "spotify/lyrics.rs"]
-mod spotify_lyrics;
-#[cfg(target_arch = "wasm32")]
-mod web;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
@@ -48,12 +42,12 @@ pub struct Music {
 }
 
 impl Music {
-    pub(crate) fn new(config: &Config, updater: &AppUpdater) -> Self {
+    pub(crate) fn new(config: &Config, updater: &AppUpdater, local_playback: watch::Receiver<bool>) -> Self {
         Self {
             resources: TrackCache::default(),
             queue: Queue { timeline: Timeline { observed_at: Instant::now(), .. }, .. },
             last_toggle: Instant::now(),
-            spotify: spotify::Spotify::new(config, updater),
+            spotify: spotify::Spotify::new(config, updater, local_playback),
             ..
         }
     }

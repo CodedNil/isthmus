@@ -4,7 +4,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 pub use slices::SliceIndices;
 use syn::{ExprClosure, Ident, Path, Type, parse_quote};
-use upload::{Upload, UploadKind};
+use upload::Upload;
 
 mod chain;
 mod gpu;
@@ -66,7 +66,7 @@ impl Shader {
     }
 
     fn images(&self) -> impl Iterator<Item = &Ident> {
-        self.uploads.iter().filter(|upload| upload.kind == UploadKind::Image).map(|upload| &upload.name)
+        self.uploads.iter().filter(|upload| upload.kind.is_image()).map(|upload| &upload.name)
     }
 
     pub fn metadata(&self, isthmus: &TokenStream) -> TokenStream {
@@ -89,14 +89,12 @@ impl Shader {
     /// The draw record's struct: the region to rasterize, then every upload except images, which are bound
     /// separately. Each field's type is a parameter, because a struct field cannot name an elided lifetime.
     fn payload(&self, isthmus: &TokenStream, name: &Ident) -> TokenStream {
-        let sent = self.uploads.iter().enumerate().filter(|(_, upload)| upload.kind != UploadKind::Image);
-        let parameters = sent
-            .clone()
-            .filter(|(_, upload)| upload.kind == UploadKind::Data)
-            .map(|(index, _)| format_ident!("T{index}"));
+        let sent = self.uploads.iter().enumerate().filter(|(_, upload)| !upload.kind.is_image());
+        let parameters =
+            sent.clone().filter(|(_, upload)| upload.kind.is_data()).map(|(index, _)| format_ident!("T{index}"));
         let fields = sent.map(|(index, upload)| {
             let name = &upload.name;
-            if upload.kind == UploadKind::Slice {
+            if upload.kind.is_slice() {
                 quote!(#name: [u32; 2])
             } else {
                 let parameter = format_ident!("T{index}");
@@ -111,7 +109,7 @@ impl Shader {
 
     /// The draw record's struct with its fields' types filled in, for use inside function bodies.
     fn payload_type(&self, isthmus: &TokenStream, name: &Ident) -> TokenStream {
-        let records = self.uploads.iter().filter(|upload| upload.kind == UploadKind::Data).map(|upload| {
+        let records = self.uploads.iter().filter(|upload| upload.kind.is_data()).map(|upload| {
             let ty = &upload.ty;
             quote!(<#ty as #isthmus::Sent>::Record)
         });

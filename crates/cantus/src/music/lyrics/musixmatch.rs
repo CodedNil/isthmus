@@ -10,9 +10,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    time::Duration,
+    time::{Duration, Instant},
 };
-use web_time::Instant;
 
 const API: &str = "https://apic-appmobile.musixmatch.com/ws/1.1/";
 const APP_ID: &str = "mac-ios-v2.0";

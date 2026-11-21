@@ -11,6 +11,8 @@ use std::{
     mem,
     sync::{Arc, RwLock},
 };
+use strum::IntoEnumIterator as _;
+use strum_macros::{EnumIter, IntoStaticStr};
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -113,18 +115,17 @@ impl Session {
 
 pub(super) type SocketAddress = (String, u16);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, EnumIter, IntoStaticStr)]
 pub(super) enum Endpoint {
+    #[strum(serialize = "dealer.spotify.com")]
     Dealer,
+    #[strum(serialize = "spclient.wg.spotify.com")]
     Api,
 }
 
 impl Endpoint {
     fn fallback(self) -> SocketAddress {
-        let host = match self {
-            Self::Dealer => "dealer.spotify.com",
-            Self::Api => "spclient.wg.spotify.com",
-        };
+        let host: &str = self.into();
         (host.to_owned(), 443)
     }
 }
@@ -153,7 +154,7 @@ impl Session {
             match self.fetch_endpoints().await {
                 Ok(mut resolved) => {
                     // Preserve other queues so resolving the dealer cannot reset an API failover.
-                    for kind in [Endpoint::Dealer, Endpoint::Api] {
+                    for kind in Endpoint::iter() {
                         if points.queue(kind).is_empty() {
                             *points.queue(kind) = mem::take(resolved.queue(kind));
                         }

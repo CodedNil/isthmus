@@ -1,16 +1,14 @@
 use arrayvec::ArrayVec;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "linux")]
-use std::io;
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, io, path::PathBuf};
 use tracing::warn;
 
 pub const MAX_PLAYLIST_TARGETS: usize = 8;
 pub const MAX_WORLD_CLOCKS: usize = 3;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[expect(clippy::struct_excessive_bools, reason = "independent user-facing toggles")]
-#[cfg_attr(target_os = "linux", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct Config {
     /// The monitor to display on.
@@ -62,8 +60,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[cfg_attr(target_os = "linux", derive(schemars::JsonSchema))]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
 pub struct SearchProvider {
     /// Display name, such as `DuckDuckGo` or `GitHub`.
     pub name: String,
@@ -75,8 +72,7 @@ pub struct SearchProvider {
     pub alias: String,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[cfg_attr(target_os = "linux", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Layer {
     Background,
@@ -85,8 +81,7 @@ pub enum Layer {
     Overlay,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[cfg_attr(target_os = "linux", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LayerAnchor {
     Top,
@@ -113,7 +108,6 @@ pub fn load() -> Config {
         })
 }
 
-#[cfg(target_os = "linux")]
 /// Writes `generated-options.nix` from the configuration schema and defaults.
 pub fn generate_nix_options() -> io::Result<()> {
     use core::fmt::Write as _;

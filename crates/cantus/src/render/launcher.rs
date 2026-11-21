@@ -20,9 +20,9 @@ use std::{
     ops::Range,
     slice::SliceIndex,
     sync::OnceLock,
+    time::Instant,
 };
 use unicode_segmentation::UnicodeSegmentation;
-use web_time::Instant;
 
 const PANEL_WIDTH: f32 = 520.0;
 const ROW_HEIGHT: f32 = UNIT * 12.0;
@@ -171,7 +171,7 @@ impl TextField {
 
 #[derive(Default)]
 pub struct LauncherState {
-    pub open: bool = Self::ALWAYS_OPEN,
+    pub open: bool,
     pub session: u64,
     pub field: TextField,
     entries: Vec<Entry>,
@@ -214,18 +214,16 @@ struct EntryView<'entry> {
 }
 
 impl LauncherState {
-    const ALWAYS_OPEN: bool = cfg!(target_arch = "wasm32");
-
     pub(crate) fn new(background: &Background, providers: impl IntoIterator<Item = SearchProvider>) -> Self {
         let mut calc = Context::new();
         let rates_http = background.http.clone();
-        platform::spawn_task(async move {
+        tokio::spawn(async move {
             #[derive(Deserialize)]
             struct Rates {
                 rates: HashMap<String, f64>,
             }
             if let Ok(rates) = fetch_json::<Rates>(rates_http.get("https://open.er-api.com/v6/latest/USD")).await {
-                drop(EXCHANGE_RATES.set(rates.rates));
+                let _initialized = EXCHANGE_RATES.set(rates.rates);
             }
         });
         calc.set_exchange_rate_handler_v2(ExchangeRates);
@@ -250,7 +248,7 @@ impl LauncherState {
 
     pub fn toggle(&mut self) {
         self.session = self.session.wrapping_add(1);
-        self.open = Self::ALWAYS_OPEN || !self.open;
+        self.open = !self.open;
         self.edit(|field| *field = TextField::default());
     }
 
@@ -307,7 +305,6 @@ impl LauncherState {
     }
 
     /// Reloads visible icons in the background.
-    #[cfg(target_os = "linux")]
     pub(crate) fn refresh_icons(&mut self) {
         self.icon_revision = self.icon_revision.wrapping_add(1);
         self.icon_requests.clear();
@@ -325,7 +322,7 @@ impl LauncherState {
             return false;
         }
         match key {
-            "Escape" => self.open = Self::ALWAYS_OPEN,
+            "Escape" => self.open = false,
             "Enter" => self.activate(self.selected, shift),
             "ArrowUp" => self.move_selection(-1),
             "ArrowDown" => self.move_selection(1),
@@ -420,7 +417,7 @@ impl LauncherState {
             }
             None => return,
         }
-        self.open = Self::ALWAYS_OPEN;
+        self.open = false;
         self.edit(|field| *field = TextField::default());
     }
 
@@ -473,15 +470,12 @@ impl LauncherState {
         let (origin, size) = self.bounds(context.frame.screen_size);
         let rect = Rect::new(origin, origin + size);
         let panel = Shape::rounded_rect(rect, CORNER_RADIUS);
-        if !Self::ALWAYS_OPEN {
-            let screen = Rect::new(Vec2::ZERO, context.frame.screen_size);
-            context.interaction.input_region(screen);
-            let backdrop =
-                context.interaction.interact("launcher-backdrop", Shape::rectangle(screen).difference(panel));
-            if backdrop.clicked {
-                self.open = false;
-                return;
-            }
+        let screen = Rect::new(Vec2::ZERO, context.frame.screen_size);
+        context.interaction.input_region(screen);
+        let backdrop = context.interaction.interact("launcher-backdrop", Shape::rectangle(screen).difference(panel));
+        if backdrop.clicked {
+            self.open = false;
+            return;
         }
 
         self.show_search(context, rect);

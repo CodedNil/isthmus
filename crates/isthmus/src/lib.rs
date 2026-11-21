@@ -7,7 +7,6 @@
 #![cfg_attr(target_arch = "spirv", no_std, feature(asm_experimental_arch))]
 #![cfg_attr(not(target_arch = "spirv"), feature(const_trait_impl))]
 #![feature(trait_alias)]
-#![cfg_attr(target_arch = "wasm32", expect(clippy::future_not_send, reason = "browser futures run on one thread"))]
 
 extern crate self as isthmus;
 

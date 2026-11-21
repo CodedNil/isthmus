@@ -4,6 +4,7 @@ use reqwest::{Client, StatusCode};
 use roxmltree::{Document, Node};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use strum::IntoEnumIterator as _;
 
 pub(super) async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics> {
     // lrc.red serves BiniLyrics search and TTML; it needs integer seconds, unlike LyricsPlus.
@@ -26,7 +27,7 @@ pub(super) async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicRes
     let response = response.error_for_status()?.json::<Value>().await?;
     let results = response["results"].as_array().ok_or("Apple lyrics response has no results array")?;
     let mut best = Ok(Lyrics::default());
-    for timing in [Timing::Syllable, Timing::Word, Timing::Line] {
+    for timing in Timing::iter().rev() {
         for result in results.iter().filter(|result| {
             result["timing_type"].as_str() == Some(timing.as_ref()) && matches_track(track, result, "duration")
         }) {

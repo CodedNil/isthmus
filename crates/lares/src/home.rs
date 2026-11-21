@@ -9,6 +9,7 @@ use isthmus::{
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, ShaderData)]
+#[cfg_attr(test, derive(strum_macros::VariantArray))]
 #[repr(u32)]
 pub enum Material {
     #[default]

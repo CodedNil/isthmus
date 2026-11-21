@@ -23,7 +23,7 @@ fn hash_sources(path: &Path, hash: &mut u64) {
 
 fn main() {
     let mut hash = 0xcbf2_9ce4_8422_2325;
-    // Camera, UI and server edits must not invalidate baked transport.
+    // Hash geometry and lighting sources to decide when baked transport is stale.
     for path in [
         "src/home.rs",
         "src/render/geometry/layout.rs",

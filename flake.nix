@@ -50,9 +50,13 @@ rec {
             just
             nixfmt
             spirv-tools
-            wasm-bindgen-cli
           ]);
-        LD_LIBRARY_PATH = cantus.runtimeLibraryPath;
+        LD_LIBRARY_PATH = "${
+          pkgs.lib.makeLibraryPath [
+            pkgs.wayland
+            pkgs.libxkbcommon
+          ]
+        }:${cantus.runtimeLibraryPath}";
       };
 
       formatter.${system} = pkgs.nixfmt;

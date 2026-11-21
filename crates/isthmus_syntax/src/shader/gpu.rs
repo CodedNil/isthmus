@@ -19,7 +19,7 @@ impl Shader {
         let slices = self
             .uploads
             .iter()
-            .filter(|upload| upload.kind == UploadKind::Slice)
+            .filter(|upload| upload.kind.is_slice())
             .map(|upload| upload.name.to_string())
             .collect::<BTreeSet<_>>();
         let [shape, paint] = [&self.shape, &self.paint].map(|closure| {
@@ -37,7 +37,7 @@ impl Shader {
                 UploadKind::Slice => quote!(crate::ShaderSlice::from_words(__words, __data.#name)),
                 UploadKind::Data => quote!(<#ty as #isthmus::Sent>::restore(__data.#name, __shared)),
             };
-            let annotation = (*kind == UploadKind::Slice).then(|| {
+            let annotation = kind.is_slice().then(|| {
                 let Type::Reference(reference) = ty else { return quote!() };
                 let Type::Slice(slice) = &*reference.elem else { return quote!() };
                 let element = &slice.elem;

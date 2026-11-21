@@ -232,22 +232,25 @@ pub(super) struct Credentials {
 
 impl Session {
     pub(super) async fn auth_token(&self) -> MusicResult<String> {
-        let mut cached = self.access_token_cache().lock().await;
-        if let Some(token) = cached.as_ref().filter(|token| !token.is_expired()) {
-            return Ok(token.access_token.clone());
-        }
-        let mut credentials = self.credentials().ok_or_else(|| io::Error::other("Spotify sign-in required"))?;
-        let response = refresh_access_token(&credentials.refresh_token).await?;
-        if let Some(next) = response.refresh_token.filter(|next| !next.is_empty() && next != &credentials.refresh_token)
-        {
-            credentials.refresh_token = next;
-            self.set_credentials(credentials.clone());
-            spawn_blocking(move || save_credentials(&credentials)).await?;
-        }
+        let access_token = {
+            let mut cached = self.access_token_cache().lock().await;
+            if let Some(token) = cached.as_ref().filter(|token| !token.is_expired()) {
+                return Ok(token.access_token.clone());
+            }
+            let mut credentials = self.credentials().ok_or_else(|| io::Error::other("Spotify sign-in required"))?;
+            let response = refresh_access_token(&credentials.refresh_token).await?;
+            if let Some(next) =
+                response.refresh_token.filter(|next| !next.is_empty() && next != &credentials.refresh_token)
+            {
+                credentials.refresh_token = next;
+                self.set_credentials(credentials.clone());
+                spawn_blocking(move || save_credentials(&credentials)).await?;
+            }
 
-        let access_token = response.access_token;
-        *cached = Some(Token::new(access_token.clone(), Duration::from_secs(response.expires_in)));
-        drop(cached);
+            let access_token = response.access_token;
+            *cached = Some(Token::new(access_token.clone(), Duration::from_secs(response.expires_in)));
+            access_token
+        };
         Ok(access_token)
     }
 }

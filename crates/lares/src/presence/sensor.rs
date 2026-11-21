@@ -1,16 +1,7 @@
-//! One local Shelly RPC stream, shared by all Lares browser connections.
+//! The local Shelly live tracking stream.
 use crate::presence::{Snapshot, Track};
-use axum::{
-    Router,
-    extract::{
-        State, WebSocketUpgrade,
-        ws::{Message as BrowserMessage, WebSocket},
-    },
-    http::{HeaderMap, StatusCode},
-    response::Response,
-    routing::get,
-};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt as _, StreamExt as _};
+use serde::Deserialize as _;
 use serde_json::{Value, json};
 use std::{
     error::Error,
@@ -27,7 +18,7 @@ const SENSOR: &str = "ws://192.168.0.133/rpc";
 const STALE: Duration = Duration::from_secs(5);
 
 /// Keeps one sensor connection alive, publishing every update to `latest`.
-#[expect(clippy::infinite_loop, reason = "the sensor is reconnected for as long as the server runs")]
+#[expect(clippy::infinite_loop, reason = "the sensor is reconnected for as long as the app runs")]
 async fn run(latest: watch::Sender<Snapshot>) {
     loop {
         if let Err(error) = stream(&latest).await {
@@ -88,7 +79,7 @@ fn parse_tracks(text: &str) -> Option<Vec<Track>> {
         objects
             .iter()
             .take(10)
-            .filter_map(|value| serde_json::from_value::<Track>(value.clone()).ok())
+            .filter_map(|value| Track::deserialize(value).ok())
             .filter(|track| {
                 track.x.is_finite()
                     && track.y.is_finite()
@@ -100,51 +91,15 @@ fn parse_tracks(text: &str) -> Option<Vec<Track>> {
     )
 }
 
-pub fn router() -> Router {
+pub fn subscribe() -> watch::Receiver<Snapshot> {
     let (latest, updates) = watch::channel(Snapshot::empty(false));
     tokio::spawn(run(latest));
-    Router::new().route("/api/presence", get(upgrade)).with_state(updates)
-}
-
-async fn upgrade(
-    State(updates): State<watch::Receiver<Snapshot>>,
-    headers: HeaderMap,
-    socket: WebSocketUpgrade,
-) -> Result<Response, StatusCode> {
-    if let Some(origin) = headers.get("origin") {
-        let origin = origin.to_str().map_err(|_error| StatusCode::FORBIDDEN)?;
-        let host = headers.get("host").and_then(|value| value.to_str().ok()).ok_or(StatusCode::FORBIDDEN)?;
-        if origin != format!("http://{host}") && origin != format!("https://{host}") {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
-    Ok(socket.on_upgrade(move |socket| forward(updates, socket)))
-}
-
-async fn forward(mut updates: watch::Receiver<Snapshot>, socket: WebSocket) {
-    let (mut output, mut input) = socket.split();
-    loop {
-        let message = serde_json::to_string(&*updates.borrow_and_update()).expect("finite presence values");
-        if output.send(BrowserMessage::Text(message.into())).await.is_err() {
-            break;
-        }
-        tokio::select! {
-            result = updates.changed() => { if result.is_err() { break; } }
-            message = input.next() => match message {
-                Some(Ok(BrowserMessage::Ping(bytes))) => {
-                    if output.send(BrowserMessage::Pong(bytes)).await.is_err() { break; }
-                }
-                Some(Ok(BrowserMessage::Close(_)) | Err(_)) | None => break,
-                _ => {}
-            }
-        }
-    }
-    drop(output.close().await);
+    updates
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::presence::server::*;
+    use crate::presence::sensor::*;
     #[test]
     fn live_events_clear_absent_people_and_ignore_other_notifications() {
         let message = r#"{"method":"NotifyEvent","params":{"events":[{"component":"presence","event":"track","object":[{"id":3,"x":0.27,"y":5.04,"z":-0.09,"minz":0.70,"maxz":0.82}]}]}}"#;

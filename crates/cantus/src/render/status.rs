@@ -96,7 +96,7 @@ pub struct StatusPanel {
     /// Progress from one history sample to the next.
     history_scroll: Ramp,
     processors: [ProcessorStatus; 2],
-    audio_monitor: Arc<AudioMonitor>,
+    pub(crate) audio_monitor: Arc<AudioMonitor>,
 }
 
 #[derive(Clone, Copy)]

@@ -1,7 +1,7 @@
 use super::{LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, separate};
 use crate::music::{
     MusicResult,
-    spotify_lyrics::{Line, Milliseconds, SpotifyLyrics, SyncType},
+    spotify::lyrics::{Line, Milliseconds, SpotifyLyrics, SyncType},
 };
 use core::ops::Range;
 

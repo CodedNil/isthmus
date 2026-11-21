@@ -1,5 +1,5 @@
 # cantus
-A beautiful interactive music widget for Wayland
+A beautiful interactive music widget for Wayland.
 
 <img width="1755" height="81" alt="image" src="https://github.com/user-attachments/assets/a447d690-f36c-4c72-95e3-5be8a5c9041b" />
 
@@ -38,23 +38,15 @@ To build Cantus from source, ensure the following dependencies are installed:
 
 * Rust (with cargo)
 * wayland-protocols
-* clang
+* A C and C++ toolchain, such as GCC and G++
+* pkg-config
 * libxkbcommon
 * wayland
 * vulkan-loader
+* IANA time-zone data (`tzdata` on most distributions)
 * PipeWire and WirePlumber command-line tools (`pw-record`, `pw-dump`, and `wpctl`)
 * A systemd user session for launching applications (`systemd-run`)
 
 Then, from the root of the repository, run:
 
 ```cargo build --release```
-
-## Profiling
-
-Run the isolated text and status rendering workload without starting desktop integrations:
-
-```sh
-nix develop --command cargo test --release -p cantus --lib profile_rendering -- --ignored --nocapture
-```
-
-It warms up for 100 frames, then reports CPU recording time, time waiting for completion, encoded resource bytes, and Linux resident memory. Set `CANTUS_PROFILE_FRAMES` to change the measured frame count. Completion time includes synchronization and driver overhead; it is not a GPU timestamp measurement. The workload runs uncapped and does not represent the whole app or its usual frame rate.

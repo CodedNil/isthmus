@@ -46,11 +46,11 @@ impl Gpu {
         let errors = Arc::new(GpuErrors::default());
         let uncaptured = Arc::clone(&errors);
         device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
-            drop(uncaptured.validation.set(RenderError::Gpu(error.to_string())));
+            let _first_error = uncaptured.validation.set(RenderError::Gpu(error.to_string()));
         }));
         let lost = Arc::clone(&errors);
         device.set_device_lost_callback(move |reason, message| {
-            drop(lost.loss.set(RenderError::DeviceLost(format!("{reason:?}: {message}"))));
+            let _first_loss = lost.loss.set(RenderError::DeviceLost(format!("{reason:?}: {message}")));
         });
         let entries = from_fn::<_, { abi::BUFFER_COUNT }, _>(|binding| wgpu::BindGroupLayoutEntry {
             binding: binding as u32,

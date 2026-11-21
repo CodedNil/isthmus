@@ -5,29 +5,18 @@
   description,
 }:
 let
-  pname = "cantus";
-  nativeBuildInputs = with pkgs; [
-    pkg-config
-    makeWrapper
-    mold
-  ];
-  runtimeLibraries = with pkgs; [
-    wayland
-    vulkan-loader
-    libxkbcommon
-  ];
   runtimeTools = with pkgs; [
     pipewire
     wireplumber
   ];
-  runtimeLibraryPath = "${lib.makeLibraryPath runtimeLibraries}:/run/opengl-driver/lib";
+  runtimeLibraryPath = "${lib.makeLibraryPath [ pkgs.vulkan-loader ]}:/run/opengl-driver/lib";
   rustPlatform = pkgs.makeRustPlatform {
     rustc = rust;
     cargo = rust;
   };
 in
 rustPlatform.buildRustPackage {
-  inherit pname;
+  pname = "cantus";
   cargoDeps = pkgs.symlinkJoin {
     name = "cargo-vendor-dir";
     # build-std also resolves dependencies from the pinned Rust sysroot.
@@ -51,12 +40,21 @@ rustPlatform.buildRustPackage {
     ];
   };
   buildAndTestSubdir = "crates/cantus";
-  inherit nativeBuildInputs;
-  buildInputs = runtimeLibraries;
+  nativeBuildInputs = with pkgs; [
+    makeWrapper
+    pkg-config
+  ];
+  buildInputs = with pkgs; [
+    aws-lc
+    libxkbcommon
+    wayland
+  ];
+  nativeCheckInputs = [ pkgs.cacert ];
   RUSTFLAGS = "--remap-path-prefix=${rust}=/rustc";
   postInstall = ''
-    wrapProgram "$out/bin/${pname}" \
+    wrapProgram "$out/bin/$pname" \
       --set LD_LIBRARY_PATH "${runtimeLibraryPath}" \
+      --set-default TZDIR "${pkgs.tzdata}/share/zoneinfo" \
       --prefix PATH : "${lib.makeBinPath runtimeTools}"
   '';
   passthru = { inherit runtimeTools runtimeLibraryPath; };
@@ -66,6 +64,6 @@ rustPlatform.buildRustPackage {
     license = lib.licenses.mit;
     maintainers = with lib.maintainers; [ CodedNil ];
     platforms = lib.platforms.linux;
-    mainProgram = pname;
+    mainProgram = "cantus";
   };
 }

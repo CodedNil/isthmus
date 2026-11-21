@@ -1,14 +1,15 @@
 [package]
+edition.workspace = true
 name = "isthmus_macros"
 version = "0.1.0"
-edition.workspace = true
 
 [lib]
 proc-macro = true
 
 [dependencies]
+# Shader syntax and macro expansion
 isthmus_syntax.workspace = true
-proc-macro-crate = "3"
+proc-macro-crate = "3.5.0"
 proc-macro2.workspace = true
 quote.workspace = true
 syn.workspace = true

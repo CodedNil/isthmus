@@ -6,9 +6,7 @@ use protobuf_codegen::{Customize, CustomizeCallback};
 use std::{env, path::PathBuf};
 
 fn main() {
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        generate_spotify_protocol();
-    }
+    generate_spotify_protocol();
     isthmus_build::build("src/render/mod.rs").expect("failed to build shaders");
 }
 

@@ -2,7 +2,6 @@ use super::WeatherReadout;
 use crate::{
     app::Background,
     config::MAX_WORLD_CLOCKS,
-    platform,
     render::{
         GAP, PANEL_RADIUS, PANEL_START, SUPPORT_BLEND, TEXT_BODY, TEXT_COLOR, TEXT_DISPLAY, TEXT_HEADING, TEXT_SHADOW,
         TEXT_SMALL, TEXT_TITLE, UNIT, UiContext,
@@ -313,6 +312,7 @@ mod monitor {
     };
     use reqwest::Client;
     use serde::Deserialize;
+    use tokio::time::sleep;
     use tracing::warn;
 
     const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
@@ -417,7 +417,7 @@ mod monitor {
             result = platform::current_location() => result
                 .inspect_err(|error| warn!(%error, "Could not determine local weather location; using timezone"))
                 .ok(),
-            () = platform::sleep(Duration::from_secs(10)) => None,
+            () = sleep(Duration::from_secs(10)) => None,
         };
         loop {
             join_all(timezones.iter().zip(&mut locations).filter_map(|(timezone, slot)| {
@@ -455,7 +455,7 @@ mod monitor {
             {
                 break;
             }
-            platform::sleep(if retry { Duration::from_secs(30) } else { Duration::from_mins(15) }).await;
+            sleep(if retry { Duration::from_secs(30) } else { Duration::from_mins(15) }).await;
         }
     }
 
@@ -637,7 +637,7 @@ impl WeatherPanel {
                 Some(WorldClock { label: city(name), timezone, weather: String::from("Weather unavailable") })
             })
             .collect();
-        platform::spawn_task(monitor::run(forecast_timezones, background.clone()));
+        tokio::spawn(monitor::run(forecast_timezones, background.clone()));
         Self { timezones, details: "Weather unavailable".into(), ..Default::default() }
     }
 

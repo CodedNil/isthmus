@@ -1,6 +1,6 @@
 use super::Track;
 use core::mem;
-use web_time::Instant;
+use std::time::Instant;
 
 /// The queue, its playback position, and the on-screen position.
 pub struct Queue {

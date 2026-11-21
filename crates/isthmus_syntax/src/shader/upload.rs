@@ -1,4 +1,5 @@
 //! The typed values a shader draw uploads.
+use strum_macros::EnumIs;
 use syn::{Ident, Type};
 
 /// One `let name = draw.upload::<Type>(value);`.
@@ -9,7 +10,7 @@ pub(super) struct Upload {
 }
 
 /// How an upload reaches the GPU: in the draw's record, as a bound image, or as a range of the frame's words.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, EnumIs)]
 pub(super) enum UploadKind {
     Data,
     Image,

@@ -1,5 +1,3 @@
-//! Metadata snapshots with pre-normalized search terms; icons load separately.
-
 use crate::platform::DesktopApp;
 use std::mem::replace;
 

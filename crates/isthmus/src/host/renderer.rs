@@ -8,8 +8,10 @@ use crate::{Frame, Image, Program, ShaderData, ShaderFrame, SurfaceHandle, glam:
 use core::marker::PhantomData;
 use slotmap::SlotMap;
 use smallvec::SmallVec;
-use std::collections::HashSet;
-use web_time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 /// CPU time to build and upload a frame beyond which it is logged. Presenting is excluded because it waits for vsync.
 const SLOW_FRAME: Duration = Duration::from_millis(8);
@@ -173,7 +175,7 @@ impl<P: Program> Renderer<P> {
 
     /// Creates a renderer without a window for offscreen rendering and GPU tests.
     pub async fn headless(format: wgpu::TextureFormat) -> Result<Self, SetupError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = setup::vulkan_instance();
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await?;
         Ok(Self::with_gpu(setup::device::<P>(instance, adapter, format).await?))
     }

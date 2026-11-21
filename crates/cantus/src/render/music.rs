@@ -554,17 +554,18 @@ impl MusicView {
 
         let track_text = (collapsed_width > height + 26.0 || expansion > 0.0).then(|| {
             let seconds = (layout.start_ms / 1000.0).abs();
-            let time = if seconds >= 60.0 {
-                format!("{}m{}s", seconds as u32 / 60, seconds as u32 % 60)
-            } else {
-                format!("{}s", seconds.round())
+            let format_time = |seconds: u32| {
+                if seconds >= 60 { format!("{}m{}s", seconds / 60, seconds % 60) } else { format!("{seconds}s") }
             };
+            let time = format_time(if seconds >= 60.0 { seconds as u32 } else { seconds.round() as u32 });
+            let sign = if layout.start_ms < 0.0 { '-' } else { '+' };
+            let duration = format_time(track.duration_ms / 1_000);
             let artists = track.artists.iter().take(3).map(String::as_str).collect::<Vec<_>>().join(", ");
             [
                 (track.compact_title().to_owned(), track.name.clone(), TEXT_TITLE),
                 (
                     format!("{time}\u{2004}•\u{2004}{}", track.primary_artist()),
-                    format!("{time}\u{2004}•\u{2004}{artists}"),
+                    format!("{sign}{time}\u{2004}•\u{2004}{artists}\u{2004}•\u{2004}{duration}"),
                     TEXT_BODY,
                 ),
             ]

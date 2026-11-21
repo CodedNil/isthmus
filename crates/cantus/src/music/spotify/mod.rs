@@ -1,5 +1,6 @@
 use self::{
     library::{CachedPlaylist, PlaylistChange},
+    lyrics::SpotifyLyrics,
     protocol::{
         connect::{
             Capabilities, Cluster, ContextPlayerOptions, Device as ConnectDevice, DeviceInfo, DeviceType, MemberType,
@@ -9,14 +10,11 @@ use self::{
     },
     session::Session,
 };
-use super::{
-    ART_SIZE, AudioFeatures, MusicResult, PlaybackCommand, PlaylistId, Track, TrackId, TrackRuntime,
-    spotify_lyrics::SpotifyLyrics,
-};
+use super::{ART_SIZE, AudioFeatures, MusicResult, PlaybackCommand, PlaylistId, Track, TrackId, TrackRuntime};
 use crate::{
     app::{AppUpdater, send_update},
     config::{Config, MAX_PLAYLIST_TARGETS},
-    platform,
+    platform::mpris,
 };
 use arrayvec::{ArrayString, ArrayVec};
 use protobuf::{EnumOrUnknown, MessageField};
@@ -25,7 +23,7 @@ use std::{
     collections::{HashMap, HashSet},
     io, str,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     sync::{
@@ -35,12 +33,12 @@ use tokio::{
     time::{Instant as TokioInstant, sleep, timeout},
 };
 use tracing::{error, info, warn};
-use web_time::Instant;
 
 mod auth;
 mod client;
 mod dealer;
 mod library;
+pub(super) mod lyrics;
 #[allow(
     clippy::all,
     clippy::pedantic,
@@ -67,13 +65,13 @@ type CatalogTrack = metadata::Track;
 type Metadata = HashMap<String, Option<CatalogTrack>>;
 
 impl Spotify {
-    pub(super) fn new(config: &Config, updater: &AppUpdater) -> Self {
+    pub(super) fn new(config: &Config, updater: &AppUpdater, local_playback: watch::Receiver<bool>) -> Self {
         let (commands, mut receiver) = mpsc::unbounded_channel();
         let (connected_session, session) = watch::channel(None);
         let updater = updater.clone();
         let playlist_targets = config.playlists.clone();
         let ratings_enabled = config.ratings_enabled;
-        platform::spawn_task(async move {
+        tokio::spawn(async move {
             let reconnect = async {
                 loop {
                     match auth::connect().await {
@@ -85,6 +83,7 @@ impl Spotify {
                                 updater.clone(),
                                 playlist_targets.clone(),
                                 ratings_enabled,
+                                local_playback.clone(),
                             )
                             .await;
                             connected_session.send_replace(None);
@@ -129,10 +128,13 @@ async fn run_spotify(
     updater: AppUpdater,
     playlist_targets: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
     ratings_enabled: bool,
+    local_playback: watch::Receiver<bool>,
 ) -> MusicResult<()> {
     let mut dealer = dealer::Dealer::start(session.clone()).await?;
 
-    let mut worker = SpotifyWorker { playlist_targets, ratings_enabled, ..SpotifyWorker::new(session, updater) };
+    let (mpris, mut media_keys) = mpris::start(local_playback.clone());
+    let mut worker =
+        SpotifyWorker { playlist_targets, ratings_enabled, mpris: Some(mpris), ..SpotifyWorker::new(session, updater) };
     let mut registered = false;
     let mut playlists_dirty = false;
     let mut playlist_read = None;
@@ -152,6 +154,12 @@ async fn run_spotify(
             }
         }
         tokio::select! {
+            Some(request) = media_keys.recv() => {
+                if !*local_playback.borrow() && worker.accepts_media_command(&request) {
+                    timeout(Duration::from_secs(20), worker.command(request.command)).await
+                        .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, format!("Spotify command: {error}")))?;
+                }
+            }
             Some(command) = commands.recv() => {
                 let edited = matches!(
                     &command,
@@ -277,6 +285,7 @@ struct SpotifyWorker {
     metadata_dirty: bool = false,
     player: Option<PlayerState> = None,
     server_clock: Option<(i64, TokioInstant)> = None,
+    mpris: Option<watch::Sender<Option<mpris::Playback>>> = None,
 }
 
 impl SpotifyWorker {
@@ -396,9 +405,12 @@ impl SpotifyWorker {
         if cluster.server_timestamp_ms > 0 {
             self.server_clock = Some((cluster.server_timestamp_ms, TokioInstant::now()));
         }
-        let Some(player) = cluster.player_state.into_option() else {
-            return;
-        };
+        if self.active_device.as_deref() != Some(cluster.active_device_id.as_str())
+            && let Some(mpris) = &self.mpris
+        {
+            mpris.send_replace(None);
+        }
+        let Some(player) = cluster.player_state.into_option() else { return };
         if player.track.as_ref().is_none_or(|track| track.uri.is_empty()) {
             if cluster.active_device_id.is_empty() && !player.is_playing {
                 self.clear_active_device();
@@ -407,6 +419,13 @@ impl SpotifyWorker {
                     previous.is_paused = true;
                 }
                 freeze_playback(&self.updater);
+                if let Some(mpris) = &self.mpris {
+                    mpris.send_if_modified(|state| {
+                        let Some(state) = state else { return false };
+                        state.pause();
+                        true
+                    });
+                }
             }
             return;
         }
@@ -441,7 +460,62 @@ impl SpotifyWorker {
         if let Some(player) = &mut self.player {
             player.is_playing = false;
         }
+        if let Some(mpris) = &self.mpris {
+            mpris.send_replace(None);
+        }
         freeze_playback(&self.updater);
+    }
+
+    fn accepts_media_command(&self, request: &mpris::MediaCommand) -> bool {
+        self.active_device.as_ref() == Some(&request.device)
+            && self
+                .mpris
+                .as_ref()
+                .is_some_and(|state| state.borrow().as_ref().is_some_and(|playback| playback.device == request.device))
+            && (!matches!(request.command, PlaybackCommand::Seek(_))
+                || self
+                    .player
+                    .as_ref()
+                    .and_then(|player| player.track.as_ref())
+                    .is_some_and(|track| request.matches_track(requested_track_uri(track), &track.uid)))
+    }
+
+    fn publish_mpris(&self, player: &PlayerState, track: Option<&Track>, observation: Option<(f32, f32, Instant)>) {
+        let Some(mpris) = &self.mpris else { return };
+        let (Some(device), Some(track)) = (&self.active_device, track) else {
+            mpris.send_replace(None);
+            return;
+        };
+        if device == self.session.device_id() || !(player.is_playing || player.is_paused || player.is_buffering) {
+            mpris.send_replace(None);
+            return;
+        }
+        // A skip can report the new URI before its display metadata arrives.
+        if track.name.trim().is_empty() && track.id.is_some() && !self.track_metadata.contains_key(&track.uri) {
+            return;
+        }
+        mpris.send_if_modified(|state| {
+            let metadata = mpris::Metadata::from(track);
+            if observation.is_none()
+                && let Some(previous) = state
+                && previous.device == *device
+                && previous.matches_track(&track.uri, &track.queue_uid)
+            {
+                if previous.track == metadata {
+                    return false;
+                }
+                previous.track = metadata;
+            } else {
+                let observation = observation.unwrap_or_else(|| self.observe_position(player));
+                *state = Some(mpris::Playback::new(device.clone(), metadata, player.is_paused, observation));
+            }
+            true
+        });
+    }
+
+    fn observe_position(&self, player: &PlayerState) -> (f32, f32, Instant) {
+        let (position, rate) = playback_position(player, self.server_now());
+        (position, rate, Instant::now())
     }
 
     /// Publish queue metadata; only a new player report may reset the playback clock.
@@ -452,19 +526,20 @@ impl SpotifyWorker {
             let catalog = self.track_metadata.get(requested_track_uri(track)).and_then(Option::as_ref);
             track_from_provided(track, catalog, duration)
         };
+        let is_track = |track: &&ProvidedTrack| !track.uri.ends_with(":delimiter");
+        let current =
+            player.track.as_ref().filter(is_track).map(|track| convert(track, u32::try_from(player.duration).ok()));
+        let playing = player.is_playing && !player.is_paused;
+        let observation = observe_playback.then(|| self.observe_position(player));
+        self.publish_mpris(player, current.as_ref(), observation);
         let tracks = player
             .prev_tracks
             .iter()
+            .filter(is_track)
             .map(|track| convert(track, None))
-            .chain(player.track.iter().map(|track| convert(track, u32::try_from(player.duration).ok())))
-            .chain(player.next_tracks.iter().map(|track| convert(track, None)))
-            .filter(|track| !track.uri.ends_with(":delimiter"))
-            .collect();
-        let playing = player.is_playing && !player.is_paused;
-        let observation = observe_playback.then(|| {
-            let (position, rate) = playback_position(player, self.server_now());
-            (position, rate, Instant::now())
-        });
+            .chain(current)
+            .chain(player.next_tracks.iter().filter(is_track).map(|track| convert(track, None)))
+            .collect::<Vec<_>>();
         send_update(&self.updater, move |app| {
             let music = &mut app.music;
             let position = observation.map_or_else(|| music.queue.timeline.position_now(), |(position, ..)| position);
@@ -654,6 +729,39 @@ mod tests {
             assert_eq!(worker.player.as_ref().unwrap().track.get_or_default().uri, REQUESTED);
             assert_eq!(worker.active_device.as_deref(), device);
         }
+    }
+
+    #[test]
+    fn mpris_replaces_a_track_when_its_title_arrives() {
+        let (updater, _updates) = channel::channel();
+        let (mpris, playback) = watch::channel(None);
+        let mut worker = SpotifyWorker {
+            active_device: Some("phone".into()),
+            mpris: Some(mpris),
+            ..SpotifyWorker::new(Session::new().unwrap(), updater)
+        };
+        let report = |uri: &str, title: Option<&str>| PlayerState {
+            track: MessageField::some(ProvidedTrack {
+                uri: uri.into(),
+                metadata: title.map_or_else(HashMap::new, |title| HashMap::from([("title".into(), title.into())])),
+                ..Default::default()
+            }),
+            is_playing: true,
+            ..Default::default()
+        };
+        worker.player = Some(report(REQUESTED, Some("First track")));
+        worker.publish(true);
+        assert!(playback.borrow().as_ref().unwrap().matches_track(REQUESTED, ""));
+
+        worker.player = Some(report(PLAYBACK, None));
+        worker.publish(true);
+        assert!(playback.borrow().as_ref().unwrap().matches_track(REQUESTED, ""));
+
+        worker
+            .track_metadata
+            .insert(PLAYBACK.into(), Some(CatalogTrack { name: Some("Second track".into()), ..Default::default() }));
+        worker.publish(false);
+        assert!(playback.borrow().as_ref().unwrap().matches_track(PLAYBACK, ""));
     }
 
     #[test]

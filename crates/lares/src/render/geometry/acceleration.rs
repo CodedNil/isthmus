@@ -16,9 +16,7 @@ use isthmus::{
     ShaderData,
     glam::{UVec4, Vec3},
 };
-#[cfg(not(target_arch = "wasm32"))]
-use std::fs;
-use std::io;
+use std::{fs, io};
 
 #[derive(Clone, Copy, ShaderData)]
 pub struct Node {
@@ -77,10 +75,7 @@ impl Scene {
 
     /// Builds the scene for an explicit clock, so previews and tests are deterministic.
     pub fn new_at(rooms: &[Room], unix_seconds: f64, sun_settings: SunSettings) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
         let controls = fs::read(irradiance::bake::baked_dir().join("lighting.bin")).ok();
-        #[cfg(target_arch = "wasm32")]
-        let controls: Option<Vec<u8>> = None;
         let controls = controls.and_then(|bytes| irradiance::Controls::decode(&bytes, source_signature(rooms)).ok());
         Self::build_scene(rooms, unix_seconds, sun_settings, controls)
     }
@@ -258,7 +253,7 @@ impl Scene {
 
 fn source_signature(rooms: &[Room]) -> u64 {
     let mut words = Vec::new();
-    // Quantized so native and wasm agree despite sub-micron trigonometric differences.
+    // Quantized so baked assets tolerate sub-micron trigonometric differences.
     let scalar = |value: f32| (f64::from(value) * 100_000.0).round() as i32 as u32;
     let object = |item: Object, words: &mut Vec<u32>| {
         words.extend([item.kind as u32, item.material as u32]);
@@ -316,7 +311,7 @@ fn geometry(rooms: &[Room]) -> (Vec<Object>, Vec<Node>, Vec<(&'static str, u32)>
     if !leaves.is_empty() {
         build(&mut leaves, &mut nodes);
     }
-    // Object IDs keep authored order so baked responses and light slots match wasm.
+    // Object IDs keep authored order so baked responses and light slots match baked assets.
     let light_entities =
         entities.iter().enumerate().filter_map(|(index, &name)| name.map(|name| (name, index as u32))).collect();
     (objects, nodes, light_entities)

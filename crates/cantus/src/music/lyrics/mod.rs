@@ -3,7 +3,8 @@ use core::ops::Range;
 pub use musixmatch::Session;
 use reqwest::Client;
 use serde_json::Value;
-use strum_macros::{AsRefStr, Display};
+use strum::IntoEnumIterator as _;
+use strum_macros::{AsRefStr, Display, EnumIter, IntoStaticStr};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -66,7 +67,7 @@ pub struct Lyrics {
     pub timing: Timing,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, AsRefStr, Display)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, AsRefStr, Display, EnumIter)]
 #[strum(serialize_all = "lowercase")]
 pub enum Timing {
     #[default]
@@ -143,7 +144,7 @@ pub(super) fn fragment_timing(lines: &[LyricLine]) -> Timing {
     }
 }
 
-#[derive(Clone, Copy, Display, PartialEq, Eq)]
+#[derive(Clone, Copy, EnumIter, IntoStaticStr, PartialEq, Eq)]
 enum Source {
     #[strum(serialize = "LRCLIB")]
     Lrclib,
@@ -164,7 +165,7 @@ pub(super) async fn fetch(
     let title = track.compact_title().split(" (").next().unwrap_or(&track.name);
     let artist = track.primary_artist();
     let mut options = vec![(Source::Lrclib, describe_result(&best))];
-    for source in [Source::Spotify, Source::Musixmatch, Source::Apple] {
+    for source in Source::iter() {
         if best.as_ref().is_ok_and(|lyrics| lyrics.timing >= Timing::Word) {
             break;
         }
@@ -176,7 +177,7 @@ pub(super) async fn fetch(
             }
             Source::Musixmatch => {
                 let mut session = session.lock().await;
-                if cfg!(target_arch = "wasm32") || session.is_backing_off() {
+                if session.is_backing_off() {
                     continue;
                 }
                 session.fetch(track, http).await
@@ -193,6 +194,7 @@ pub(super) async fn fetch(
     for (source, details) in options {
         let selected = selected_source == Some(source) && best.as_ref().is_ok_and(|lyrics| !lyrics.is_empty());
         let marker = if selected { "★" } else { "·" };
+        let source: &str = source.into();
         report.push(format!(" {marker} {source:<10} {details}"));
     }
     info!("{}", report.join("\n"));
@@ -211,8 +213,8 @@ pub(super) async fn fetch(
         if !already_uploaded {
             // Contribution is best-effort; playback must not fail because of publishing.
             let words = lyrics.word_count();
-            let source = selected_source.map_or_else(|| "unknown".to_owned(), |source| source.to_string());
-            match lrclib::publish_lrclib(track, lyrics, http, &source).await {
+            let source = selected_source.map_or("unknown", Into::into);
+            match lrclib::publish_lrclib(track, lyrics, http, source).await {
                 Ok(status) => info!(
                     "LRCLIB upload succeeded: {title:.28} — {artist:.20} · {} · {} lines · {words} words · HTTP {status}",
                     lyrics.timing,

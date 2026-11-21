@@ -1,21 +1,15 @@
 //! Live radar tracks mapped into room coordinates.
-#[cfg(not(target_arch = "wasm32"))]
-pub use crate::presence::server::router;
-#[cfg(target_arch = "wasm32")]
-pub(crate) use client::connect;
 use isthmus::{
     ShaderData,
     glam::{Mat2, Vec2, Vec3, vec2},
 };
-use serde::{Deserialize, Serialize};
-use web_time::Instant;
+pub(crate) use sensor::subscribe;
+use serde::Deserialize;
+use std::time::Instant;
 
-#[cfg(target_arch = "wasm32")]
-mod client;
-#[cfg(not(target_arch = "wasm32"))]
-mod server;
+mod sensor;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Track {
     pub id: u32,
     pub x: f32,
@@ -26,7 +20,7 @@ pub struct Track {
     pub maxz: Option<f32>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 pub struct Snapshot {
     pub connected: bool,
     pub stale: bool,

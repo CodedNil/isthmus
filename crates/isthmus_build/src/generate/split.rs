@@ -24,7 +24,7 @@ fn remove_stale(directory: &Path, written: &BTreeSet<PathBuf>) -> Result<()> {
         if path.is_dir() {
             remove_stale(&path, written)?;
             // Only succeeds once the directory is empty.
-            drop(fs::remove_dir(&path));
+            let _removed = fs::remove_dir(&path);
         } else if path.extension().is_some_and(|extension| extension == "rs") && !written.contains(&path) {
             fs::remove_file(&path)?;
         }
