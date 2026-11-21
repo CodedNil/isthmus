@@ -5,7 +5,7 @@ use crate::{
     app::fetch_json,
     music::{MusicResult, Track},
 };
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, Version};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -32,6 +32,7 @@ impl Session {
     async fn request(&mut self, http: &Client, endpoint: &str, params: &[(&str, &str)]) -> MusicResult<Value> {
         let response = fetch_json::<Value>(
             http.get(format!("{API}{endpoint}"))
+                .version(Version::HTTP_2)
                 .query(&[("app_id", APP_ID), ("format", "json")])
                 .query(&[("usertoken", self.token.as_str())])
                 .query(params)
@@ -73,6 +74,7 @@ impl Session {
                 ("q_album", &track.album),
                 ("q_duration", &duration),
                 ("f_subtitle_length", &duration),
+                ("f_subtitle_length_max_deviation", "5"),
                 ("track_spotify_id", &spotify_uri),
                 ("namespace", "lyrics_richsynched"),
                 ("subtitle_format", "mxm"),

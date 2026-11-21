@@ -38,7 +38,7 @@ To build Cantus from source, ensure the following dependencies are installed:
 
 * Rust (with cargo)
 * wayland-protocols
-* A C and C++ toolchain, such as GCC and G++
+* A C and C++ toolchain (GCC/G++ or Clang/Clang++).
 * pkg-config
 * libxkbcommon
 * wayland

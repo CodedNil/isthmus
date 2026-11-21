@@ -4,6 +4,8 @@ Write GPU graphics in Rust, alongside the application that drives them.
 
 The renderer uses Vulkan. Cantus, Lares, and Paries run on Linux Wayland.
 
+Project code is licensed under the [GNU GPL v3 or later](LICENSE).
+
 - **Inline shaders.** A shader is one method chain where you draw: say which variables it needs, give it a shape, and paint it. The closures capture ordinary local variables, and the ones you list are sent to the GPU.
 - **Composable 2D graphics.** `isthmus_2d` provides shapes, smooth unions, cutouts, outlines and scalable text. Custom distance functions work with the same antialiasing and painting tools.
 - **Shared Rust.** Reuse types and helpers across CPU and GPU code, with checked data interfaces.

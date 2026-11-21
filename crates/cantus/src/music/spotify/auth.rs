@@ -45,11 +45,10 @@ pub(super) async fn connect() -> MusicResult<Session> {
 }
 
 fn oauth_client() -> Result<Client, reqwest::Error> {
-    Client::builder().redirect(Policy::none()).timeout(REQUEST_TIMEOUT).build()
+    Client::builder().http3_prior_knowledge().redirect(Policy::none()).timeout(REQUEST_TIMEOUT).build()
 }
 
 async fn browser_login() -> MusicResult<(Credentials, Token)> {
-    let http = oauth_client()?;
     let random_secret = || -> MusicResult<String> {
         let mut bytes = [0; 32];
         getrandom::fill(&mut bytes)?;
@@ -90,7 +89,7 @@ async fn browser_login() -> MusicResult<(Credentials, Token)> {
             socket.get_mut().write_all(response).await?;
             continue;
         };
-        let result = exchange_code(&http, &code, &verifier).await;
+        let result = exchange_code(&code, &verifier).await;
         let (status, message) = if result.is_ok() {
             ("200 OK", "Cantus connected successfully. You can close this tab.")
         } else {
@@ -115,8 +114,8 @@ struct OAuthToken {
     refresh_token: Option<String>,
 }
 
-async fn exchange_code(http: &Client, code: &str, verifier: &str) -> MusicResult<(Credentials, Token)> {
-    let token = http
+async fn exchange_code(code: &str, verifier: &str) -> MusicResult<(Credentials, Token)> {
+    let token = oauth_client()?
         .post(TOKEN_ENDPOINT)
         .form(&[
             ("grant_type", "authorization_code"),

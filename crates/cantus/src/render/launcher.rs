@@ -13,6 +13,7 @@ use crate::{
 use fend_core::Context;
 use isthmus::prelude::*;
 use isthmus_2d::prelude::*;
+use reqwest::Version;
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -220,10 +221,14 @@ impl LauncherState {
         tokio::spawn(async move {
             #[derive(Deserialize)]
             struct Rates {
-                rates: HashMap<String, f64>,
+                usd: HashMap<String, f64>,
             }
-            if let Ok(rates) = fetch_json::<Rates>(rates_http.get("https://open.er-api.com/v6/latest/USD")).await {
-                let _initialized = EXCHANGE_RATES.set(rates.rates);
+            let request = rates_http
+                .get("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.min.json")
+                .version(Version::HTTP_3);
+            if let Ok(rates) = fetch_json::<Rates>(request).await {
+                let rates = rates.usd.into_iter().map(|(code, rate)| (code.to_ascii_uppercase(), rate)).collect();
+                let _initialized = EXCHANGE_RATES.set(rates);
             }
         });
         calc.set_exchange_rate_handler_v2(ExchangeRates);

@@ -30,9 +30,7 @@ rec {
           "llvm-tools"
         ];
       };
-      cantus = pkgs.callPackage ./crates/cantus/package.nix {
-        inherit rust description;
-      };
+      cantus = pkgs.callPackage ./crates/cantus/package.nix { inherit rust; };
     in
     {
       packages.${system} = {
@@ -43,20 +41,15 @@ rec {
       devShells.${system}.default = pkgs.mkShell {
         name = "isthmus";
         inputsFrom = [ cantus ];
-        packages =
-          cantus.runtimeTools
-          ++ (with pkgs; [
-            rust
-            just
-            nixfmt
-            spirv-tools
-          ]);
-        LD_LIBRARY_PATH = "${
-          pkgs.lib.makeLibraryPath [
-            pkgs.wayland
-            pkgs.libxkbcommon
-          ]
-        }:${cantus.runtimeLibraryPath}";
+        packages = with pkgs; [
+          rust
+          just
+          nixfmt
+          pipewire
+          spirv-tools
+          wireplumber
+        ];
+        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader ];
       };
 
       formatter.${system} = pkgs.nixfmt;

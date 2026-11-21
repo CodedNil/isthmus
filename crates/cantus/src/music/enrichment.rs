@@ -1,4 +1,4 @@
-use super::{ART_SIZE, AudioFeatures, MusicResult, Track, TrackId, lyrics};
+use super::{ART_SIZE, AudioFeatures, MusicResult, Track, TrackId, lyrics, spotify::Spotify};
 use crate::{
     app::{Background, CantusApp},
     render::{lyrics::PreparedLyrics, music::PALETTE_COLORS},
@@ -240,7 +240,7 @@ impl CantusApp {
             self.background.fetch(
                 url.clone(),
                 async move {
-                    let bytes = http.get(&url).send().await?.error_for_status()?.bytes().await?;
+                    let bytes = Spotify::artwork(&http, &url).await?;
                     let art = spawn_blocking(move || decode_art(&bytes)).await??;
                     Ok(art)
                 },

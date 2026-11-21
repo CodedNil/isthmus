@@ -6,7 +6,7 @@ use serde_json::Value;
 use strum::IntoEnumIterator as _;
 use strum_macros::{AsRefStr, Display, EnumIter, IntoStaticStr};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 mod apple;
 mod lrclib;
@@ -94,40 +94,19 @@ impl Lyrics {
     pub fn is_empty(&self) -> bool {
         self.lines.iter().all(|line| line.text.trim().is_empty())
     }
-
-    pub fn word_count(&self) -> usize {
-        self.lines.iter().map(|line| line.words.as_ref().map_or(0, Vec::len)).sum()
-    }
 }
 
 // Timing quality wins; ties retain provider priority. Keep errors only when no lyrics exist.
 pub(super) fn prefer_lyrics(previous: MusicResult<Lyrics>, next: MusicResult<Lyrics>) -> MusicResult<Lyrics> {
-    match (previous, next) {
-        (Ok(previous), Ok(next)) if improves(&next, Some(&previous)) => Ok(next),
-        (Ok(lyrics), _) | (_, Ok(lyrics)) if !lyrics.is_empty() => Ok(lyrics),
-        (_, Err(error)) => Err(error),
-        (previous, _) => previous,
-    }
+    if prefer_next(&previous, &next) { next } else { previous }
 }
 
-fn improves(candidate: &Lyrics, previous: Option<&Lyrics>) -> bool {
-    !candidate.is_empty() && previous.is_none_or(|previous| previous.is_empty() || candidate.timing > previous.timing)
-}
-
-fn describe_result(result: &MusicResult<Lyrics>) -> String {
-    match result {
-        Ok(lyrics) if !lyrics.is_empty() => {
-            let lanes = lyrics.lines.iter().map(|line| line.lane).max().unwrap_or(0) + 1;
-            format!(
-                "{} sync  ·  {} lines  ·  {} words  ·  {lanes} lanes",
-                lyrics.timing,
-                lyrics.lines.len(),
-                lyrics.word_count()
-            )
-        }
-        Ok(_) => "no lyrics".to_owned(),
-        Err(error) => format!("unavailable · {error}"),
-    }
+fn prefer_next(previous: &MusicResult<Lyrics>, next: &MusicResult<Lyrics>) -> bool {
+    let current = previous.as_ref().ok().filter(|lyrics| !lyrics.is_empty());
+    next.as_ref().map_or_else(
+        |_| current.is_none(),
+        |candidate| !candidate.is_empty() && current.is_none_or(|lyrics| candidate.timing > lyrics.timing),
+    )
 }
 
 pub(super) fn fragment_timing(lines: &[LyricLine]) -> Timing {
@@ -160,17 +139,12 @@ pub(super) async fn fetch(
     spotify: &Spotify,
     publish_enabled: bool,
 ) -> MusicResult<Lyrics> {
-    let mut best = lrclib::fetch_lrclib(track, http).await;
-    let mut selected_source = best.as_ref().is_ok_and(|lyrics| !lyrics.is_empty()).then_some(Source::Lrclib);
     let title = track.compact_title().split(" (").next().unwrap_or(&track.name);
     let artist = track.primary_artist();
-    let mut options = vec![(Source::Lrclib, describe_result(&best))];
+    let mut best = (None, Ok(Lyrics::default()));
     for source in Source::iter() {
-        if best.as_ref().is_ok_and(|lyrics| lyrics.timing >= Timing::Word) {
-            break;
-        }
         let result = match source {
-            Source::Lrclib => continue,
+            Source::Lrclib => lrclib::fetch_lrclib(track, http).await,
             Source::Spotify => {
                 let Some(id) = track.id else { continue };
                 spotify.get_lyrics(id).await.and_then(|response| spotify::parse_spotify(response, track.duration_ms))
@@ -184,61 +158,42 @@ pub(super) async fn fetch(
             }
             Source::Apple => apple::fetch_apple_lyrics(track, http).await,
         };
-        options.push((source, describe_result(&result)));
-        if result.as_ref().is_ok_and(|candidate| improves(candidate, best.as_ref().ok())) {
-            selected_source = Some(source);
+        if let Err(error) = &result {
+            debug!(source = Into::<&str>::into(source), %error, "Lyrics provider unavailable");
         }
-        best = prefer_lyrics(best, result);
+        if prefer_next(&best.1, &result) {
+            best = (result.is_ok().then_some(source), result);
+            if best.1.as_ref().is_ok_and(|lyrics| lyrics.timing >= Timing::Word) {
+                break;
+            }
+        }
     }
-    let mut report = vec![format!("♫  {title:.32}  ·  {artist:.24}")];
-    for (source, details) in options {
-        let selected = selected_source == Some(source) && best.as_ref().is_ok_and(|lyrics| !lyrics.is_empty());
-        let marker = if selected { "★" } else { "·" };
-        let source: &str = source.into();
-        report.push(format!(" {marker} {source:<10} {details}"));
+    let (selected_source, lyrics) = best;
+    match (&lyrics, selected_source) {
+        (Ok(lyrics), Some(source)) => {
+            let source: &str = source.into();
+            info!("♫  {title:.32}  ·  {artist:.24}  ·  {source}  ·  {} sync", lyrics.timing);
+        }
+        (Ok(_), None) => info!("♫  {title:.32}  ·  {artist:.24}  ·  no lyrics"),
+        (Err(error), _) => info!("♫  {title:.32}  ·  {artist:.24}  ·  lyrics unavailable  ·  {error}"),
     }
-    info!("{}", report.join("\n"));
-    if selected_source.is_some_and(|source| source != Source::Lrclib)
-        && let Ok(lyrics) = &best
-        && !lyrics.is_empty()
+    if let (Some(source), Ok(lyrics)) = (selected_source, &lyrics)
+        && source != Source::Lrclib
         && publish_enabled
+        && !contributed_by_us(track, lyrics)
     {
-        let already_uploaded = match lrclib::was_uploaded(track, lyrics) {
-            Ok(already_uploaded) => already_uploaded,
-            Err(error) => {
-                warn!("Could not read LRCLIB upload history; continuing with publish: {error}");
-                false
-            }
-        };
-        if !already_uploaded {
-            // Contribution is best-effort; playback must not fail because of publishing.
-            let words = lyrics.word_count();
-            let source = selected_source.map_or("unknown", Into::into);
-            match lrclib::publish_lrclib(track, lyrics, http, source).await {
-                Ok(status) => info!(
-                    "LRCLIB upload succeeded: {title:.28} — {artist:.20} · {} · {} lines · {words} words · HTTP {status}",
-                    lyrics.timing,
-                    lyrics.lines.len()
-                ),
-                Err(error) => warn!(
-                    "LRCLIB upload failed: {title:.28} — {artist:.20} · {} · {} lines · {words} words · {error}",
-                    lyrics.timing,
-                    lyrics.lines.len()
-                ),
-            }
+        match lrclib::publish_lrclib(track, lyrics, http, source.into()).await {
+            Ok(status) => info!("LRCLIB upload succeeded: {title:.28} — {artist:.20} · HTTP {status}"),
+            Err(error) => warn!("LRCLIB upload failed: {title:.28} — {artist:.20} · {error}"),
         }
     }
-    best
+    lyrics
 }
 
 pub(super) fn contributed_by_us(track: &Track, lyrics: &Lyrics) -> bool {
-    match lrclib::was_uploaded(track, lyrics) {
-        Ok(contributed) => contributed,
-        Err(error) => {
-            warn!("Could not read LRCLIB upload history: {error}");
-            false
-        }
-    }
+    lrclib::was_uploaded(track, lyrics)
+        .inspect_err(|error| warn!("Could not read LRCLIB upload history: {error}"))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

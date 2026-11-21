@@ -5,6 +5,7 @@ use crate::{
 };
 use isthmus::glam::FloatExt as _;
 use microfft::real::rfft_1024;
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -50,6 +51,7 @@ pub fn set_volume(volume: f32) {
 }
 
 fn monitor_status(updates: &AppUpdater) {
+    let _backlight_watcher = watch_backlight(updates);
     let temperatures: Vec<_> = directory_paths("/sys/class/hwmon")
         .filter(|path| {
             fs::read_to_string(path.join("name"))
@@ -129,6 +131,52 @@ fn monitor_status(updates: &AppUpdater) {
         }
         thread::sleep(STATUS_SAMPLE_INTERVAL);
     }
+}
+
+fn watch_backlight(updates: &AppUpdater) -> Option<RecommendedWatcher> {
+    let read_level = |path: &Path| fs::read_to_string(path).ok()?.trim().parse::<u32>().ok();
+    let mut backlights: HashMap<_, _> = directory_paths("/sys/class/backlight")
+        .filter_map(|device| {
+            let max = read_level(&device.join("max_brightness")).filter(|max| *max > 0)?;
+            let path = device.join("actual_brightness");
+            let level = read_level(&path)?;
+            Some((path, (max, level)))
+        })
+        .collect();
+    if backlights.is_empty() {
+        return None;
+    }
+
+    let paths: Vec<_> = backlights.keys().cloned().collect();
+    let updates = updates.clone();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
+        let Ok(event) = event else { return };
+        if !event.kind.is_modify() {
+            return;
+        }
+        for path in event.paths {
+            if let Some((max, previous)) = backlights.get_mut(&path)
+                && let Some(level) = read_level(&path)
+                && level != *previous
+            {
+                *previous = level;
+                let brightness = (level.min(*max) as f32) / (*max as f32);
+                send_update(&updates, move |app| {
+                    if let Some(status) = &mut app.bar.status {
+                        status.show_brightness(brightness);
+                    }
+                });
+            }
+        }
+    })
+    .inspect_err(|error| warn!(%error, "Could not watch display brightness"))
+    .ok()?;
+    for path in paths {
+        if let Err(error) = watcher.watch(&path, RecursiveMode::NonRecursive) {
+            warn!(%error, path = %path.display(), "Could not watch backlight");
+        }
+    }
+    Some(watcher)
 }
 
 fn nvidia_samples() -> Vec<(f32, ProcessorSample)> {
@@ -217,7 +265,7 @@ fn monitor_pipewire(audio: Option<&AudioMonitor>, playing: &watch::Sender<bool>)
         let result =
             with_output(Command::new("pw-dump").args(["--monitor", "--no-colors", "--indent", "0"]), |output| {
                 let mut default_sink = None;
-                let mut sinks = HashMap::new();
+                let mut sinks: HashMap<String, f32> = HashMap::new();
                 let mut running_streams = HashSet::new();
                 for batch in serde_json::Deserializer::from_reader(output).into_iter::<Vec<Value>>() {
                     for object in batch.map_err(io::Error::other)? {
@@ -242,17 +290,20 @@ fn monitor_pipewire(audio: Option<&AudioMonitor>, playing: &watch::Sender<bool>)
                                 continue;
                             }
                             let Some(name) = info["props"]["node.name"].as_str() else { continue };
-                            let Some(props) = info["params"]["Props"]
-                                .as_array()
-                                .and_then(|items| items.iter().find(|props| props["channelVolumes"].is_array()))
-                            else {
-                                continue;
-                            };
-                            let volumes = props["channelVolumes"].as_array().unwrap();
-                            let level = (volumes.iter().filter_map(Value::as_f64).sum::<f64>()
-                                / volumes.len().max(1) as f64)
-                                .cbrt() as f32;
-                            sinks.insert(name.to_owned(), if props["mute"] == true { -level } else { level });
+                            let Some(props) = info["params"]["Props"].as_array() else { continue };
+                            let level = sinks.entry(name.to_owned()).or_insert(0.0);
+                            for props in props {
+                                let muted = props["mute"].as_bool().unwrap_or_else(|| level.is_sign_negative());
+                                let magnitude = props["channelVolumes"].as_array().map_or_else(
+                                    || level.abs(),
+                                    |volumes| {
+                                        (volumes.iter().filter_map(Value::as_f64).sum::<f64>()
+                                            / volumes.len().max(1) as f64)
+                                            .cbrt() as f32
+                                    },
+                                );
+                                *level = if muted { -magnitude } else { magnitude };
+                            }
                         }
                         let local_playback = !running_streams.is_empty();
                         playing.send_if_modified(|previous| {

@@ -1,10 +1,10 @@
 use self::{
-    library::{CachedPlaylist, PlaylistChange},
+    library::CachedPlaylist,
     lyrics::SpotifyLyrics,
-    protocol::{
+    proto::{
         connect::{
-            Capabilities, Cluster, ContextPlayerOptions, Device as ConnectDevice, DeviceInfo, DeviceType, MemberType,
-            PlayerState, ProvidedTrack, PutStateReason, PutStateRequest, Suppressions,
+            Capabilities, Cluster, Device as ConnectDevice, DeviceInfo, DeviceType, MemberType, PlayerState,
+            ProvidedTrack, PutStateReason, PutStateRequest,
         },
         metadata,
     },
@@ -17,11 +17,12 @@ use crate::{
     platform::mpris,
 };
 use arrayvec::{ArrayString, ArrayVec};
-use protobuf::{EnumOrUnknown, MessageField};
+use bytes::Bytes;
+use reqwest::{Client, Version};
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
-    io, str,
+    io, mem, str,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -39,16 +40,7 @@ mod client;
 mod dealer;
 mod library;
 pub(super) mod lyrics;
-#[allow(
-    clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::restriction,
-    reason = "Generated protobuf bindings use the generator’s coding conventions"
-)]
-mod protocol {
-    include!(concat!(env!("OUT_DIR"), "/spotify/mod.rs"));
-}
+mod proto;
 mod session;
 
 const METADATA_CACHE_LIMIT: usize = 512;
@@ -120,6 +112,16 @@ impl Spotify {
         let Some(session) = self.session.borrow().clone() else { return Ok(None) };
         timeout(REQUEST_TIMEOUT, session.lyrics(id)).await?
     }
+
+    pub(super) async fn artwork(http: &Client, url: &str) -> MusicResult<Bytes> {
+        const CDN: &str = "https://image-cdn-fa.spotifycdn.com/image/";
+        let id = [CDN, "https://i.scdn.co/image/", "https://image-cdn-ak.spotifycdn.com/image/"]
+            .into_iter()
+            .find_map(|prefix| url.strip_prefix(prefix))
+            .filter(|id| id.len() == 40 && id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let request = id.map_or_else(|| http.get(url), |id| http.get(format!("{CDN}{id}")));
+        Ok(request.version(Version::HTTP_3).send().await?.error_for_status()?.bytes().await?)
+    }
 }
 
 async fn run_spotify(
@@ -137,13 +139,22 @@ async fn run_spotify(
         SpotifyWorker { playlist_targets, ratings_enabled, mpris: Some(mpris), ..SpotifyWorker::new(session, updater) };
     let mut registered = false;
     let mut playlists_dirty = false;
+    let mut pending_playlists = HashMap::<PlaylistId, Vec<u8>>::new();
     let mut playlist_read = None;
     let mut metadata = None;
 
     loop {
-        if playlists_dirty && playlist_read.is_none() {
-            playlists_dirty = false;
-            playlist_read = Some((None, Box::pin(worker.playlist_refresh(None))));
+        if playlist_read.is_none() {
+            pending_playlists.retain(|&id, revision| worker.needs_playlist_refresh(id, revision));
+            if playlists_dirty || !pending_playlists.is_empty() {
+                let requested = if mem::take(&mut playlists_dirty) {
+                    Vec::new()
+                } else {
+                    pending_playlists.drain().collect::<Vec<_>>()
+                };
+                let read = worker.playlist_refresh(requested.iter().map(|&(id, _)| id).collect());
+                playlist_read = Some((requested, Box::pin(read)));
+            }
         }
         if metadata.is_none() && worker.metadata_dirty {
             worker.metadata_dirty = false;
@@ -165,14 +176,14 @@ async fn run_spotify(
                     &command,
                     PlaybackCommand::UpdateLibrary { playlists, .. } if !playlists.is_empty()
                 );
-                let cancelled = if edited { playlist_read.take() } else { None };
-                playlists_dirty |= cancelled.is_some();
-                let cancelled_target = cancelled.and_then(|(target, _)| target);
+                if edited && let Some((requested, _)) = playlist_read.take() {
+                    playlists_dirty |= requested.is_empty();
+                    for (id, revision) in requested {
+                        pending_playlists.entry(id).or_insert(revision);
+                    }
+                }
                 playlists_dirty |= timeout(Duration::from_secs(20), worker.command(command)).await
                     .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, format!("Spotify command: {error}")))?;
-                if let Some(id) = cancelled_target {
-                    worker.invalidate_playlist(id);
-                }
             }
             result = async { metadata.as_mut().expect("pending metadata").await }, if metadata.is_some() => {
                 metadata = None;
@@ -190,13 +201,13 @@ async fn run_spotify(
             event = dealer.next() => match event? {
                 dealer::Event::Connected(connection_id) => {
                     worker.session.set_connection_id(&connection_id);
-                    let reason = if registered { PutStateReason::NEW_CONNECTION } else { PutStateReason::NEW_DEVICE };
+                    let reason = if registered { PutStateReason::NewConnection } else { PutStateReason::NewDevice };
                     let cluster = timeout(REQUEST_TIMEOUT, SpotifyWorker::register(&worker.session, reason))
                         .await.map_err(|error| {
                             io::Error::new(io::ErrorKind::TimedOut, format!("Spotify observer registration: {error}"))
                         })??;
                     info!(reconnected = registered, "Spotify playback subscription registered");
-                    let reported_track = cluster.player_state.get_or_default().track.as_ref();
+                    let reported_track = cluster.player_state.as_ref().and_then(|player| player.track.as_ref());
                     if !registered && reported_track.is_none_or(|track| track.uri.is_empty()) {
                         info!("Spotify reported no current track. Start playback in Spotify to populate the queue.");
                     }
@@ -204,39 +215,25 @@ async fn run_spotify(
                     worker.update_cluster(cluster);
                     playlists_dirty = true;
                 }
-                dealer::Event::Cluster(cluster) => {
-                    worker.update_cluster(*cluster);
-                }
+                dealer::Event::Cluster(cluster) => worker.update_cluster(*cluster),
                 dealer::Event::Disconnected => {
                     worker.session.set_connection_id("");
                     worker.metadata_dirty = false;
                     worker.clear_active_device();
                 }
-                dealer::Event::PlaylistChanged(change) => {
-                    match change.as_ref().map_or(PlaylistChange::Root, |change| {
-                        worker.playlist_change(change, playlist_read.is_none())
-                    }) {
-                        PlaylistChange::Ignore => {}
-                        PlaylistChange::Root => playlists_dirty = true,
-                        PlaylistChange::Selected(id, revision) => {
-                            playlist_read = Some((Some(id), Box::pin(worker.playlist_refresh(Some((id, revision))))));
-                        }
-                    }
+                dealer::Event::RootlistChanged(revision) => {
+                    playlists_dirty |= worker.needs_root_refresh(&revision);
+                }
+                dealer::Event::PlaylistChanged { id, revision, membership_only } => {
+                    // A rename can bring a previously untracked playlist into the configured targets.
+                    playlists_dirty |= !membership_only && !worker.cached_playlists.contains_key(&id);
+                    pending_playlists.insert(id, revision);
                 }
             },
             result = async { playlist_read.as_mut().expect("pending playlist read").1.as_mut().await },
                 if playlist_read.is_some() => {
-                let target = playlist_read.take().and_then(|(target, _)| target);
-                let failed = result.is_err();
-                match result {
-                    Ok(read) if target.is_none() || !playlists_dirty => worker.apply_playlist_read(read),
-                    Ok(_) => {}
-                    Err(error) => warn!(%error, "Spotify library refresh failed"),
-                }
-                if let Some(id) = target && (playlists_dirty || failed) {
-                    worker.invalidate_playlist(id);
-                    playlists_dirty = true;
-                }
+                let (requested, _) = playlist_read.take().expect("pending playlist read");
+                playlists_dirty |= worker.apply_playlist_read(&requested, result);
             }
         }
     }
@@ -284,6 +281,8 @@ struct SpotifyWorker {
     track_metadata: Metadata,
     metadata_dirty: bool = false,
     player: Option<PlayerState> = None,
+    queue_context: String = String::new(),
+    skip_forward: Option<bool> = None,
     server_clock: Option<(i64, TokioInstant)> = None,
     mpris: Option<watch::Sender<Option<mpris::Playback>>> = None,
 }
@@ -360,36 +359,32 @@ impl SpotifyWorker {
 
     async fn register(session: &Session, reason: PutStateReason) -> MusicResult<Cluster> {
         let request = PutStateRequest {
-            device: MessageField::some(ConnectDevice {
-                device_info: MessageField::some(DeviceInfo {
+            device: Some(ConnectDevice {
+                device_info: Some(DeviceInfo {
                     name: "Cantus".into(),
-                    capabilities: MessageField::some(Capabilities {
+                    capabilities: Some(Capabilities {
                         is_observable: true,
                         needs_full_player_state: true,
                         hidden: true,
                         supports_gzip_pushes: true,
                         supports_playlist_v2: true,
                         supported_types: vec!["audio/track".into(), "audio/episode".into()],
-                        ..Default::default()
                     }),
-                    device_type: EnumOrUnknown::new(DeviceType::OBSERVER),
+                    device_type: DeviceType::Observer as i32,
                     device_id: session.device_id().into(),
                     client_id: auth::CLIENT_ID.into(),
-                    ..Default::default()
                 }),
-                player_state: MessageField::some(PlayerState {
+                player_state: Some(PlayerState {
                     session_id: session.session_id().to_owned(),
                     playback_speed: 1.0,
-                    options: MessageField::some(ContextPlayerOptions::default()),
-                    suppressions: MessageField::some(Suppressions::default()),
+                    options: Some(()),
+                    suppressions: Some(()),
                     ..Default::default()
                 }),
-                ..Default::default()
             }),
-            member_type: EnumOrUnknown::new(MemberType::CONNECT_STATE),
-            put_state_reason: EnumOrUnknown::new(reason),
+            member_type: MemberType::ConnectState as i32,
+            put_state_reason: reason as i32,
             client_side_timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
-            ..Default::default()
         };
         session.put_connect_state(&request).await
     }
@@ -405,16 +400,20 @@ impl SpotifyWorker {
         if cluster.server_timestamp_ms > 0 {
             self.server_clock = Some((cluster.server_timestamp_ms, TokioInstant::now()));
         }
-        if self.active_device.as_deref() != Some(cluster.active_device_id.as_str())
-            && let Some(mpris) = &self.mpris
-        {
+        let same_device = self.active_device.as_deref() == Some(cluster.active_device_id.as_str());
+        if !same_device && let Some(mpris) = &self.mpris {
             mpris.send_replace(None);
         }
-        let Some(player) = cluster.player_state.into_option() else { return };
-        if player.track.as_ref().is_none_or(|track| track.uri.is_empty()) {
+        let Some(player) = cluster.player_state else { return };
+        let context_changed = !player.context_uri.is_empty() && player.context_uri != self.queue_context;
+        if context_changed {
+            info!(context = %player.context_uri, "Spotify queue context changed");
+            self.queue_context.clone_from(&player.context_uri);
+        }
+        let Some(track) = player.track.as_ref().filter(|track| !track.uri.is_empty()) else {
             if cluster.active_device_id.is_empty() && !player.is_playing {
                 self.clear_active_device();
-            } else if self.active_device.as_deref() == Some(cluster.active_device_id.as_str()) && player.is_paused {
+            } else if same_device && player.is_paused {
                 if let Some(previous) = &mut self.player {
                     previous.is_paused = true;
                 }
@@ -428,6 +427,13 @@ impl SpotifyWorker {
                 }
             }
             return;
+        };
+        let previous = self.player.as_ref().filter(|_| !context_changed && same_device);
+        if !previous.and_then(|old| old.track.as_ref()).is_some_and(|old| old.uri == track.uri && old.uid == track.uid)
+        {
+            self.skip_forward = previous
+                .and_then(|old| queued_occurrence(old, requested_track_uri(track), &track.uid))
+                .map(|(_, forward)| forward);
         }
         self.active_device = (!cluster.active_device_id.is_empty()).then_some(cluster.active_device_id);
         // Keep recent metadata across temporary queue gaps.
@@ -507,7 +513,13 @@ impl SpotifyWorker {
                 previous.track = metadata;
             } else {
                 let observation = observation.unwrap_or_else(|| self.observe_position(player));
-                *state = Some(mpris::Playback::new(device.clone(), metadata, player.is_paused, observation));
+                *state = Some(mpris::Playback::new(
+                    device.clone(),
+                    metadata,
+                    player.is_paused,
+                    observation,
+                    self.skip_forward,
+                ));
             }
             true
         });
@@ -619,7 +631,7 @@ fn track_from_provided(
     Track {
         id: track_id_from_uri(uri),
         isrc: catalog
-            .and_then(|track| track.external_id.iter().find(|id| id.type_().eq_ignore_ascii_case("isrc")))
+            .and_then(|track| track.external_id.iter().find(|id| id.r#type().eq_ignore_ascii_case("isrc")))
             .map(|id| id.id().to_owned()),
         uri: uri.to_owned(),
         queue_uid: track.uid.clone(),
@@ -628,14 +640,14 @@ fn track_from_provided(
             .filter(|track| !track.name().is_empty())
             .map_or_else(|| text("title", ""), |track| track.name().to_owned()),
         artists,
-        album: text("album_title", catalog.map_or("", |track| track.album.get_or_default().name())),
+        album: text("album_title", catalog.and_then(|track| track.album.as_ref()).map_or("", metadata::Album::name)),
         image: ["image_url", "image_large_url", "image_xlarge_url"]
             .into_iter()
             .find_map(|key| track.metadata.get(key).filter(|url| !url.is_empty()))
             .map(|url| image_url(url))
             .or_else(|| {
                 let album = catalog?.album.as_ref()?;
-                let covers = &album.cover_group.get_or_default().image;
+                let covers = album.cover_group.as_ref().map_or(&[][..], |group| group.image.as_slice());
                 let images = if covers.is_empty() { &album.cover } else { covers };
                 let image = images
                     .iter()
@@ -676,10 +688,9 @@ mod tests {
             uri: PLAYBACK.into(),
             uid: uid.into(),
             metadata: HashMap::from([("requested_uri".into(), REQUESTED.into())]),
-            ..Default::default()
         };
         let player = PlayerState {
-            track: MessageField::some(track("current")),
+            track: Some(track("current")),
             prev_tracks: vec![track("previous")],
             next_tracks: vec![track("next")],
             ..Default::default()
@@ -714,7 +725,7 @@ mod tests {
         let mut worker = SpotifyWorker {
             active_device: Some("playing-device".into()),
             player: Some(PlayerState {
-                track: MessageField::some(ProvidedTrack { uri: REQUESTED.into(), ..Default::default() }),
+                track: Some(ProvidedTrack { uri: REQUESTED.into(), ..Default::default() }),
                 is_playing: true,
                 ..Default::default()
             }),
@@ -723,10 +734,10 @@ mod tests {
         for device in [Some("playing-device"), None] {
             worker.update_cluster(Cluster {
                 active_device_id: device.unwrap_or_default().into(),
-                player_state: MessageField::some(PlayerState { is_buffering: device.is_some(), ..Default::default() }),
+                player_state: Some(PlayerState { is_buffering: device.is_some(), ..Default::default() }),
                 ..Default::default()
             });
-            assert_eq!(worker.player.as_ref().unwrap().track.get_or_default().uri, REQUESTED);
+            assert_eq!(worker.player.as_ref().unwrap().track.as_ref().unwrap().uri, REQUESTED);
             assert_eq!(worker.active_device.as_deref(), device);
         }
     }
@@ -741,7 +752,7 @@ mod tests {
             ..SpotifyWorker::new(Session::new().unwrap(), updater)
         };
         let report = |uri: &str, title: Option<&str>| PlayerState {
-            track: MessageField::some(ProvidedTrack {
+            track: Some(ProvidedTrack {
                 uri: uri.into(),
                 metadata: title.map_or_else(HashMap::new, |title| HashMap::from([("title".into(), title.into())])),
                 ..Default::default()
@@ -770,7 +781,6 @@ mod tests {
             uri: REQUESTED.into(),
             uid: "921086112294dced".into(),
             metadata: HashMap::from([("requested_uri".into(), REQUESTED.into())]),
-            ..Default::default()
         };
         let mut queued = track_from_provided(&provided, None, Some(160_342));
         queued.image = Some("https://i.scdn.co/image/already-loaded".into());

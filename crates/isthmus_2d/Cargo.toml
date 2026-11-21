@@ -1,5 +1,6 @@
 [package]
 edition.workspace = true
+license.workspace = true
 name = "isthmus_2d"
 version = "0.1.0"
 

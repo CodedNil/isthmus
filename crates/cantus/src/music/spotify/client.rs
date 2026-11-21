@@ -1,7 +1,7 @@
 use super::{
     AudioFeatures, CachedPlaylist, CatalogTrack, Metadata, MusicResult, PlaylistId, REQUEST_TIMEOUT, SpotifyLyrics,
     TrackId,
-    protocol::{
+    proto::{
         collection::{CollectionItem, WriteRequest},
         connect::{Cluster, PutStateRequest},
         extended_metadata::{
@@ -12,19 +12,17 @@ use super::{
             ItemRequestedFields, ListEntity, ListEntityRequestedFields, ListIdentifier, ListResponseRequestedFields,
             MetaItemsRequestedFields, RequestOptions, RequestedFields,
         },
-        playlist4_external::{ListChanges, PlaylistWriteResult},
+        playlist_edit::ListChanges,
     },
     session::{Endpoint, Session},
+    track_id_from_uri,
 };
 use bytes::Bytes;
-use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
-use protobuf::{EnumOrUnknown, Message, MessageField};
+use flate2::{Compression, write::GzEncoder};
+use prost::Message;
 use reqwest::{
-    Client, Error as HttpError, IntoUrl, Method, StatusCode,
-    header::{
-        ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue,
-        RETRY_AFTER,
-    },
+    Client, Error as HttpError, IntoUrl, Method, StatusCode, Version,
+    header::{ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER},
     redirect::Policy,
 };
 use serde::{Deserialize, de::DeserializeOwned};
@@ -33,7 +31,7 @@ use std::{
     collections::HashMap,
     error::Error as StdError,
     fmt::{Display, Formatter, Result as FmtResult},
-    io::{self, Read},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::sleep;
@@ -41,6 +39,11 @@ use tracing::warn;
 
 const PROTOBUF: HeaderValue = HeaderValue::from_static("application/x-protobuf");
 const CONNECTION_ID: HeaderName = HeaderName::from_static("x-spotify-connection-id");
+const GET_LISTS: &str = "/playlist/spotify.list.v1.ListReadService/GetLists";
+const TRACK_METADATA: &str = "/extended-metadata/v0/extended-metadata";
+
+type ListResult = MusicResult<(ListEntity, Vec<u8>)>;
+pub(super) type PlaylistResult = MusicResult<(CachedPlaylist, Option<Attributes>)>;
 
 impl Session {
     async fn base_url(&self) -> String {
@@ -63,7 +66,7 @@ impl Session {
     ) -> MusicResult<Bytes> {
         headers.insert(CONTENT_TYPE, PROTOBUF);
 
-        self.request(method, endpoint, headers, message.write_to_bytes()?.into()).await
+        self.request(method, endpoint, headers, message.encode_to_vec().into()).await
     }
 
     async fn get_json<T: DeserializeOwned>(&self, endpoint: &str, mut headers: HeaderMap) -> MusicResult<T> {
@@ -79,8 +82,7 @@ impl Session {
         mut headers: HeaderMap,
         body: Bytes,
     ) -> MusicResult<Bytes> {
-        let max_attempts = if matches!(*method, Method::GET | Method::PUT) { 3 } else { 1 };
-        let mut remaining = max_attempts;
+        let mut remaining = if matches!(*method, Method::GET | Method::PUT) { 3 } else { 1 };
         loop {
             let (base, token) = tokio::join!(self.base_url(), self.auth_token());
             let token = token?;
@@ -91,9 +93,9 @@ impl Session {
             }
 
             {
-                let mut endpoint = self.api_endpoint().lock().await;
-                if endpoint.as_ref() == Some(&base) {
-                    *endpoint = None;
+                let mut cached_endpoint = self.api_endpoint().lock().await;
+                if cached_endpoint.as_ref() == Some(&base) {
+                    *cached_endpoint = None;
                 }
             }
             remaining -= 1;
@@ -106,18 +108,12 @@ impl Session {
     pub(super) async fn put_connect_state(&self, state: &PutStateRequest) -> MusicResult<Cluster> {
         let endpoint = format!("/connect-state/v1/devices/{}", self.device_id());
         let bytes = self.request_with_protobuf(&Method::PUT, &endpoint, self.connected_headers()?, state).await?;
-        Ok(Cluster::parse_from_bytes(&bytes)?)
+        Ok(Cluster::decode(bytes)?)
     }
 
-    pub(super) async fn change_playlist(
-        &self,
-        id: PlaylistId,
-        changes: &ListChanges,
-    ) -> MusicResult<Option<PlaylistWriteResult>> {
+    pub(super) async fn change_playlist(&self, id: PlaylistId, changes: &ListChanges) -> MusicResult<()> {
         let path = format!("/playlist/v2/playlist/{id}/changes");
-        let bytes = self.request_with_protobuf(&Method::POST, &path, self.connected_headers()?, changes).await?;
-        // A successful write with an unfamiliar response still needs a snapshot.
-        Ok(PlaylistWriteResult::parse_from_bytes(&bytes).ok())
+        self.request_with_protobuf(&Method::POST, &path, self.connected_headers()?, changes).await.map(drop)
     }
 
     pub(super) async fn write_liked_song(&self, uri: String, should_like: bool) -> MusicResult<()> {
@@ -130,19 +126,12 @@ impl Session {
                 0
             },
             is_removed: !should_like,
-            ..Default::default()
         };
-        let request = WriteRequest {
-            username: self.username(),
-            set: "collection".into(),
-            items: vec![item],
-            ..Default::default()
-        };
+        let request = WriteRequest { username: self.username(), set: "collection".into(), items: vec![item] };
         let mut headers = self.connected_headers()?;
         headers.insert(CONTENT_TYPE, MEDIA_TYPE);
         headers.insert(ACCEPT, MEDIA_TYPE);
-        self.request(&Method::POST, "/collection/v2/write", headers, request.write_to_bytes()?.into()).await?;
-        Ok(())
+        self.request(&Method::POST, "/collection/v2/write", headers, request.encode_to_vec().into()).await.map(drop)
     }
 
     pub(super) async fn post_player_command(&self, target: &str, command: &Value) -> MusicResult<()> {
@@ -159,8 +148,7 @@ impl Session {
         let mut headers = self.connected_headers()?;
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-        self.request(&Method::POST, &path, headers, body.finish()?.into()).await?;
-        Ok(())
+        self.request(&Method::POST, &path, headers, body.finish()?.into()).await.map(drop)
     }
 
     fn connected_headers(&self) -> MusicResult<HeaderMap> {
@@ -174,32 +162,28 @@ impl Session {
     }
 
     pub(super) async fn track_metadata(&self, uris: &[String]) -> MusicResult<Metadata> {
-        let kind = EnumOrUnknown::new(ExtensionKind::TRACK_V4);
+        let kind = ExtensionKind::TrackV4 as i32;
         let request = BatchedEntityRequest {
             entity_request: uris
                 .iter()
                 .map(|uri| EntityRequest {
                     entity_uri: uri.clone(),
-                    query: vec![ExtensionQuery { extension_kind: kind, ..Default::default() }],
-                    ..Default::default()
+                    query: vec![ExtensionQuery { extension_kind: kind }],
                 })
                 .collect(),
-            ..Default::default()
         };
-        let bytes = self
-            .request_with_protobuf(&Method::POST, "/extended-metadata/v0/extended-metadata", HeaderMap::new(), &request)
-            .await?;
-        Ok(BatchedExtensionResponse::parse_from_bytes(&bytes)?
+        let bytes = self.request_with_protobuf(&Method::POST, TRACK_METADATA, HeaderMap::new(), &request).await?;
+        Ok(BatchedExtensionResponse::decode(bytes)?
             .extended_metadata
             .into_iter()
             .filter(|array| array.extension_kind == kind)
             .flat_map(|array| array.extension_data)
             .filter_map(|data| {
-                if data.header.get_or_default().status_code == i32::from(StatusCode::NOT_FOUND.as_u16()) {
+                if data.header.is_some_and(|header| header.status_code == i32::from(StatusCode::NOT_FOUND.as_u16())) {
                     return Some((data.entity_uri, None));
                 }
-                let payload = data.extension_data.into_option()?;
-                let track = CatalogTrack::parse_from_bytes(&payload.value)
+                let payload = data.extension_data?;
+                let track = CatalogTrack::decode(payload.value.as_slice())
                     .inspect_err(|error| warn!(%error, uri = %data.entity_uri, "Invalid Spotify track metadata"))
                     .ok()?;
                 Some((data.entity_uri, Some(track)))
@@ -236,37 +220,32 @@ impl Session {
         }
     }
 
-    pub(super) async fn playlists(
-        &self,
-        ids: &[PlaylistId],
-        include_artwork: bool,
-    ) -> MusicResult<Vec<(CachedPlaylist, Option<Attributes>)>> {
+    pub(super) async fn playlists(&self, ids: &[PlaylistId]) -> MusicResult<Vec<PlaylistResult>> {
         let uris = ids.iter().map(|id| format!("spotify:playlist:{id}")).collect::<Vec<_>>();
         Ok(self
-            .read_lists(&uris, playlist_fields(false, include_artwork))
+            .read_lists(&uris, playlist_fields(false))
             .await?
             .into_iter()
-            .map(|(list, revision)| {
-                let items =
-                    list.items.into_iter().map(|item| item.attributes.into_option().unwrap_or_default().uri).collect();
-                (CachedPlaylist { revision, items }, list.attributes.into_option())
+            .map(|result| {
+                result.map(|(list, revision)| {
+                    let tracks = list
+                        .items
+                        .iter()
+                        .filter_map(|item| track_id_from_uri(&item.attributes.as_ref()?.uri))
+                        .collect();
+                    let name = list.attributes.as_ref().map_or_else(String::new, |attributes| attributes.name.clone());
+                    (CachedPlaylist { revision, tracks: Arc::new(tracks), name }, list.attributes)
+                })
             })
             .collect())
     }
 
-    pub(super) async fn root_playlist(&self) -> MusicResult<(ListEntity, Vec<u8>)> {
+    pub(super) async fn root_playlist(&self) -> ListResult {
         let uri = format!("spotify:user:{}:rootlist", self.username());
-        self.read_lists(&[uri], playlist_fields(true, false))
-            .await?
-            .pop()
-            .ok_or_else(|| "Missing Spotify root list".into())
+        self.read_lists(&[uri], playlist_fields(true)).await?.pop().ok_or("Missing Spotify root list")?
     }
 
-    async fn read_lists(
-        &self,
-        uris: &[String],
-        requested_fields: RequestedFields,
-    ) -> MusicResult<Vec<(ListEntity, Vec<u8>)>> {
+    async fn read_lists(&self, uris: &[String], requested_fields: RequestedFields) -> MusicResult<Vec<ListResult>> {
         if uris.is_empty() {
             return Ok(Vec::new());
         }
@@ -274,81 +253,51 @@ impl Session {
             requests: uris
                 .iter()
                 .map(|uri| GetListRequest {
-                    identifier: MessageField::some(ListIdentifier { uri: uri.clone(), ..Default::default() }),
-                    options: MessageField::some(RequestOptions {
-                        requested_fields: MessageField::some(requested_fields.clone()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+                    identifier: Some(ListIdentifier { uri: uri.clone() }),
+                    options: Some(RequestOptions { requested_fields: Some(requested_fields.clone()) }),
                 })
                 .collect(),
-            ..Default::default()
         };
-        let bytes = self
-            .request_with_protobuf(
-                &Method::POST,
-                "/playlist/spotify.list.v1.ListReadService/GetLists",
-                HeaderMap::new(),
-                &request,
-            )
-            .await?;
-        let response = GetListsResponse::parse_from_bytes(&bytes)?;
-        if response.responses.len() != uris.len() {
-            return Err("Spotify returned the wrong number of playlist results".into());
-        }
-        uris.iter()
-            .zip(response.responses)
-            .map(|(uri, list)| {
-                let info = list.info.into_option().unwrap_or_default();
-                if let Some(error) = info.request_error.as_ref() {
-                    return Err(format!("Spotify could not read {uri}: {}", error.message).into());
-                }
-                let entity = list.entity.into_option().ok_or_else(|| io::Error::other("Missing Spotify playlist"))?;
-                Ok((entity, info.revision))
-            })
-            .collect()
+        let bytes = self.request_with_protobuf(&Method::POST, GET_LISTS, HeaderMap::new(), &request).await?;
+        decode_list_results(&bytes, uris)
     }
 }
 
-fn playlist_fields(root: bool, include_artwork: bool) -> RequestedFields {
-    const ARTWORK: [AttributeKind; 3] =
-        [AttributeKind::KIND_NAME, AttributeKind::KIND_PICTURE_FILE_ID, AttributeKind::KIND_PICTURE_SIZES];
-    let attributes = |kinds: &[AttributeKind]| {
-        MessageField::some(AttributesRequestedFields {
-            requested_field: kinds.iter().copied().map(EnumOrUnknown::new).collect(),
-            ..Default::default()
+fn decode_list_results(bytes: &[u8], uris: &[String]) -> MusicResult<Vec<ListResult>> {
+    let response = GetListsResponse::decode(bytes)?;
+    if response.responses.len() != uris.len() {
+        return Err("Spotify returned the wrong number of playlist results".into());
+    }
+    Ok(uris
+        .iter()
+        .zip(response.responses)
+        .map(|(uri, list)| {
+            let info = list.info.unwrap_or_default();
+            if let Some(error) = info.request_error {
+                return Err(format!("Spotify could not read {uri}: {}", error.message).into());
+            }
+            let entity = list.entity.ok_or_else(|| format!("Spotify omitted the list entity for {uri}"))?;
+            Ok((entity, info.revision))
         })
+        .collect())
+}
+
+fn playlist_fields(root: bool) -> RequestedFields {
+    const ARTWORK: [AttributeKind; 3] =
+        [AttributeKind::Name, AttributeKind::PictureFileId, AttributeKind::PictureSizes];
+    let attributes = |kinds: &[AttributeKind]| {
+        Some(AttributesRequestedFields { requested_field: kinds.iter().copied().map(|kind| kind as i32).collect() })
     };
     let mut entity = ListEntityRequestedFields {
-        items: MessageField::some(ItemRequestedFields {
-            attributes: attributes(&[AttributeKind::KIND_URI]),
-            ..Default::default()
-        }),
+        items: Some(ItemRequestedFields { attributes: attributes(&[AttributeKind::Uri]) }),
         ..Default::default()
     };
     if root {
-        entity.meta_items =
-            MessageField::some(MetaItemsRequestedFields { attributes: attributes(&ARTWORK), ..Default::default() });
-    }
-    if include_artwork {
+        entity.meta_items = Some(MetaItemsRequestedFields { attributes: attributes(&ARTWORK) });
+    } else {
         entity.attributes = attributes(&ARTWORK);
     }
-    RequestedFields {
-        list_response: MessageField::some(ListResponseRequestedFields {
-            entity: MessageField::some(entity),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-pub(super) fn decode_gzip(bytes: Bytes, compressed: bool) -> io::Result<Bytes> {
-    if !compressed || bytes.is_empty() {
-        return Ok(bytes);
-    }
-    let mut decoded = Vec::new();
-    MultiGzDecoder::new(bytes.as_ref()).read_to_end(&mut decoded)?;
-    Ok(decoded.into())
+    RequestedFields { list_response: Some(ListResponseRequestedFields { entity: Some(entity) }) }
 }
 
 pub(super) fn gzip_encoder() -> GzEncoder<Vec<u8>> {
@@ -356,17 +305,13 @@ pub(super) fn gzip_encoder() -> GzEncoder<Vec<u8>> {
 }
 
 const USER_AGENT: &str = concat!("Spotify/124200290 Linux/0 (Cantus/", env!("CARGO_PKG_VERSION"), ")");
-
 pub struct HttpClient(Client);
 
 impl HttpClient {
     pub fn new() -> MusicResult<Self> {
-        let mut headers = HeaderMap::new();
-        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
         Ok(Self(
             Client::builder()
                 .user_agent(USER_AGENT)
-                .default_headers(headers)
                 .redirect(Policy::none())
                 .timeout(REQUEST_TIMEOUT)
                 .no_proxy()
@@ -386,6 +331,7 @@ impl HttpClient {
             let response = self
                 .0
                 .request(method.clone(), url.clone())
+                .version(Version::HTTP_3)
                 .headers(headers.clone())
                 .body(body.clone())
                 .send()
@@ -393,11 +339,7 @@ impl HttpClient {
                 .map_err(HttpError::without_url)?;
             let status = response.status();
             if status.is_success() {
-                let gzip = response
-                    .headers()
-                    .get(CONTENT_ENCODING)
-                    .is_some_and(|encoding| encoding.as_bytes().eq_ignore_ascii_case(b"gzip"));
-                return Ok(decode_gzip(response.bytes().await.map_err(HttpError::without_url)?, gzip)?);
+                return Ok(response.bytes().await.map_err(HttpError::without_url)?);
             }
             if status == StatusCode::TOO_MANY_REQUESTS && !retried {
                 let retry = response
@@ -442,8 +384,7 @@ impl Display for HttpStatus {
 impl StdError for HttpStatus {}
 
 fn retryable(error: &(dyn StdError + 'static)) -> bool {
-    error.is::<io::Error>()
-        || error.downcast_ref::<HttpError>().is_some_and(|error| error.is_timeout() || error.is_connect())
+    error.downcast_ref::<HttpError>().is_some_and(|error| error.is_timeout() || error.is_request() || error.is_decode())
         || error.downcast_ref::<HttpStatus>().is_some_and(|status| {
             matches!(
                 status.0,
@@ -455,4 +396,39 @@ fn retryable(error: &(dyn StdError + 'static)) -> bool {
                     | StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        super::proto::list_read::{GetListResponse, RequestError, ResponseInfo},
+        *,
+    };
+
+    #[test]
+    fn list_batch_preserves_results_around_failed_lists() {
+        let success = |revision| GetListResponse {
+            entity: Some(ListEntity::default()),
+            info: Some(ResponseInfo { revision: vec![revision], ..Default::default() }),
+        };
+        let missing = GetListResponse {
+            info: Some(ResponseInfo {
+                request_error: Some(RequestError { message: "not found".into() }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let bytes = GetListsResponse { responses: vec![success(1), missing, GetListResponse::default(), success(4)] }
+            .encode_to_vec();
+        let uris = ["a".into(), "b".into(), "c".into(), "d".into()];
+        let results = decode_list_results(&bytes, &uris).unwrap();
+        assert_eq!(results[0].as_ref().unwrap().1, [1]);
+        assert_eq!(results[1].as_ref().unwrap_err().to_string(), "Spotify could not read b: not found");
+        assert_eq!(results[2].as_ref().unwrap_err().to_string(), "Spotify omitted the list entity for c");
+        assert_eq!(results[3].as_ref().unwrap().1, [4]);
+        assert_eq!(
+            decode_list_results(&bytes, &uris[..3]).unwrap_err().to_string(),
+            "Spotify returned the wrong number of playlist results"
+        );
+    }
 }

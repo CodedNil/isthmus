@@ -305,13 +305,12 @@ mod monitor {
         platform,
     };
     use core::{array::from_fn, iter::once, time::Duration};
-    use futures_util::future::join_all;
     use jiff::{
         civil::DateTime,
         tz::{Offset, TimeZone},
     };
-    use reqwest::Client;
     use serde::Deserialize;
+    use std::{env, fs, path::PathBuf};
     use tokio::time::sleep;
     use tracing::warn;
 
@@ -347,19 +346,6 @@ mod monitor {
         temperature_2m_min: [f32; 6],
         sunrise: [DateTime; 6],
         sunset: [DateTime; 6],
-    }
-
-    #[derive(Deserialize)]
-    struct SearchResults {
-        #[serde(default)]
-        results: Vec<Place>,
-    }
-
-    #[derive(Deserialize)]
-    struct Place {
-        latitude: f32,
-        longitude: f32,
-        timezone: String,
     }
 
     macro_rules! weather_codes {
@@ -409,53 +395,74 @@ mod monitor {
     }
 
     pub(super) async fn run(timezones: Vec<String>, background: Background) {
-        let http = &background.http;
-        let timezones: Vec<_> =
-            once(TimeZone::system().iana_name().map(str::to_owned)).chain(timezones.into_iter().map(Some)).collect();
-        let mut locations = vec![None; timezones.len()];
-        locations[0] = tokio::select! {
+        let local = tokio::select! {
             result = platform::current_location() => result
                 .inspect_err(|error| warn!(%error, "Could not determine local weather location; using timezone"))
                 .ok(),
             () = sleep(Duration::from_secs(10)) => None,
         };
+        let system = TimeZone::system();
+        let timezones = once(system.iana_name()).chain(timezones.iter().map(|name| Some(name.as_str())));
+        let (table, links) = env::var_os("TZDIR")
+            .map(PathBuf::from)
+            .into_iter()
+            .chain(["/usr/share/zoneinfo", "/usr/share/lib/zoneinfo", "/etc/zoneinfo"].map(PathBuf::from))
+            .find_map(|dir| {
+                let table = fs::read_to_string(dir.join("zone.tab")).ok()?;
+                Some((table, fs::read_to_string(dir.join("tzdata.zi")).unwrap_or_default()))
+            })
+            .unwrap_or_default();
+        let locations: Vec<_> = timezones
+            .enumerate()
+            .filter_map(|(index, timezone)| {
+                if index == 0
+                    && let Some(point) = local
+                {
+                    return Some((index, point));
+                }
+                let timezone = timezone?;
+                let Some(point) = timezone_coordinates(&table, &links, timezone) else {
+                    warn!(timezone, "No weather coordinates in local timezone data");
+                    return None;
+                };
+                Some((index, point))
+            })
+            .collect();
+        if locations.is_empty() {
+            return;
+        }
+        let latitude = locations.iter().map(|(_, point)| point[0].to_string()).collect::<Vec<_>>().join(",");
+        let longitude = locations.iter().map(|(_, point)| point[1].to_string()).collect::<Vec<_>>().join(",");
+        let url = format!(
+            "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current={WEATHER_FIELDS},relative_humidity_2m,wind_speed_10m&hourly={WEATHER_FIELDS}&forecast_hours=24&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&temperature_unit=celsius&timezone=auto&forecast_days=6"
+        );
         loop {
-            join_all(timezones.iter().zip(&mut locations).filter_map(|(timezone, slot)| {
-                let timezone = timezone.as_ref().filter(|_| slot.is_none())?;
-                Some(async move {
-                    *slot = geocode(http, timezone)
-                        .await
-                        .inspect_err(|error| warn!(%error, timezone, "Failed to locate timezone"))
-                        .ok();
-                })
-            }))
-            .await;
-            let ready = locations
-                .iter()
-                .enumerate()
-                .filter_map(|(index, &location)| location.map(|point| (index, point)))
-                .collect::<Vec<_>>();
-            let mut retry = ready.len() != locations.len();
-            let forecasts: Vec<_> = match fetch(http, &ready).await {
-                Ok(results) => ready.into_iter().zip(results).map(|((index, _), forecast)| (index, forecast)).collect(),
+            let request = background.http.get(&url);
+            let forecasts = if locations.len() == 1 {
+                fetch_json::<Forecast>(request).await.map(|forecast| vec![forecast])
+            } else {
+                fetch_json(request).await
+            };
+            let delay = match forecasts {
+                Ok(results) => {
+                    let forecasts: Vec<_> = locations.iter().map(|&(index, _)| index).zip(results).collect();
+                    if !send_update(&background.updater, move |app| {
+                        if let Some(weather) = &mut app.bar.weather {
+                            for (index, forecast) in forecasts {
+                                apply_forecast(weather, index, &forecast);
+                            }
+                        }
+                    }) {
+                        break;
+                    }
+                    Duration::from_mins(15)
+                }
                 Err(error) => {
-                    retry = true;
                     warn!(%error, "Failed to refresh weather");
-                    Vec::new()
+                    Duration::from_secs(30)
                 }
             };
-            if !forecasts.is_empty()
-                && !send_update(&background.updater, move |app| {
-                    if let Some(weather) = &mut app.bar.weather {
-                        for (index, forecast) in forecasts {
-                            apply_forecast(weather, index, &forecast);
-                        }
-                    }
-                })
-            {
-                break;
-            }
-            sleep(if retry { Duration::from_secs(30) } else { Duration::from_mins(15) }).await;
+            sleep(delay).await;
         }
     }
 
@@ -519,42 +526,52 @@ mod monitor {
         );
     }
 
-    async fn geocode(http: &Client, timezone: &str) -> Result<[f32; 2], String> {
-        let city = super::city(timezone);
-        let query: String = form_urlencoded::byte_serialize(city.as_bytes()).collect();
-        let results: SearchResults =
-            fetch_json(http.get(format!("https://geocoding-api.open-meteo.com/v1/search?name={query}&count=10")))
-                .await
-                .map_err(|error| error.to_string())?;
-        let place = results
-            .results
-            .iter()
-            .find(|place| place.timezone == timezone)
-            .or_else(|| results.results.first())
-            .ok_or_else(|| format!("no place found for {city}"))?;
-        Ok([place.latitude, place.longitude])
+    fn timezone_coordinates(table: &str, links: &str, timezone: &str) -> Option<[f32; 2]> {
+        let find = |name: &str| {
+            table.lines().filter(|line| !line.starts_with('#')).find_map(|line| {
+                let mut columns = line.split('\t');
+                let coordinates = columns.nth(1)?;
+                columns.next()?.eq_ignore_ascii_case(name).then_some(coordinates)
+            })
+        };
+        let coordinates = find(timezone).or_else(|| {
+            let target = links.lines().find_map(|line| {
+                let mut fields = line.strip_prefix("L ")?.split_ascii_whitespace();
+                let target = fields.next()?;
+                fields.next()?.eq_ignore_ascii_case(timezone).then_some(target)
+            })?;
+            find(target)
+        })?;
+        let longitude_start = coordinates.get(1..)?.find(['+', '-'])? + 1;
+        let (latitude, longitude) = coordinates.split_at(longitude_start);
+        Some([decimal_degrees(latitude, 2)?, decimal_degrees(longitude, 3)?])
     }
 
-    async fn fetch(http: &Client, locations: &[(usize, [f32; 2])]) -> Result<Vec<Forecast>, String> {
-        if locations.is_empty() {
-            return Ok(Vec::new());
-        }
-        let latitude = locations.iter().map(|(_, [latitude, _])| latitude.to_string()).collect::<Vec<_>>().join(",");
-        let longitude = locations.iter().map(|(_, [_, longitude])| longitude.to_string()).collect::<Vec<_>>().join(",");
-        let url = format!(
-            "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current={WEATHER_FIELDS},relative_humidity_2m,wind_speed_10m&hourly={WEATHER_FIELDS}&forecast_hours=24&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&temperature_unit=celsius&timezone=auto&forecast_days=6"
-        );
-        if locations.len() == 1 {
-            fetch_json(http.get(url)).await.map(|forecast| vec![forecast])
-        } else {
-            fetch_json(http.get(url)).await
-        }
-        .map_err(|error| error.to_string())
+    // zone.tab uses signed degrees and minutes, with optional seconds.
+    fn decimal_degrees(coordinate: &str, degree_digits: usize) -> Option<f32> {
+        let (sign, digits) = coordinate.split_at_checked(1)?;
+        let (degrees, rest) = digits.split_at_checked(degree_digits)?;
+        let (minutes, seconds) = rest.split_at_checked(2)?;
+        let degrees = degrees.parse::<f32>().ok()?;
+        let minutes = minutes.parse::<f32>().ok()?;
+        let seconds = if seconds.is_empty() { 0.0 } else { seconds.parse::<f32>().ok()? };
+        Some((degrees + minutes / 60.0 + seconds / 3600.0) * if sign == "-" { -1.0 } else { 1.0 })
     }
 
     #[cfg(test)]
     mod tests {
-        use super::weather;
+        use super::{timezone_coordinates, weather};
+
+        #[test]
+        fn timezone_coordinates_support_aliases_and_optional_seconds() {
+            let table = "GB\t+513030-0000730\tEurope/London\nUS\t+3403-11815\tAmerica/Los_Angeles\n";
+            let links = "L America/Los_Angeles US/Pacific";
+            let [latitude, longitude] = timezone_coordinates(table, links, "Europe/London").unwrap();
+            assert!((latitude - 51.508_33).abs() < 0.000_01);
+            assert!((longitude - (-0.125)).abs() < 0.000_01);
+            assert_eq!(timezone_coordinates(table, links, "US/Pacific"), Some([34.05, -118.25]));
+            assert_eq!(timezone_coordinates(table, links, "Etc/UTC"), None);
+        }
 
         #[test]
         fn precipitation_has_clouds_and_heavier_weather_reduces_visibility() {

@@ -1,15 +1,14 @@
 use super::{LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, matches_track, prefer_lyrics, separate};
 use crate::music::{MusicResult, Track};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, Version};
 use roxmltree::{Document, Node};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use strum::IntoEnumIterator as _;
 
 pub(super) async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicResult<Lyrics> {
-    // lrc.red serves BiniLyrics search and TTML; it needs integer seconds, unlike LyricsPlus.
     let duration = (track.duration_ms / 1000).to_string();
-    let mut request = http.get("https://lyrics-api.binimum.org/").query(&[
+    let mut request = http.get("https://lrc.red/api/v1").query(&[
         ("track", track.name.as_str()),
         ("artist", track.primary_artist()),
         ("album", track.album.as_str()),
@@ -20,7 +19,7 @@ pub(super) async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicRes
     if let Some(isrc) = track.isrc.as_deref() {
         request = request.query(&[("isrc", isrc)]);
     }
-    let response = request.send().await?;
+    let response = request.version(Version::HTTP_3).send().await?;
     if response.status() == StatusCode::NOT_FOUND {
         return Ok(Lyrics::default());
     }
@@ -33,7 +32,7 @@ pub(super) async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicRes
         }) {
             let Some(url) = result["lyricsUrl"].as_str() else { continue };
             let fetched: MusicResult<Lyrics> = async {
-                let source = http.get(url).send().await?.error_for_status()?.text().await?;
+                let source = http.get(url).version(Version::HTTP_3).send().await?.error_for_status()?.text().await?;
                 let lyrics = parse_ttml(&source);
                 if lyrics.is_empty() {
                     return Err("Lyrics document has no usable timed text".into());

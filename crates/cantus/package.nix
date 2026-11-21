@@ -2,14 +2,8 @@
   lib,
   pkgs,
   rust,
-  description,
 }:
 let
-  runtimeTools = with pkgs; [
-    pipewire
-    wireplumber
-  ];
-  runtimeLibraryPath = "${lib.makeLibraryPath [ pkgs.vulkan-loader ]}:/run/opengl-driver/lib";
   rustPlatform = pkgs.makeRustPlatform {
     rustc = rust;
     cargo = rust;
@@ -17,29 +11,28 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "cantus";
+  version = (lib.importTOML ./Cargo.toml).package.version;
+
   cargoDeps = pkgs.symlinkJoin {
     name = "cargo-vendor-dir";
-    # build-std also resolves dependencies from the pinned Rust sysroot.
-    paths = [
-      (rustPlatform.importCargoLock {
-        lockFile = ../../Cargo.lock;
-      })
-      (rustPlatform.importCargoLock {
-        lockFile = "${rust}/lib/rustlib/src/rust/library/Cargo.lock";
-      })
+    # Rust-GPU builds core using the pinned sysroot's lockfile.
+    paths = map (lockFile: rustPlatform.importCargoLock { inherit lockFile; }) [
+      ../../Cargo.lock
+      "${rust}/lib/rustlib/src/rust/library/Cargo.lock"
     ];
   };
-  version = (lib.importTOML ./Cargo.toml).package.version;
+
   src = lib.fileset.toSource {
     root = ../..;
     fileset = lib.fileset.unions [
       ../../Cargo.toml
       ../../Cargo.lock
-      ../../rustfmt.toml
+      ../../LICENSE
       ../../crates
     ];
   };
   buildAndTestSubdir = "crates/cantus";
+
   nativeBuildInputs = with pkgs; [
     makeWrapper
     pkg-config
@@ -50,18 +43,27 @@ rustPlatform.buildRustPackage {
     wayland
   ];
   nativeCheckInputs = [ pkgs.cacert ];
-  RUSTFLAGS = "--remap-path-prefix=${rust}=/rustc";
-  postInstall = ''
-    wrapProgram "$out/bin/$pname" \
-      --set LD_LIBRARY_PATH "${runtimeLibraryPath}" \
-      --set-default TZDIR "${pkgs.tzdata}/share/zoneinfo" \
-      --prefix PATH : "${lib.makeBinPath runtimeTools}"
+
+  # Nixpkgs' target flags take precedence over Cargo's build flags.
+  RUSTFLAGS = (lib.importTOML ../../.cargo/config.toml).build.rustflags ++ [
+    # Keep compiler source paths from pulling the toolchain into the runtime closure.
+    "--remap-path-prefix=${rust}=/rustc"
+  ];
+
+  postFixup = ''
+    patchelf --add-rpath "${lib.makeLibraryPath [ pkgs.vulkan-loader ]}" "$out/bin/$pname"
+    wrapProgram "$out/bin/$pname" --prefix PATH : "${
+      lib.makeBinPath [
+        pkgs.pipewire
+        pkgs.wireplumber
+      ]
+    }"
   '';
-  passthru = { inherit runtimeTools runtimeLibraryPath; };
+
   meta = {
-    inherit description;
+    description = "Interactive music widget for Wayland";
     homepage = "https://github.com/CodedNil/cantus";
-    license = lib.licenses.mit;
+    license = lib.licenses.gpl3Plus;
     maintainers = with lib.maintainers; [ CodedNil ];
     platforms = lib.platforms.linux;
     mainProgram = "cantus";

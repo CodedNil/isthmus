@@ -3,7 +3,7 @@ use crate::{
     app::{CantusApp, View},
     config,
     interaction::{InputEvent, Interaction},
-    render::{PANEL_START, Renderer, install_fonts, launcher::CORNER_RADIUS, lyrics, weathertime},
+    render::{PANEL_START, Renderer, install_fonts, launcher::CORNER_RADIUS, lyrics, status, weathertime},
 };
 use calloop::{EventLoop, channel};
 use clipboard::Clipboard;
@@ -245,6 +245,7 @@ impl LayerShellApp {
     fn bar_height(&self) -> f32 {
         let config = &self.cantus.config;
         let extension = (f32::from(config.weathertime_enabled) * weathertime::EXTENSION)
+            .max(f32::from(config.status_enabled) * status::OSD_EXTENSION)
             .max(if config.lyrics_enabled { lyrics::height(&self.cantus.music) } else { 0.0 });
         config.height + PANEL_START + extension + PANEL_OVERFLOW
     }

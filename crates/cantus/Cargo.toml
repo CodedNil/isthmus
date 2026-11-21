@@ -1,5 +1,6 @@
 [package]
 edition.workspace = true
+license.workspace = true
 name = "cantus"
 version = "0.10.0"
 
@@ -41,7 +42,9 @@ bytes = "1.12.2"
 futures-util.workspace = true
 reqwest = { version = "0.13.5", default-features = false, features = [
     "form",
+    "gzip",
     "http2",
+    "http3",
     "json",
     "query",
     "rustls",
@@ -55,7 +58,8 @@ flate2 = "1.1.11"
 form_urlencoded.workspace = true
 getrandom = "0.4.3"
 hex = "0.4.3"
-protobuf = "3.7.2"
+prost = "0.14.6"
+prost-types = "0.14.6"
 roxmltree = "0.21.2"
 sha2 = "0.11.1"
 tempfile = "3.27.0"
@@ -91,12 +95,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [build-dependencies]
-# Shader compilation
 isthmus_build.workspace = true
-
-# Spotify protocol code generation
-protobuf = "3.7.2"
-protobuf-codegen = "3.7.2"
 
 [lints]
 workspace = true

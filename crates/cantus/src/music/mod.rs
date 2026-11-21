@@ -11,7 +11,10 @@ use serde::Deserialize;
 use std::{
     collections::HashSet,
     error::Error,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::watch;
@@ -226,7 +229,7 @@ impl Track {
 pub struct CondensedPlaylist {
     pub id: PlaylistId,
     pub image_url: Option<String>,
-    pub tracks: HashSet<TrackId>,
+    pub tracks: Arc<HashSet<TrackId>>,
     pub rating_index: Option<u8>,
 }
 

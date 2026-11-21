@@ -1,9 +1,10 @@
 use super::{LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, normalize};
 use crate::{
+    app::fetch_json,
     config::directory,
     music::{MusicResult, Track},
 };
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, Version};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -16,12 +17,11 @@ use std::{
 use tokio::task;
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LrclibRecord {
-    #[serde(rename = "trackName")]
     track_name: String,
-    #[serde(rename = "artistName")]
     artist_name: String,
-    #[serde(rename = "albumName", default)]
+    #[serde(default)]
     album_name: String,
     duration: Option<f64>,
     lyricsfile: Option<String>,
@@ -66,12 +66,14 @@ struct FileWord {
 }
 
 pub(super) async fn fetch_lrclib(track: &Track, http: &Client) -> MusicResult<Lyrics> {
-    let records = http
+    let request = http
         .get("https://lrclib.net/api/search")
+        .version(Version::HTTP_3)
         .query(&[("track_name", track.compact_title()), ("artist_name", track.primary_artist())])
         .header("User-Agent", concat!("Cantus/", env!("CARGO_PKG_VERSION"), " (https://github.com/isthmus)"));
-    let records = records.send().await?.error_for_status()?.json::<Vec<LrclibRecord>>().await?;
+    let records: Vec<LrclibRecord> = fetch_json(request).await?;
     let title = normalize(track.compact_title());
+    let full_title = normalize(&track.name);
     let artists = track.artists.iter().map(|artist| normalize(artist)).collect::<Vec<_>>();
     let target_album = normalize(&track.album);
     let target_duration = f64::from(track.duration_ms) / 1000.0;
@@ -84,7 +86,7 @@ pub(super) async fn fetch_lrclib(track: &Track, http: &Client) -> MusicResult<Ly
         let duration_delta = if duration > 0.0 { (duration - target_duration).abs() } else { f64::MAX };
         let duration_match = track.duration_ms == 0 || duration <= 0.0 || duration_delta <= 5.0;
         let title_match = matched_title == title
-            || matched_title == normalize(&track.name)
+            || matched_title == full_title
             || (record.track_name.split_once(" (").is_some_and(|(base, _)| normalize(base) == title) && duration_match);
         if !title_match || !artists.iter().any(|artist| artist == &matched_artist) || (!album_match && !duration_match)
         {
@@ -96,9 +98,10 @@ pub(super) async fn fetch_lrclib(track: &Track, http: &Client) -> MusicResult<Ly
             continue;
         }
         let wins = best.as_ref().is_none_or(|(current, current_album, current_delta)| {
-            (lyrics.timing, album_match) > (current.timing, *current_album)
-                || ((lyrics.timing, album_match) == (current.timing, *current_album)
-                    && current_delta.total_cmp(&duration_delta).is_gt())
+            (lyrics.timing, album_match)
+                .cmp(&(current.timing, *current_album))
+                .then_with(|| current_delta.total_cmp(&duration_delta))
+                .is_gt()
         });
         if wins {
             best = Some((lyrics, album_match, duration_delta));
@@ -127,15 +130,12 @@ fn parse_lyricsfile(source: &str) -> MusicResult<Lyrics> {
         }
         let words = line.words.unwrap_or_default();
         let mut word_segments = Vec::new();
-        if !words.is_empty() {
-            has_words = true;
-            for word in words {
-                let start = word.start_ms as f32;
-                let end = word.end_ms.unwrap_or_else(|| word.start_ms.saturating_add(500)) as f32;
-                if start >= 0.0 && end >= start {
-                    let fragment = LyricSegment { time: start..end, text: word.text };
-                    word_segments.push(fragment);
-                }
+        has_words |= !words.is_empty();
+        for word in words {
+            let start = word.start_ms as f32;
+            let end = word.end_ms.unwrap_or_else(|| word.start_ms.saturating_add(500)) as f32;
+            if start >= 0.0 && end >= start {
+                word_segments.push(LyricSegment { time: start..end, text: word.text });
             }
         }
         canonical.push(LyricLine {
@@ -146,20 +146,15 @@ fn parse_lyricsfile(source: &str) -> MusicResult<Lyrics> {
             singer: Some(0),
         });
     }
-    let mut lyrics = Lyrics { lines: canonical, timing: if has_words { Timing::Word } else { Timing::Line } };
-    if has_words {
-        lyrics.timing = fragment_timing(&lyrics.lines);
-    }
-    Ok(lyrics)
+    let timing = if has_words { fragment_timing(&canonical) } else { Timing::Line };
+    Ok(Lyrics { lines: canonical, timing })
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PublishBody<'track> {
-    #[serde(rename = "trackName")]
     track_name: &'track str,
-    #[serde(rename = "artistName")]
     artist_name: &'track str,
-    #[serde(rename = "albumName")]
     album_name: &'track str,
     duration: u32,
     lyricsfile: String,
@@ -171,9 +166,8 @@ pub(super) async fn publish_lrclib(
     http: &Client,
     source: &str,
 ) -> MusicResult<StatusCode> {
-    // Publish support is deliberately best-effort and currently requires a fresh PoW token.
-    let challenge =
-        http.post("https://lrclib.net/api/request-challenge").send().await?.error_for_status()?.json::<Value>().await?;
+    let challenge: Value =
+        fetch_json(http.post("https://lrclib.net/api/request-challenge").version(Version::HTTP_3)).await?;
     let prefix = challenge["prefix"].as_str().ok_or("LRCLIB challenge has no prefix")?;
     let target = challenge["target"].as_str().ok_or("LRCLIB challenge has no target")?;
     let target = hex::decode(target)?;
@@ -181,16 +175,13 @@ pub(super) async fn publish_lrclib(
         return Err("LRCLIB challenge target is not a SHA-256 digest".into());
     }
     let mut nonce = 0u64;
-    let mut attempts = 0;
     loop {
         let digest = Sha256::digest(format!("{prefix}{nonce}").as_bytes());
         if digest.as_slice() <= target.as_slice() {
             break;
         }
         nonce += 1;
-        attempts += 1;
-        if attempts == 4096 {
-            attempts = 0;
+        if nonce.is_multiple_of(4096) {
             task::yield_now().await;
         }
     }
@@ -231,11 +222,15 @@ pub(super) async fn publish_lrclib(
         lyricsfile: file,
     };
     let token = format!("{prefix}:{nonce}");
-    let response =
-        http.post("https://lrclib.net/api/publish").header("X-Publish-Token", token).json(&body).send().await?;
+    let response = http
+        .post("https://lrclib.net/api/publish")
+        .version(Version::HTTP_3)
+        .header("X-Publish-Token", token)
+        .json(&body)
+        .send()
+        .await?;
     let status = response.status();
     response.error_for_status()?;
-    tracing::debug!(source, %status, "Published lyrics to LRCLIB");
     if let Err(error) = append_upload_log(track, lyrics, source, status) {
         tracing::warn!("LRCLIB upload succeeded, but its local history could not be written: {error}");
     }
@@ -259,7 +254,7 @@ fn append_upload_log(track: &Track, lyrics: &Lyrics, source: &str, status: Statu
         source: source.to_owned(),
         timing: lyrics.timing.to_string(),
         lines: lyrics.lines.len(),
-        words: lyrics.word_count(),
+        words: lyrics.lines.iter().filter_map(|line| line.words.as_ref()).map(Vec::len).sum(),
         lrclib_status: status.as_u16(),
         key: upload_key(track, lyrics),
     };

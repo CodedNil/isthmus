@@ -1,5 +1,8 @@
-use crate::music::{PlaybackCommand, Track};
-use futures_util::{StreamExt as _, future::join_all, stream::select};
+use crate::{
+    app::{AppUpdater, send_update},
+    music::{PlaybackCommand, Track},
+};
+use futures_util::{Stream, StreamExt as _, future::join_all, stream::select};
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -12,17 +15,18 @@ use tokio::{
 };
 use tracing::warn;
 use zbus::{
-    Connection, MatchRule, MessageStream, ObjectPath, OwnedObjectPath, OwnedVariant, Proxy, Str, Variant,
-    fdo::{self, DBusProxy, Properties, RequestNameFlags},
+    Connection, MatchRule, MessageStream, ObjectPath, OwnedObjectPath, OwnedVariant, Str, Variant,
+    fdo::{self, DBusProxy, Properties, PropertiesProxy, RequestNameFlags},
     message::Type,
     names::InterfaceName,
     object_server::SignalEmitter,
-    proxy::{Builder, CacheProperties},
 };
 
 const NAME: &str = "org.mpris.MediaPlayer2.cantus";
 const PATH: &str = "/org/mpris/MediaPlayer2";
 const PLAYER: &str = "org.mpris.MediaPlayer2.Player";
+const TRACK_LIST: &str = "org.mpris.MediaPlayer2.TrackList";
+const SKIP_FORWARD: &str = "cantus:skipForward";
 
 pub struct MediaCommand {
     pub device: String,
@@ -72,6 +76,7 @@ fn track_path(uri: &str, uid: &str) -> OwnedObjectPath {
 pub struct Playback {
     pub device: String,
     pub track: Metadata,
+    skip_forward: Option<bool>,
     paused: bool,
     position: i64,
     rate: f32,
@@ -79,9 +84,15 @@ pub struct Playback {
 }
 
 impl Playback {
-    pub fn new(device: String, track: Metadata, paused: bool, observation: (f32, f32, Instant)) -> Self {
+    pub fn new(
+        device: String,
+        track: Metadata,
+        paused: bool,
+        observation: (f32, f32, Instant),
+        skip_forward: Option<bool>,
+    ) -> Self {
         let (position_ms, rate, observed) = observation;
-        Self { device, track, paused, position: (position_ms * 1_000.0) as i64, rate, observed }
+        Self { device, track, skip_forward, paused, position: (position_ms * 1_000.0) as i64, rate, observed }
     }
 
     pub fn matches_track(&self, uri: &str, uid: &str) -> bool {
@@ -123,23 +134,7 @@ async fn serve(
 ) -> zbus::Result<()> {
     let connection = Connection::session().await?;
     let dbus = DBusProxy::new(&connection).await?;
-    let names = MatchRule::builder()
-        .msg_type(Type::Signal)
-        .sender("org.freedesktop.DBus")
-        .interface("org.freedesktop.DBus")
-        .member("NameOwnerChanged")
-        .arg0ns("org.mpris.MediaPlayer2")
-        .build()?;
-    let properties = MatchRule::builder()
-        .msg_type(Type::Signal)
-        .interface("org.freedesktop.DBus.Properties")
-        .member("PropertiesChanged")
-        .path(PATH)
-        .arg(0, PLAYER)
-        .build()?;
-    let names = MessageStream::for_match_rule(names, &connection, None).await?;
-    let properties = MessageStream::for_match_rule(properties, &connection, None).await?;
-    let mut signals = select(names, properties);
+    let mut signals = player_signals(&connection).await?;
     connection.object_server().at(PATH, Root).await?;
     connection
         .object_server()
@@ -189,27 +184,226 @@ async fn serve(
     }
 }
 
+async fn player_signals(
+    connection: &Connection,
+) -> zbus::Result<impl Stream<Item = zbus::Result<zbus::Message>> + use<>> {
+    let names = MatchRule::builder()
+        .msg_type(Type::Signal)
+        .sender("org.freedesktop.DBus")
+        .interface("org.freedesktop.DBus")
+        .member("NameOwnerChanged")
+        .arg0ns("org.mpris.MediaPlayer2")
+        .build()?;
+    let properties = MatchRule::builder()
+        .msg_type(Type::Signal)
+        .interface("org.freedesktop.DBus.Properties")
+        .member("PropertiesChanged")
+        .path(PATH)
+        .arg(0, PLAYER)
+        .build()?;
+    let names = MessageStream::for_match_rule(names, connection, None).await?;
+    let properties = MessageStream::for_match_rule(properties, connection, None).await?;
+    Ok(select(names, properties))
+}
+
 fn other_player(name: &str) -> bool {
-    name.starts_with("org.mpris.MediaPlayer2.") && name != NAME && name != "org.mpris.MediaPlayer2.playerctld"
+    media_player(name) && name != NAME
+}
+
+fn media_player(name: &str) -> bool {
+    name.starts_with("org.mpris.MediaPlayer2.") && name != "org.mpris.MediaPlayer2.playerctld"
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct MediaNotice {
+    pub title: String,
+    pub artist: String,
+    pub status: PlaybackStatus,
+    pub skip_forward: Option<bool>,
+    track_id: Option<OwnedObjectPath>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackStatus {
+    Playing,
+    Paused,
+    Stopped,
+}
+
+pub fn watch_osd(updater: AppUpdater) {
+    tokio::spawn(async move {
+        let report = |notice| {
+            send_update(&updater, move |app| {
+                if let Some(status) = &mut app.bar.status {
+                    status.show_media(notice);
+                }
+            })
+        };
+        while let Err(error) = watch_players(report).await {
+            warn!(%error, "Could not watch MPRIS playback");
+            sleep(Duration::from_secs(5)).await;
+        }
+    });
+}
+
+async fn watch_players(mut report: impl FnMut(MediaNotice) -> bool) -> zbus::Result<()> {
+    let connection = Connection::session().await?;
+    let bus = DBusProxy::new(&connection).await?;
+    let mut signals = player_signals(&connection).await?;
+    let names = bus.list_names().await?;
+    let connection = &connection;
+    let bus = &bus;
+    let mut players: HashMap<_, _> =
+        join_all(names.into_iter().filter(|name| media_player(name.as_str())).map(|name| async move {
+            let owner = bus.get_name_owner((*name).clone()).await.ok()?;
+            let state = read_notice(connection, owner.as_str()).await;
+            Some((name.to_string(), (owner.to_string(), state)))
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
+    while let Some(message) = signals.next().await {
+        let message = message?;
+        let header = message.header();
+        let body = message.body();
+        let notice = if header.member().is_some_and(|name| name.as_str() == "NameOwnerChanged") {
+            let (name, _, owner) = body.deserialize::<(&str, &str, &str)>()?;
+            if !media_player(name) {
+                continue;
+            }
+            if owner.is_empty() {
+                players.remove(name);
+                continue;
+            }
+            if players.get(name).is_some_and(|(previous, _)| previous == owner) {
+                continue;
+            }
+            let current = read_notice(connection, owner).await;
+            players.insert(name.into(), (owner.into(), current.clone()));
+            current
+                .filter(|notice| notice.status == PlaybackStatus::Playing)
+                .map(|notice| MediaNotice { skip_forward: None, ..notice })
+        } else {
+            let Some(sender) = header.sender() else { continue };
+            let Some((owner, previous)) = players.values_mut().find(|(owner, _)| owner == sender.as_str()) else {
+                continue;
+            };
+            let (_, changed, invalidated) = body.deserialize::<(&str, HashMap<&str, Variant<'_>>, Vec<&str>)>()?;
+            if !["PlaybackStatus", "Metadata"]
+                .iter()
+                .any(|name| changed.contains_key(name) || invalidated.contains(name))
+            {
+                continue;
+            }
+            let mut current = read_notice(connection, owner).await;
+            if current == *previous {
+                continue;
+            }
+            let old = mem::replace(previous, current.clone());
+            if let Some(notice) = &mut current {
+                if notice.status == PlaybackStatus::Stopped {
+                    let Some(old) = old.filter(|old| old.status != PlaybackStatus::Stopped) else { continue };
+                    if notice.title.is_empty() {
+                        notice.title = old.title;
+                        notice.artist = old.artist;
+                    }
+                    notice.skip_forward = None;
+                } else if let Some((before, after)) = old
+                    .as_ref()
+                    .and_then(|old| old.track_id.as_ref())
+                    .zip(notice.track_id.as_ref())
+                    .filter(|(before, after)| before != after)
+                {
+                    if notice.skip_forward.is_none() {
+                        notice.skip_forward = track_list_direction(connection, owner, before, after).await;
+                    }
+                } else {
+                    notice.skip_forward = None;
+                }
+            }
+            current
+        };
+        if let Some(notice) = notice
+            && (notice.status == PlaybackStatus::Stopped || !notice.title.is_empty())
+            && !report(notice)
+        {
+            return Ok(());
+        }
+    }
+    Err(zbus::Error::Failure("MPRIS event streams closed".into()))
+}
+
+async fn player_properties<'owner>(
+    connection: &Connection,
+    owner: &'owner str,
+) -> zbus::Result<PropertiesProxy<'owner>> {
+    PropertiesProxy::builder(connection).destination(owner).path(PATH).build().await
+}
+
+async fn read_notice(connection: &Connection, owner: &str) -> Option<MediaNotice> {
+    timeout(Duration::from_millis(500), async {
+        let player = player_properties(connection, owner).await.ok()?;
+        let mut properties = player.get_all(InterfaceName::try_from(PLAYER).ok()?).await.ok()?;
+        let status = properties.remove("PlaybackStatus")?;
+        let status = match <&str>::try_from(&status).ok()? {
+            "Playing" => PlaybackStatus::Playing,
+            "Paused" => PlaybackStatus::Paused,
+            "Stopped" => PlaybackStatus::Stopped,
+            _ => return None,
+        };
+        let mut metadata = properties
+            .remove("Metadata")
+            .and_then(|value| HashMap::<String, OwnedVariant>::try_from(value).ok())
+            .unwrap_or_default();
+        let title = metadata
+            .remove("xesam:title")
+            .and_then(|value| String::try_from(value).ok())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_default();
+        let artist = metadata
+            .remove("xesam:artist")
+            .and_then(|artists| Vec::<String>::try_from(artists).ok())
+            .map_or_else(String::new, |artists| artists.join(", "));
+        let track_id = metadata.remove("mpris:trackid").and_then(|value| OwnedObjectPath::try_from(value).ok());
+        let skip_forward = metadata.remove(SKIP_FORWARD).and_then(|value| bool::try_from(value).ok());
+        Some(MediaNotice { title, artist, status, skip_forward, track_id })
+    })
+    .await
+    .ok()?
+}
+
+async fn track_list_direction(
+    connection: &Connection,
+    owner: &str,
+    before: &OwnedObjectPath,
+    after: &OwnedObjectPath,
+) -> Option<bool> {
+    timeout(Duration::from_millis(150), async {
+        let player = player_properties(connection, owner).await.ok()?;
+        let tracks = player.get(InterfaceName::from_static_str(TRACK_LIST).ok()?, "Tracks").await.ok()?;
+        let tracks = Vec::<OwnedObjectPath>::try_from(tracks).ok()?;
+        let before = tracks.iter().position(|track| track == before)?;
+        let after = tracks.iter().position(|track| track == after)?;
+        Some(after > before)
+    })
+    .await
+    .ok()?
 }
 
 async fn other_player_playing(connection: &Connection, bus: &DBusProxy<'_>) -> zbus::Result<bool> {
     let names = bus.list_names().await?;
     let statuses = join_all(names.iter().filter(|name| other_player(name.as_str())).map(|name| async move {
         timeout(Duration::from_millis(500), async {
-            let player: Proxy<'_> = Builder::new(connection)
-                .destination(name.as_str())
-                .path(PATH)
-                .interface(PLAYER)
-                .cache_properties(CacheProperties::No)
-                .build()
-                .await?;
-            player.get_property::<String>("PlaybackStatus").await
+            let player = player_properties(connection, name.as_str()).await.ok()?;
+            let status = player.get(InterfaceName::from_static_str(PLAYER).ok()?, "PlaybackStatus").await.ok()?;
+            <&str>::try_from(&status).ok().map(|status| status == "Playing")
         })
         .await
     }))
     .await;
-    Ok(statuses.into_iter().any(|status| matches!(status, Ok(Ok(status)) if status == "Playing")))
+    Ok(statuses.into_iter().any(|status| matches!(status, Ok(Some(true)))))
 }
 
 // Static capabilities still use zbus's typed properties and introspection.
@@ -367,6 +561,9 @@ interface!("org.mpris.MediaPlayer2.Player", Player {
         if track.length > 0 {
             metadata.insert("mpris:length", OwnedVariant::from(track.length));
         }
+        if let Some(forward) = state.skip_forward {
+            metadata.insert(SKIP_FORWARD, OwnedVariant::from(forward));
+        }
         for (key, text) in [("mpris:artUrl", &track.art), ("xesam:isrc", &track.isrc)] {
             if let Some(text) = text {
                 metadata.insert(key, OwnedVariant::from(Str::from(text.as_str())));
@@ -413,7 +610,105 @@ interface!("org.mpris.MediaPlayer2.Player", Player {
 mod tests {
     use super::*;
     use serde_json::json;
-    use zbus::fdo::PropertiesProxy;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+    use zbus::{
+        Proxy,
+        proxy::{Builder, CacheProperties},
+    };
+
+    struct OsdPlayer {
+        state: MediaNotice,
+        read_metadata: Arc<Notify>,
+    }
+
+    #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
+    impl OsdPlayer {
+        #[zbus(property)]
+        const fn playback_status(&self) -> &'static str {
+            match self.state.status {
+                PlaybackStatus::Playing => "Playing",
+                PlaybackStatus::Paused => "Paused",
+                PlaybackStatus::Stopped => "Stopped",
+            }
+        }
+
+        #[zbus(property)]
+        fn metadata(&self) -> HashMap<&str, OwnedVariant> {
+            self.read_metadata.notify_one();
+            if self.state.status == PlaybackStatus::Stopped {
+                return HashMap::new();
+            }
+            HashMap::from([
+                ("mpris:trackid", OwnedVariant::from((**self.state.track_id.as_ref().unwrap()).clone())),
+                ("xesam:title", OwnedVariant::from(Str::from(self.state.title.as_str()))),
+                ("xesam:artist", OwnedVariant::try_from(Variant::from(vec![self.state.artist.as_str()])).unwrap()),
+            ])
+        }
+    }
+
+    struct OsdTrackList(Vec<OwnedObjectPath>);
+
+    #[zbus::interface(name = "org.mpris.MediaPlayer2.TrackList")]
+    impl OsdTrackList {
+        #[zbus(property(emits_changed_signal = "const"))]
+        fn tracks(&self) -> Vec<OwnedObjectPath> {
+            self.0.clone()
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "Run with dbus-run-session to use an isolated session bus"]
+    async fn osd_reports_track_and_playback_changes_from_another_player() {
+        let notification = Arc::new(Notify::new());
+        let connection = Connection::session().await.unwrap();
+        connection
+            .object_server()
+            .at(PATH, OsdPlayer {
+                state: MediaNotice {
+                    title: "First track".into(),
+                    artist: "Artist".into(),
+                    status: PlaybackStatus::Playing,
+                    skip_forward: None,
+                    track_id: Some(track_path("First track", "")),
+                },
+                read_metadata: Arc::clone(&notification),
+            })
+            .await
+            .unwrap();
+        let tracks = ["First track", "Next track"].map(|title| track_path(title, ""));
+        connection.object_server().at(PATH, OsdTrackList(tracks.into())).await.unwrap();
+        connection.request_name("org.mpris.MediaPlayer2.cantus_osd_test").await.unwrap();
+        let interface = connection.object_server().interface::<_, OsdPlayer>(PATH).await.unwrap();
+        let (send, mut notices) = mpsc::unbounded_channel();
+        let watcher = tokio::spawn(watch_players(move |notice| send.send(notice).is_ok()));
+        timeout(Duration::from_secs(3), notification.notified()).await.unwrap();
+
+        for (title, status, direction) in [
+            ("Next track", PlaybackStatus::Playing, Some(true)),
+            ("First track", PlaybackStatus::Playing, Some(false)),
+            ("First track", PlaybackStatus::Paused, None),
+            ("First track", PlaybackStatus::Playing, None),
+            ("First track", PlaybackStatus::Stopped, None),
+        ] {
+            let mut player = interface.get_mut().await;
+            if player.state.title == title {
+                player.state.status = status;
+                player.playback_status_changed(interface.signal_emitter()).await.unwrap();
+            } else {
+                player.state.title = title.into();
+                player.state.track_id = Some(track_path(title, ""));
+                player.metadata_changed(interface.signal_emitter()).await.unwrap();
+            }
+            drop(player);
+            let notice = timeout(Duration::from_secs(3), notices.recv()).await.unwrap().unwrap();
+            assert_eq!(notice.title, title);
+            assert_eq!(notice.artist, "Artist");
+            assert_eq!(notice.status, status);
+            assert_eq!(notice.skip_forward, direction);
+        }
+        watcher.abort();
+    }
 
     struct LocalPlayer;
 
@@ -452,8 +747,9 @@ mod tests {
         }))
         .unwrap();
         let first = Metadata::from(&track);
-        let update_track =
-            |track| remote.send_replace(Some(Playback::new("phone".into(), track, false, (0.0, 1.0, Instant::now()))));
+        let update_track = |track| {
+            remote.send_replace(Some(Playback::new("phone".into(), track, false, (0.0, 1.0, Instant::now()), None)))
+        };
         update_track(first.clone());
         wait_for_name(&bus, true).await;
 
@@ -465,7 +761,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let props = PropertiesProxy::builder(&connection).destination(NAME).path(PATH).build().await.unwrap();
+        let props = player_properties(&connection, NAME).await.unwrap();
         let mut updates = props.receive_properties_changed().await.unwrap();
         let next_uri = "spotify:track:3OIgsG6duyvwodGPoFYVzJ";
         let next = Metadata {
