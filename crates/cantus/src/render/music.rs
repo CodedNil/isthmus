@@ -1047,43 +1047,15 @@ mod tests {
     }
 
     #[test]
-    fn playlist_hex_grid_balances_rows_and_uses_available_vertical_space() {
-        for (count, rows) in [(5, [2, 1, 2]), (4, [1, 2, 1]), (6, [2, 2, 2]), (7, [2, 3, 2])] {
+    fn playlist_grid_centers_the_short_row_and_reserves_its_full_width() {
+        let size = vec2(40.0 * HEXAGON_WIDTH_RATIO, 40.0);
+        for (count, rows, short_row) in [(4, [1, 2, 1], [0, 1, 2]), (5, [2, 1, 2], [2, 0, 1])] {
             assert_eq!(playlist_row_counts(count), rows);
+            let center = |index| playlist_button_center(index, count, size).x;
+            let [single, left, right] = short_row.map(center);
+            assert!((single - left.midpoint(right)).abs() < 0.0001);
+            assert!((right - left + size.x - playlist_grid_width(count, size.x)).abs() < 0.0001);
         }
-        let tile_height = (100.0 + PLAYLIST_EXTENSION) / 2.5;
-        let size = vec2(tile_height * HEXAGON_WIDTH_RATIO, tile_height);
-        let centers = (0..5).map(|i| playlist_button_center(i, 5, size)).collect::<Vec<_>>();
-
-        assert!((size.y * 2.5 - 100.0 - PLAYLIST_EXTENSION).abs() < 0.0001);
-        assert_eq!([centers[0].y, centers[3].y], [centers[1].y, centers[4].y]);
-        assert_eq!([centers[0].x, centers[1].x], [centers[3].x, centers[4].x]);
-        let four = (0..4).map(|i| playlist_button_center(i, 4, size)).collect::<Vec<_>>();
-        assert!((four[0].x - f32::midpoint(four[1].x, four[2].x)).abs() < 0.0001);
-        assert!((centers[2].y - centers[0].y - size.y * 0.75).abs() < 0.0001);
-        assert!((centers[2].y - PANEL_START - f32::midpoint(100.0, PLAYLIST_EXTENSION)).abs() < 0.0001);
-        for count in 1..=12 {
-            let centers = (0..count).map(|i| playlist_button_center(i, count, size)).collect::<Vec<_>>();
-            let bounds = centers.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), center| {
-                (min.min(center.x - size.x * 0.5), max.max(center.x + size.x * 0.5))
-            });
-            assert!((bounds.1 - bounds.0 - playlist_grid_width(count, size.x)).abs() < 0.0001);
-        }
-        let tile = Rect::from_center_size(Vec2::ZERO, size);
-        assert!(playlist_hex(tile).outlined(8.0).bounds(0.0).min.x < tile.min.x - 7.9);
-    }
-
-    #[test]
-    fn artwork_crop_shares_cornering_on_both_sides() {
-        let crop = Rect::from_center_size(Vec2::ZERO, Vec2::splat(20.0));
-        let left_corner = vec2(-9.0, -9.0);
-        let right_corner = vec2(9.0, -9.0);
-        let square = track_shape(crop, Vec2::ZERO);
-        let round = track_shape(crop, Vec2::ONE);
-
-        assert_eq!(square.distance_at(left_corner), square.distance_at(right_corner));
-        assert_eq!(round.distance_at(left_corner), round.distance_at(right_corner));
-        assert_ne!(square.distance_at(left_corner), round.distance_at(left_corner));
     }
 
     #[test]

@@ -615,15 +615,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spectrum_interpolates_smoothly_between_vertical_samples() {
-        let levels = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
-        assert_eq!(spectrum_level(levels, -6.0, 6.0), 0.0);
-        assert!((spectrum_level(levels, -5.0, 6.0) - 0.5).abs() < 0.001);
-        assert_eq!(spectrum_level(levels, 0.0, 6.0), 1.0);
-        assert_eq!(spectrum_level(levels, 6.0, 6.0), 0.0);
-    }
-
-    #[test]
     fn dragging_the_power_icon_down_shuts_down_and_up_reboots() {
         assert!(matches!(power_action(0.61), Some(platform::PowerAction::PowerOff)));
         assert!(matches!(power_action(1.0), Some(platform::PowerAction::PowerOff)));

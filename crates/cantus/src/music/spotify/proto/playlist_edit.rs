@@ -1,21 +1,21 @@
 /// Playlist entry identified by its Spotify URI.
-#[derive(PartialEq, Eq, prost::Message)]
+#[derive(prost::Message)]
 pub struct Item {
     #[prost(string, required, tag = "1")]
     pub uri: String,
 }
 
 /// Appends entries to a playlist.
-#[derive(PartialEq, Eq, prost::Message)]
+#[derive(prost::Message)]
 pub struct Add {
     #[prost(message, repeated, tag = "2")]
     pub items: Vec<Item>,
     #[prost(bool, optional, tag = "4")]
-    pub at_end: Option<bool>,
+    pub add_last: Option<bool>,
 }
 
 /// Removes entries by URI.
-#[derive(PartialEq, Eq, prost::Message)]
+#[derive(prost::Message)]
 pub struct Remove {
     #[prost(message, repeated, tag = "3")]
     pub items: Vec<Item>,
@@ -25,7 +25,7 @@ pub struct Remove {
 }
 
 /// One playlist edit, with a kind that selects the matching payload.
-#[derive(PartialEq, Eq, prost::Message)]
+#[derive(prost::Message)]
 pub struct Operation {
     #[prost(enumeration = "OperationKind", required, tag = "1")]
     pub kind: i32,
@@ -36,8 +36,7 @@ pub struct Operation {
 }
 
 /// Wire discriminator for the supported playlist edit payloads.
-#[derive(Debug, PartialEq, Eq, prost::Enumeration)]
-#[repr(i32)]
+#[derive(Debug, prost::Enumeration)]
 pub enum OperationKind {
     /// Default value for an unrecognized edit kind.
     Unknown = 0,

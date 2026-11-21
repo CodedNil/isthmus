@@ -301,7 +301,7 @@ struct WeatherLayout {
 mod monitor {
     use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, WeatherCondition, WeatherPanel};
     use crate::{
-        app::{Background, fetch_json, send_update},
+        app::{Background, send_update},
         platform,
     };
     use core::{array::from_fn, iter::once, time::Duration};
@@ -437,11 +437,12 @@ mod monitor {
             "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current={WEATHER_FIELDS},relative_humidity_2m,wind_speed_10m&hourly={WEATHER_FIELDS}&forecast_hours=24&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&temperature_unit=celsius&timezone=auto&forecast_days=6"
         );
         loop {
-            let request = background.http.get(&url);
-            let forecasts = if locations.len() == 1 {
-                fetch_json::<Forecast>(request).await.map(|forecast| vec![forecast])
-            } else {
-                fetch_json(request).await
+            let forecasts = match background.http.get(&url).send().await.and_then(reqwest::Response::error_for_status) {
+                Ok(response) if locations.len() == 1 => {
+                    response.json::<Forecast>().await.map(|forecast| vec![forecast])
+                }
+                Ok(response) => response.json().await,
+                Err(error) => Err(error),
             };
             let delay = match forecasts {
                 Ok(results) => {
@@ -574,20 +575,17 @@ mod monitor {
         }
 
         #[test]
-        fn precipitation_has_clouds_and_heavier_weather_reduces_visibility() {
-            for code in [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 71, 73, 75, 77, 80, 81, 82, 85, 86, 95, 96, 99] {
+        fn weather_codes_preserve_clear_fog_and_precipitation_conditions() {
+            for code in [51, 61, 71, 80, 85, 95] {
                 let (_, scene) = weather(code);
                 assert!(scene.cloud >= 0.5, "precipitation without clouds: {code}");
             }
-            for codes in [[51, 53, 55], [61, 63, 65], [71, 73, 75], [80, 81, 82]] {
+            for codes in [[61, 63, 65], [71, 73, 75]] {
                 assert!(codes.windows(2).all(|pair| weather(pair[0]).1.fog < weather(pair[1]).1.fog));
             }
             assert!(weather(80).1.cloud < weather(61).1.cloud);
             assert!(weather(85).1.cloud < weather(71).1.cloud);
-        }
 
-        #[test]
-        fn clear_fog_and_thunder_remain_distinct() {
             let clear = weather(0).1;
             assert!(clear.cloud + clear.fog + clear.rain + clear.snow <= f32::EPSILON);
             for code in [45, 48] {

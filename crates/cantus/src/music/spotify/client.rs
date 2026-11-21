@@ -1,6 +1,5 @@
 use super::{
-    AudioFeatures, CachedPlaylist, CatalogTrack, Metadata, MusicResult, PlaylistId, REQUEST_TIMEOUT, SpotifyLyrics,
-    TrackId,
+    AudioFeatures, CachedPlaylist, CatalogTrack, Metadata, MusicResult, PlaylistId, SpotifyLyrics, TrackId,
     proto::{
         collection::{CollectionItem, WriteRequest},
         connect::{Cluster, PutStateRequest},
@@ -17,17 +16,12 @@ use super::{
     session::Session,
     track_id_from_uri,
 };
-use crate::http::client_builder;
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
 use prost::Message;
 use reqwest::{
-    Client, Error as HttpError, IntoUrl, Method, StatusCode, Version,
-    header::{
-        ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER,
-        USER_AGENT,
-    },
-    redirect::Policy,
+    Error as HttpError, Method, RequestBuilder, StatusCode,
+    header::{ACCEPT, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER, USER_AGENT},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -45,6 +39,10 @@ const PROTOBUF: HeaderValue = HeaderValue::from_static("application/x-protobuf")
 const CONNECTION_ID: HeaderName = HeaderName::from_static("x-spotify-connection-id");
 const GET_LISTS: &str = "/playlist/spotify.list.v1.ListReadService/GetLists";
 const TRACK_METADATA: &str = "/extended-metadata/v0/extended-metadata";
+const SPOTIFY_USER_AGENT: HeaderValue =
+    HeaderValue::from_static(concat!("Spotify/124200290 Linux/0 (Cantus/", env!("CARGO_PKG_VERSION"), ")"));
+const MAX_HOST_ATTEMPTS: usize = 3;
+const MAX_RATE_LIMIT_WAIT_SECONDS: u64 = 10;
 
 type ListResult = MusicResult<(ListEntity, Vec<u8>)>;
 pub(super) type PlaylistResult = MusicResult<(CachedPlaylist, Option<Attributes>)>;
@@ -62,26 +60,23 @@ impl Session {
         self.request(method, endpoint, headers, message.encode_to_vec().into()).await
     }
 
-    async fn get_json<T: DeserializeOwned>(&self, endpoint: &str, mut headers: HeaderMap) -> MusicResult<T> {
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    async fn get_json<T: DeserializeOwned>(&self, endpoint: &str, headers: HeaderMap) -> MusicResult<T> {
         let body = self.request(&Method::GET, endpoint, headers, Bytes::new()).await?;
         Ok(serde_json::from_slice(&body)?)
     }
 
-    async fn request(
-        &self,
-        method: &Method,
-        endpoint: &str,
-        mut headers: HeaderMap,
-        body: Bytes,
-    ) -> MusicResult<Bytes> {
-        let mut remaining = if matches!(*method, Method::GET | Method::PUT) { 3 } else { 1 };
+    async fn request(&self, method: &Method, endpoint: &str, headers: HeaderMap, body: Bytes) -> MusicResult<Bytes> {
+        let mut remaining = if matches!(*method, Method::GET | Method::PUT) { MAX_HOST_ATTEMPTS } else { 1 };
         loop {
             let (base, token) = tokio::join!(self.base_url(), self.auth_token());
-            let token = token?;
-            headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}"))?);
-            let result = self.http_client.request(method, format!("{base}{endpoint}"), &headers, body.clone()).await;
-            if !result.as_ref().is_err_and(|error| retryable(error.as_ref())) {
+            let request = self
+                .http
+                .request(method.clone(), format!("{base}{endpoint}"))
+                .headers(headers.clone())
+                .bearer_auth(token?)
+                .body(body.clone());
+            let result = send_with_rate_limit_retry(request).await;
+            if !result.as_ref().is_err_and(|error| should_rotate_host(error.as_ref())) {
                 return result;
             }
 
@@ -205,8 +200,8 @@ impl Session {
     }
 
     pub(super) async fn lyrics(&self, id: TrackId) -> MusicResult<Option<SpotifyLyrics>> {
-        let path = format!("/color-lyrics/v2/track/{id}?format=json&vocalRemoval=false&market=from_token");
-        let mut headers = HeaderMap::new();
+        let path = format!("/color-lyrics/v2/track/{id}?format=json");
+        let mut headers = spotify_client_headers();
         headers.insert("app-platform", HeaderValue::from_static("WebPlayer"));
         match self.get_json(&path, headers).await {
             Err(error) if error.downcast_ref::<HttpStatus>().is_some_and(HttpStatus::missing) => Ok(None),
@@ -261,9 +256,15 @@ fn connected_headers(connection_id: &str) -> MusicResult<HeaderMap> {
     if connection_id.is_empty() {
         return Err("Spotify Dealer is not connected".into());
     }
-    let mut headers = HeaderMap::new();
+    let mut headers = spotify_client_headers();
     headers.insert(CONNECTION_ID, connection_id.parse()?);
     Ok(headers)
+}
+
+fn spotify_client_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, SPOTIFY_USER_AGENT);
+    headers
 }
 
 fn decode_list_results(bytes: &[u8], uris: &[String]) -> MusicResult<Vec<ListResult>> {
@@ -310,53 +311,26 @@ pub(super) fn gzip_encoder() -> GzEncoder<Vec<u8>> {
     GzEncoder::new(Vec::new(), Compression::fast())
 }
 
-const SPOTIFY_USER_AGENT: &str = concat!("Spotify/124200290 Linux/0 (Cantus/", env!("CARGO_PKG_VERSION"), ")");
-pub(super) struct HttpClient(pub(super) Client);
-
-impl HttpClient {
-    pub(super) fn new() -> MusicResult<Self> {
-        Ok(Self(client_builder().redirect(Policy::none()).timeout(REQUEST_TIMEOUT).no_proxy().build()?))
+async fn send_with_rate_limit_retry(request: RequestBuilder) -> MusicResult<Bytes> {
+    let retry = request.try_clone();
+    let mut response = request.send().await.map_err(HttpError::without_url)?;
+    if response.status() == StatusCode::TOO_MANY_REQUESTS
+        && let Some(retry) = retry
+        && let Some(seconds) = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|seconds| *seconds <= MAX_RATE_LIMIT_WAIT_SECONDS)
+    {
+        drop(response);
+        sleep(Duration::from_secs(seconds)).await;
+        response = retry.send().await.map_err(HttpError::without_url)?;
     }
-
-    pub(super) async fn request(
-        &self,
-        method: &Method,
-        url: impl IntoUrl + Clone,
-        headers: &HeaderMap,
-        body: Bytes,
-    ) -> MusicResult<Bytes> {
-        let mut retried = false;
-        loop {
-            let response = self
-                .0
-                .request(method.clone(), url.clone())
-                .version(Version::HTTP_3)
-                .header(USER_AGENT, SPOTIFY_USER_AGENT)
-                .headers(headers.clone())
-                .body(body.clone())
-                .send()
-                .await
-                .map_err(HttpError::without_url)?;
-            let status = response.status();
-            if status.is_success() {
-                return Ok(response.bytes().await.map_err(HttpError::without_url)?);
-            }
-            if status == StatusCode::TOO_MANY_REQUESTS && !retried {
-                let retry = response
-                    .headers()
-                    .get(RETRY_AFTER)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .filter(|seconds| *seconds <= 10);
-                if let Some(seconds) = retry {
-                    retried = true;
-                    sleep(Duration::from_secs(seconds)).await;
-                    continue;
-                }
-            }
-            return Err(HttpStatus(status).into());
-        }
+    if !response.status().is_success() {
+        return Err(HttpStatus(response.status()).into());
     }
+    Ok(response.bytes().await.map_err(HttpError::without_url)?)
 }
 
 #[derive(Debug)]
@@ -383,7 +357,7 @@ impl Display for HttpStatus {
 
 impl StdError for HttpStatus {}
 
-fn retryable(error: &(dyn StdError + 'static)) -> bool {
+fn should_rotate_host(error: &(dyn StdError + 'static)) -> bool {
     error.downcast_ref::<HttpError>().is_some_and(|error| error.is_timeout() || error.is_request() || error.is_decode())
         || error.downcast_ref::<HttpStatus>().is_some_and(|status| {
             matches!(

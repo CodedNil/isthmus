@@ -1,12 +1,7 @@
 use crate::{
     app::camera::Camera,
-    home,
     presence::Presence,
-    render::{
-        Globals,
-        geometry::acceleration::Scene,
-        light::sun::{SunSettings, utc_now},
-    },
+    render::{Globals, geometry::acceleration::Scene},
 };
 use isthmus::glam::{Vec2, Vec3};
 pub use wayland::run;
@@ -36,10 +31,6 @@ pub struct App {
 }
 
 impl App {
-    pub fn with_baked_lighting(settings: SunSettings, controls: &[u8]) -> Result<Self, &'static str> {
-        Ok(Self::from_scene(Scene::from_baked_at(&home::rooms(), utc_now(), settings, controls)?))
-    }
-
     fn from_scene(scene: Scene) -> Self {
         let camera =
             Camera { target: Vec2::ZERO, distance: (scene.radius * 2.0).clamp(6.0, 40.0), ..Camera::default() };
@@ -119,7 +110,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::*;
+    use crate::{app::*, home, render::light::sun::SunSettings};
 
     #[test]
     fn offscreen_passes_submit_and_resolve() {

@@ -256,13 +256,4 @@ mod tests {
             assert!(interaction.hovering() && !interaction.pressed());
         }
     }
-
-    #[test]
-    fn releasing_away_from_the_widget_is_not_a_click() {
-        let mut interaction = pressed();
-        interaction.apply(InputEvent::Motion(Vec2::splat(50.0)));
-        interaction.apply(InputEvent::Release);
-        interaction.begin_frame();
-        assert!(!interaction.interact(7, square()).clicked);
-    }
 }

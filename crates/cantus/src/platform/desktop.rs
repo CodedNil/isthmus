@@ -26,19 +26,20 @@ pub enum PowerAction {
 pub fn run_power_action(action: PowerAction) {
     let method: &str = action.into();
     tokio::spawn(async move {
-        let result = async {
-            zbus::Connection::system()
-                .await?
-                .call_method(
-                    Some("org.freedesktop.login1"),
-                    "/org/freedesktop/login1",
-                    Some("org.freedesktop.login1.Manager"),
-                    method,
-                    &(false,),
-                )
-                .await
-        }
-        .await;
+        let result = match zbus::Connection::system().await {
+            Ok(connection) => {
+                connection
+                    .call_method(
+                        Some("org.freedesktop.login1"),
+                        "/org/freedesktop/login1",
+                        Some("org.freedesktop.login1.Manager"),
+                        method,
+                        &(false,),
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
+        };
         if let Err(error) = result {
             warn!(%error, method, "Failed to run held power action");
         }

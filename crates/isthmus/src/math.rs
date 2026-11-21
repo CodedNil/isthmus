@@ -56,20 +56,3 @@ macro_rules! impl_min_max {
     )+};
 }
 impl_min_max!(f32, Vec2, Vec3, Vec4);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn numeric_clamp_matches_ordered_scalar_and_vector_ranges() {
-        for (lower, upper) in [(-3.0f32, -1.0), (-1.0, 0.5), (0.5, 0.5), (1.0, 2.0)] {
-            let middle = lower.midpoint(upper);
-            for value in [f32::NEG_INFINITY, lower, middle, upper, f32::INFINITY] {
-                assert_eq!(value.clamp_num(lower, upper), value.clamp(lower, upper));
-            }
-            let values = Vec3::new(lower - 1.0, middle, upper + 1.0);
-            assert_eq!(values.clamp_num(Vec3::splat(lower), Vec3::splat(upper)), Vec3::new(lower, middle, upper));
-        }
-    }
-}

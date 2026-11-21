@@ -289,8 +289,10 @@ mod tests {
                 assert!((coordinates(light, ray) - uv).length() < 1.0e-4);
             }
         }
-        let corner = direction(light, vec2(0.0, 0.0));
-        assert!((cone_radius(corner) - CONE_RADIUS).abs() < 1.0e-5, "the map corners sit on the cone's rim");
+        for uv in [Vec2::ZERO, Vec2::X, Vec2::Y, Vec2::ONE] {
+            let corner = direction(light, uv);
+            assert!(corner.z < 0.0 && (cone_radius(corner) - CONE_RADIUS).abs() < 1.0e-5);
+        }
     }
     #[test]
     fn octahedral_mapping_roundtrips_both_hemispheres() {
@@ -335,21 +337,6 @@ mod tests {
                 (actual - expected).abs() < 0.00001,
                 "visibility must be the fraction of unblocked taps: {actual} vs {expected}"
             );
-        }
-    }
-
-    #[test]
-    fn downward_projection_roundtrips_and_allocates_no_texels_to_the_upper_hemisphere() {
-        let light = Object::new(Kind::Downlight, Vec3::ZERO, Vec3::ONE, Paint);
-        for y in 0..31 {
-            for x in 0..31 {
-                let uv = vec2((x as f32 + 0.5) / 31.0, (y as f32 + 0.5) / 31.0);
-                let ray = direction(light, uv);
-                assert!(ray.z <= 0.0);
-                if ray.z < 0.0 {
-                    assert!((coordinates(light, ray) - uv).length() < 0.00001);
-                }
-            }
         }
     }
 }

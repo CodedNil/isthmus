@@ -42,7 +42,6 @@ reqwest = { version = "0.13.5", default-features = false, features = [
     "form",
     "gzip",
     "http2",
-    "http3",
     "json",
     "query",
     "rustls",
@@ -75,7 +74,7 @@ toml.workspace = true
 # Launcher and local utilities
 fastrand = "2.5.0"
 fend-core = "1.5.9"
-jiff = { version = "1.0.1", default-features = false, features = [
+jiff = { version = "1.0.2", default-features = false, features = [
     "serde",
     "tz-system",
     "tzdb-zoneinfo",

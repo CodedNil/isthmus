@@ -1,5 +1,5 @@
 use crate::{
-    app::AppUpdater,
+    app::Background,
     config::Config,
     render::music::{AudioFeatures, DropletMotion},
 };
@@ -7,7 +7,6 @@ use arrayvec::ArrayString;
 use enrichment::TrackCache;
 use isthmus_2d::Ramp;
 use queue::{Queue, Timeline};
-use serde::Deserialize;
 use std::{
     collections::HashSet,
     error::Error,
@@ -31,7 +30,7 @@ pub type MusicResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 pub const ART_SIZE: u32 = 128;
 pub const TRACK_SPACING_MS: f32 = 3000.0;
 const SCROLL_RESTART_AFTER_MS: f32 = 10_000.0;
-const SCROLL_RESTART_GRACE: Duration = Duration::from_secs(2);
+pub(crate) const TRACK_RESTART_GRACE: Duration = Duration::from_secs(2);
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct Music {
@@ -45,12 +44,12 @@ pub struct Music {
 }
 
 impl Music {
-    pub(crate) fn new(config: &Config, updater: &AppUpdater, local_playback: watch::Receiver<bool>) -> Self {
+    pub(crate) fn new(config: &Config, background: &Background, local_playback: watch::Receiver<bool>) -> Self {
         Self {
             resources: TrackCache::default(),
             queue: Queue { timeline: Timeline { observed_at: Instant::now(), .. }, .. },
             last_toggle: Instant::now(),
-            spotify: spotify::Spotify::new(config, updater, local_playback),
+            spotify: spotify::Spotify::new(config, background, local_playback),
             ..
         }
     }
@@ -83,7 +82,7 @@ impl Music {
         };
         let now = Instant::now();
         let recently_restarted =
-            self.scroll_restart.is_some_and(|(id, at)| id == track.interaction_id && now - at < SCROLL_RESTART_GRACE);
+            self.scroll_restart.is_some_and(|(id, at)| id == track.interaction_id && now - at < TRACK_RESTART_GRACE);
         let (restart, skip) = scroll_playback(
             notches,
             self.queue.timeline.position_now(),
@@ -143,6 +142,10 @@ impl Music {
     }
 }
 
+pub(crate) fn should_restart_track(position_ms: f32, recently_restarted: bool) -> bool {
+    position_ms > SCROLL_RESTART_AFTER_MS && !recently_restarted
+}
+
 fn scroll_playback(
     notches: i32,
     position_ms: f32,
@@ -150,7 +153,7 @@ fn scroll_playback(
     previous: usize,
     next: usize,
 ) -> (bool, i32) {
-    let restart = notches < 0 && position_ms > SCROLL_RESTART_AFTER_MS && !recently_restarted;
+    let restart = notches < 0 && should_restart_track(position_ms, recently_restarted);
     let skip = (notches + i32::from(restart))
         .clamp(-i32::try_from(previous).unwrap_or(i32::MAX), i32::try_from(next).unwrap_or(i32::MAX));
     (restart, skip)
@@ -174,15 +177,13 @@ mod tests {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone)]
 pub struct Track {
     /// Spotify track ID used for playback and library requests.
     pub id: Option<TrackId>,
     /// Recording identifier shared by providers that expose an ISRC.
-    #[serde(default)]
     pub isrc: Option<String>,
     /// The requested recording, kept when Spotify plays an alternative.
-    #[serde(default)]
     pub uri: String,
     pub name: String,
     pub original_title: Option<String>,
@@ -192,11 +193,8 @@ pub struct Track {
     /// Zero means the duration is unknown, including live media.
     pub duration_ms: u32,
     /// Spotify's id for this queue entry, unique even for repeats.
-    #[serde(skip)]
     pub(crate) queue_uid: String,
-    #[serde(skip, default = "Track::next_interaction_id")]
     pub(crate) interaction_id: u64,
-    #[serde(skip)]
     pub runtime: TrackRuntime,
 }
 

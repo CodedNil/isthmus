@@ -97,7 +97,7 @@ mod tests {
     const EQUINOX: f64 = 1_773_964_800.0; // 2026-03-20 00:00 UTC
 
     #[test]
-    fn sun_moves_east_to_west_and_sets() {
+    fn solar_position_tracks_time_and_location() {
         let settings = SunSettings { latitude: 0.0, longitude: 0.0, north_degrees: 0.0 };
         let morning = Sun::at_utc(EQUINOX + 8.0 * 3600.0, settings);
         let noon = Sun::at_utc(EQUINOX + 12.0 * 3600.0, settings);
@@ -109,10 +109,7 @@ mod tests {
         assert!(night.sky.max_element() < 0.01);
         let rotated = Sun::at_utc(EQUINOX + 8.0 * 3600.0, SunSettings { north_degrees: 90.0, ..settings });
         assert!((rotated.direction.y - morning.direction.x).abs() < 0.001);
-    }
 
-    #[test]
-    fn latitude_seasons_and_longitude_affect_the_sun() {
         let settings = SunSettings::default();
         let summer = Sun::at_utc(1_782_000_000.0 + 12.0 * 3600.0, settings); // June 21
         let winter = Sun::at_utc(1_797_811_200.0 + 12.0 * 3600.0, settings); // December 21

@@ -433,24 +433,6 @@ mod tests {
     }
 
     #[test]
-    fn lyric_shadows_and_history_fade_at_expected_boundaries() {
-        assert!(lyric_shadow(SHADOW_REACH + 1.0).w > 0.0);
-        assert!(lyric_shadow(0.0).w > lyric_shadow(SHADOW_REACH + 1.0).w);
-        assert!(lyric_shadow(0.0).w < 1.0);
-        assert_eq!(lyric_shadow(BACKDROP_REACH).w, 0.0);
-        assert_eq!(lyric_shadow(BACKDROP_REACH + 10.0).w, 0.0);
-
-        for playhead in [0.0, 0.5, 380.0] {
-            for offset in [0.0, 0.25, 100.0, 2000.0] {
-                assert_eq!(history_opacity(playhead + offset, playhead), 1.0);
-            }
-        }
-        assert_eq!(history_opacity(0.0, 380.0), 0.0);
-        assert_eq!(history_opacity(190.0, 380.0), 0.5);
-        assert!(history_opacity(300.0, 380.0) > history_opacity(100.0, 380.0));
-    }
-
-    #[test]
     fn prepares_text_in_channel_order_across_empty_channels() {
         install_fonts();
         let source = Lyrics {

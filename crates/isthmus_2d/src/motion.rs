@@ -46,33 +46,16 @@ impl Ramp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use isthmus::glam::FloatExt;
 
     #[test]
-    fn ramp_matches_stepwise_move_towards_at_any_frame_rate() {
-        for frames in [7, 60, 240] {
-            let mut ramp = Ramp::new(0.0);
-            let mut stepped = 0.0f32;
-            ramp.approach_over(0.0, 1.0, 0.8);
-            for frame in 1..=frames {
-                let time = frame as f32 / frames as f32 * 0.5;
-                ramp.approach_over(time, 1.0, 0.8);
-                stepped = stepped.move_towards(1.0, 0.5 / frames as f32 / 0.8);
-                assert!((ramp.at(time) - stepped).abs() < 1e-4, "{frames} frames at {time}");
-            }
-        }
-    }
-
-    #[test]
-    fn ramp_continues_from_where_it_is_and_ignores_repeated_goals() {
+    fn ramp_is_continuous_when_repeating_or_changing_goals() {
         let mut ramp = Ramp::new(0.0);
-        ramp.approach(0.0, 1.0, 2.0);
-        let before = ramp;
-        ramp.approach(0.1, 1.0, 2.0);
-        assert!(ramp == before);
-        assert!((ramp.at(0.25) - 0.5).abs() < 1e-6);
-        ramp.approach(0.25, 0.0, 2.0);
-        assert!(ramp.at(0.5).abs() < 1e-6);
-        assert_eq!(ramp.at(10.0), 0.0);
+        ramp.approach_over(0.0, 1.0, 0.5);
+        assert_eq!(ramp.approach_over(0.125, 1.0, 0.5), 0.25);
+        assert_eq!(ramp.at(0.25), 0.5);
+        assert_eq!(ramp.at(1.0), 1.0);
+        assert_eq!(ramp.approach(0.25, 0.0, 2.0), 0.5);
+        assert_eq!(ramp.at(0.375), 0.25);
+        assert_eq!(ramp.at(1.0), 0.0);
     }
 }

@@ -23,8 +23,7 @@ fn accumulation_survives_running_clock_and_resets_only_for_discontinuities() {
         for brightness in [0.0, 0.5, 1.0] {
             assert!(scene.set_light_state("test", brightness));
             assert_ne!(scene.lighting_revision, revision);
-            let (_, mask) = samples.advance(true);
-            assert_eq!(mask.count_ones(), 1);
+            assert_eq!(samples.advance(scene.lighting_revision != revision), (0, 1));
             for _ in 0..8 {
                 samples.advance(false);
             }

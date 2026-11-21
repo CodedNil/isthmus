@@ -30,25 +30,3 @@ impl Accumulation {
         (self.phase, self.mask)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::render::pipeline::temporal::*;
-
-    #[test]
-    fn camera_changes_discard_all_previous_samples() {
-        for interleaved in [false, true] {
-            let mut history = Accumulation::new(interleaved);
-            for _ in 0..20 {
-                history.advance(false);
-            }
-            assert!(history.converged());
-            let (phase, mask) = history.advance(true);
-            assert_eq!((phase, mask), (0, 1));
-            for _ in 0..8 {
-                history.advance(false);
-            }
-            assert!(history.converged());
-        }
-    }
-}

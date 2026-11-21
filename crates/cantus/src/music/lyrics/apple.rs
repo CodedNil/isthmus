@@ -1,6 +1,6 @@
 use super::{LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, matches_track, prefer_lyrics, separate};
 use crate::music::{MusicResult, Track};
-use reqwest::{Client, StatusCode, Version};
+use reqwest::{Client, Response, StatusCode};
 use roxmltree::{Document, Node};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -19,7 +19,7 @@ pub(super) async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicRes
     if let Some(isrc) = track.isrc.as_deref() {
         request = request.query(&[("isrc", isrc)]);
     }
-    let response = request.version(Version::HTTP_3).send().await?;
+    let response = request.send().await?;
     if response.status() == StatusCode::NOT_FOUND {
         return Ok(Lyrics::default());
     }
@@ -31,15 +31,13 @@ pub(super) async fn fetch_apple_lyrics(track: &Track, http: &Client) -> MusicRes
             result["timing_type"].as_str() == Some(timing.as_ref()) && matches_track(track, result, "duration")
         }) {
             let Some(url) = result["lyricsUrl"].as_str() else { continue };
-            let fetched: MusicResult<Lyrics> = async {
-                let source = http.get(url).version(Version::HTTP_3).send().await?.error_for_status()?.text().await?;
-                let lyrics = parse_ttml(&source);
-                if lyrics.is_empty() {
-                    return Err("Lyrics document has no usable timed text".into());
-                }
-                Ok(lyrics)
-            }
-            .await;
+            let fetched = match http.get(url).send().await.and_then(Response::error_for_status) {
+                Ok(response) => response.text().await.map_err(Into::into).and_then(|source| {
+                    let lyrics = parse_ttml(&source);
+                    if lyrics.is_empty() { Err("Lyrics document has no usable timed text".into()) } else { Ok(lyrics) }
+                }),
+                Err(error) => Err(error.into()),
+            };
             best = prefer_lyrics(best, fetched);
             if best.as_ref().is_ok_and(|lyrics| lyrics.timing == Timing::Syllable) {
                 return best;

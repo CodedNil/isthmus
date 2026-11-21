@@ -267,7 +267,7 @@ impl SpotifyWorker {
 fn playlist_operation(uri: &str, add: bool) -> Operation {
     let items = vec![Item { uri: uri.into() }];
     if add {
-        Operation { kind: OperationKind::Add as i32, add: Some(Add { items, at_end: Some(true) }), remove: None }
+        Operation { kind: OperationKind::Add as i32, add: Some(Add { items, add_last: Some(true) }), remove: None }
     } else {
         Operation {
             kind: OperationKind::Remove as i32,
@@ -306,8 +306,10 @@ mod tests {
     async fn playlist_notices_deduplicate_cached_revisions() {
         let id = parse_id("37i9dQZF1DXcBWIGoYBM5M").unwrap();
         let (updater, _updates) = channel::channel();
-        let mut worker =
-            SpotifyWorker { root_revision: vec![1], ..SpotifyWorker::new(Arc::new(Session::new().unwrap()), updater) };
+        let mut worker = SpotifyWorker {
+            root_revision: vec![1],
+            ..SpotifyWorker::new(Arc::new(Session::new(reqwest::Client::new()).unwrap()), updater)
+        };
         assert!(!worker.needs_root_refresh(&[1]));
         assert!(worker.needs_root_refresh(&[2]));
         assert!(worker.needs_root_refresh(&[]));
@@ -328,7 +330,7 @@ mod tests {
         let second = parse_id("37i9dQZF1DXcBWIGoYBM5N").unwrap();
         let track = parse_id("6vWfZZyIlODYPMEbsrOK3G").unwrap();
         let (updater, _updates) = channel::channel();
-        let mut worker = SpotifyWorker::new(Arc::new(Session::new().unwrap()), updater);
+        let mut worker = SpotifyWorker::new(Arc::new(Session::new(reqwest::Client::new()).unwrap()), updater);
         let previous =
             CachedPlaylist { revision: vec![1], tracks: Arc::new(HashSet::from([track])), name: String::new() };
         Arc::make_mut(&mut worker.cached_playlists).extend([(first, previous.clone()), (second, previous.clone())]);

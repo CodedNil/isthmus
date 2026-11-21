@@ -165,11 +165,6 @@ impl Shape {
             },
         )
     }
-
-    /// Creates an open chevron with its tip at the origin.
-    pub fn chevron(extent: Vec2) -> Shape<impl Fn(Vec2) -> f32 + Copy> {
-        Self::segment(Vec2::ZERO, extent, 0.0).union(Self::segment(Vec2::ZERO, vec2(extent.x, -extent.y), 0.0))
-    }
 }
 
 /// One end of a rounded rectangle.

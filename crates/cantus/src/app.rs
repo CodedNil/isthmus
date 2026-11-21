@@ -1,6 +1,5 @@
 use crate::{
     config::{self, Config},
-    http::client_builder,
     interaction::Interaction,
     music::Music,
     platform,
@@ -11,8 +10,7 @@ use calloop::channel::Sender;
 use isthmus::{Render, SurfaceHandle, glam::Vec2};
 use isthmus_2d::Ramp;
 use jiff::ZonedDateTime;
-use reqwest::{Client, RequestBuilder};
-use serde::de::DeserializeOwned;
+use reqwest::Client;
 use std::{
     env,
     fmt::Result as FmtResult,
@@ -38,10 +36,6 @@ pub enum View {
 
 pub type Update = Box<dyn FnOnce(&mut CantusApp) + Send>;
 pub type AppUpdater = Sender<Update>;
-
-pub async fn fetch_json<T: DeserializeOwned>(request: RequestBuilder) -> reqwest::Result<T> {
-    request.send().await?.error_for_status()?.json().await
-}
 
 #[derive(Clone)]
 pub struct Background {
@@ -108,7 +102,7 @@ pub struct CantusApp {
 
 impl CantusApp {
     pub(crate) fn new(updater: AppUpdater) -> Self {
-        let http = client_builder().timeout(Duration::from_secs(15));
+        let http = Client::builder().timeout(Duration::from_secs(15));
         let background = Background { updater, http: http.build().expect("failed to construct HTTP client") };
         let config = config::load();
         platform::start_launcher_listener(&background.updater);
@@ -119,7 +113,7 @@ impl CantusApp {
             started: Instant::now(),
             launcher: LauncherState::new(&background, config.search_providers.iter().cloned()),
             bar,
-            music: Music::new(&config, &background.updater, local_playback),
+            music: Music::new(&config, &background, local_playback),
             background,
             interaction: Interaction::default(),
             pressure: Ramp::default(),

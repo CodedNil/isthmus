@@ -1,6 +1,5 @@
-use super::{MusicResult, auth::Auth, client::HttpClient};
-use bytes::Bytes;
-use reqwest::{Method, header::HeaderMap};
+use super::{MusicResult, auth::Auth};
+use reqwest::Client;
 use serde::Deserialize;
 use std::{collections::VecDeque, mem};
 use strum::IntoEnumIterator as _;
@@ -12,18 +11,18 @@ pub(super) struct Session {
     pub(super) device_id: String,
     pub(super) id: String,
     pub(super) username: String,
-    pub(super) http_client: HttpClient,
+    pub(super) http: Client,
     pub(super) auth: Mutex<Auth>,
-    endpoints: Mutex<ServiceEndpoints>,
+    endpoints: Mutex<EndpointState>,
 }
 
 impl Session {
-    pub(super) fn new() -> MusicResult<Self> {
+    pub(super) fn new(http: Client) -> MusicResult<Self> {
         Ok(Self {
             device_id: device_id()?,
             id: hex::encode(random_uuid_bytes()?),
             username: String::new(),
-            http_client: HttpClient::new()?,
+            http,
             auth: Mutex::default(),
             endpoints: Mutex::default(),
         })
@@ -68,7 +67,11 @@ impl Endpoint {
 struct ServiceEndpoints {
     dealer: VecDeque<String>,
     spclient: VecDeque<String>,
-    #[serde(skip)]
+}
+
+#[derive(Default)]
+struct EndpointState {
+    services: ServiceEndpoints,
     api_url: Option<String>,
 }
 
@@ -84,7 +87,7 @@ impl ServiceEndpoints {
 impl Session {
     pub(super) async fn resolve(&self, endpoint: Endpoint) -> SocketAddress {
         let mut endpoints = self.endpoints.lock().await;
-        self.resolve_endpoint(&mut endpoints, endpoint).await
+        self.resolve_endpoint(&mut endpoints.services, endpoint).await
     }
 
     pub(super) async fn base_url(&self) -> String {
@@ -93,7 +96,7 @@ impl Session {
             return url.clone();
         }
 
-        let (host, port) = self.resolve_endpoint(&mut endpoints, Endpoint::Api).await;
+        let (host, port) = self.resolve_endpoint(&mut endpoints.services, Endpoint::Api).await;
         let url = format!("https://{host}:{port}");
         endpoints.api_url = Some(url.clone());
         url
@@ -131,15 +134,13 @@ impl Session {
     }
 
     async fn fetch_endpoints(&self) -> MusicResult<ServiceEndpoints> {
-        let body = self
-            .http_client
-            .request(
-                &Method::GET,
-                "https://apresolve.spotify.com/?type=dealer&type=spclient",
-                &HeaderMap::new(),
-                Bytes::new(),
-            )
-            .await?;
-        Ok(serde_json::from_slice(&body)?)
+        Ok(self
+            .http
+            .get("https://apresolve.spotify.com/?type=dealer&type=spclient")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 }

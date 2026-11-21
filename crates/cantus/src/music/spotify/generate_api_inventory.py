@@ -1,4 +1,4 @@
-"""Refresh static API references from a local Spotify build."""
+"""Extract static API references from local Spotify client artifacts."""
 
 import argparse
 import hashlib
@@ -104,6 +104,8 @@ def descriptor_records(data):
             name = dict(parts).get(1, b"")
             if not isinstance(name, bytes) or not re.fullmatch(IDENTIFIER, name):
                 continue
+            if tag == 5 and name != b"ExtensionKind":
+                continue
             for key, child in parts:
                 if key != 2 or not isinstance(child, bytes):
                     continue
@@ -117,7 +119,7 @@ def descriptor_records(data):
                         (package + b"." + name).decode("ascii"),
                         label.decode("ascii"),
                     )
-                elif name == b"ExtensionKind" and isinstance(item.get(2), int):
+                elif isinstance(item.get(2), int):
                     yield "extension", item[2], label.decode("ascii")
 
 
@@ -130,7 +132,7 @@ def static_references(desktop, soloist, bundles):
     def scan_routes(data, location):
         for group, pattern in ROUTES.items():
             for match in pattern.finditer(data):
-                route = (match[1] if match.lastindex else match[0]).decode("ascii")
+                route = match[match.lastindex or 0].decode("ascii")
                 if group in ("route", "rpc_path"):
                     route = "/" + route.lstrip("/")
                 if len(route) <= 256 and not route.endswith(".proto"):
@@ -160,17 +162,19 @@ def static_references(desktop, soloist, bundles):
                 extensions.setdefault(key, name)
 
     for path in sorted(bundles):
-        label = f"bundle:{path.name}"
-        data = read_artifact(path, label)
+        data = read_artifact(path, f"bundle:{path.name}")
         # SPA bundles are ZIP archives. Inspect members in memory.
         with ZipFile(BytesIO(data)) as archive:
             for member in archive.namelist():
                 if member.endswith((".js", ".html")):
                     scan_routes(archive.read(member), f"{path.name}/{member}")
 
-    locations = sorted(
-        {name for _, names in [*routes.values(), *services.values()] for name in names}
-    )
+    locations = sorted({
+        location
+        for entries in (routes, services)
+        for _, sources in entries.values()
+        for location in sources
+    })
     indices = {name: index for index, name in enumerate(locations)}
 
     def records(entries):
@@ -180,6 +184,7 @@ def static_references(desktop, soloist, bundles):
         }
 
     return {
+        "schema_version": 2,
         "notes": "Static client literals and descriptors. They establish references, without verifying network use or availability.",
         "artifacts": artifacts,
         "locations": locations,
@@ -187,48 +192,8 @@ def static_references(desktop, soloist, bundles):
         "routes": records(routes),
         "service_fields": ["methods", "location_indices"],
         "service_methods": records(services),
-        "metadata_extension_names": {
-            str(number): name for number, name in sorted(extensions.items())
-        },
+        "metadata_extension_names": dict(sorted(extensions.items())),
     }
-
-
-def encode_inventory(value, depth=0):
-    """Keep one row per endpoint, route, service and enum value."""
-    indent = "  " * depth
-    if isinstance(value, dict) and value:
-        nested = {
-            "apis",
-            "sources",
-            "common_probes",
-            "metadata_extension_observations",
-            "unverified_client_references",
-            "artifacts",
-            "routes",
-            "service_methods",
-            "metadata_extension_names",
-        }
-        rows = [
-            f"{indent}  {json.dumps(key)}: "
-            + (
-                encode_inventory(item, depth + 1)
-                if key in nested
-                else json.dumps(item, ensure_ascii=False)
-            )
-            for key, item in value.items()
-        ]
-        return "{\n" + ",\n".join(rows) + "\n" + indent + "}"
-    if isinstance(value, list) and value:
-        return (
-            "[\n"
-            + ",\n".join(
-                indent + "  " + json.dumps(item, ensure_ascii=False) for item in value
-            )
-            + "\n"
-            + indent
-            + "]"
-        )
-    return json.dumps(value, ensure_ascii=False)
 
 
 def main():
@@ -244,23 +209,20 @@ def main():
         help="SPA bundle to scan, repeat for each bundle",
     )
     parser.add_argument(
-        "--base", type=Path, default=Path(__file__).with_name("API_INVENTORY.json")
-    )
-    parser.add_argument(
-        "--output", type=Path, required=True, help="path for the refreshed inventory"
+        "--output",
+        type=Path,
+        default=Path(__file__).with_name("API_INVENTORY.json"),
+        help="report path (defaults to API_INVENTORY.json beside this script)",
     )
     args = parser.parse_args()
 
-    inventory = json.loads(args.base.read_text(encoding="utf-8"))
     bundles = args.bundle or [
         path
         for directory in (args.desktop.parent, args.desktop.parent / "Apps")
         for path in directory.glob("*.spa")
     ]
-    inventory["unverified_client_references"] = static_references(
-        args.desktop, args.soloist, bundles
-    )
-    args.output.write_text(encode_inventory(inventory) + "\n", encoding="utf-8")
+    report = static_references(args.desktop, args.soloist, bundles)
+    args.output.write_text(json.dumps(report, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -8,26 +8,16 @@ pub struct SpotifyLyrics {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sheet {
-    pub sync_type: Option<SyncType>,
+    pub sync_type: Option<String>,
     pub lines: Option<Vec<Line>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum SyncType {
-    LineSynced,
-    WordSynced,
-    SyllableSynced,
-    #[serde(other)]
-    Unknown,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Line {
     pub words: Option<String>,
-    pub start_time_ms: Option<Milliseconds>,
-    pub end_time_ms: Option<Milliseconds>,
+    pub start_time_ms: Option<String>,
+    pub end_time_ms: Option<String>,
     pub syllables: Option<Vec<Syllable>>,
 }
 

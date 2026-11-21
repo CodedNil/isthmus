@@ -163,8 +163,7 @@ pub struct RequestError {
 }
 
 /// Attribute IDs that can be requested from `GetLists`.
-#[derive(Debug, PartialEq, Eq, prost::Enumeration)]
-#[repr(i32)]
+#[derive(Debug, prost::Enumeration)]
 pub enum AttributeKind {
     /// Default when no attribute has been selected.
     Unspecified = 0,

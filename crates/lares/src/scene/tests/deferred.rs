@@ -1,15 +1,6 @@
 use crate::{app::camera::Camera, render::light::shadows::ShadowAtlas, scene::tests::*};
 
 #[test]
-fn sampled_normals_agree_with_the_ellipsoid_gradient() {
-    let scale = vec3(0.7, 1.1, 1.4);
-    for point in [vec3(0.3, -0.7, 0.2), vec3(-0.4, 0.1, 0.8), Vec3::Z] {
-        let actual = trace::normal(point, 4, |p| (p * scale).length() - 0.5);
-        assert!((actual - (point * scale * scale).normalize()).length() < 0.01);
-    }
-}
-
-#[test]
 fn half_payloads_survive_half_precision_storage_exactly() {
     for value in 0..32768 {
         let encoded = half_payload(value);

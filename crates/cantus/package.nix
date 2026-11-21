@@ -49,11 +49,8 @@ rustPlatform.buildRustPackage {
   ];
   nativeCheckInputs = [ pkgs.cacert ];
 
-  # Nixpkgs' target flags take precedence over Cargo's build flags.
-  RUSTFLAGS = (lib.importTOML ../../.cargo/config.toml).build.rustflags ++ [
-    # Keep compiler source paths from pulling the toolchain into the runtime closure.
-    "--remap-path-prefix=${rust}=/rustc"
-  ];
+  # Keep compiler source paths from pulling the toolchain into the runtime closure.
+  RUSTFLAGS = [ "--remap-path-prefix=${rust}=/rustc" ];
 
   postFixup = ''
     patchelf --add-rpath "${lib.makeLibraryPath [ pkgs.vulkan-loader ]}" "$out/bin/$pname"

@@ -5,7 +5,6 @@
 //! live in `isthmus_2d`. Shader-side modules (`codec`, `stage`, `frame`, `gpu`, `image`) compile for SPIR-V as well
 //! as the host; the `host` that records and presents draws is host-only.
 #![cfg_attr(target_arch = "spirv", no_std, feature(asm_experimental_arch))]
-#![cfg_attr(not(target_arch = "spirv"), feature(const_trait_impl))]
 #![feature(trait_alias)]
 
 extern crate self as isthmus;

@@ -1,10 +1,9 @@
 use super::{LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, normalize};
 use crate::{
-    app::fetch_json,
     config::directory,
     music::{MusicResult, Track},
 };
-use reqwest::{Client, StatusCode, Version};
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -66,12 +65,15 @@ struct FileWord {
 }
 
 pub(super) async fn fetch_lrclib(track: &Track, http: &Client) -> MusicResult<Lyrics> {
-    let request = http
+    let records: Vec<LrclibRecord> = http
         .get("https://lrclib.net/api/search")
-        .version(Version::HTTP_3)
         .query(&[("track_name", track.compact_title()), ("artist_name", track.primary_artist())])
-        .header("User-Agent", concat!("Cantus/", env!("CARGO_PKG_VERSION"), " (https://github.com/isthmus)"));
-    let records: Vec<LrclibRecord> = fetch_json(request).await?;
+        .header("User-Agent", concat!("Cantus/", env!("CARGO_PKG_VERSION"), " (https://github.com/isthmus)"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
     let title = normalize(track.compact_title());
     let full_title = normalize(&track.name);
     let artists = track.artists.iter().map(|artist| normalize(artist)).collect::<Vec<_>>();
@@ -167,7 +169,7 @@ pub(super) async fn publish_lrclib(
     source: &str,
 ) -> MusicResult<StatusCode> {
     let challenge: Value =
-        fetch_json(http.post("https://lrclib.net/api/request-challenge").version(Version::HTTP_3)).await?;
+        http.post("https://lrclib.net/api/request-challenge").send().await?.error_for_status()?.json().await?;
     let prefix = challenge["prefix"].as_str().ok_or("LRCLIB challenge has no prefix")?;
     let target = challenge["target"].as_str().ok_or("LRCLIB challenge has no target")?;
     let target = hex::decode(target)?;
@@ -222,13 +224,8 @@ pub(super) async fn publish_lrclib(
         lyricsfile: file,
     };
     let token = format!("{prefix}:{nonce}");
-    let response = http
-        .post("https://lrclib.net/api/publish")
-        .version(Version::HTTP_3)
-        .header("X-Publish-Token", token)
-        .json(&body)
-        .send()
-        .await?;
+    let response =
+        http.post("https://lrclib.net/api/publish").header("X-Publish-Token", token).json(&body).send().await?;
     let status = response.status();
     response.error_for_status()?;
     if let Err(error) = append_upload_log(track, lyrics, source, status) {
@@ -237,8 +234,11 @@ pub(super) async fn publish_lrclib(
     Ok(status)
 }
 
-pub(super) fn was_uploaded(track: &Track, lyrics: &Lyrics) -> MusicResult<bool> {
-    Ok(upload_history()?.contains(&upload_key(track, lyrics)))
+pub(in crate::music) fn contributed_by_us(track: &Track, lyrics: &Lyrics) -> bool {
+    upload_history()
+        .map(|history| history.contains(&upload_key(track, lyrics)))
+        .inspect_err(|error| tracing::warn!("Could not read LRCLIB upload history: {error}"))
+        .unwrap_or_default()
 }
 
 fn append_upload_log(track: &Track, lyrics: &Lyrics, source: &str, status: StatusCode) -> MusicResult<()> {

@@ -12,13 +12,12 @@ use self::{
 };
 use super::{ART_SIZE, AudioFeatures, MusicResult, PlaybackCommand, PlaylistId, Track, TrackId, TrackRuntime};
 use crate::{
-    app::{AppUpdater, send_update},
+    app::{AppUpdater, Background, send_update},
     config::{Config, MAX_PLAYLIST_TARGETS},
+    music::spotify::proto::connect::{ContextPlayerOptions, Suppressions},
     platform::mpris,
 };
 use arrayvec::{ArrayString, ArrayVec};
-use bytes::Bytes;
-use reqwest::{Client, Version};
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
@@ -57,16 +56,17 @@ type CatalogTrack = metadata::Track;
 type Metadata = HashMap<String, Option<CatalogTrack>>;
 
 impl Spotify {
-    pub(super) fn new(config: &Config, updater: &AppUpdater, local_playback: watch::Receiver<bool>) -> Self {
+    pub(super) fn new(config: &Config, background: &Background, local_playback: watch::Receiver<bool>) -> Self {
         let (commands, mut receiver) = mpsc::unbounded_channel();
         let (connected_session, session) = watch::channel(None);
-        let updater = updater.clone();
+        let updater = background.updater.clone();
+        let http = background.http.clone();
         let playlist_targets = config.playlists.clone();
         let ratings_enabled = config.ratings_enabled;
         tokio::spawn(async move {
             let reconnect = async {
                 loop {
-                    match auth::connect().await {
+                    match auth::connect(http.clone()).await {
                         Ok(session) => {
                             connected_session.send_replace(Some(Arc::clone(&session)));
                             let result = run_spotify(
@@ -105,22 +105,12 @@ impl Spotify {
 
     pub(super) async fn audio_features(&self, ids: &[TrackId]) -> MusicResult<HashMap<TrackId, AudioFeatures>> {
         let session = self.session.borrow().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
-        timeout(REQUEST_TIMEOUT, session.audio_features(ids)).await?
+        session.audio_features(ids).await
     }
 
     pub(super) async fn get_lyrics(&self, id: TrackId) -> MusicResult<Option<SpotifyLyrics>> {
         let Some(session) = self.session.borrow().clone() else { return Ok(None) };
-        timeout(REQUEST_TIMEOUT, session.lyrics(id)).await?
-    }
-
-    pub(super) async fn artwork(http: &Client, url: &str) -> MusicResult<Bytes> {
-        const CDN: &str = "https://image-cdn-fa.spotifycdn.com/image/";
-        let id = [CDN, "https://i.scdn.co/image/", "https://image-cdn-ak.spotifycdn.com/image/"]
-            .into_iter()
-            .find_map(|prefix| url.strip_prefix(prefix))
-            .filter(|id| id.len() == 40 && id.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        let request = id.map_or_else(|| http.get(url), |id| http.get(format!("{CDN}{id}")));
-        Ok(request.version(Version::HTTP_3).send().await?.error_for_status()?.bytes().await?)
+        session.lyrics(id).await
     }
 }
 
@@ -378,8 +368,8 @@ impl SpotifyWorker {
                 player_state: Some(PlayerState {
                     session_id: self.session.id.clone(),
                     playback_speed: 1.0,
-                    options: Some(()),
-                    suppressions: Some(()),
+                    options: Some(ContextPlayerOptions::default()),
+                    suppressions: Some(Suppressions::default()),
                     ..Default::default()
                 }),
             }),
@@ -679,6 +669,7 @@ mod tests {
     use super::*;
     use crate::music::queue::{Queue, Timeline};
     use calloop::channel;
+    use reqwest::Client;
 
     const REQUESTED: &str = "spotify:track:6vWfZZyIlODYPMEbsrOK3G";
     const PLAYBACK: &str = "spotify:track:3OIgsG6duyvwodGPoFYVzJ";
@@ -730,7 +721,7 @@ mod tests {
                 is_playing: true,
                 ..Default::default()
             }),
-            ..SpotifyWorker::new(Arc::new(Session::new().unwrap()), updater)
+            ..SpotifyWorker::new(Arc::new(Session::new(Client::new()).unwrap()), updater)
         };
         for device in [Some("playing-device"), None] {
             worker.update_cluster(Cluster {
@@ -750,7 +741,7 @@ mod tests {
         let mut worker = SpotifyWorker {
             active_device: Some("phone".into()),
             mpris: Some(mpris),
-            ..SpotifyWorker::new(Arc::new(Session::new().unwrap()), updater)
+            ..SpotifyWorker::new(Arc::new(Session::new(Client::new()).unwrap()), updater)
         };
         let report = |uri: &str, title: Option<&str>| PlayerState {
             track: Some(ProvidedTrack {

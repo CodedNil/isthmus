@@ -1,10 +1,11 @@
 //! The scene and its paced GPU render loop.
 use super::{App, camera::Camera, wayland::NativeWindow};
 use crate::{
+    home,
     irradiance::bake::{baked_dir, ensure_assets},
     presence::{self, Snapshot},
     render::{
-        Renderer,
+        Renderer, Scene,
         light::{
             shadows::ShadowAtlas,
             sun::{SunSettings, utc_now},
@@ -48,7 +49,9 @@ impl Runtime {
         info!("Preparing lighting and scene");
         ensure_assets()?;
         let baked = baked_dir();
-        let app = App::with_baked_lighting(SunSettings::default(), &fs::read(baked.join("lighting.bin"))?)?;
+        let controls = fs::read(baked.join("lighting.bin"))?;
+        let scene = Scene::from_baked_at(&home::rooms(), utc_now(), SunSettings::default(), &controls)?;
+        let app = App::from_scene(scene);
         let shadows = ShadowAtlas::decode(&app.scene, &fs::read(baked.join("visibility.bin"))?)?;
         let targets = Targets::new(&mut gpu, size);
         let now = Instant::now();

@@ -26,19 +26,19 @@ const REDIRECT_URI: &str = "http://127.0.0.1:8898/login";
 const TOKEN_ENDPOINT: &str = "https://accounts.spotify.com/api/token";
 const OAUTH_CACHE: &str = "spotify-oauth.json";
 
-pub(super) async fn connect() -> MusicResult<Arc<Session>> {
-    let mut session = Session::new()?;
+pub(super) async fn connect(http: Client) -> MusicResult<Arc<Session>> {
+    let mut session = Session::new(http)?;
     if let Some(credentials) = spawn_blocking(load_credentials).await? {
         session.username = credentials.username;
         session.auth.get_mut().refresh_token = credentials.refresh_token;
-        match timeout(REQUEST_TIMEOUT, session.auth_token()).await? {
+        match session.auth_token().await {
             Ok(_) => return Ok(Arc::new(session)),
             Err(error) if error.is::<AuthorizationExpired>() => {}
             Err(error) => return Err(error),
         }
     }
 
-    let (credentials, token) = browser_login(&session.http_client.0).await?;
+    let (credentials, token) = browser_login(&session.http).await?;
     let credentials = spawn_blocking(move || {
         save_credentials(&credentials);
         credentials
@@ -237,13 +237,13 @@ pub(super) struct Auth {
 impl Session {
     pub(super) async fn auth_token(&self) -> MusicResult<String> {
         let mut auth = self.auth.lock().await;
-        if let Some(token) = auth.access_token.as_ref().filter(|token| !token.is_expired()) {
+        if let Some(token) = auth.access_token.as_ref().filter(|token| Instant::now() < token.expires_at) {
             return Ok(token.access_token.clone());
         }
         if auth.refresh_token.is_empty() {
             return Err(io::Error::other("Spotify sign-in required").into());
         }
-        let response = refresh_access_token(&self.http_client.0, &auth.refresh_token).await?;
+        let response = refresh_access_token(&self.http, &auth.refresh_token).await?;
         if let Some(refresh_token) =
             response.refresh_token.filter(|next| !next.is_empty() && next != &auth.refresh_token)
         {
@@ -266,10 +266,6 @@ struct Token {
 impl Token {
     fn new(access_token: String, lifetime: Duration) -> Self {
         Self { access_token, expires_at: Instant::now() + lifetime.saturating_sub(Duration::from_secs(10)) }
-    }
-
-    fn is_expired(&self) -> bool {
-        self.expires_at <= Instant::now()
     }
 }
 

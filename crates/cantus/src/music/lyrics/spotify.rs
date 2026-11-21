@@ -1,9 +1,14 @@
 use super::{LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, separate};
 use crate::music::{
     MusicResult,
-    spotify::lyrics::{Line, Milliseconds, SpotifyLyrics, SyncType},
+    spotify::lyrics::{Line, SpotifyLyrics},
 };
 use core::ops::Range;
+
+fn line_milliseconds(value: &str) -> Option<f32> {
+    let value: f32 = value.parse().ok()?;
+    value.is_finite().then_some(value)
+}
 
 fn spotify_fragments(line: &Line, time: &Range<f32>) -> Option<Vec<LyricSegment>> {
     let mut remaining = line.words.as_deref()?.trim();
@@ -34,7 +39,7 @@ fn spotify_fragments(line: &Line, time: &Range<f32>) -> Option<Vec<LyricSegment>
 
 pub(super) fn parse_spotify(response: Option<SpotifyLyrics>, duration: u32) -> MusicResult<Lyrics> {
     let Some(sheet) = response.and_then(|response| response.lyrics) else { return Ok(Lyrics::default()) };
-    if !matches!(sheet.sync_type, Some(SyncType::LineSynced | SyncType::WordSynced | SyncType::SyllableSynced)) {
+    if !matches!(sheet.sync_type.as_deref(), Some("LINE_SYNCED" | "WORD_SYNCED" | "SYLLABLE_SYNCED")) {
         return Ok(Lyrics::default());
     }
     let lines = sheet.lines.unwrap_or_default();
@@ -46,13 +51,13 @@ pub(super) fn parse_spotify(response: Option<SpotifyLyrics>, duration: u32) -> M
             continue;
         }
         let start =
-            line.start_time_ms.as_ref().and_then(Milliseconds::value).ok_or("Spotify line has no start time")?;
+            line.start_time_ms.as_deref().and_then(line_milliseconds).ok_or("Spotify line has no start time")?;
         let end = line
             .end_time_ms
-            .as_ref()
-            .and_then(Milliseconds::value)
+            .as_deref()
+            .and_then(line_milliseconds)
             .filter(|&end| end > start)
-            .or_else(|| lines.get(index + 1).and_then(|line| line.start_time_ms.as_ref().and_then(Milliseconds::value)))
+            .or_else(|| lines.get(index + 1).and_then(|line| line.start_time_ms.as_deref().and_then(line_milliseconds)))
             .unwrap_or(duration as f32);
         if !(0.0..end).contains(&start) || !(0.0..=duration as f32 + 1000.0).contains(&end) {
             return Err("Spotify line has invalid timing".into());

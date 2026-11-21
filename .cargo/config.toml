@@ -1,3 +1,0 @@
-[build]
-# Reqwest's HTTP/3 feature requires this opt-in.
-rustflags = ["--cfg=reqwest_unstable"]

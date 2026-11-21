@@ -13,8 +13,8 @@ use flate2::read::MultiGzDecoder;
 use futures_util::{SinkExt as _, StreamExt as _};
 use prost::Message as _;
 use reqwest::Url;
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, de::IgnoredAny};
+use serde_json::json;
 use std::{
     collections::HashMap,
     io::{self, Read as _},
@@ -178,12 +178,14 @@ async fn receive<Stream: AsyncRead + AsyncWrite + Unpin>(
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "lowercase")]
 enum Envelope {
     Message {
         uri: String,
+        // Absent headers carry no transfer encoding.
         #[serde(default)]
         headers: HashMap<String, String>,
+        // Connection announcements carry headers and omit payloads.
         #[serde(default)]
         payloads: Vec<Payload>,
     },
@@ -200,7 +202,7 @@ enum Envelope {
 enum Payload {
     Base64(String),
     Bytes(Vec<u8>),
-    Json(Value),
+    Other(IgnoredAny),
 }
 
 fn decode_event(
@@ -247,10 +249,7 @@ fn decode_event(
             .pop()
             .filter(|_| payloads.is_empty())
             .ok_or_else(|| io::Error::other("Spotify cluster event must have one payload"))?;
-        let update: ClusterUpdate = match payload {
-            Payload::Json(value) => serde_json::from_value(value)?,
-            Payload::Base64(_) | Payload::Bytes(_) => ClusterUpdate::decode(decode_binary(payload, gzip)?)?,
-        };
+        let update = ClusterUpdate::decode(decode_binary(payload, gzip)?)?;
         return Ok(update.cluster.map(|cluster| Event::Cluster(Box::new(cluster))));
     }
     Ok(None)
@@ -260,7 +259,7 @@ fn decode_binary(payload: Payload, gzip: bool) -> MusicResult<bytes::Bytes> {
     let bytes = match payload {
         Payload::Base64(value) => BASE64_STANDARD.decode(value)?,
         Payload::Bytes(value) => value,
-        Payload::Json(_) => return Err(io::Error::other("Spotify Dealer payload was JSON").into()),
+        Payload::Other(IgnoredAny) => return Err(io::Error::other("Spotify Dealer payload was not binary").into()),
     };
     if !gzip || bytes.is_empty() {
         return Ok(bytes.into());
@@ -336,41 +335,62 @@ mod tests {
     }
 
     #[test]
-    fn dealer_decodes_binary_compressed_and_json_cluster_events() {
-        let json = json!({
-            "cluster": {
-                "activeDeviceId": "phone",
-                "player_state": {
-                    "timestamp": "1700000000000",
-                    "positionAsOfTimestamp": 42000,
-                    "context_uri": "spotify:playlist:example",
-                    "playbackSpeed": "1.25",
-                    "nextTracks": null,
-                    "options": { "shufflingContext": true }
-                },
-                "needFullPlayerState": false
-            },
-            "ackId": "id"
-        });
-        let raw = serde_json::from_value::<ClusterUpdate>(json.clone()).unwrap().encode_to_vec();
+    fn dealer_decodes_uncompressed_and_compressed_protobuf_cluster_events() {
+        use super::super::proto::connect::{ContextPlayerOptions, PlayerState, ProvidedTrack, Suppressions};
+
+        let raw = ClusterUpdate {
+            cluster: Some(Cluster {
+                active_device_id: "phone".into(),
+                server_timestamp_ms: 1_700_000_000_123,
+                player_state: Some(PlayerState {
+                    timestamp: 1_700_000_000_000,
+                    position_as_of_timestamp: 42_000,
+                    duration: 180_000,
+                    context_uri: "spotify:playlist:example".into(),
+                    playback_speed: 1.25,
+                    is_playing: true,
+                    next_tracks: vec![ProvidedTrack {
+                        uri: "spotify:track:example".into(),
+                        uid: "queue-occurrence".into(),
+                        metadata: HashMap::from([("title".into(), "Example track".into())]),
+                    }],
+                    options: Some(ContextPlayerOptions { shuffling_context: true, ..Default::default() }),
+                    suppressions: Some(Suppressions::default()),
+                    ..Default::default()
+                }),
+            }),
+        }
+        .encode_to_vec();
         let mut gzip = super::super::client::gzip_encoder();
         gzip.write_all(&raw).unwrap();
         let gzip = BASE64_STANDARD.encode(gzip.finish().unwrap());
-        for (headers, payload) in [
-            (HashMap::new(), Payload::Bytes(raw)),
-            (HashMap::from([("transfer-encoding".into(), "gzip".into())]), Payload::Base64(gzip)),
-            (HashMap::new(), Payload::Json(json)),
+        for envelope in [
+            json!({"type": "message", "uri": CLUSTER_TOPIC, "payloads": [raw]}),
+            json!({"type": "message", "uri": CLUSTER_TOPIC, "headers": {"transfer-encoding": "gzip"}, "payloads": [gzip]}),
         ] {
-            let event = decode_event(CLUSTER_TOPIC, &headers, vec![payload]).unwrap().unwrap();
+            let Envelope::Message { uri, headers, payloads } = serde_json::from_value(envelope).unwrap() else {
+                panic!("expected a Dealer message");
+            };
+            let event = decode_event(&uri, &headers, payloads).unwrap().unwrap();
             assert!(matches!(event, Event::Cluster(update)
                     if update.active_device_id == "phone"
+                    && update.server_timestamp_ms == 1_700_000_000_123
                     && update.player_state.as_ref().is_some_and(|player|
                         player.timestamp == 1_700_000_000_000
                             && player.position_as_of_timestamp == 42_000
+                            && player.duration == 180_000
                             && player.context_uri == "spotify:playlist:example"
                             && (player.playback_speed - 1.25).abs() < f64::EPSILON
-                            && player.next_tracks.is_empty()
-                            && player.options.is_none())));
+                            && player.is_playing
+                            && !player.is_paused
+                            && !player.is_buffering
+                            && player.prev_tracks.is_empty()
+                            && player.next_tracks.first().is_some_and(|track|
+                                track.uri == "spotify:track:example"
+                                    && track.uid == "queue-occurrence"
+                                    && track.metadata.get("title").is_some_and(|title| title == "Example track"))
+                            && player.options.as_ref().is_some_and(|options| options.shuffling_context)
+                            && player.suppressions.as_ref().is_some_and(|suppressions| suppressions.providers.is_empty()))));
         }
     }
 }

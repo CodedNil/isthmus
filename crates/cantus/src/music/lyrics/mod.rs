@@ -1,5 +1,6 @@
 use super::{MusicResult, Track, spotify::Spotify};
 use core::ops::Range;
+pub(super) use lrclib::contributed_by_us;
 pub use musixmatch::Session;
 use reqwest::Client;
 use serde_json::Value;
@@ -190,15 +191,10 @@ pub(super) async fn fetch(
     lyrics
 }
 
-pub(super) fn contributed_by_us(track: &Track, lyrics: &Lyrics) -> bool {
-    lrclib::was_uploaded(track, lyrics)
-        .inspect_err(|error| warn!("Could not read LRCLIB upload history: {error}"))
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::music::TrackRuntime;
     use apple::parse_ttml;
     use serde_json::json;
     fn parse_spotify(response: &Value, duration: u32) -> MusicResult<Lyrics> {
@@ -206,11 +202,20 @@ mod tests {
     }
 
     fn track() -> Track {
-        serde_json::from_value(json!({
-            "id":"4SJuENxvGDMBrjRJJjbYVe", "name":"Lego Bricks", "album":"Lego Bricks",
-            "artists":["Euan Allison", "Lily Williams"], "duration_ms":236_000, "isrc":"NL2VN2000027"
-        }))
-        .expect("track fixture")
+        Track {
+            id: Some("4SJuENxvGDMBrjRJJjbYVe".parse().unwrap()),
+            isrc: Some("NL2VN2000027".into()),
+            uri: String::new(),
+            name: "Lego Bricks".into(),
+            original_title: None,
+            artists: vec!["Euan Allison".into(), "Lily Williams".into()],
+            album: "Lego Bricks".into(),
+            image: None,
+            duration_ms: 236_000,
+            queue_uid: String::new(),
+            interaction_id: Track::next_interaction_id(),
+            runtime: TrackRuntime::default(),
+        }
     }
 
     fn candidate(timing: Timing, text: &str) -> Lyrics {
@@ -259,7 +264,7 @@ mod tests {
         let response = json!({"lyrics":{"syncType":"LINE_SYNCED","lines":[
             {"startTimeMs":"1000","endTimeMs":"0","words":"First"},
             {"startTimeMs":"2000","endTimeMs":"0","words":"♪"},
-            {"startTimeMs":3000,"endTimeMs":"0","words":"Last"}
+            {"startTimeMs":"3000","endTimeMs":"0","words":"Last"}
         ]}});
         let lyrics = parse_spotify(&response, 5000).expect("line timing");
         assert_eq!(lyrics.timing, Timing::Line);

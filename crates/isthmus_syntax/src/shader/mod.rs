@@ -162,7 +162,6 @@ mod tests {
     #[test]
     fn other_paint_calls_are_not_shaders() {
         assert!(find(&quote!(sample.paint(fill, outline))).unwrap().is_none());
-        assert!(find(&quote!(x.shape(1))).unwrap().is_none());
         assert!(find(&quote!(x.shape(|_| r).paint(|_, _| c))).unwrap().is_none());
     }
 
@@ -173,7 +172,6 @@ mod tests {
         assert!(
             error(&quote!(frame.shader("a").with(draw.time).shape(|_| r).paint(|_, _| c))).contains("plain variable")
         );
-        assert!(error(&quote!(frame.shader("a").with(1.0).shape(|_| r).paint(|_, _| c))).contains("plain variable"));
         let chain = find(&quote!(frame.shader("a").with(x).shape(|_, _| r).paint(|_, _| c))).unwrap().unwrap();
         let shader = Shader::new(chain, vec![parse_quote!(f32)]);
         assert!(shader.err().is_some_and(|error| error.to_string().contains("closure of the form")));

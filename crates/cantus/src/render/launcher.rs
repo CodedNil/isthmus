@@ -1,5 +1,5 @@
 use crate::{
-    app::{Background, CantusApp, fetch_json},
+    app::{Background, CantusApp},
     catalog::AppCatalog,
     config::SearchProvider,
     interaction::key,
@@ -13,7 +13,6 @@ use crate::{
 use fend_core::Context;
 use isthmus::prelude::*;
 use isthmus_2d::prelude::*;
-use reqwest::Version;
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -223,10 +222,13 @@ impl LauncherState {
             struct Rates {
                 usd: HashMap<String, f64>,
             }
-            let request = rates_http
+            if let Ok(response) = rates_http
                 .get("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.min.json")
-                .version(Version::HTTP_3);
-            if let Ok(rates) = fetch_json::<Rates>(request).await {
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+                && let Ok(rates) = response.json::<Rates>().await
+            {
                 let rates = rates.usd.into_iter().map(|(code, rate)| (code.to_ascii_uppercase(), rate)).collect();
                 let _initialized = EXCHANGE_RATES.set(rates);
             }
@@ -674,22 +676,6 @@ impl LauncherState {
 mod tests {
     use super::*;
     use crate::platform::DesktopApp;
-
-    #[test]
-    #[expect(clippy::float_cmp_const, reason = "layout constants are exact sums of small multiples")]
-    fn empty_panel_is_a_centered_pill() {
-        let mut launcher = LauncherState::default();
-        let screen = vec2(1920.0, 1080.0);
-        let (origin, size) = launcher.bounds(screen);
-        assert_eq!(size, vec2(PANEL_WIDTH, HEADER_HEIGHT));
-        assert_eq!(origin + size * 0.5, screen * 0.5);
-        assert_eq!(CORNER_RADIUS, size.y * 0.5);
-
-        launcher.entries.push(Entry::Answer("4".into()));
-        assert_eq!(launcher.bounds(screen).1.y, HEADER_HEIGHT + PADDING * 2.0 + ROW_HEIGHT);
-        launcher.entries.clear();
-        assert_eq!(launcher.bounds(screen).1, size);
-    }
 
     #[test]
     fn warm_catalog_survives_reopening_and_updates_preserve_selection() {

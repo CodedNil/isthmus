@@ -56,8 +56,7 @@ pub struct EntityExtensionDataHeader {
 }
 
 /// Metadata extension IDs recognized by Cantus.
-#[derive(Debug, PartialEq, Eq, prost::Enumeration)]
-#[repr(i32)]
+#[derive(Debug, prost::Enumeration)]
 pub enum ExtensionKind {
     /// Default when an extension is unspecified or unrecognized.
     Unknown = 0,

@@ -1,11 +1,8 @@
 use super::{
     LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, items, matches_track, normalize, prefer_lyrics, separate,
 };
-use crate::{
-    app::fetch_json,
-    music::{MusicResult, Track},
-};
-use reqwest::{Client, StatusCode, Version};
+use crate::music::{MusicResult, Track};
+use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -30,28 +27,23 @@ impl Session {
     }
 
     async fn request(&mut self, http: &Client, endpoint: &str, params: &[(&str, &str)]) -> MusicResult<Value> {
-        let response = fetch_json::<Value>(
-            http.get(format!("{API}{endpoint}"))
-                .version(Version::HTTP_2)
-                .query(&[("app_id", APP_ID), ("format", "json")])
-                .query(&[("usertoken", self.token.as_str())])
-                .query(params)
-                .header("Cookie", "x-mxm-token-guid=")
-                .header("x-mxm-app-version", "10.1.1")
-                .header("X-User-Agent", "Musixmatch/2025120901 CFNetwork/3860.300.31 Darwin/25.2.0")
-                .timeout(Duration::from_secs(5)),
-        )
-        .await;
-        let result = match response {
-            Ok(response) => self.body(response),
+        let request = http
+            .get(format!("{API}{endpoint}"))
+            .query(&[("app_id", APP_ID), ("format", "json")])
+            .query(&[("usertoken", self.token.as_str())])
+            .query(params)
+            .header("Cookie", "x-mxm-token-guid=")
+            .header("x-mxm-app-version", "10.1.1")
+            .header("X-User-Agent", "Musixmatch/2025120901 CFNetwork/3860.300.31 Darwin/25.2.0");
+        // The request URL contains the anonymous token.
+        match request.send().await.and_then(Response::error_for_status) {
+            Ok(response) => {
+                response.json().await.map_err(|error| error.without_url().into()).and_then(|body| self.body(body))
+            }
             Err(error) if error.status() == Some(StatusCode::NOT_FOUND) => Ok(Value::Null),
-            // Never log the request URL: it contains the anonymous token.
             Err(error) => Err(error.without_url().into()),
-        };
-        if result.is_err() {
-            self.backoff();
         }
-        result
+        .inspect_err(|_| self.backoff())
     }
 
     pub(super) async fn fetch(&mut self, track: &Track, http: &Client) -> MusicResult<Lyrics> {
@@ -95,8 +87,8 @@ impl Session {
         let subtitles =
             self.body(calls["track.subtitles.get"].take()).and_then(|body| parse_subtitles(&body, track.duration_ms));
         // An unavailable or malformed richsync must not discard usable line timing.
-        let words = async {
-            let richsync = self.body(calls["track.richsync.get"].take())?["richsync"].take();
+        let words = self.body(calls["track.richsync.get"].take()).and_then(|mut body| {
+            let richsync = body["richsync"].take();
             if richsync.is_null()
                 || flag(&richsync["restricted"])
                 || richsync["richsync_length"]
@@ -108,8 +100,7 @@ impl Session {
             let lines: Vec<RichsyncLine> =
                 serde_json::from_str(richsync["richsync_body"].as_str().ok_or("Musixmatch richsync body missing")?)?;
             parse_richsync(&lines, &matched, track.duration_ms as f32)
-        }
-        .await;
+        });
         prefer_lyrics(subtitles, words)
     }
 
