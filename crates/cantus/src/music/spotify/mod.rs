@@ -1,11 +1,11 @@
 use self::{
     library::CachedPlaylist,
-    lyrics::SpotifyLyrics,
     proto::{
         connect::{
             Capabilities, Cluster, Device as ConnectDevice, DeviceInfo, DeviceType, MemberType, PlayerState,
             ProvidedTrack, PutStateReason, PutStateRequest,
         },
+        lyrics::SpotifyLyrics,
         metadata,
     },
     session::Session,
@@ -14,13 +14,13 @@ use super::{ART_SIZE, AudioFeatures, MusicResult, PlaybackCommand, PlaylistId, T
 use crate::{
     app::{AppUpdater, Background, send_update},
     config::{Config, MAX_PLAYLIST_TARGETS},
-    music::spotify::proto::connect::{ContextPlayerOptions, Suppressions},
     platform::mpris,
 };
 use arrayvec::{ArrayString, ArrayVec};
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     io, mem, str,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -38,8 +38,7 @@ mod auth;
 mod client;
 mod dealer;
 mod library;
-pub(super) mod lyrics;
-mod proto;
+pub(super) mod proto;
 mod session;
 
 const METADATA_CACHE_LIMIT: usize = 512;
@@ -128,13 +127,17 @@ async fn run_spotify(
     let mut worker =
         SpotifyWorker { playlist_targets, ratings_enabled, mpris: Some(mpris), ..SpotifyWorker::new(session, updater) };
     let mut registered = false;
-    let mut playlists_dirty = false;
+    let mut registration = None;
+    let mut playlists_dirty = true;
     let mut pending_playlists = HashMap::<PlaylistId, Vec<u8>>::new();
     let mut playlist_read = None;
     let mut metadata = None;
+    let mut player_command = None;
+    let mut library_write = None;
+    let mut reconciling_library = false;
 
     loop {
-        if playlist_read.is_none() {
+        if playlist_read.is_none() && library_write.is_none() {
             pending_playlists.retain(|&id, revision| worker.needs_playlist_refresh(id, revision));
             if playlists_dirty || !pending_playlists.is_empty() {
                 let requested = if mem::take(&mut playlists_dirty) {
@@ -154,26 +157,38 @@ async fn run_spotify(
                 metadata = Some(Box::pin(async move { session.track_metadata(&uris).await }));
             }
         }
+        let can_send = registered && registration.is_none() && player_command.is_none() && library_write.is_none();
         tokio::select! {
-            Some(request) = media_keys.recv() => {
+            Some(request) = media_keys.recv(), if can_send => {
                 if !*local_playback.borrow() && worker.accepts_media_command(&request) {
-                    timeout(Duration::from_secs(20), worker.command(request.command)).await
-                        .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, format!("Spotify command: {error}")))?;
+                    player_command = worker.start_player_command(request.command).map(Box::pin);
                 }
             }
-            Some(command) = commands.recv() => {
-                let edited = matches!(
-                    &command,
-                    PlaybackCommand::UpdateLibrary { playlists, .. } if !playlists.is_empty()
-                );
-                if edited && let Some((requested, _)) = playlist_read.take() {
-                    playlists_dirty |= requested.is_empty();
-                    for (id, revision) in requested {
-                        pending_playlists.entry(id).or_insert(revision);
+            Some(command) = commands.recv(), if can_send && !reconciling_library => {
+                if let PlaybackCommand::UpdateLibrary { track_id, playlists, liked } = command {
+                    if !playlists.is_empty() && let Some((requested, _)) = playlist_read.take() {
+                        playlists_dirty |= requested.is_empty();
+                        for (id, revision) in requested {
+                            pending_playlists.entry(id).or_insert(revision);
+                        }
                     }
+                    library_write = Some(Box::pin(timeout(Duration::from_secs(20),
+                        worker.update_library(track_id, &playlists, liked))));
+                } else {
+                    player_command = worker.start_player_command(command).map(Box::pin);
                 }
-                playlists_dirty |= timeout(Duration::from_secs(20), worker.command(command)).await
-                    .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, format!("Spotify command: {error}")))?;
+            }
+            result = async { library_write.as_mut().expect("pending library write").await }, if library_write.is_some() => {
+                library_write = None;
+                let (refresh_root, edited) = result?;
+                playlists_dirty |= refresh_root;
+                reconciling_library = !edited.is_empty();
+                pending_playlists.extend(edited.into_iter().map(|id| (id, Vec::new())));
+            }
+            result = async { player_command.as_mut().expect("pending player command").await },
+                if player_command.is_some() => {
+                player_command = None;
+                result?;
             }
             result = async { metadata.as_mut().expect("pending metadata").await }, if metadata.is_some() => {
                 metadata = None;
@@ -188,22 +203,23 @@ async fn run_spotify(
                     Err(error) => warn!(%error, "Failed to fetch Spotify track metadata"),
                 }
             }
-            event = dealer.next() => match event? {
+            result = async { registration.as_mut().expect("pending registration").await }, if registration.is_some() => {
+                registration = None;
+                let cluster: Cluster = result?;
+                info!(reconnected = registered, "Spotify playback subscription registered");
+                let reported_track = cluster.player_state.as_ref().and_then(|player| player.track.as_ref());
+                if !registered && reported_track.is_none_or(|track| track.uri.is_empty()) {
+                    info!("Spotify reported no current track. Start playback in Spotify to populate the queue.");
+                }
+                playlists_dirty |= registered;
+                registered = true;
+                worker.update_cluster(cluster);
+            }
+            event = dealer.next(), if registration.is_none() => match event? {
                 dealer::Event::Connected(connection_id) => {
                     worker.connection_id = connection_id;
                     let reason = if registered { PutStateReason::NewConnection } else { PutStateReason::NewDevice };
-                    let cluster = timeout(REQUEST_TIMEOUT, worker.register(reason))
-                        .await.map_err(|error| {
-                            io::Error::new(io::ErrorKind::TimedOut, format!("Spotify observer registration: {error}"))
-                        })??;
-                    info!(reconnected = registered, "Spotify playback subscription registered");
-                    let reported_track = cluster.player_state.as_ref().and_then(|player| player.track.as_ref());
-                    if !registered && reported_track.is_none_or(|track| track.uri.is_empty()) {
-                        info!("Spotify reported no current track. Start playback in Spotify to populate the queue.");
-                    }
-                    registered = true;
-                    worker.update_cluster(cluster);
-                    playlists_dirty = true;
+                    registration = Some(Box::pin(worker.register(reason)));
                 }
                 dealer::Event::Cluster(cluster) => worker.update_cluster(*cluster),
                 dealer::Event::Disconnected => {
@@ -224,6 +240,7 @@ async fn run_spotify(
                 if playlist_read.is_some() => {
                 let (requested, _) = playlist_read.take().expect("pending playlist read");
                 playlists_dirty |= worker.apply_playlist_read(&requested, result);
+                reconciling_library &= playlists_dirty;
             }
         }
     }
@@ -290,7 +307,8 @@ impl SpotifyWorker {
         }
     }
 
-    async fn command(&mut self, command: PlaybackCommand) -> bool {
+    fn start_player_command(&self, command: PlaybackCommand) -> Option<impl Future<Output = MusicResult<()>> + use<>> {
+        let mut expected = None;
         let mut command = match command {
             PlaybackCommand::PlayPlaylist(id) => {
                 let uri = id.map_or_else(
@@ -314,10 +332,21 @@ impl SpotifyWorker {
                 })
             }
             PlaybackCommand::SetPlaying(playing) => {
+                let status = if playing { mpris::PlaybackStatus::Playing } else { mpris::PlaybackStatus::Paused };
+                expected = self
+                    .player
+                    .as_ref()
+                    .filter(|player| playing != (player.is_playing && !player.is_paused))
+                    .and_then(|player| player.track.as_ref().map(|track| (track, Some(status))));
                 json!({ "endpoint": if playing { "resume" } else { "pause" } })
             }
             PlaybackCommand::Seek(position_ms) => json!({ "endpoint": "seek_to", "value": position_ms }),
             PlaybackCommand::Skip { forward } => {
+                if let Some(player) = &self.player {
+                    let queue = if forward { &player.next_tracks } else { &player.prev_tracks };
+                    let mut tracks = queue.iter().filter(|track| !track.uri.ends_with(":delimiter"));
+                    expected = (if forward { tracks.next() } else { tracks.next_back() }).map(|track| (track, None));
+                }
                 json!({ "endpoint": if forward { "skip_next" } else { "skip_prev" } })
             }
             PlaybackCommand::JumpTo { uri, uid } => {
@@ -325,30 +354,44 @@ impl SpotifyWorker {
                     self.player.as_ref().and_then(|player| queued_occurrence(player, &uri, &uid))
                 else {
                     warn!("Spotify queue target is no longer available or is ambiguous");
-                    return false;
+                    return None;
                 };
+                expected = Some((track, None));
                 json!({
                     "endpoint": if forward { "skip_next" } else { "skip_prev" },
                     "track": { "uri": track.uri, "uid": track.uid, "metadata": track.metadata },
                 })
             }
-            PlaybackCommand::UpdateLibrary { track_id, playlists, liked } => {
-                return self.update_library(track_id, &playlists, liked).await;
-            }
+            PlaybackCommand::UpdateLibrary { .. } => return None,
         };
         let option_group = if command["endpoint"] == "play" { "play_options" } else { "options" };
         for option in ["override_restrictions", "only_for_local_device", "system_initiated"] {
             command[option_group][option] = false.into();
         }
         command["logging_params"] = json!({});
-        let Some(target) = &self.active_device else { return false };
-        if let Err(error) = self.session.post_player_command(&self.connection_id, target, &command).await {
-            error!(%error, endpoint = %command["endpoint"], "Spotify player command failed");
-        }
-        false
+        let target = self.active_device.clone()?;
+        let session = Arc::clone(&self.session);
+        let connection_id = self.connection_id.clone();
+        mpris::expect_notice(expected.map(|(track, status)| (requested_track_uri(track), status)));
+        Some(async move {
+            let result =
+                timeout(Duration::from_secs(20), session.post_player_command(&connection_id, &target, &command)).await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    mpris::expect_notice(None);
+                    error!(%error, endpoint = %command["endpoint"], "Spotify player command failed");
+                }
+                Err(error) => {
+                    mpris::expect_notice(None);
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, format!("Spotify command: {error}")).into());
+                }
+            }
+            Ok(())
+        })
     }
 
-    async fn register(&self, reason: PutStateReason) -> MusicResult<Cluster> {
+    fn register(&self, reason: PutStateReason) -> impl Future<Output = MusicResult<Cluster>> + use<> {
         let request = PutStateRequest {
             device: Some(ConnectDevice {
                 device_info: Some(DeviceInfo {
@@ -368,8 +411,8 @@ impl SpotifyWorker {
                 player_state: Some(PlayerState {
                     session_id: self.session.id.clone(),
                     playback_speed: 1.0,
-                    options: Some(ContextPlayerOptions::default()),
-                    suppressions: Some(Suppressions::default()),
+                    options: Some(()),
+                    suppressions: Some(()),
                     ..Default::default()
                 }),
             }),
@@ -377,7 +420,13 @@ impl SpotifyWorker {
             put_state_reason: reason as i32,
             client_side_timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
         };
-        self.session.put_connect_state(&self.connection_id, &request).await
+        let session = Arc::clone(&self.session);
+        let connection_id = self.connection_id.clone();
+        async move {
+            timeout(REQUEST_TIMEOUT, session.put_connect_state(&connection_id, &request)).await.map_err(|error| {
+                io::Error::new(io::ErrorKind::TimedOut, format!("Spotify observer registration: {error}"))
+            })?
+        }
     }
 
     fn server_now(&self) -> i64 {

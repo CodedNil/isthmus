@@ -97,37 +97,15 @@ pub struct PlayerState {
     #[prost(bool, tag = "14")]
     pub is_buffering: bool,
     #[prost(message, optional, tag = "16")]
-    pub options: Option<ContextPlayerOptions>,
+    pub options: Option<()>,
     #[prost(message, optional, tag = "18")]
-    pub suppressions: Option<Suppressions>,
+    pub suppressions: Option<()>,
     #[prost(message, repeated, tag = "19")]
     pub prev_tracks: Vec<ProvidedTrack>,
     #[prost(message, repeated, tag = "20")]
     pub next_tracks: Vec<ProvidedTrack>,
     #[prost(string, tag = "23")]
     pub session_id: String,
-}
-
-/// Playback preferences reported for the current context.
-#[derive(prost::Message)]
-pub struct ContextPlayerOptions {
-    #[prost(bool, tag = "1")]
-    pub shuffling_context: bool,
-    #[prost(bool, tag = "2")]
-    pub repeating_context: bool,
-    #[prost(bool, tag = "3")]
-    pub repeating_track: bool,
-    #[prost(float, tag = "4")]
-    pub playback_speed: f32,
-    #[prost(map = "string, string", tag = "5")]
-    pub modes: HashMap<String, String>,
-}
-
-/// Track providers suppressed by the active player.
-#[derive(prost::Message)]
-pub struct Suppressions {
-    #[prost(string, repeated, tag = "1")]
-    pub providers: Vec<String>,
 }
 
 /// One queue occurrence with its Spotify URI, occurrence ID, and metadata.
@@ -155,7 +133,7 @@ pub enum PutStateReason {
 /// Connect protocol used by the registering device.
 #[derive(Debug, prost::Enumeration)]
 pub enum MemberType {
-    /// Legacy Spotify remote-control membership.
+    /// Legacy remote-control membership and the protobuf default.
     SpircV2 = 0,
     /// Membership through the Connect state service.
     ConnectState = 2,

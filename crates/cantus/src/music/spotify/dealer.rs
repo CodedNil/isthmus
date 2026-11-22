@@ -6,7 +6,7 @@ use super::{
         connect::{Cluster, ClusterUpdate},
         playlist_edit::{OperationKind, PlaylistNotification},
     },
-    session::{Endpoint, Session},
+    session::Session,
 };
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use flate2::read::MultiGzDecoder;
@@ -73,9 +73,9 @@ impl Drop for Dealer {
 
 async fn connect(session: &Session) -> MusicResult<Socket> {
     timeout(REQUEST_TIMEOUT, async {
-        let (host, port) = session.resolve(Endpoint::Dealer).await;
+        let endpoint = session.dealer_url().await?;
         let token = session.auth_token().await?;
-        let mut url = Url::parse(&format!("wss://{host}:{port}/"))?;
+        let mut url = Url::parse(&endpoint)?;
         url.query_pairs_mut().append_pair("access_token", &token);
         Ok(connect_async(url.as_str()).await?.0)
     })
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn dealer_decodes_uncompressed_and_compressed_protobuf_cluster_events() {
-        use super::super::proto::connect::{ContextPlayerOptions, PlayerState, ProvidedTrack, Suppressions};
+        use super::super::proto::connect::{PlayerState, ProvidedTrack};
 
         let raw = ClusterUpdate {
             cluster: Some(Cluster {
@@ -354,8 +354,6 @@ mod tests {
                         uid: "queue-occurrence".into(),
                         metadata: HashMap::from([("title".into(), "Example track".into())]),
                     }],
-                    options: Some(ContextPlayerOptions { shuffling_context: true, ..Default::default() }),
-                    suppressions: Some(Suppressions::default()),
                     ..Default::default()
                 }),
             }),
@@ -388,9 +386,7 @@ mod tests {
                             && player.next_tracks.first().is_some_and(|track|
                                 track.uri == "spotify:track:example"
                                     && track.uid == "queue-occurrence"
-                                    && track.metadata.get("title").is_some_and(|title| title == "Example track"))
-                            && player.options.as_ref().is_some_and(|options| options.shuffling_context)
-                            && player.suppressions.as_ref().is_some_and(|suppressions| suppressions.providers.is_empty()))));
+                                    && track.metadata.get("title").is_some_and(|title| title == "Example track")))));
         }
     }
 }

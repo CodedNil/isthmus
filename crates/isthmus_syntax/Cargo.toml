@@ -5,14 +5,14 @@ name = "isthmus_syntax"
 version = "0.1.0"
 
 [dependencies]
-# Shader ABI
+# Workspace crates
 isthmus_abi.workspace = true
 
 # Rust syntax and code generation
 proc-macro2.workspace = true
 quote.workspace = true
 strum_macros.workspace = true
-syn = { workspace = true, features = ["visit", "visit-mut"] }
+syn = { workspace = true, features = ["visit-mut"] }
 
 [lints]
 workspace = true

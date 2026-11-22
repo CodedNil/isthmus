@@ -21,7 +21,7 @@ use std::{
     borrow::Cow,
     mem,
     ops::Range,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Weak},
 };
 
 /// The fonts and caches every line is shaped with.
@@ -54,7 +54,7 @@ struct Instance {
 /// How many lines are cached before the first sweep.
 const MIN_SWEEP: usize = 256;
 
-static SHAPER: Mutex<Option<Shaper>> = Mutex::new(None);
+static SHAPER: parking_lot::Mutex<Option<Shaper>> = parking_lot::Mutex::new(None);
 
 /// Installs the fonts that lines are shaped with, replacing any installed before.
 ///
@@ -93,11 +93,11 @@ pub fn install_fonts(fonts: impl IntoIterator<Item = impl Into<Cow<'static, [u8]
         limit: MIN_SWEEP,
         buffer: Buffer::new(),
     };
-    *SHAPER.lock().expect("shaper lock") = Some(shaper);
+    *SHAPER.lock() = Some(shaper);
 }
 
 fn with_shaper<T>(use_shaper: impl FnOnce(&mut Shaper) -> T) -> T {
-    let mut shaper = SHAPER.lock().expect("shaper lock");
+    let mut shaper = SHAPER.lock();
     use_shaper(shaper.as_mut().expect("install fonts with `install_fonts` before shaping text"))
 }
 

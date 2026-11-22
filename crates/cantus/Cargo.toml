@@ -5,15 +5,14 @@ name = "cantus"
 version = "0.10.0"
 
 [dependencies]
-# Rendering and media analysis
-bytemuck.workspace = true
-image = { workspace = true, features = ["jpeg", "png"] }
+# Workspace crates
 isthmus = { workspace = true, features = ["wayland"] }
 isthmus_2d.workspace = true
-microfft = { version = "0.6.0", default-features = false, features = [
-    "size-1024",
-    "std",
-] }
+
+# Graphics and audio analysis
+bytemuck.workspace = true
+image = { workspace = true, features = ["jpeg", "png"] }
+microfft = { version = "0.6.0", default-features = false, features = ["size-1024"] }
 palette = { version = "0.7.7", default-features = false, features = ["std"] }
 resvg = { version = "0.50.0", default-features = false, features = [
     "raster-images",
@@ -24,7 +23,7 @@ calloop.workspace = true
 calloop-wayland-source.workspace = true
 freedesktop-desktop-entry = { version = "0.8.4", default-features = false }
 freedesktop-icons = "0.4.0"
-notify = "9.0.0"
+notify = { version = "9.0.0", default-features = false }
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
@@ -35,8 +34,9 @@ zbus = { version = "6.5.0", default-features = false, features = [
     "tokio",
 ] }
 
-# HTTP, WebSockets, and async execution
+# Async runtime and networking
 bytes = "1.12.2"
+form_urlencoded.workspace = true
 futures-util.workspace = true
 reqwest = { version = "0.13.5", default-features = false, features = [
     "form",
@@ -49,17 +49,16 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 tokio = { workspace = true, features = ["io-util"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
-# Music protocols and authentication
+# Spotify and lyrics
 base64 = "0.23.1"
-flate2 = "1.1.11"
-form_urlencoded.workspace = true
+flate2.workspace = true
 getrandom = "0.4.3"
 hex = "0.4.3"
 prost = "0.14.6"
 prost-types = "0.14.6"
 roxmltree = "0.21.2"
 sha2 = "0.11.1"
-tempfile = "3.27.0"
+tempfile.workspace = true
 
 # Configuration and serialization
 schemars = { version = "1.2.3", features = ["arrayvec07", "preserve_order"] }
@@ -68,11 +67,10 @@ serde-saphyr = { version = "2.2.0", default-features = false, features = [
     "deserialize",
     "serialize",
 ] }
-serde_json = "1.0.154"
+serde_json.workspace = true
 toml.workspace = true
 
-# Launcher and local utilities
-fastrand = "2.5.0"
+# Launcher and time
 fend-core = "1.5.9"
 jiff = { version = "1.0.2", default-features = false, features = [
     "serde",
@@ -81,8 +79,10 @@ jiff = { version = "1.0.2", default-features = false, features = [
 ] }
 unicode-segmentation = "1.13.3"
 
-# Collections and enum derives
+# Collections, synchronization, and enum derives
 arrayvec = { version = "0.7.8", features = ["serde"] }
+fastrand = "2.5.0"
+parking_lot.workspace = true
 smallvec.workspace = true
 strum.workspace = true
 strum_macros.workspace = true

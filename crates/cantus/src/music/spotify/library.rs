@@ -11,6 +11,7 @@ use crate::{
     app::send_update,
     music::{CondensedPlaylist, PlaylistId, TrackId},
 };
+use futures_util::future::join_all;
 use std::{
     collections::{HashMap, HashSet},
     str,
@@ -21,6 +22,10 @@ use tokio::time::timeout;
 use tracing::{error, warn};
 
 const RATING_PLAYLISTS: [&str; 10] = ["0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0"];
+
+fn rating_index(name: &str, ratings: bool) -> Option<u8> {
+    ratings.then(|| RATING_PLAYLISTS.iter().position(|rating| *rating == name)).flatten().map(|index| index as u8)
+}
 
 #[derive(Clone)]
 pub(super) struct CachedPlaylist {
@@ -155,44 +160,51 @@ impl SpotifyWorker {
         refresh_root
     }
 
-    pub(super) async fn update_library(
-        &mut self,
+    pub(super) fn update_library(
+        &self,
         track_id: TrackId,
         playlists: &[(PlaylistId, bool)],
         liked: Option<bool>,
-    ) -> bool {
+    ) -> impl Future<Output = (bool, Vec<PlaylistId>)> + use<> {
         let uri = format!("spotify:track:{track_id}");
         let mut refresh_needed = false;
-        let mut edited = Vec::new();
+        let mut edits: HashMap<_, Vec<_>> = HashMap::new();
         for &(playlist_id, add) in playlists {
-            let Some(cached) = self.cached_playlists.get(&playlist_id) else {
+            if !self.cached_playlists.contains_key(&playlist_id) {
                 warn!(%playlist_id, "Spotify playlist is not loaded");
                 refresh_needed = true;
                 continue;
-            };
-            let revision = cached.revision.clone();
-            let operation = playlist_operation(&uri, add);
-            let request = ListChanges {
-                base_revision: Some(revision.clone()),
-                deltas: vec![Delta { base_version: Some(revision), ops: vec![operation] }],
-            };
-            if let Err(error) = self.session.change_playlist(&self.connection_id, playlist_id, &request).await {
-                error!(%error, %playlist_id, "Failed to update Spotify playlist");
             }
-            // A transport error can arrive after Spotify has applied the write.
-            edited.push((playlist_id, Vec::new()));
+            edits.entry(playlist_id).or_default().push(playlist_operation(&uri, add));
         }
-        if !edited.is_empty() {
-            let ids: Vec<_> = edited.iter().map(|&(id, _)| id).collect();
-            let results = self.session.playlists(&ids).await;
-            refresh_needed |= self.apply_playlist_results(&edited, results);
+        let session = Arc::clone(&self.session);
+        let connection_id = self.connection_id.clone();
+        let cache = Arc::clone(&self.cached_playlists);
+        async move {
+            let writes = edits.into_iter().map(|(id, ops)| {
+                let (session, connection_id, cache) = (&session, &connection_id, &cache);
+                async move {
+                    let revision = cache[&id].revision.clone();
+                    let request = ListChanges {
+                        base_revision: Some(revision.clone()),
+                        deltas: vec![Delta { base_version: Some(revision), ops }],
+                    };
+                    if let Err(error) = session.change_playlist(connection_id, id, &request).await {
+                        error!(%error, playlist_id = %id, "Failed to update Spotify playlist");
+                    }
+                    // A transport error can arrive after Spotify has applied the write.
+                    id
+                }
+            });
+            let (edited, ()) = tokio::join!(join_all(writes), async {
+                if let Some(should_like) = liked
+                    && let Err(error) = session.write_liked_song(&connection_id, uri, should_like).await
+                {
+                    error!(%error, %track_id, "Failed to update Spotify library");
+                }
+            },);
+            (refresh_needed, edited)
         }
-        if let Some(should_like) = liked
-            && let Err(error) = self.session.write_liked_song(&self.connection_id, uri, should_like).await
-        {
-            error!(%error, %track_id, "Failed to update Spotify library");
-        }
-        refresh_needed
     }
 
     async fn load_playlists(
@@ -217,11 +229,7 @@ impl SpotifyWorker {
                 let id = parse_id(kind_and_id.strip_prefix("playlist:")?)?;
                 let attributes = metadata.attributes.as_ref()?;
                 let name = attributes.name.as_str();
-                let rating_index = RATING_PLAYLISTS
-                    .iter()
-                    .position(|rating| *rating == name)
-                    .filter(|_| ratings)
-                    .map(|index| index as u8);
+                let rating_index = rating_index(name, ratings);
                 if !targets.iter().any(|target| target == name) && rating_index.is_none() {
                     return None;
                 }

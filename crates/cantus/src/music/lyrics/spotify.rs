@@ -1,34 +1,49 @@
 use super::{LyricLine, LyricSegment, Lyrics, Timing, fragment_timing, separate};
 use crate::music::{
     MusicResult,
-    spotify::lyrics::{Line, SpotifyLyrics},
+    spotify::proto::lyrics::{Line, SpotifyLyrics},
 };
 use core::ops::Range;
 
-fn line_milliseconds(value: &str) -> Option<f32> {
-    let value: f32 = value.parse().ok()?;
-    value.is_finite().then_some(value)
-}
-
 fn spotify_fragments(line: &Line, time: &Range<f32>) -> Option<Vec<LyricSegment>> {
-    let mut remaining = line.words.as_deref()?.trim();
+    // Spotify counts UTF-16 code units in the original line, including spaces.
+    let mut remaining = line.words.as_str();
     let mut parts: Vec<LyricSegment> = Vec::new();
-    for part in line.syllables.as_deref().unwrap_or_default() {
-        let Some(text) = part.text.as_deref().map(str::trim).filter(|text| !text.is_empty()) else { continue };
-        let prefix = remaining.len() - remaining.trim_start().len();
-        if let Some(previous) = parts.last_mut() {
-            previous.text.push_str(remaining.get(..prefix).unwrap_or_default());
+    for part in &line.sync_data {
+        let count = usize::try_from(part.num_chars).ok()?;
+        let mut units = 0;
+        let mut bytes = 0;
+        for ch in remaining.chars() {
+            if units >= count {
+                break;
+            }
+            units += ch.len_utf16();
+            bytes += ch.len_utf8();
         }
-        remaining = remaining.trim_start().strip_prefix(text)?;
-        let start = part.start_time_ms.as_ref()?.value()?;
-        let end = part.end_time_ms.as_ref()?.value()?;
+        if units != count {
+            return None;
+        }
+        let (text, rest) = remaining.split_at(bytes);
+        remaining = rest;
+        if text.trim().is_empty() {
+            if let Some(previous) = parts.last_mut() {
+                previous.text.push_str(text);
+            }
+            continue;
+        }
+        let start = part.start_time_ms as f32;
+        let end = part.end_time_ms as f32;
         if !(time.start..end).contains(&start)
             || !(start..=time.end).contains(&end)
             || parts.last().is_some_and(|previous| previous.time.start > start)
         {
             return None;
         }
-        parts.push(LyricSegment { time: start..end, text: text.into() });
+        let trimmed = text.trim_start();
+        if let Some(previous) = parts.last_mut() {
+            previous.text.push_str(text.get(..text.len() - trimmed.len())?);
+        }
+        parts.push(LyricSegment { time: start..end, text: trimmed.into() });
     }
     if parts.is_empty() || !remaining.trim().is_empty() {
         return None;
@@ -39,26 +54,24 @@ fn spotify_fragments(line: &Line, time: &Range<f32>) -> Option<Vec<LyricSegment>
 
 pub(super) fn parse_spotify(response: Option<SpotifyLyrics>, duration: u32) -> MusicResult<Lyrics> {
     let Some(sheet) = response.and_then(|response| response.lyrics) else { return Ok(Lyrics::default()) };
-    if !matches!(sheet.sync_type.as_deref(), Some("LINE_SYNCED" | "WORD_SYNCED" | "SYLLABLE_SYNCED")) {
+    // V3 sync type 1 is line-synced and type 2 carries fragment timings.
+    if !matches!(sheet.sync_type, 1 | 2) {
         return Ok(Lyrics::default());
     }
-    let lines = sheet.lines.unwrap_or_default();
+    let lines = sheet.lines;
     let mut output = Vec::new();
     let mut all_word_synced = true;
     for (index, line) in lines.iter().enumerate() {
-        let text = line.words.as_deref().unwrap_or_default().trim();
+        let text = line.words.trim();
         if text.is_empty() || matches!(text, "♪" | "♫") {
             continue;
         }
-        let start =
-            line.start_time_ms.as_deref().and_then(line_milliseconds).ok_or("Spotify line has no start time")?;
-        let end = line
-            .end_time_ms
-            .as_deref()
-            .and_then(line_milliseconds)
-            .filter(|&end| end > start)
-            .or_else(|| lines.get(index + 1).and_then(|line| line.start_time_ms.as_deref().and_then(line_milliseconds)))
-            .unwrap_or(duration as f32);
+        let start = line.start_time_ms as f32;
+        let end = if line.end_time_ms > line.start_time_ms {
+            line.end_time_ms as f32
+        } else {
+            lines.get(index + 1).map_or(duration as f32, |next| next.start_time_ms as f32)
+        };
         if !(0.0..end).contains(&start) || !(0.0..=duration as f32 + 1000.0).contains(&end) {
             return Err("Spotify line has invalid timing".into());
         }

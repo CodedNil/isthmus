@@ -5,7 +5,6 @@ name = "isthmus_2d"
 version = "0.1.0"
 
 [dependencies]
-# Rendering
 isthmus.workspace = true
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
@@ -19,6 +18,7 @@ hashbrown = { version = "0.17.1", default-features = false, features = [
     "default-hasher",
     "inline-more",
 ] }
+parking_lot.workspace = true
 
 [lints]
 workspace = true

@@ -3,7 +3,7 @@ use arrayvec::ArrayString;
 use isthmus::prelude::*;
 use isthmus_2d::prelude::*;
 use sdf::refract;
-use std::sync::Once;
+use std::sync::OnceLock;
 
 pub mod launcher;
 pub mod lyrics;
@@ -63,8 +63,8 @@ isthmus::program!(Globals);
 
 /// Installs the fonts every line of text is shaped with, once.
 pub fn install_fonts() {
-    static INSTALLED: Once = Once::new();
-    INSTALLED.call_once(|| {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
         isthmus_2d::install_fonts([
             include_bytes!("../../assets/NotoSans-Variable.ttf").as_slice(),
             include_bytes!("../../assets/NotoSansSymbols-Music.ttf").as_slice(),

@@ -5,11 +5,11 @@ name = "paries"
 version = "0.1.0"
 
 [dependencies]
-# Rendering
+# Workspace crates
 isthmus = { workspace = true, features = ["wayland"] }
 isthmus_2d.workspace = true
 
-# Wayland wallpaper surfaces
+# Wayland
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true

@@ -3,6 +3,7 @@ use crate::{
     music::{PlaybackCommand, TRACK_RESTART_GRACE, Track, should_restart_track},
 };
 use futures_util::{Stream, StreamExt as _, future::join_all, stream::select};
+use parking_lot::Mutex;
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -27,6 +28,8 @@ const PATH: &str = "/org/mpris/MediaPlayer2";
 const PLAYER: &str = "org.mpris.MediaPlayer2.Player";
 const TRACK_LIST: &str = "org.mpris.MediaPlayer2.TrackList";
 const SKIP_FORWARD: &str = "cantus:skipForward";
+// MPRIS reports the new state without identifying who requested it.
+static EXPECTED_NOTICE: Mutex<Option<(Instant, String, Option<PlaybackStatus>)>> = Mutex::new(None);
 
 pub struct MediaCommand {
     pub device: String,
@@ -221,6 +224,7 @@ pub struct MediaNotice {
     pub status: PlaybackStatus,
     pub skip_forward: Option<bool>,
     track_id: Option<OwnedObjectPath>,
+    uri: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +232,29 @@ pub enum PlaybackStatus {
     Playing,
     Paused,
     Stopped,
+}
+
+pub fn expect_notice(change: Option<(&str, Option<PlaybackStatus>)>) {
+    *EXPECTED_NOTICE.lock() = change.map(|(uri, status)| (Instant::now(), uri.into(), status));
+}
+
+fn suppress_notice(name: &str, old: Option<&MediaNotice>, notice: &MediaNotice) -> bool {
+    let spotify = name == NAME || name.split('.').nth(3) == Some("spotify");
+    if !spotify || notice.title.is_empty() || notice.status == PlaybackStatus::Stopped {
+        return false;
+    }
+    let track_changed = old.is_some_and(|old| old.track_id != notice.track_id || old.uri != notice.uri);
+    let new_track = track_changed || old.is_none_or(|old| old.title.is_empty());
+    EXPECTED_NOTICE
+        .lock()
+        .take_if(|(sent, uri, status)| {
+            sent.elapsed() < Duration::from_secs(5)
+                && notice.uri.as_ref() == Some(uri)
+                && status.map_or(new_track, |status| {
+                    !track_changed && notice.status == status && old.is_none_or(|old| old.status != status)
+                })
+        })
+        .is_some()
 }
 
 pub fn watch_osd(updater: AppUpdater) {
@@ -283,11 +310,12 @@ async fn watch_players(mut report: impl FnMut(MediaNotice) -> bool) -> zbus::Res
             let current = read_notice(connection, owner).await;
             players.insert(name.into(), (owner.into(), current.clone()));
             current
-                .filter(|notice| notice.status == PlaybackStatus::Playing)
+                .filter(|notice| notice.status == PlaybackStatus::Playing && !suppress_notice(name, None, notice))
                 .map(|notice| MediaNotice { skip_forward: None, ..notice })
         } else {
             let Some(sender) = header.sender() else { continue };
-            let Some((owner, previous)) = players.values_mut().find(|(owner, _)| owner == sender.as_str()) else {
+            let Some((name, (owner, previous))) = players.iter_mut().find(|(_, (owner, _))| owner == sender.as_str())
+            else {
                 continue;
             };
             let (_, changed, invalidated) = body.deserialize::<(&str, HashMap<&str, Variant<'_>>, Vec<&str>)>()?;
@@ -297,11 +325,12 @@ async fn watch_players(mut report: impl FnMut(MediaNotice) -> bool) -> zbus::Res
             {
                 continue;
             }
-            let mut current = read_notice(connection, owner).await;
+            let current = read_notice(connection, owner).await;
             if current == *previous {
                 continue;
             }
             let old = mem::replace(previous, current.clone());
+            let mut current = current.filter(|notice| !suppress_notice(name, old.as_ref(), notice));
             if let Some(notice) = &mut current {
                 if notice.status == PlaybackStatus::Stopped {
                     let Some(old) = old.filter(|old| old.status != PlaybackStatus::Stopped) else { continue };
@@ -368,7 +397,11 @@ async fn read_notice(connection: &Connection, owner: &str) -> Option<MediaNotice
             .map_or_else(String::new, |artists| artists.join(", "));
         let track_id = metadata.remove("mpris:trackid").and_then(|value| OwnedObjectPath::try_from(value).ok());
         let skip_forward = metadata.remove(SKIP_FORWARD).and_then(|value| bool::try_from(value).ok());
-        Some(MediaNotice { title, artist, status, skip_forward, track_id })
+        let mut uri = metadata.remove("xesam:url").and_then(|value| String::try_from(value).ok());
+        if let Some(path) = uri.as_deref().and_then(|url| url.strip_prefix("https://open.spotify.com/")) {
+            uri = Some(format!("spotify:{}", path.split('?').next().unwrap_or(path).replace('/', ":")));
+        }
+        Some(MediaNotice { title, artist, status, skip_forward, track_id, uri })
     })
     .await
     .ok()?

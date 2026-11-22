@@ -5,26 +5,28 @@ name = "lares"
 version = "0.1.0"
 
 [dependencies]
-# Rendering and scene data
-bitflags.workspace = true
+# Workspace crates
 isthmus = { workspace = true, features = ["wayland"] }
 isthmus_2d.workspace = true
 
-# Wayland windowing
+# Scene data and baked lighting
+bitflags = "2.13.2"
+flate2.workspace = true
+
+# Wayland
 calloop.workspace = true
 calloop-wayland-source.workspace = true
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["unstable"] }
 
-# Presence sensor and async execution
+# Async runtime and networking
 futures-util.workspace = true
-serde.workspace = true
-serde_json = "1.0.154"
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 
-# Baked lighting compression
-flate2 = "1.1.11"
+# Presence sensor messages
+serde.workspace = true
+serde_json.workspace = true
 
 # Diagnostics
 tracing.workspace = true

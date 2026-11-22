@@ -3,6 +3,7 @@ use crate::{
     config::directory,
     music::{MusicResult, Track},
 };
+use parking_lot::Mutex;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -11,7 +12,7 @@ use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{self, BufRead as _, BufReader, Write as _},
-    sync::{Mutex, MutexGuard, OnceLock},
+    sync::OnceLock,
 };
 use tokio::task;
 
@@ -235,10 +236,8 @@ pub(super) async fn publish_lrclib(
 }
 
 pub(in crate::music) fn contributed_by_us(track: &Track, lyrics: &Lyrics) -> bool {
-    upload_history()
-        .map(|history| history.contains(&upload_key(track, lyrics)))
-        .inspect_err(|error| tracing::warn!("Could not read LRCLIB upload history: {error}"))
-        .unwrap_or_default()
+    let key = upload_key(track, lyrics);
+    upload_history().lock().contains(&key)
 }
 
 fn append_upload_log(track: &Track, lyrics: &Lyrics, source: &str, status: StatusCode) -> MusicResult<()> {
@@ -260,13 +259,13 @@ fn append_upload_log(track: &Track, lyrics: &Lyrics, source: &str, status: Statu
     };
     serde_json::to_writer(&mut file, &entry)?;
     writeln!(file)?;
-    upload_history()?.insert(entry.key);
+    upload_history().lock().insert(entry.key);
     Ok(())
 }
 
-fn upload_history() -> MusicResult<MutexGuard<'static, HashSet<String>>> {
+fn upload_history() -> &'static Mutex<HashSet<String>> {
     static HISTORY: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let history = HISTORY.get_or_init(|| {
+    HISTORY.get_or_init(|| {
         let mut keys = HashSet::new();
         match File::open(directory().join("lyrics-uploads.jsonl")) {
             Ok(file) => {
@@ -279,8 +278,7 @@ fn upload_history() -> MusicResult<MutexGuard<'static, HashSet<String>>> {
             Err(error) => tracing::warn!("Could not read LRCLIB upload history: {error}"),
         }
         Mutex::new(keys)
-    });
-    Ok(history.lock().map_err(|_error| io::Error::other("LRCLIB upload history lock poisoned"))?)
+    })
 }
 
 fn upload_key(track: &Track, lyrics: &Lyrics) -> String {

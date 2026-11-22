@@ -4,7 +4,6 @@ pub(super) use lrclib::contributed_by_us;
 pub use musixmatch::Session;
 use reqwest::Client;
 use serde_json::Value;
-use strum::IntoEnumIterator as _;
 use strum_macros::{AsRefStr, Display, EnumIter, IntoStaticStr};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -124,7 +123,7 @@ pub(super) fn fragment_timing(lines: &[LyricLine]) -> Timing {
     }
 }
 
-#[derive(Clone, Copy, EnumIter, IntoStaticStr, PartialEq, Eq)]
+#[derive(Clone, Copy, IntoStaticStr, PartialEq, Eq)]
 enum Source {
     #[strum(serialize = "LRCLIB")]
     Lrclib,
@@ -142,30 +141,33 @@ pub(super) async fn fetch(
 ) -> MusicResult<Lyrics> {
     let title = track.compact_title().split(" (").next().unwrap_or(&track.name);
     let artist = track.primary_artist();
-    let mut best = (None, Ok(Lyrics::default()));
-    for source in Source::iter() {
-        let result = match source {
-            Source::Lrclib => lrclib::fetch_lrclib(track, http).await,
-            Source::Spotify => {
-                let Some(id) = track.id else { continue };
+    let cached = lrclib::fetch_lrclib(track, http).await;
+    if let Err(error) = &cached {
+        debug!(source = "LRCLIB", %error, "Lyrics provider unavailable");
+    }
+    let cached_source = cached.as_ref().ok().filter(|lyrics| !lyrics.is_empty()).map(|_| Source::Lrclib);
+    let mut best = (cached_source, cached);
+    if !best.1.as_ref().is_ok_and(|lyrics| !lyrics.is_empty() && lyrics.timing == Timing::Syllable) {
+        let (spotify, musixmatch, apple) = tokio::join!(
+            async {
+                let Some(id) = track.id else { return Ok(Lyrics::default()) };
                 spotify.get_lyrics(id).await.and_then(|response| spotify::parse_spotify(response, track.duration_ms))
-            }
-            Source::Musixmatch => {
+            },
+            async {
                 let mut session = session.lock().await;
                 if session.is_backing_off() {
-                    continue;
+                    return Ok(Lyrics::default());
                 }
                 session.fetch(track, http).await
+            },
+            apple::fetch_apple_lyrics(track, http),
+        );
+        for (source, result) in [(Source::Spotify, spotify), (Source::Musixmatch, musixmatch), (Source::Apple, apple)] {
+            if let Err(error) = &result {
+                debug!(source = Into::<&str>::into(source), %error, "Lyrics provider unavailable");
             }
-            Source::Apple => apple::fetch_apple_lyrics(track, http).await,
-        };
-        if let Err(error) = &result {
-            debug!(source = Into::<&str>::into(source), %error, "Lyrics provider unavailable");
-        }
-        if prefer_next(&best.1, &result) {
-            best = (result.is_ok().then_some(source), result);
-            if best.1.as_ref().is_ok_and(|lyrics| lyrics.timing >= Timing::Word) {
-                break;
+            if prefer_next(&best.1, &result) {
+                best = (result.is_ok().then_some(source), result);
             }
         }
     }
@@ -194,11 +196,18 @@ pub(super) async fn fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::music::TrackRuntime;
+    use crate::music::{
+        TrackRuntime,
+        spotify::proto::lyrics::{Line, Sheet, SpotifyLyrics, SyncData},
+    };
     use apple::parse_ttml;
+    use prost::Message;
     use serde_json::json;
-    fn parse_spotify(response: &Value, duration: u32) -> MusicResult<Lyrics> {
-        spotify::parse_spotify(serde_json::from_value(response.clone())?, duration)
+
+    fn parse_spotify(lines: Vec<Line>, sync_type: i32) -> MusicResult<Lyrics> {
+        let response = SpotifyLyrics { lyrics: Some(Sheet { sync_type, lines }) };
+        let decoded = SpotifyLyrics::decode(response.encode_to_vec().as_slice())?;
+        spotify::parse_spotify(Some(decoded), 5000)
     }
 
     fn track() -> Track {
@@ -261,38 +270,43 @@ mod tests {
 
     #[test]
     fn spotify_uses_silence_markers_and_track_end_as_boundaries() {
-        let response = json!({"lyrics":{"syncType":"LINE_SYNCED","lines":[
-            {"startTimeMs":"1000","endTimeMs":"0","words":"First"},
-            {"startTimeMs":"2000","endTimeMs":"0","words":"♪"},
-            {"startTimeMs":"3000","endTimeMs":"0","words":"Last"}
-        ]}});
-        let lyrics = parse_spotify(&response, 5000).expect("line timing");
+        let lines = vec![
+            Line { start_time_ms: 1000, words: "First".into(), ..Default::default() },
+            Line { start_time_ms: 2000, words: "♪".into(), ..Default::default() },
+            Line { start_time_ms: 3000, end_time_ms: 4200, words: "Last".into(), ..Default::default() },
+            Line { start_time_ms: 4400, words: "End".into(), ..Default::default() },
+        ];
+        let lyrics = parse_spotify(lines, 1).expect("line timing");
         assert_eq!(lyrics.timing, Timing::Line);
         let lines = &lyrics.lines;
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].time, 1000.0..2000.0);
-        assert_eq!(lines[1].time, 3000.0..5000.0);
-        assert!(parse_spotify(&json!({"lyrics":{"syncType":"UNSYNCED"}}), 5000).expect("no sync").is_empty());
+        assert_eq!(lines[1].time, 3000.0..4200.0);
+        assert_eq!(lines[2].time, 4400.0..5000.0);
+        assert!(parse_spotify(Vec::new(), 0).expect("no sync").is_empty());
     }
 
     #[test]
-    fn spotify_syllables_must_cover_the_line_and_keep_word_spaces() {
-        let mut response = json!({"lyrics":{"syncType":"LINE_SYNCED","lines":[
-            {"startTimeMs":"1000","endTimeMs":"4000","words":"Hello world","syllables":[
-                {"startTimeMs":"1000","endTimeMs":"1500","text":"Hel"},
-                {"startTimeMs":"1500","endTimeMs":"2000","text":"lo"},
-                {"startTimeMs":"2500","endTimeMs":"4000","text":"world"}
-            ]}
-        ]}});
-        let lyrics = parse_spotify(&response, 5000).expect("syllable timing");
+    fn spotify_syllables_use_utf16_counts_and_keep_word_spaces() {
+        let mut line = Line {
+            start_time_ms: 1000,
+            end_time_ms: 4000,
+            words: "🎵Hello world".into(),
+            sync_data: vec![
+                SyncData { start_time_ms: 1000, end_time_ms: 1500, num_chars: 5 },
+                SyncData { start_time_ms: 1500, end_time_ms: 2000, num_chars: 2 },
+                SyncData { start_time_ms: 2500, end_time_ms: 4000, num_chars: 6 },
+            ],
+        };
+        let lyrics = parse_spotify(vec![line.clone()], 2).expect("syllable timing");
         assert_eq!(lyrics.timing, Timing::Syllable);
         let segments = lyrics.lines[0].words.as_ref().expect("word timings");
-        assert_eq!(segments.iter().map(|segment| segment.text.as_str()).collect::<String>(), "Hello world ");
+        assert_eq!(segments.iter().map(|segment| segment.text.as_str()).collect::<String>(), "🎵Hello world ");
         assert_eq!(segments[1].time, 1500.0..2000.0);
-        response["lyrics"]["lines"][0]["syllables"][2]["text"] = json!("wrong");
-        let lyrics = parse_spotify(&response, 5000).expect("fallback to whole line");
+        line.sync_data[0].num_chars = 1;
+        let lyrics = parse_spotify(vec![line], 2).expect("fallback to whole line");
         assert_eq!(lyrics.timing, Timing::Line);
-        assert_eq!(lyrics.lines[0].text, "Hello world ");
+        assert_eq!(lyrics.lines[0].text, "🎵Hello world ");
     }
 
     #[test]

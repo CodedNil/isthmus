@@ -1,11 +1,8 @@
 use super::{MusicResult, auth::Auth};
 use reqwest::Client;
 use serde::Deserialize;
-use std::{collections::VecDeque, mem};
-use strum::IntoEnumIterator as _;
-use strum_macros::{EnumIter, IntoStaticStr};
+use std::{collections::VecDeque, io};
 use tokio::sync::Mutex;
-use tracing::warn;
 
 pub(super) struct Session {
     pub(super) device_id: String,
@@ -45,102 +42,59 @@ fn device_id() -> Result<String, getrandom::Error> {
     Ok(id)
 }
 
-pub(super) type SocketAddress = (String, u16);
-
-#[derive(Clone, Copy, EnumIter, IntoStaticStr)]
-pub(super) enum Endpoint {
-    #[strum(serialize = "dealer.spotify.com")]
-    Dealer,
-    #[strum(serialize = "spclient.wg.spotify.com")]
-    Api,
-}
-
-impl Endpoint {
-    fn fallback(self) -> SocketAddress {
-        let host: &str = self.into();
-        (host.to_owned(), 443)
-    }
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
+#[derive(Deserialize)]
 struct ServiceEndpoints {
-    dealer: VecDeque<String>,
-    spclient: VecDeque<String>,
+    dealer: Vec<String>,
+    spclient: Vec<String>,
 }
 
 #[derive(Default)]
 struct EndpointState {
-    services: ServiceEndpoints,
+    dealer: VecDeque<String>,
     api_url: Option<String>,
 }
 
-impl ServiceEndpoints {
-    const fn queue(&mut self, endpoint: Endpoint) -> &mut VecDeque<String> {
-        match endpoint {
-            Endpoint::Dealer => &mut self.dealer,
-            Endpoint::Api => &mut self.spclient,
-        }
-    }
-}
-
 impl Session {
-    pub(super) async fn resolve(&self, endpoint: Endpoint) -> SocketAddress {
+    pub(super) async fn dealer_url(&self) -> MusicResult<String> {
         let mut endpoints = self.endpoints.lock().await;
-        self.resolve_endpoint(&mut endpoints.services, endpoint).await
+        if endpoints.dealer.is_empty() {
+            *endpoints = self.discover().await?;
+        }
+        endpoints
+            .dealer
+            .pop_front()
+            .ok_or_else(|| io::Error::other("Spotify AP Resolve returned no Dealer address").into())
     }
 
-    pub(super) async fn base_url(&self) -> String {
+    pub(super) async fn base_url(&self) -> MusicResult<String> {
         let mut endpoints = self.endpoints.lock().await;
-        if let Some(url) = &endpoints.api_url {
-            return url.clone();
+        if endpoints.api_url.is_none() {
+            *endpoints = self.discover().await?;
         }
-
-        let (host, port) = self.resolve_endpoint(&mut endpoints.services, Endpoint::Api).await;
-        let url = format!("https://{host}:{port}");
-        endpoints.api_url = Some(url.clone());
-        url
+        endpoints
+            .api_url
+            .clone()
+            .ok_or_else(|| io::Error::other("Spotify AP Resolve returned no spclient address").into())
     }
 
-    pub(super) async fn invalidate_base_url(&self, url: &str) {
-        let mut endpoints = self.endpoints.lock().await;
-        if endpoints.api_url.as_deref() == Some(url) {
-            endpoints.api_url = None;
-        }
-    }
-
-    async fn resolve_endpoint(&self, points: &mut ServiceEndpoints, endpoint: Endpoint) -> SocketAddress {
-        if points.queue(endpoint).is_empty() {
-            match self.fetch_endpoints().await {
-                Ok(mut resolved) => {
-                    // Preserve other queues so resolving the dealer cannot reset an API failover.
-                    for kind in Endpoint::iter() {
-                        if points.queue(kind).is_empty() {
-                            *points.queue(kind) = mem::take(resolved.queue(kind));
-                        }
-                    }
-                }
-                Err(error) => warn!(%error, "Spotify service lookup failed"),
-            }
-        }
-        while let Some(address) = points.queue(endpoint).pop_front() {
-            if let Some((host, port)) = address.rsplit_once(':')
-                && let Ok(port) = port.parse()
-            {
-                return (host.to_owned(), port);
-            }
-        }
-        endpoint.fallback()
-    }
-
-    async fn fetch_endpoints(&self) -> MusicResult<ServiceEndpoints> {
-        Ok(self
+    async fn discover(&self) -> MusicResult<EndpointState> {
+        let hosts: ServiceEndpoints = self
             .http
             .get("https://apresolve.spotify.com/?type=dealer&type=spclient")
             .send()
             .await?
             .error_for_status()?
             .json()
-            .await?)
+            .await?;
+        let url = |scheme, address: &String| {
+            let (host, port) = address.rsplit_once(':')?;
+            let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
+            (!host.is_empty() && host.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))
+                .then(|| format!("{scheme}://{host}:{port}"))
+        };
+        Ok(EndpointState {
+            dealer: hosts.dealer.iter().filter_map(|host| url("wss", host)).collect(),
+            api_url: hosts.spclient.iter().find_map(|host| url("https", host)),
+        })
     }
 }

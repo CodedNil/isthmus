@@ -8,25 +8,31 @@ version = "0.1.0"
 wayland = ["dep:wayland-client", "dep:wayland-backend"]
 
 [dependencies]
-# Shared shader ABI and macros
+# Workspace crates
 isthmus_abi.workspace = true
 isthmus_macros.workspace = true
 
 # Shader runtime
-spirv-std.workspace = true
+spirv-std = "0.11.0"
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
-# GPU rendering and image data
+# Vulkan
+ash = { git = "https://github.com/ash-rs/ash.git", rev = "80e5856982af6651d56337f9a10e46308145c2d2" }
+# gpu-allocator 0.28 uses the crates.io ash API.
+ash-allocator = { package = "ash", version = "0.38.0" }
+gpu-allocator = { version = "0.28.0", default-features = false, features = [
+    "std",
+    "vulkan",
+] }
+
+# Window handles and Wayland
+raw-window-handle = { version = "0.6.2", features = ["alloc"] }
+wayland-backend = { version = "0.3.17", features = ["rwh_06"], optional = true }
+wayland-client = { workspace = true, optional = true }
+
+# Image data and resource collections
 bytemuck.workspace = true
 half = "2.7.1"
-ash.workspace = true
-ash-allocator.workspace = true
-gpu-allocator.workspace = true
-raw-window-handle.workspace = true
-wayland-client = { workspace = true, optional = true }
-wayland-backend = { workspace = true, optional = true }
-
-# Resource collections
 slotmap = "1.1.1"
 smallvec.workspace = true
 

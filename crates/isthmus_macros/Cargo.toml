@@ -8,8 +8,10 @@ version = "0.1.0"
 proc-macro = true
 
 [dependencies]
-# Shader syntax and macro expansion
+# Workspace crates
 isthmus_syntax.workspace = true
+
+# Macro expansion
 proc-macro-crate = "3.5.0"
 proc-macro2.workspace = true
 quote.workspace = true

@@ -5,9 +5,11 @@ name = "isthmus_build"
 version = "0.1.0"
 
 [dependencies]
-# Shader parsing and compilation
+# Workspace crates
 isthmus_syntax.workspace = true
-spirv-builder.workspace = true
+
+# Shader compilation
+spirv-builder = "0.11.0"
 
 # Rust code generation
 prettyplease = "0.3.0"
@@ -20,10 +22,10 @@ cargo_metadata = "0.23.1"
 form_urlencoded.workspace = true
 toml = { workspace = true, features = ["display"] }
 
-# Build errors
+# Errors and files
 anyhow = "1.0.104"
 rustix = { version = "1.1.6", features = ["stdio"] }
-tempfile = "3.27.0"
+tempfile.workspace = true
 
 [lints]
 workspace = true

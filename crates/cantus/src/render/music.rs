@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    music::{Music, PlaylistId, TRACK_SPACING_MS, TrackId},
+    music::{Music, PlaylistId, TRACK_SPACING_MS, TrackId, enrichment::AlbumArt},
     render::{
         BarLayout, GAP, HISTORY_WIDTH, PANEL_START, SUPPORT_BLEND, SUPPORT_INSET, TEXT_BODY, TEXT_COLOR, TEXT_TITLE,
         UiContext,
@@ -16,7 +16,7 @@ use isthmus::{prelude::*, spirv_std::arch::kill};
 use isthmus_2d::prelude::*;
 use serde::Deserialize;
 use smallvec::SmallVec;
-use std::{iter, sync::LazyLock};
+use std::{iter, sync::OnceLock};
 
 /// Number of colors extracted from album artwork.
 pub const PALETTE_COLORS: usize = 4;
@@ -38,8 +38,11 @@ const TRACK_RADIUS: f32 = 0.4;
 /// Fraction of the bar height spanned by the playhead line.
 const PLAYHEAD_HEIGHT: f32 = 0.86;
 const PAUSED_PARTICLE_FADE: f32 = 0.15;
-/// Transparent placeholder for missing artwork.
-static EMPTY_ART: LazyLock<Image> = LazyLock::new(|| Image::rgba8([1, 1], vec![0; 4]));
+fn artwork(art: Option<&AlbumArt>) -> &Image {
+    static EMPTY_ART: OnceLock<Image> = OnceLock::new();
+    let Some(art) = art else { return EMPTY_ART.get_or_init(|| Image::rgba8([1, 1], vec![0; 4])) };
+    &art.image
+}
 
 struct TrackLayout {
     queue_index: usize,
@@ -417,9 +420,8 @@ impl MusicView {
                 let hover: f32 = hover;
                 let rect: Rect = Rect::from_center_size(center, tile_size * (1.0 - 2.0 * (1.0 - hover) / tile_size.y));
 
-                let image: &Image = playlist
-                    .and_then(|playlist| music.resources.art(playlist.image_url.as_deref()))
-                    .map_or(&*EMPTY_ART, |art| &art.image);
+                let image: &Image =
+                    artwork(playlist.and_then(|playlist| music.resources.art(playlist.image_url.as_deref())));
                 let liked: bool = playlist.is_none();
                 context
                     .frame
@@ -696,7 +698,7 @@ impl MusicView {
         let opacity: f32 = (if hovered { 1.0 } else { future_fade.lerp(1.0, expansion) }) * history_alpha;
 
         let audio: AudioFeatures = music.resources.audio(track.id);
-        let image: &Image = music.resources.art(track.image.as_deref()).map_or(&*EMPTY_ART, |art| &art.image);
+        let image: &Image = artwork(music.resources.art(track.image.as_deref()));
         let seed: f32 = track
             .uri
             .bytes()
@@ -875,9 +877,8 @@ impl MusicView {
                     }
                 }
 
-                let image: &Image = playlist
-                    .and_then(|playlist| music.resources.art(playlist.image_url.as_deref()))
-                    .map_or(&*EMPTY_ART, |art| &art.image);
+                let image: &Image =
+                    artwork(playlist.and_then(|playlist| music.resources.art(playlist.image_url.as_deref())));
                 let fill: f32 = (rating.unwrap_or(0) as f32 * 0.5 - slot as f32).saturate();
                 let desaturation: f32 = 0.2 * f32::from(!response.hovered);
                 context

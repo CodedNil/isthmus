@@ -20,19 +20,16 @@ use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
 use prost::Message;
 use reqwest::{
-    Error as HttpError, Method, RequestBuilder, StatusCode,
-    header::{ACCEPT, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER, USER_AGENT},
+    Error as HttpError, Method, StatusCode,
+    header::{ACCEPT, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    error::Error as StdError,
-    fmt::{Display, Formatter, Result as FmtResult},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::time::sleep;
 use tracing::warn;
 
 const PROTOBUF: HeaderValue = HeaderValue::from_static("application/x-protobuf");
@@ -41,8 +38,6 @@ const GET_LISTS: &str = "/playlist/spotify.list.v1.ListReadService/GetLists";
 const TRACK_METADATA: &str = "/extended-metadata/v0/extended-metadata";
 const SPOTIFY_USER_AGENT: HeaderValue =
     HeaderValue::from_static(concat!("Spotify/124200290 Linux/0 (Cantus/", env!("CARGO_PKG_VERSION"), ")"));
-const MAX_HOST_ATTEMPTS: usize = 3;
-const MAX_RATE_LIMIT_WAIT_SECONDS: u64 = 10;
 
 type ListResult = MusicResult<(ListEntity, Vec<u8>)>;
 pub(super) type PlaylistResult = MusicResult<(CachedPlaylist, Option<Attributes>)>;
@@ -66,26 +61,18 @@ impl Session {
     }
 
     async fn request(&self, method: &Method, endpoint: &str, headers: HeaderMap, body: Bytes) -> MusicResult<Bytes> {
-        let mut remaining = if matches!(*method, Method::GET | Method::PUT) { MAX_HOST_ATTEMPTS } else { 1 };
-        loop {
-            let (base, token) = tokio::join!(self.base_url(), self.auth_token());
-            let request = self
-                .http
-                .request(method.clone(), format!("{base}{endpoint}"))
-                .headers(headers.clone())
-                .bearer_auth(token?)
-                .body(body.clone());
-            let result = send_with_rate_limit_retry(request).await;
-            if !result.as_ref().is_err_and(|error| should_rotate_host(error.as_ref())) {
-                return result;
-            }
-
-            self.invalidate_base_url(&base).await;
-            remaining -= 1;
-            if remaining == 0 {
-                return result;
-            }
-        }
+        let (base, token) = tokio::join!(self.base_url(), self.auth_token());
+        let response = self
+            .http
+            .request(method.clone(), format!("{}{endpoint}", base?))
+            .headers(headers)
+            .bearer_auth(token?)
+            .body(body)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(HttpError::without_url)?;
+        Ok(response.bytes().await.map_err(HttpError::without_url)?)
     }
 
     pub(super) async fn put_connect_state(&self, connection_id: &str, state: &PutStateRequest) -> MusicResult<Cluster> {
@@ -200,41 +187,35 @@ impl Session {
     }
 
     pub(super) async fn lyrics(&self, id: TrackId) -> MusicResult<Option<SpotifyLyrics>> {
-        let path = format!("/color-lyrics/v2/track/{id}?format=json");
+        let path = format!("/color-lyrics/v3/track/{id}?prototype=true");
         let mut headers = spotify_client_headers();
-        headers.insert("app-platform", HeaderValue::from_static("WebPlayer"));
-        match self.get_json(&path, headers).await {
-            Err(error) if error.downcast_ref::<HttpStatus>().is_some_and(HttpStatus::missing) => Ok(None),
-            result => result,
+        headers.insert("app-platform", HeaderValue::from_static("Android"));
+        headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.google.protobuf"));
+        match self.request(&Method::GET, &path, headers, Bytes::new()).await {
+            Ok(bytes) => Ok(Some(SpotifyLyrics::decode(bytes)?)),
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<HttpError>().and_then(HttpError::status),
+                    Some(StatusCode::NOT_FOUND | StatusCode::GONE)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
         }
     }
 
     pub(super) async fn playlists(&self, ids: &[PlaylistId]) -> MusicResult<Vec<PlaylistResult>> {
         let uris = ids.iter().map(|id| format!("spotify:playlist:{id}")).collect::<Vec<_>>();
-        Ok(self
-            .read_lists(&uris, playlist_fields(false))
-            .await?
-            .into_iter()
-            .map(|result| {
-                result.map(|(list, revision)| {
-                    let tracks = list
-                        .items
-                        .iter()
-                        .filter_map(|item| track_id_from_uri(&item.attributes.as_ref()?.uri))
-                        .collect();
-                    let name = list.attributes.as_ref().map_or_else(String::new, |attributes| attributes.name.clone());
-                    (CachedPlaylist { revision, tracks: Arc::new(tracks), name }, list.attributes)
-                })
-            })
-            .collect())
+        Ok(self.read_lists(&uris, false).await?.into_iter().map(playlist_result).collect())
     }
 
     pub(super) async fn root_playlist(&self) -> ListResult {
-        let uri = format!("spotify:user:{}:rootlist", self.username);
-        self.read_lists(&[uri], playlist_fields(true)).await?.pop().ok_or("Missing Spotify root list")?
+        let root = format!("spotify:user:{}:rootlist", self.username);
+        self.read_lists(&[root], true).await?.pop().ok_or("Missing Spotify root list")?
     }
 
-    async fn read_lists(&self, uris: &[String], requested_fields: RequestedFields) -> MusicResult<Vec<ListResult>> {
+    async fn read_lists(&self, uris: &[String], root: bool) -> MusicResult<Vec<ListResult>> {
         if uris.is_empty() {
             return Ok(Vec::new());
         }
@@ -243,13 +224,21 @@ impl Session {
                 .iter()
                 .map(|uri| GetListRequest {
                     identifier: Some(ListIdentifier { uri: uri.clone() }),
-                    options: Some(RequestOptions { requested_fields: Some(requested_fields.clone()) }),
+                    options: Some(RequestOptions { requested_fields: Some(playlist_fields(root)) }),
                 })
                 .collect(),
         };
         let bytes = self.request_with_protobuf(&Method::POST, GET_LISTS, HeaderMap::new(), &request).await?;
         decode_list_results(&bytes, uris)
     }
+}
+
+fn playlist_result(result: ListResult) -> PlaylistResult {
+    result.map(|(list, revision)| {
+        let tracks = list.items.iter().filter_map(|item| track_id_from_uri(&item.attributes.as_ref()?.uri)).collect();
+        let name = list.attributes.as_ref().map_or_else(String::new, |attributes| attributes.name.clone());
+        (CachedPlaylist { revision, tracks: Arc::new(tracks), name }, list.attributes)
+    })
 }
 
 fn connected_headers(connection_id: &str) -> MusicResult<HeaderMap> {
@@ -309,67 +298,6 @@ fn playlist_fields(root: bool) -> RequestedFields {
 
 pub(super) fn gzip_encoder() -> GzEncoder<Vec<u8>> {
     GzEncoder::new(Vec::new(), Compression::fast())
-}
-
-async fn send_with_rate_limit_retry(request: RequestBuilder) -> MusicResult<Bytes> {
-    let retry = request.try_clone();
-    let mut response = request.send().await.map_err(HttpError::without_url)?;
-    if response.status() == StatusCode::TOO_MANY_REQUESTS
-        && let Some(retry) = retry
-        && let Some(seconds) = response
-            .headers()
-            .get(RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|seconds| *seconds <= MAX_RATE_LIMIT_WAIT_SECONDS)
-    {
-        drop(response);
-        sleep(Duration::from_secs(seconds)).await;
-        response = retry.send().await.map_err(HttpError::without_url)?;
-    }
-    if !response.status().is_success() {
-        return Err(HttpStatus(response.status()).into());
-    }
-    Ok(response.bytes().await.map_err(HttpError::without_url)?)
-}
-
-#[derive(Debug)]
-struct HttpStatus(StatusCode);
-
-impl HttpStatus {
-    fn missing(&self) -> bool {
-        matches!(
-            self.0,
-            StatusCode::NOT_FOUND
-                | StatusCode::GONE
-                | StatusCode::MOVED_PERMANENTLY
-                | StatusCode::PERMANENT_REDIRECT
-                | StatusCode::TEMPORARY_REDIRECT
-        )
-    }
-}
-
-impl Display for HttpStatus {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "Spotify HTTP request returned {}", self.0)
-    }
-}
-
-impl StdError for HttpStatus {}
-
-fn should_rotate_host(error: &(dyn StdError + 'static)) -> bool {
-    error.downcast_ref::<HttpError>().is_some_and(|error| error.is_timeout() || error.is_request() || error.is_decode())
-        || error.downcast_ref::<HttpStatus>().is_some_and(|status| {
-            matches!(
-                status.0,
-                StatusCode::GATEWAY_TIMEOUT
-                    | StatusCode::REQUEST_TIMEOUT
-                    | StatusCode::INTERNAL_SERVER_ERROR
-                    | StatusCode::MISDIRECTED_REQUEST
-                    | StatusCode::SERVICE_UNAVAILABLE
-                    | StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
-            )
-        })
 }
 
 #[cfg(test)]

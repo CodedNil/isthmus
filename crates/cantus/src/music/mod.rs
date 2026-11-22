@@ -30,7 +30,7 @@ pub type MusicResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 pub const ART_SIZE: u32 = 128;
 pub const TRACK_SPACING_MS: f32 = 3000.0;
 const SCROLL_RESTART_AFTER_MS: f32 = 10_000.0;
-pub(crate) const TRACK_RESTART_GRACE: Duration = Duration::from_secs(2);
+pub const TRACK_RESTART_GRACE: Duration = Duration::from_secs(2);
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct Music {
@@ -142,7 +142,7 @@ impl Music {
     }
 }
 
-pub(crate) fn should_restart_track(position_ms: f32, recently_restarted: bool) -> bool {
+pub fn should_restart_track(position_ms: f32, recently_restarted: bool) -> bool {
     position_ms > SCROLL_RESTART_AFTER_MS && !recently_restarted
 }
 
