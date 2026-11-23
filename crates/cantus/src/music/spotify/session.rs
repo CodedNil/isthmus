@@ -1,6 +1,8 @@
-use super::{MusicResult, auth::Auth};
+use super::{MusicResult, auth::Authorization};
 use reqwest::Client;
 use serde::Deserialize;
+#[cfg(test)]
+use std::sync::Arc;
 use std::{collections::VecDeque, io};
 use tokio::sync::Mutex;
 
@@ -9,20 +11,22 @@ pub(super) struct Session {
     pub(super) id: String,
     pub(super) username: String,
     pub(super) http: Client,
-    pub(super) auth: Mutex<Auth>,
+    pub(super) auth: Authorization,
     endpoints: Mutex<EndpointState>,
 }
 
 impl Session {
-    pub(super) fn new(http: Client) -> MusicResult<Self> {
-        Ok(Self {
-            device_id: device_id()?,
-            id: hex::encode(random_uuid_bytes()?),
-            username: String::new(),
-            http,
-            auth: Mutex::default(),
-            endpoints: Mutex::default(),
-        })
+    #[cfg(test)]
+    pub(super) fn test() -> Arc<Self> {
+        Arc::new(Self::new(Client::new(), String::new(), Authorization::default()).unwrap())
+    }
+
+    pub(super) fn new(http: Client, username: String, auth: Authorization) -> MusicResult<Self> {
+        let mut device_id = hex::encode(random_uuid_bytes()?);
+        for index in [20, 16, 12, 8] {
+            device_id.insert(index, '-');
+        }
+        Ok(Self { device_id, id: hex::encode(random_uuid_bytes()?), username, http, auth, endpoints: Mutex::default() })
     }
 }
 
@@ -32,14 +36,6 @@ fn random_uuid_bytes() -> Result<[u8; 16], getrandom::Error> {
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Ok(bytes)
-}
-
-fn device_id() -> Result<String, getrandom::Error> {
-    let mut id = hex::encode(random_uuid_bytes()?);
-    for index in [20, 16, 12, 8] {
-        id.insert(index, '-');
-    }
-    Ok(id)
 }
 
 #[derive(Deserialize)]

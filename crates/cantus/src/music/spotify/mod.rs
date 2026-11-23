@@ -2,8 +2,8 @@ use self::{
     library::CachedPlaylist,
     proto::{
         connect::{
-            Capabilities, Cluster, Device as ConnectDevice, DeviceInfo, DeviceType, MemberType, PlayerState,
-            ProvidedTrack, PutStateReason, PutStateRequest,
+            Capabilities, Cluster, Device as ConnectDevice, DeviceInfo, PlayerState, ProvidedTrack, PutStateReason,
+            PutStateRequest,
         },
         lyrics::SpotifyLyrics,
         metadata,
@@ -64,22 +64,28 @@ impl Spotify {
         let ratings_enabled = config.ratings_enabled;
         tokio::spawn(async move {
             let reconnect = async {
+                let mut reauthorize = false;
                 loop {
-                    match auth::connect(http.clone()).await {
+                    match auth::connect(http.clone(), reauthorize).await {
                         Ok(session) => {
+                            reauthorize = false;
                             connected_session.send_replace(Some(Arc::clone(&session)));
-                            let result = run_spotify(
-                                session,
-                                &mut receiver,
-                                updater.clone(),
-                                playlist_targets.clone(),
-                                ratings_enabled,
-                                local_playback.clone(),
-                            )
-                            .await;
+                            let result = tokio::select! {
+                                biased;
+                                () = session.auth.expired.notified() => Err(auth::AuthorizationExpired.into()),
+                                result = run_spotify(
+                                    Arc::clone(&session),
+                                    &mut receiver,
+                                    updater.clone(),
+                                    playlist_targets.clone(),
+                                    ratings_enabled,
+                                    local_playback.clone(),
+                                ) => result,
+                            };
                             connected_session.send_replace(None);
                             freeze_playback(&updater);
                             if let Err(error) = result {
+                                reauthorize = error.is::<auth::AuthorizationExpired>();
                                 warn!(%error, "Spotify disconnected");
                             }
                         }
@@ -404,7 +410,7 @@ impl SpotifyWorker {
                         supports_playlist_v2: true,
                         supported_types: vec!["audio/track".into(), "audio/episode".into()],
                     }),
-                    device_type: DeviceType::Observer as i32,
+                    device_type: DeviceInfo::OBSERVER,
                     device_id: self.session.device_id.clone(),
                     client_id: auth::CLIENT_ID.into(),
                 }),
@@ -416,7 +422,7 @@ impl SpotifyWorker {
                     ..Default::default()
                 }),
             }),
-            member_type: MemberType::ConnectState as i32,
+            member_type: PutStateRequest::CONNECT_STATE_MEMBER,
             put_state_reason: reason as i32,
             client_side_timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
         };
@@ -573,12 +579,12 @@ impl SpotifyWorker {
     /// Publish queue metadata; only a new player report may reset the playback clock.
     fn publish(&self, observe_playback: bool) {
         let Some(player) = &self.player else { return };
-        let index = player.prev_tracks.iter().filter(|track| !track.uri.ends_with(":delimiter")).count();
+        let is_track = |track: &&ProvidedTrack| !track.uri.ends_with(":delimiter");
+        let index = player.prev_tracks.iter().filter(is_track).count();
         let convert = |track: &ProvidedTrack, duration| {
             let catalog = self.track_metadata.get(requested_track_uri(track)).and_then(Option::as_ref);
             track_from_provided(track, catalog, duration)
         };
-        let is_track = |track: &&ProvidedTrack| !track.uri.ends_with(":delimiter");
         let current =
             player.track.as_ref().filter(is_track).map(|track| convert(track, u32::try_from(player.duration).ok()));
         let playing = player.is_playing && !player.is_paused;
@@ -681,20 +687,18 @@ fn track_from_provided(
             .map_or_else(|| text("title", ""), |track| track.name().to_owned()),
         artists,
         album: text("album_title", catalog.and_then(|track| track.album.as_ref()).map_or("", metadata::Album::name)),
-        image: ["image_url", "image_large_url", "image_xlarge_url"]
-            .into_iter()
-            .find_map(|key| track.metadata.get(key).filter(|url| !url.is_empty()))
-            .map(|url| image_url(url))
-            .or_else(|| {
-                let album = catalog?.album.as_ref()?;
-                let covers = album.cover_group.as_ref().map_or(&[][..], |group| group.image.as_slice());
-                let images = if covers.is_empty() { &album.cover } else { covers };
-                let image = images
-                    .iter()
-                    .filter(|image| image.file_id().len() == 20)
-                    .min_by_key(|image| image.width().abs_diff(ART_SIZE as i32))?;
-                Some(format!("https://i.scdn.co/image/{}", hex::encode(image.file_id())))
-            }),
+        image: track.metadata.get("image_url").filter(|url| !url.is_empty()).map(|url| image_url(url)).or_else(|| {
+            let image = catalog?
+                .album
+                .as_ref()?
+                .cover_group
+                .as_ref()?
+                .image
+                .iter()
+                .filter(|image| image.file_id().len() == 20)
+                .min_by_key(|image| image.width().abs_diff(ART_SIZE as i32))?;
+            Some(format!("https://i.scdn.co/image/{}", hex::encode(image.file_id())))
+        }),
         duration_ms: [
             track.metadata.get("duration").and_then(|duration| duration.parse().ok()),
             fallback_duration_ms,
@@ -718,7 +722,6 @@ mod tests {
     use super::*;
     use crate::music::queue::{Queue, Timeline};
     use calloop::channel;
-    use reqwest::Client;
 
     const REQUESTED: &str = "spotify:track:6vWfZZyIlODYPMEbsrOK3G";
     const PLAYBACK: &str = "spotify:track:3OIgsG6duyvwodGPoFYVzJ";
@@ -770,7 +773,7 @@ mod tests {
                 is_playing: true,
                 ..Default::default()
             }),
-            ..SpotifyWorker::new(Arc::new(Session::new(Client::new()).unwrap()), updater)
+            ..SpotifyWorker::new(Session::test(), updater)
         };
         for device in [Some("playing-device"), None] {
             worker.update_cluster(Cluster {
@@ -790,7 +793,7 @@ mod tests {
         let mut worker = SpotifyWorker {
             active_device: Some("phone".into()),
             mpris: Some(mpris),
-            ..SpotifyWorker::new(Arc::new(Session::new(Client::new()).unwrap()), updater)
+            ..SpotifyWorker::new(Session::test(), updater)
         };
         let report = |uri: &str, title: Option<&str>| PlayerState {
             track: Some(ProvidedTrack {

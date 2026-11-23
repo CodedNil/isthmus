@@ -23,7 +23,7 @@ use reqwest::{
     Error as HttpError, Method, StatusCode,
     header::{ACCEPT, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT},
 };
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -53,11 +53,6 @@ impl Session {
         headers.insert(CONTENT_TYPE, PROTOBUF);
 
         self.request(method, endpoint, headers, message.encode_to_vec().into()).await
-    }
-
-    async fn get_json<T: DeserializeOwned>(&self, endpoint: &str, headers: HeaderMap) -> MusicResult<T> {
-        let body = self.request(&Method::GET, endpoint, headers, Bytes::new()).await?;
-        Ok(serde_json::from_slice(&body)?)
     }
 
     async fn request(&self, method: &Method, endpoint: &str, headers: HeaderMap, body: Bytes) -> MusicResult<Bytes> {
@@ -122,7 +117,7 @@ impl Session {
         command: &Value,
     ) -> MusicResult<()> {
         let path = format!("/connect-state/v1/player/command/from/{}/to/{target}", self.device_id);
-        let mut body = gzip_encoder();
+        let mut body = GzEncoder::new(Vec::new(), Compression::fast());
         serde_json::to_writer(
             &mut body,
             &json!({
@@ -182,14 +177,15 @@ impl Session {
 
         let ids = ids.iter().map(TrackId::as_str).collect::<Vec<_>>().join(",");
         let path = format!("/audio-attributes/v1/audio-features?format=json&ids={ids}");
-        let batch: Response = self.get_json(&path, HeaderMap::new()).await?;
+        let body = self.request(&Method::GET, &path, HeaderMap::new(), Bytes::new()).await?;
+        let batch: Response = serde_json::from_slice(&body)?;
         Ok(batch.audio_features.into_iter().flatten().map(|entry| (entry.id, entry.features)).collect())
     }
 
     pub(super) async fn lyrics(&self, id: TrackId) -> MusicResult<Option<SpotifyLyrics>> {
         let path = format!("/color-lyrics/v3/track/{id}?prototype=true");
         let mut headers = spotify_client_headers();
-        headers.insert("app-platform", HeaderValue::from_static("Android"));
+        headers.insert("app-platform", HeaderValue::from_static("Linux"));
         headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.google.protobuf"));
         match self.request(&Method::GET, &path, headers, Bytes::new()).await {
             Ok(bytes) => Ok(Some(SpotifyLyrics::decode(bytes)?)),
@@ -277,10 +273,11 @@ fn decode_list_results(bytes: &[u8], uris: &[String]) -> MusicResult<Vec<ListRes
 
 fn playlist_fields(root: bool) -> RequestedFields {
     let artwork = Some(AttributesRequestedFields {
-        requested_field: [AttributeKind::Name, AttributeKind::PictureFileId, AttributeKind::PictureSizes]
-            .into_iter()
-            .map(|kind| kind as i32)
-            .collect(),
+        requested_field: vec![
+            AttributeKind::Name as i32,
+            AttributeKind::PictureFileId as i32,
+            AttributeKind::PictureSizes as i32,
+        ],
     });
     let mut entity = ListEntityRequestedFields {
         items: Some(ItemRequestedFields {
@@ -294,10 +291,6 @@ fn playlist_fields(root: bool) -> RequestedFields {
         entity.attributes = artwork;
     }
     RequestedFields { list_response: Some(ListResponseRequestedFields { entity: Some(entity) }) }
-}
-
-pub(super) fn gzip_encoder() -> GzEncoder<Vec<u8>> {
-    GzEncoder::new(Vec::new(), Compression::fast())
 }
 
 #[cfg(test)]

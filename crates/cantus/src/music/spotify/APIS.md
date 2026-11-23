@@ -13,7 +13,7 @@
 
 | Method | Route | Request and response | Cantus usage |
 | --- | --- | --- | --- |
-| GET | `/color-lyrics/v3/track/{id}?prototype=true` | `LyricsWrapperResponse` | Fetches line and fragment timing using the `Android` app-platform header. |
+| GET | `/color-lyrics/v3/track/{id}?prototype=true` | `LyricsWrapperResponse` | Fetches line and fragment timing using the `Linux` app-platform header. |
 | POST | `/collection/v2/write` | `WriteRequest`. Response body ignored. | Adds or removes a liked song. Uses the Dealer connection ID and the `application/vnd.collection-v2.spotify.proto` media type. |
 | PUT | `/connect-state/v1/devices/{device_id}` | `PutStateRequest` → `Cluster` | Publishes Cantus device state and reads the current Connect cluster. Uses the Dealer connection ID. |
 | POST | `/extended-metadata/v0/extended-metadata` | `BatchedEntityRequest` → `BatchedExtensionResponse` | Fetches batched track metadata and decodes the `TRACK_V4` extension. |
@@ -29,7 +29,7 @@
 
 ## WebSocket API usage
 
-The `hm://` entries are incoming Dealer message topics. The client matches each topic exactly or as a slash-delimited prefix and ignores any query string.
+The `hm://` entries are incoming Dealer message topics. The client matches each topic exactly or as a slash-delimited prefix and ignores any query string. Cantus requires gzip-compressed protobuf payloads wrapped in base64.
 
 | Route or topic | Direction | Cantus usage |
 | --- | --- | --- |
@@ -37,4 +37,4 @@ The `hm://` entries are incoming Dealer message topics. The client matches each 
 | `hm://pusher/v1/connections` | Incoming | Reads the `Spotify-Connection-Id` header for Connect state, playback commands, and library writes. |
 | `hm://connect-state/v1/cluster` | Incoming | Decodes a protobuf `ClusterUpdate` and updates playback and device state. |
 | `hm://playlist/v2` | Incoming | Decodes protobuf playlist notifications to refresh changed playlists or the root list. |
-| `hm://playlist/user` | Incoming | Handles user playlist notifications, including root-list changes. |
+| `hm://playlist/user` | Incoming | Reads the new root-list revision from the first protobuf field. |

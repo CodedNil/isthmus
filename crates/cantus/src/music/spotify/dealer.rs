@@ -1,7 +1,5 @@
 use super::{
-    CLUSTER_TOPIC, MusicResult, PlaylistId, REQUEST_TIMEOUT,
-    auth::AuthorizationExpired,
-    parse_id,
+    CLUSTER_TOPIC, MusicResult, PlaylistId, REQUEST_TIMEOUT, parse_id,
     proto::{
         connect::{Cluster, ClusterUpdate},
         playlist_edit::{OperationKind, PlaylistNotification},
@@ -104,10 +102,6 @@ async fn run(session: Arc<Session>, mut socket: Socket, events: UnboundedSender<
                     socket = connected;
                     break;
                 }
-                Err(error) if error.is::<AuthorizationExpired>() => {
-                    warn!("Spotify authorization expired while reconnecting");
-                    return;
-                }
                 Err(error) => warn!(%error, "Could not reconnect Spotify dealer"),
             }
         }
@@ -201,7 +195,6 @@ enum Envelope {
 #[serde(untagged)]
 enum Payload {
     Base64(String),
-    Bytes(Vec<u8>),
     Other(IgnoredAny),
 }
 
@@ -221,23 +214,18 @@ fn decode_event(
             .ok_or_else(|| io::Error::other("Spotify dealer connection event had no connection ID"))?;
         return Ok(Some(Event::Connected(id)));
     }
-    let gzip = headers
-        .iter()
-        .any(|(key, value)| key.eq_ignore_ascii_case("Transfer-Encoding") && value.eq_ignore_ascii_case("gzip"));
     if matches_topic("hm://playlist/v2") || matches_topic("hm://playlist/user") {
         let notice = payloads
             .pop()
-            .and_then(|payload| decode_binary(payload, gzip).ok())
+            .and_then(|payload| decode_binary(payload).ok())
             .and_then(|bytes| PlaylistNotification::decode(bytes).ok());
         let Some(notice) = notice else { return Ok(Some(Event::RootlistChanged(Vec::new()))) };
         let uri = str::from_utf8(&notice.uri_or_revision).unwrap_or_default();
-        let event = if uri.starts_with("spotify:user:") && uri.ends_with(":rootlist") {
-            Event::RootlistChanged(notice.revision_or_parent)
-        } else if let Some(id) = uri.strip_prefix("spotify:playlist:").and_then(parse_id) {
+        let event = if let Some(id) = uri.strip_prefix("spotify:playlist:").and_then(parse_id) {
             let membership_only = !notice.ops.is_empty()
                 && notice.ops.iter().all(|op| matches!(op.kind(), OperationKind::Add | OperationKind::Remove));
             Event::PlaylistChanged { id, revision: notice.revision_or_parent, membership_only }
-        } else if matches_topic("hm://playlist/user") || topic.ends_with("/rootlist") {
+        } else if matches_topic("hm://playlist/user") && !uri.starts_with("spotify:") {
             Event::RootlistChanged(notice.uri_or_revision)
         } else {
             Event::RootlistChanged(Vec::new())
@@ -249,21 +237,17 @@ fn decode_event(
             .pop()
             .filter(|_| payloads.is_empty())
             .ok_or_else(|| io::Error::other("Spotify cluster event must have one payload"))?;
-        let update = ClusterUpdate::decode(decode_binary(payload, gzip)?)?;
+        let update = ClusterUpdate::decode(decode_binary(payload)?)?;
         return Ok(update.cluster.map(|cluster| Event::Cluster(Box::new(cluster))));
     }
     Ok(None)
 }
 
-fn decode_binary(payload: Payload, gzip: bool) -> MusicResult<bytes::Bytes> {
+fn decode_binary(payload: Payload) -> MusicResult<bytes::Bytes> {
     let bytes = match payload {
         Payload::Base64(value) => BASE64_STANDARD.decode(value)?,
-        Payload::Bytes(value) => value,
-        Payload::Other(IgnoredAny) => return Err(io::Error::other("Spotify Dealer payload was not binary").into()),
+        Payload::Other(IgnoredAny) => return Err(io::Error::other("Expected a base64 Spotify Dealer payload").into()),
     };
-    if !gzip || bytes.is_empty() {
-        return Ok(bytes.into());
-    }
     let mut decoded = Vec::new();
     MultiGzDecoder::new(bytes.as_slice()).read_to_end(&mut decoded)?;
     Ok(decoded.into())
@@ -272,9 +256,16 @@ fn decode_binary(payload: Payload, gzip: bool) -> MusicResult<bytes::Bytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::{Compression, write::GzEncoder};
     use std::io::Write as _;
     use tokio::io::duplex;
     use tokio_tungstenite::tungstenite::protocol::Role;
+
+    fn gzip_base64(bytes: &[u8]) -> String {
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
+        gzip.write_all(bytes).unwrap();
+        BASE64_STANDARD.encode(gzip.finish().unwrap())
+    }
 
     #[tokio::test]
     async fn dealer_requires_an_announcement_even_when_socket_answers() {
@@ -317,76 +308,64 @@ mod tests {
         };
 
         let mut playlist = encode(format!("spotify:playlist:{id}").into_bytes(), revision.clone());
-        playlist.extend([34, 4, 8, 2, 32, 1]); // An unsupported operation must still trigger a playlist read.
-        let event = decode_event("hm://playlist/v2", &HashMap::new(), vec![Payload::Bytes(playlist)]).unwrap();
+        playlist.extend([34, 4, 8, 2, 32, 1]); // The add operation carries an unused field.
+        let event =
+            decode_event("hm://playlist/v2", &HashMap::new(), vec![Payload::Base64(gzip_base64(&playlist))]).unwrap();
         assert!(matches!(event, Some(Event::PlaylistChanged { id: target, revision: rev, membership_only: true })
             if target.as_str() == id && rev == revision));
 
-        let root = encode(revision.clone(), vec![1; 24]);
-        for topic in
-            ["hm://playlist/user", "hm://playlist/user/account/rootlist", "hm://playlist/v2/user/account/rootlist"]
-        {
-            let event = decode_event(topic, &HashMap::new(), vec![Payload::Bytes(root.clone())]).unwrap();
+        let root = gzip_base64(&encode(revision.clone(), vec![1; 24]));
+        for topic in ["hm://playlist/user", "hm://playlist/user/account/rootlist"] {
+            let event = decode_event(topic, &HashMap::new(), vec![Payload::Base64(root.clone())]).unwrap();
             assert!(matches!(event, Some(Event::RootlistChanged(rev)) if rev == revision));
         }
-        let legacy = encode(b"spotify:user:account:rootlist".to_vec(), revision.clone());
-        let event = decode_event("hm://playlist/v2", &HashMap::new(), vec![Payload::Bytes(legacy)]).unwrap();
-        assert!(matches!(event, Some(Event::RootlistChanged(rev)) if rev == revision));
+        let event =
+            decode_event("hm://playlist/v2/user/account/rootlist", &HashMap::new(), vec![Payload::Base64(root)])
+                .unwrap();
+        assert!(matches!(event, Some(Event::RootlistChanged(rev)) if rev.is_empty()));
+        let uri_notice = Payload::Base64(gzip_base64(&encode(b"spotify:user:account:rootlist".to_vec(), revision)));
+        let event = decode_event("hm://playlist/user", &HashMap::new(), vec![uri_notice]).unwrap();
+        assert!(matches!(event, Some(Event::RootlistChanged(rev)) if rev.is_empty()));
     }
 
     #[test]
-    fn dealer_decodes_uncompressed_and_compressed_protobuf_cluster_events() {
+    fn dealer_requires_gzip_base64_cluster_payloads() {
         use super::super::proto::connect::{PlayerState, ProvidedTrack};
 
-        let raw = ClusterUpdate {
-            cluster: Some(Cluster {
-                active_device_id: "phone".into(),
-                server_timestamp_ms: 1_700_000_000_123,
-                player_state: Some(PlayerState {
-                    timestamp: 1_700_000_000_000,
-                    position_as_of_timestamp: 42_000,
-                    duration: 180_000,
-                    context_uri: "spotify:playlist:example".into(),
-                    playback_speed: 1.25,
-                    is_playing: true,
-                    next_tracks: vec![ProvidedTrack {
-                        uri: "spotify:track:example".into(),
-                        uid: "queue-occurrence".into(),
-                        metadata: HashMap::from([("title".into(), "Example track".into())]),
-                    }],
-                    ..Default::default()
-                }),
+        let cluster = Cluster {
+            active_device_id: "phone".into(),
+            server_timestamp_ms: 1_700_000_000_123,
+            player_state: Some(PlayerState {
+                timestamp: 1_700_000_000_000,
+                position_as_of_timestamp: 42_000,
+                duration: 180_000,
+                context_uri: "spotify:playlist:example".into(),
+                playback_speed: 1.25,
+                is_playing: true,
+                next_tracks: vec![ProvidedTrack {
+                    uri: "spotify:track:example".into(),
+                    uid: "queue-occurrence".into(),
+                    metadata: HashMap::from([("title".into(), "Example track".into())]),
+                }],
+                ..Default::default()
             }),
-        }
-        .encode_to_vec();
-        let mut gzip = super::super::client::gzip_encoder();
-        gzip.write_all(&raw).unwrap();
-        let gzip = BASE64_STANDARD.encode(gzip.finish().unwrap());
-        for envelope in [
-            json!({"type": "message", "uri": CLUSTER_TOPIC, "payloads": [raw]}),
-            json!({"type": "message", "uri": CLUSTER_TOPIC, "headers": {"transfer-encoding": "gzip"}, "payloads": [gzip]}),
-        ] {
+        };
+        let expected = ClusterUpdate { cluster: Some(cluster) };
+        let raw = expected.encode_to_vec();
+        for (payload, accepted) in
+            [(json!(gzip_base64(&raw)), true), (json!(BASE64_STANDARD.encode(&raw)), false), (json!(raw), false)]
+        {
+            let envelope = json!({"type": "message", "uri": CLUSTER_TOPIC, "payloads": [payload]});
             let Envelope::Message { uri, headers, payloads } = serde_json::from_value(envelope).unwrap() else {
                 panic!("expected a Dealer message");
             };
-            let event = decode_event(&uri, &headers, payloads).unwrap().unwrap();
-            assert!(matches!(event, Event::Cluster(update)
-                    if update.active_device_id == "phone"
-                    && update.server_timestamp_ms == 1_700_000_000_123
-                    && update.player_state.as_ref().is_some_and(|player|
-                        player.timestamp == 1_700_000_000_000
-                            && player.position_as_of_timestamp == 42_000
-                            && player.duration == 180_000
-                            && player.context_uri == "spotify:playlist:example"
-                            && (player.playback_speed - 1.25).abs() < f64::EPSILON
-                            && player.is_playing
-                            && !player.is_paused
-                            && !player.is_buffering
-                            && player.prev_tracks.is_empty()
-                            && player.next_tracks.first().is_some_and(|track|
-                                track.uri == "spotify:track:example"
-                                    && track.uid == "queue-occurrence"
-                                    && track.metadata.get("title").is_some_and(|title| title == "Example track")))));
+            let event = decode_event(&uri, &headers, payloads);
+            if accepted {
+                let Ok(Some(Event::Cluster(update))) = event else { panic!("expected a cluster update") };
+                assert_eq!(Some(update.as_ref()), expected.cluster.as_ref());
+            } else {
+                assert!(event.is_err());
+            }
         }
     }
 }

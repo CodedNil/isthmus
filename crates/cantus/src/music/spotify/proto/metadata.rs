@@ -10,8 +10,6 @@ pub struct Artist {
 pub struct Album {
     #[prost(string, optional, tag = "2")]
     pub name: Option<String>,
-    #[prost(message, repeated, tag = "9")]
-    pub cover: Vec<Image>,
     #[prost(message, optional, tag = "17")]
     pub cover_group: Option<ImageGroup>,
 }

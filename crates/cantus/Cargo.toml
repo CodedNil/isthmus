@@ -12,7 +12,9 @@ isthmus_2d.workspace = true
 # Graphics and audio analysis
 bytemuck.workspace = true
 image = { workspace = true, features = ["jpeg", "png"] }
-microfft = { version = "0.6.0", default-features = false, features = ["size-1024"] }
+microfft = { version = "0.6.0", default-features = false, features = [
+    "size-1024",
+] }
 palette = { version = "0.7.7", default-features = false, features = ["std"] }
 resvg = { version = "0.50.0", default-features = false, features = [
     "raster-images",

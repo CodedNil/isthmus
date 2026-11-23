@@ -60,7 +60,6 @@ pub(super) fn parse_spotify(response: Option<SpotifyLyrics>, duration: u32) -> M
     }
     let lines = sheet.lines;
     let mut output = Vec::new();
-    let mut all_word_synced = true;
     for (index, line) in lines.iter().enumerate() {
         let text = line.words.trim();
         if text.is_empty() || matches!(text, "♪" | "♫") {
@@ -75,14 +74,12 @@ pub(super) fn parse_spotify(response: Option<SpotifyLyrics>, duration: u32) -> M
         if !(0.0..end).contains(&start) || !(0.0..=duration as f32 + 1000.0).contains(&end) {
             return Err("Spotify line has invalid timing".into());
         }
-        let words = spotify_fragments(line, &(start..end));
-        if words.is_none() {
-            all_word_synced = false;
-        }
-        output.push(LyricLine { text: format!("{text} "), time: start..end, words, lane: 0, singer: Some(0) });
+        let time = start..end;
+        let words = spotify_fragments(line, &time);
+        output.push(LyricLine { text: format!("{text} "), time, words, lane: 0, singer: Some(0) });
     }
     let mut lyrics = Lyrics { lines: output, timing: Timing::Line };
-    if all_word_synced && lyrics.lines.iter().any(|line| line.words.is_some()) {
+    if !lyrics.lines.is_empty() && lyrics.lines.iter().all(|line| line.words.is_some()) {
         lyrics.timing = fragment_timing(&lyrics.lines);
     } else {
         for line in &mut lyrics.lines {

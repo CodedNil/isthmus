@@ -1,7 +1,7 @@
 use super::{MusicResult, REQUEST_TIMEOUT, session::Session};
 use crate::{config, platform};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use reqwest::{Client, StatusCode, Url};
+use reqwest::{Client, Response, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -14,6 +14,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
+    sync::{Mutex, Notify},
     task::spawn_blocking,
     time::timeout,
 };
@@ -26,27 +27,31 @@ const REDIRECT_URI: &str = "http://127.0.0.1:8898/login";
 const TOKEN_ENDPOINT: &str = "https://accounts.spotify.com/api/token";
 const OAUTH_CACHE: &str = "spotify-oauth.json";
 
-pub(super) async fn connect(http: Client) -> MusicResult<Arc<Session>> {
-    let mut session = Session::new(http)?;
-    if let Some(credentials) = spawn_blocking(load_credentials).await? {
-        session.username = credentials.username;
-        session.auth.get_mut().refresh_token = credentials.refresh_token;
+pub(super) async fn connect(http: Client, reauthorize: bool) -> MusicResult<Arc<Session>> {
+    if !reauthorize && let Some(credentials) = spawn_blocking(load_credentials).await? {
+        let session = authorized_session(http.clone(), credentials, None)?;
         match session.auth_token().await {
-            Ok(_) => return Ok(Arc::new(session)),
+            Ok(_) => return Ok(session),
             Err(error) if error.is::<AuthorizationExpired>() => {}
             Err(error) => return Err(error),
         }
     }
 
-    let (credentials, token) = browser_login(&session.http).await?;
-    let credentials = spawn_blocking(move || {
-        save_credentials(&credentials);
-        credentials
+    let (credentials, token) = browser_login(&http).await?;
+    authorized_session(http, credentials.persist().await?, Some(token))
+}
+
+fn authorized_session(
+    http: Client,
+    credentials: Credentials,
+    access_token: Option<Token>,
+) -> MusicResult<Arc<Session>> {
+    let tokens = Tokens { refresh_token: credentials.refresh_token, access_token };
+    Session::new(http, credentials.username, Authorization {
+        tokens: Arc::new(Mutex::new(tokens)),
+        expired: Arc::default(),
     })
-    .await?;
-    session.username = credentials.username;
-    *session.auth.get_mut() = Auth { refresh_token: credentials.refresh_token, access_token: Some(token) };
-    Ok(Arc::new(session))
+    .map(Arc::new)
 }
 
 async fn browser_login(http: &Client) -> MusicResult<(Credentials, Token)> {
@@ -115,8 +120,18 @@ struct OAuthToken {
     refresh_token: Option<String>,
 }
 
+impl OAuthToken {
+    async fn decode(response: Response) -> MusicResult<Self> {
+        let token = response.error_for_status()?.json::<Self>().await?;
+        if token.access_token.is_empty() {
+            return Err("Spotify did not return an access token".into());
+        }
+        Ok(token)
+    }
+}
+
 async fn exchange_code(http: &Client, code: &str, verifier: &str) -> MusicResult<(Credentials, Token)> {
-    let token = http
+    let response = http
         .post(TOKEN_ENDPOINT)
         .form(&[
             ("grant_type", "authorization_code"),
@@ -126,22 +141,17 @@ async fn exchange_code(http: &Client, code: &str, verifier: &str) -> MusicResult
             ("code_verifier", verifier),
         ])
         .send()
-        .await?
-        .error_for_status()?
-        .json::<OAuthToken>()
         .await?;
+    let token = OAuthToken::decode(response).await?;
     let username = token.username.filter(|username| !username.is_empty()).ok_or("Spotify omitted the username")?;
     let refresh_token =
         token.refresh_token.filter(|token| !token.is_empty()).ok_or("Spotify omitted the refresh token")?;
-    if token.access_token.is_empty() {
-        return Err("Spotify did not return an access token".into());
-    }
     Ok((Credentials { username, refresh_token }, Token::new(token.access_token, Duration::from_secs(token.expires_in))))
 }
 
-async fn refresh_access_token(http: &Client, refresh_token: &str) -> MusicResult<OAuthToken> {
+async fn refresh_access_token(http: &Client, endpoint: &str, refresh_token: &str) -> MusicResult<OAuthToken> {
     let response = http
-        .post(TOKEN_ENDPOINT)
+        .post(endpoint)
         .form(&[("grant_type", "refresh_token"), ("client_id", CLIENT_ID), ("refresh_token", refresh_token)])
         .send()
         .await?;
@@ -155,11 +165,7 @@ async fn refresh_access_token(http: &Client, refresh_token: &str) -> MusicResult
         }
         return Err("Spotify rejected the token renewal request".into());
     }
-    let token = response.error_for_status()?.json::<OAuthToken>().await?;
-    if token.access_token.is_empty() {
-        return Err("Spotify did not return an access token".into());
-    }
-    Ok(token)
+    OAuthToken::decode(response).await
 }
 
 #[derive(Debug)]
@@ -208,53 +214,89 @@ fn load_credentials() -> Option<Credentials> {
         .ok()
 }
 
-fn save_credentials(credentials: &Credentials) {
-    let write = || -> MusicResult<()> {
-        let directory = config::directory();
-        fs::create_dir_all(&directory)?;
-        let mut file = tempfile::NamedTempFile::new_in(&directory)?;
-        serde_json::to_writer(file.as_file_mut(), credentials)?;
-        file.persist(directory.join(OAUTH_CACHE))?;
-        Ok(())
-    };
-    if let Err(error) = write() {
-        warn!(%error, "Could not save Spotify credentials");
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 struct Credentials {
     username: String,
     refresh_token: String,
 }
 
+impl Credentials {
+    async fn persist(self) -> MusicResult<Self> {
+        Ok(spawn_blocking(move || {
+            let write = || -> MusicResult<()> {
+                let directory = config::directory();
+                fs::create_dir_all(&directory)?;
+                let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+                serde_json::to_writer(file.as_file_mut(), &self)?;
+                file.persist(directory.join(OAUTH_CACHE))?;
+                Ok(())
+            };
+            if let Err(error) = write() {
+                warn!(%error, "Could not save Spotify credentials");
+            }
+            self
+        })
+        .await?)
+    }
+}
+
 #[derive(Default)]
-pub(super) struct Auth {
+pub(super) struct Authorization {
+    tokens: Arc<Mutex<Tokens>>,
+    pub(super) expired: Arc<Notify>,
+}
+
+#[derive(Default)]
+struct Tokens {
     refresh_token: String,
     access_token: Option<Token>,
 }
 
 impl Session {
     pub(super) async fn auth_token(&self) -> MusicResult<String> {
-        let mut auth = self.auth.lock().await;
+        self.auth.token(&self.http, &self.username, TOKEN_ENDPOINT).await
+    }
+}
+
+impl Authorization {
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "The refresh task takes over the lock to serialize token renewal"
+    )]
+    async fn token(&self, http: &Client, username: &str, endpoint: &str) -> MusicResult<String> {
+        let mut auth = Arc::clone(&self.tokens).lock_owned().await;
         if let Some(token) = auth.access_token.as_ref().filter(|token| Instant::now() < token.expires_at) {
             return Ok(token.access_token.clone());
         }
         if auth.refresh_token.is_empty() {
-            return Err(io::Error::other("Spotify sign-in required").into());
+            return Err(AuthorizationExpired.into());
         }
-        let response = refresh_access_token(&self.http, &auth.refresh_token).await?;
-        if let Some(refresh_token) =
-            response.refresh_token.filter(|next| !next.is_empty() && next != &auth.refresh_token)
-        {
-            auth.refresh_token.clone_from(&refresh_token);
-            let credentials = Credentials { username: self.username.clone(), refresh_token };
-            spawn_blocking(move || save_credentials(&credentials)).await?;
-        }
-        let access_token = response.access_token;
-        auth.access_token = Some(Token::new(access_token.clone(), Duration::from_secs(response.expires_in)));
-        drop(auth);
-        Ok(access_token)
+        let expired = Arc::clone(&self.expired);
+        let http = http.clone();
+        let username = username.to_owned();
+        let endpoint = endpoint.to_owned();
+        // Spotify can rotate the refresh token even if the caller stops waiting for the response.
+        tokio::spawn(async move {
+            let response = match refresh_access_token(&http, &endpoint, &auth.refresh_token).await {
+                Err(error) if error.is::<AuthorizationExpired>() => {
+                    auth.refresh_token.clear();
+                    auth.access_token = None;
+                    expired.notify_one();
+                    return Err(error);
+                }
+                result => result?,
+            };
+            if let Some(refresh_token) =
+                response.refresh_token.filter(|next| !next.is_empty() && next != &auth.refresh_token)
+            {
+                auth.refresh_token.clone_from(&refresh_token);
+                Credentials { username, refresh_token }.persist().await?;
+            }
+            let access_token = response.access_token;
+            auth.access_token = Some(Token::new(access_token.clone(), Duration::from_secs(response.expires_in)));
+            Ok(access_token)
+        })
+        .await?
     }
 }
 
@@ -272,6 +314,50 @@ impl Token {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejected_refresh_signals_expiry_even_if_caller_is_cancelled() -> MusicResult<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let auth = Authorization::default();
+        auth.tokens.lock().await.refresh_token = "cached-refresh-token".into();
+        let http = Client::builder().no_proxy().build()?;
+
+        timeout(REQUEST_TIMEOUT, async {
+            let mut refresh = Box::pin(auth.token(&http, "", &endpoint));
+            let (mut socket, _) = tokio::select! {
+                connection = listener.accept() => connection?,
+                _ = &mut refresh => return Err("refresh finished before Spotify responded".into()),
+            };
+            // Read the full request before responding so closing the socket delivers the response.
+            let mut reader = BufReader::new(&mut socket);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await? == 0 {
+                    return Err("refresh request ended before the headers were complete".into());
+                }
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.strip_prefix("content-length: ") {
+                    content_length = value.trim().parse()?;
+                }
+            }
+            reader.read_exact(&mut vec![0; content_length]).await?;
+            drop(refresh);
+            socket.write_all(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 25\r\nConnection: close\r\n\r\n{\"error\":\"invalid_grant\"}",
+            ).await?;
+            auth.expired.notified().await;
+            match auth.token(&http, "", &endpoint).await {
+                Err(error) if error.is::<AuthorizationExpired>() => Ok(()),
+                Err(error) => Err(error),
+                Ok(_) => Err("rejected refresh token was still usable".into()),
+            }
+        })
+        .await?
+    }
 
     #[test]
     fn oauth_callback_requires_matching_state() {

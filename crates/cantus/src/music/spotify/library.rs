@@ -23,10 +23,6 @@ use tracing::{error, warn};
 
 const RATING_PLAYLISTS: [&str; 10] = ["0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0"];
 
-fn rating_index(name: &str, ratings: bool) -> Option<u8> {
-    ratings.then(|| RATING_PLAYLISTS.iter().position(|rating| *rating == name)).flatten().map(|index| index as u8)
-}
-
 #[derive(Clone)]
 pub(super) struct CachedPlaylist {
     pub(super) revision: Vec<u8>,
@@ -223,13 +219,10 @@ impl SpotifyWorker {
             .filter_map(|item| {
                 let item_uri = &item.attributes.as_ref()?.uri;
                 let metadata = root.meta_items.get(item_uri)?;
-                let uri = item_uri.strip_prefix("spotify:")?;
-                let kind_and_id =
-                    if let Some(named) = uri.strip_prefix("user:") { named.split_once(':')?.1 } else { uri };
-                let id = parse_id(kind_and_id.strip_prefix("playlist:")?)?;
+                let id = parse_id(item_uri.strip_prefix("spotify:playlist:")?)?;
                 let attributes = metadata.attributes.as_ref()?;
                 let name = attributes.name.as_str();
-                let rating_index = rating_index(name, ratings);
+                let rating_index = RATING_PLAYLISTS.iter().position(|rating| ratings && *rating == name);
                 if !targets.iter().any(|target| target == name) && rating_index.is_none() {
                     return None;
                 }
@@ -263,7 +256,7 @@ impl SpotifyWorker {
                 id,
                 image_url: playlist_image(attributes),
                 tracks: Arc::clone(&snapshot.tracks),
-                rating_index,
+                rating_index: rating_index.map(|index| index as u8),
             });
             snapshot.name.clone_from(&attributes.name);
             updated_cache.insert(id, snapshot);
@@ -288,12 +281,9 @@ fn playlist_operation(uri: &str, add: bool) -> Operation {
 fn playlist_image(attributes: &Attributes) -> Option<String> {
     attributes
         .picture_sizes
-        .iter()
-        .flat_map(|sizes| &sizes.picture_size)
-        .rev()
-        .map(|picture| picture.url.as_str())
-        .find(|url| !url.is_empty())
-        .map(image_url)
+        .as_ref()
+        .and_then(|sizes| sizes.picture_size.iter().rfind(|picture| !picture.url.is_empty()))
+        .map(|picture| image_url(&picture.url))
         .or_else(|| {
             let picture = &attributes.picture_file_id;
             let id = str::from_utf8(picture)
@@ -310,14 +300,21 @@ mod tests {
     use super::*;
     use calloop::channel;
 
+    #[test]
+    fn playlist_artwork_uses_image_ids_when_size_urls_are_missing() {
+        let id = "abababababababababababababababababababab";
+        let expected = format!("https://i.scdn.co/image/{id}");
+        for picture_file_id in [format!("spotify:image:{id}").into_bytes(), vec![0xab; 20]] {
+            let attributes = Attributes { picture_file_id, ..Default::default() };
+            assert_eq!(playlist_image(&attributes).as_deref(), Some(expected.as_str()));
+        }
+    }
+
     #[tokio::test]
     async fn playlist_notices_deduplicate_cached_revisions() {
         let id = parse_id("37i9dQZF1DXcBWIGoYBM5M").unwrap();
         let (updater, _updates) = channel::channel();
-        let mut worker = SpotifyWorker {
-            root_revision: vec![1],
-            ..SpotifyWorker::new(Arc::new(Session::new(reqwest::Client::new()).unwrap()), updater)
-        };
+        let mut worker = SpotifyWorker { root_revision: vec![1], ..SpotifyWorker::new(Session::test(), updater) };
         assert!(!worker.needs_root_refresh(&[1]));
         assert!(worker.needs_root_refresh(&[2]));
         assert!(worker.needs_root_refresh(&[]));
@@ -338,7 +335,7 @@ mod tests {
         let second = parse_id("37i9dQZF1DXcBWIGoYBM5N").unwrap();
         let track = parse_id("6vWfZZyIlODYPMEbsrOK3G").unwrap();
         let (updater, _updates) = channel::channel();
-        let mut worker = SpotifyWorker::new(Arc::new(Session::new(reqwest::Client::new()).unwrap()), updater);
+        let mut worker = SpotifyWorker::new(Session::test(), updater);
         let previous =
             CachedPlaylist { revision: vec![1], tracks: Arc::new(HashSet::from([track])), name: String::new() };
         Arc::make_mut(&mut worker.cached_playlists).extend([(first, previous.clone()), (second, previous.clone())]);

@@ -17,7 +17,7 @@ pub struct Device {
 }
 
 /// Playback state for the active device and the server timestamp used to align clocks.
-#[derive(prost::Message)]
+#[derive(PartialEq, prost::Message)]
 pub struct Cluster {
     #[prost(string, tag = "2")]
     pub active_device_id: String,
@@ -32,12 +32,16 @@ pub struct Cluster {
 pub struct PutStateRequest {
     #[prost(message, optional, tag = "2")]
     pub device: Option<Device>,
-    #[prost(enumeration = "MemberType", tag = "3")]
+    #[prost(int32, tag = "3")]
     pub member_type: i32,
     #[prost(enumeration = "PutStateReason", tag = "5")]
     pub put_state_reason: i32,
     #[prost(uint64, tag = "12")]
     pub client_side_timestamp: u64,
+}
+
+impl PutStateRequest {
+    pub const CONNECT_STATE_MEMBER: i32 = 2;
 }
 
 /// Client and device identifiers, display name, and advertised capabilities.
@@ -47,12 +51,16 @@ pub struct DeviceInfo {
     pub name: String,
     #[prost(message, optional, tag = "4")]
     pub capabilities: Option<Capabilities>,
-    #[prost(enumeration = "DeviceType", tag = "7")]
+    #[prost(int32, tag = "7")]
     pub device_type: i32,
     #[prost(string, tag = "10")]
     pub device_id: String,
     #[prost(string, tag = "13")]
     pub client_id: String,
+}
+
+impl DeviceInfo {
+    pub const OBSERVER: i32 = 102;
 }
 
 /// Connect features advertised by the Cantus observer.
@@ -74,7 +82,7 @@ pub struct Capabilities {
 }
 
 /// Reported track, queue, playback flags, and timing for a Connect session.
-#[derive(prost::Message)]
+#[derive(PartialEq, prost::Message)]
 pub struct PlayerState {
     /// Server timestamp of this playback state in milliseconds.
     #[prost(int64, tag = "1")]
@@ -109,7 +117,7 @@ pub struct PlayerState {
 }
 
 /// One queue occurrence with its Spotify URI, occurrence ID, and metadata.
-#[derive(prost::Message)]
+#[derive(PartialEq, Eq, prost::Message)]
 pub struct ProvidedTrack {
     #[prost(string, tag = "1")]
     pub uri: String,
@@ -128,22 +136,4 @@ pub enum PutStateReason {
     NewDevice = 3,
     /// Registers again after reconnecting the Dealer socket.
     NewConnection = 9,
-}
-
-/// Connect protocol used by the registering device.
-#[derive(Debug, prost::Enumeration)]
-pub enum MemberType {
-    /// Legacy remote-control membership and the protobuf default.
-    SpircV2 = 0,
-    /// Membership through the Connect state service.
-    ConnectState = 2,
-}
-
-/// Device role advertised to Spotify Connect.
-#[derive(Debug, prost::Enumeration)]
-pub enum DeviceType {
-    /// Default value when a device role is unavailable.
-    Unknown = 0,
-    /// Observes playback on another Spotify device.
-    Observer = 102,
 }
